@@ -1,5 +1,5 @@
 node_modules/
 .vscode/
-out/
 package-lock.json
 yarn.lock
+bun.lockb
