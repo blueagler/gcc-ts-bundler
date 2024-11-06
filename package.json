@@ -1,6 +1,6 @@
 {
   "name": "@blueagle/gcc-ts-bundler",
-  "version": "0.47.1",
+  "version": "0.0.1",
   "description": "A TypeScript bundler that uses Google Closure Compiler to bundle TypeScript code.",
   "type": "module",
   "bin": {
