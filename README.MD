@@ -12,17 +12,24 @@ Unlike other compilers, GCC-TS-Bundler integrates deeply with Closure Compiler t
 - Renames property names in objects for better performance.
 - Radically restructures code for optimal performance.
 
-## Installation
-
-To install the dependencies, run:
+## Install From NPM using bun
 
 ```sh
-npm install
+bun install gcc-ts-bundler
 ```
 
-## Usage
+### GCC-TS-Bundler Flags
 
-To bundle your TypeScript code, use the following command:
+- `--fatalWarnings`: Whether warnings should be fatal, causing tsickle to return a non-zero exit code.
+- `--verbose`: Print diagnostics to the console.
+- `--language_out`: ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT.
+- `--entry_point`: The entry point for the application. (if it is a relative path, it will be resolved from the `--src-dir` directory)
+- `--js_output_file`: The output file for the generated JS.
+- `--compilation_level`: WHITESPACE_ONLY | SIMPLE | ADVANCED.
+- `--src-dir`: The source directory.
+- `-h, --help`: Show this help message.
+
+### Example
 
 ```sh
 gcc-ts-bundler --src-dir='./src' --entry_point='./index.ts' --js_output_file='./dist/index.js'
