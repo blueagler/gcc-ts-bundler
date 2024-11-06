@@ -5713,6 +5713,8 @@ function toClosureJS(options, fileNames, settings, writeFile) {
     addDtsClutzAliases: true,
     fileNameToModuleId: (fileName) => modulePrefix + import_path2.default.relative(rootModulePath, fileName),
     generateExtraSuppressions: true,
+    generateSummary: true,
+    generateTsMigrationExportsShim: true,
     googmodule: true,
     logWarning: (warning) => {
       if (settings.verbose) {
@@ -5730,7 +5732,8 @@ function toClosureJS(options, fileNames, settings, writeFile) {
     transformDynamicImport: "nodejs",
     transformTypesToClosure: true,
     typeBlackListPaths: new Set,
-    untyped: false
+    untyped: false,
+    useDeclarationMergingTransformation: true
   };
   const diagnostics = import_typescript.default.getPreEmitDiagnostics(program);
   if (diagnostics.length > 0) {

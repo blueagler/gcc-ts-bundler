@@ -26,6 +26,8 @@ export function toClosureJS(
     fileNameToModuleId: (fileName) =>
       modulePrefix + path.relative(rootModulePath, fileName),
     generateExtraSuppressions: true,
+    generateSummary: true,
+    generateTsMigrationExportsShim: true,
     googmodule: true,
     logWarning: (warning) => {
       if (settings.verbose) {
@@ -53,6 +55,7 @@ export function toClosureJS(
     transformTypesToClosure: true,
     typeBlackListPaths: new Set(),
     untyped: false,
+    useDeclarationMergingTransformation: true,
   };
 
   const diagnostics = ts.getPreEmitDiagnostics(program);
