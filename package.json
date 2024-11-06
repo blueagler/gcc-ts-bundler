@@ -16,7 +16,8 @@
   },
   "scripts": {
     "build": "bun build ./src/index.ts --outdir ./bin --format cjs --external minimist --external typescript --banner \"#!/usr/bin/env node\" --entry-naming \"gcc-ts-bundler.cjs\" --target node",
-    "lint": "bun --bun prettier \"**/*.ts\" --write && bun --bun eslint \"**/*.ts\" --fix"
+    "lint": "bun --bun prettier \"**/*.ts\" --write && bun --bun eslint \"**/*.ts\" --fix",
+    "publish": "bun publish"
   },
   "keywords": [
     "typescript",
@@ -32,5 +33,8 @@
     "README.md",
     "closure-externs",
     "closure-lib"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }
