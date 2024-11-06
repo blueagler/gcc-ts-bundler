@@ -71,21 +71,17 @@ export function main(args: string[]): number {
     tsickle.getGeneratedExterns(result.externs, config.options.rootDir || ""),
   );
 
-  const closureLibPath = path.join(__dirname, "../closure-lib");
-  fs.readdirSync(closureLibPath).forEach((file) => {
-    const filePath = path.join(closureLibPath, file);
-    settings.js.push(filePath);
-  });
   const closureExternsPath = path.join(__dirname, "../closure-externs");
   fs.readdirSync(closureExternsPath).forEach((file) => {
     const filePath = path.join(closureExternsPath, file);
     settings.externs.push(filePath);
   });
 
-  settings.js.push(path.join(cwd, "./.closured/**.js"));
   settings.externs.push(
     path.join(cwd, "./.closure-externs/modules-externs.js"),
   );
+  settings.js.push(path.join(__dirname, "../closure-lib/**.js"));
+  settings.js.push(path.join(cwd, "./.closured/**.js"));
 
   const parentDir = path.dirname(settings.jsOutputFile);
   if (fs.existsSync(parentDir)) {
@@ -94,6 +90,8 @@ export function main(args: string[]): number {
       fs.unlinkSync(filePath);
     });
   }
+
+  console.log("Building with Closure Compiler...");
 
   const exitCode = runClosureCompiler(settings);
 

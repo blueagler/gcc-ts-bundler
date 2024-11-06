@@ -44,7 +44,7 @@ export function isValidClosurePropertyName(name: string): boolean {
 export function isDeclaredInBuiltinLibDTS(
   node: null | ts.Node | undefined,
 ): boolean {
-  const fileName = node?.getSourceFile().fileName;
+  const fileName = node?.getSourceFile()?.fileName;
   return !!fileName && fileName.match(/\blib\.(?:[^/]+\.)?d\.ts$/) != null;
 }
 
@@ -798,7 +798,7 @@ export class TypeTranslator {
     // Remove duplicates to produce types that read better.
     const parts = new Set(types.map((t) => this.translate(t)));
     // If it's a single element set, return the single member.
-    if (parts.size === 1) return parts.values().next().value as string;
+    if (parts.size === 1) return parts.values().next().value;
     return `(${Array.from(parts.values()).join("|")})`;
   }
 

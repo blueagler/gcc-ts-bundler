@@ -4,21 +4,21 @@ import { Settings } from "../settings";
 
 export function runClosureCompiler(settings: Settings): number {
   const closureCompilerArgs = [
-    ...settings.js.flatMap((jsFile) => ["--js", jsFile]),
-    ...settings.externs.flatMap((externFile) => ["--externs", externFile]),
-    "--compilation_level",
-    settings.compilationLevel,
-    "--js_output_file",
-    settings.jsOutputFile,
-    "--language_out",
-    settings.languageOut,
     "--entry_point",
     settings.entryPoint,
+    "--js_output_file",
+    settings.jsOutputFile,
+    "--language_in",
+    "UNSTABLE",
+    "--language_out",
+    settings.languageOut,
+    "--compilation_level",
+    settings.compilationLevel,
+    ...settings.externs.flatMap((externFile) => ["--externs", externFile]),
+    ...settings.js.flatMap((jsFile) => ["--js", jsFile]),
     "--assume_function_wrapper",
     "--warning_level",
     settings.verbose ? "VERBOSE" : "DEFAULT",
-    "--language_in",
-    "UNSTABLE",
   ];
 
   const ccProcess = spawnSync("google-closure-compiler", closureCompilerArgs);

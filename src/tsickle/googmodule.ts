@@ -1664,7 +1664,7 @@ export function commonJsToGoogmoduleTransformer(
           ignoredDiagnostics,
           sf,
           importedUrl.text,
-          () => getAmbientModuleSymbol(typeChecker, importedUrl),
+          () => getAmbientModuleSymbol(typeChecker, importedUrl!),
         );
         modulesManifest.addReferencedModule(sf.fileName, imp);
 
@@ -1783,7 +1783,7 @@ function maybeAddModuleId(
   // See if a top-level 'module' symbol exists in the source file.
   const moduleSymbol: ts.Symbol | undefined = typeChecker
     .getSymbolsInScope(sourceFile, ts.SymbolFlags.ModuleMember)
-    .find((s) => s.name === "module");
+    ?.find((s) => s.name === "module");
   if (moduleSymbol) {
     const declaration =
       moduleSymbol.valueDeclaration ?? moduleSymbol.declarations?.[0];

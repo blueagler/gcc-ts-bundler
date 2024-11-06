@@ -1167,7 +1167,7 @@ export function jsdocTransformer(
         const ns = transformerUtil.getTransformedNs(typeAlias);
         if (
           ns !== null &&
-          ts.getOriginalNode(typeAlias).parent.parent === ns &&
+          ts.getOriginalNode(typeAlias).parent?.parent === ns &&
           ts.isIdentifier(ns.name)
         ) {
           // If the type alias T is defined at the top level of a transformed
@@ -1490,9 +1490,7 @@ export function jsdocTransformer(
         } else if (ts.isNamedExports(exportDecl.exportClause)) {
           // export {a, b, c} from 'abc';
           for (const exp of exportDecl.exportClause.elements) {
-            const exportedName = ts.isIdentifier(exp.name)
-              ? transformerUtil.getIdentifierText(exp.name)
-              : exp.name.text;
+            const exportedName = transformerUtil.getIdentifierText(exp.name);
             typesToExport.push([
               exportedName,
               moduleTypeTranslator.mustGetSymbolAtLocation(exp.name),
