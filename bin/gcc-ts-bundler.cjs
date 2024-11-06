@@ -50,7 +50,7 @@ var import_fs3 = __toESM(require("fs"));
 var import_path5 = __toESM(require("path"));
 
 // src/tsickle/index.ts
-var ts17 = __toESM(require("typescript"));
+var ts16 = __toESM(require("typescript"));
 
 // src/tsickle/path.ts
 var ts = __toESM(require("typescript"));
@@ -144,7 +144,7 @@ function createNotEmittedStatementWithComments(sourceFile, original) {
 }
 function synthesizeCommentRanges(sourceFile, parsedComments) {
   const synthesizedComments = [];
-  parsedComments.forEach(({ kind, pos, end, hasTrailingNewLine }) => {
+  parsedComments.forEach(({ end, hasTrailingNewLine, kind, pos }) => {
     let commentText = sourceFile.text.substring(pos, end).trim();
     if (kind === ts2.SyntaxKind.MultiLineCommentTrivia) {
       commentText = commentText.replace(/(^\/\*)|(\*\/$)/g, "");
@@ -154,16 +154,15 @@ function synthesizeCommentRanges(sourceFile, parsedComments) {
       }
       commentText = commentText.replace(/(^\/\/)/g, "");
     }
-    synthesizedComments.push({ kind, text: commentText, hasTrailingNewLine, pos: -1, end: -1 });
+    synthesizedComments.push({
+      end: -1,
+      hasTrailingNewLine,
+      kind,
+      pos: -1,
+      text: commentText
+    });
   });
   return synthesizedComments;
-}
-function createNotEmittedStatement(sourceFile) {
-  const stmt = ts2.factory.createNotEmittedStatement(sourceFile);
-  ts2.setOriginalNode(stmt, undefined);
-  ts2.setTextRange(stmt, { pos: 0, end: 0 });
-  ts2.setEmitFlags(stmt, ts2.EmitFlags.CustomPrologue);
-  return stmt;
 }
 function visitEachChild2(node, visitor, context) {
   if (node.kind === ts2.SyntaxKind.SourceFile) {
@@ -176,7 +175,7 @@ function updateSourceFileNode(sf, statements) {
   if (statements === sf.statements) {
     return sf;
   }
-  sf = ts2.factory.updateSourceFile(sf, statements, sf.isDeclarationFile, sf.referencedFiles, sf.typeReferenceDirectives, sf.hasNoDefaultLib, sf.libReferenceDirectives);
+  sf = ts2.factory.updateSourceFile(sf, ts2.setTextRange(statements, sf.statements), sf.isDeclarationFile, sf.referencedFiles, sf.typeReferenceDirectives, sf.hasNoDefaultLib, sf.libReferenceDirectives);
   return sf;
 }
 function createSingleQuoteStringLiteral(text) {
@@ -186,21 +185,21 @@ function createSingleQuoteStringLiteral(text) {
 }
 function createSingleLineComment(original, text) {
   const comment = {
-    kind: ts2.SyntaxKind.SingleLineCommentTrivia,
-    text: " " + text,
+    end: -1,
     hasTrailingNewLine: true,
+    kind: ts2.SyntaxKind.SingleLineCommentTrivia,
     pos: -1,
-    end: -1
+    text: " " + text
   };
   return ts2.setSyntheticTrailingComments(ts2.factory.createNotEmittedStatement(original), [comment]);
 }
 function createMultiLineComment(original, text) {
   const comment = {
-    kind: ts2.SyntaxKind.MultiLineCommentTrivia,
-    text: " " + text,
+    end: -1,
     hasTrailingNewLine: true,
+    kind: ts2.SyntaxKind.MultiLineCommentTrivia,
     pos: -1,
-    end: -1
+    text: " " + text
   };
   return ts2.setSyntheticTrailingComments(ts2.factory.createNotEmittedStatement(original), [comment]);
 }
@@ -213,22 +212,23 @@ function reportDiagnostic(diagnostics, node, messageText, textRange, category = 
   diagnostics.push(createDiagnostic(node, messageText, textRange, category));
 }
 function createDiagnostic(node, messageText, textRange, category) {
-  let start, length;
+  let start;
+  let length;
   node = ts2.getOriginalNode(node);
   if (textRange) {
     start = textRange.pos;
     length = textRange.end - textRange.pos;
-  } else {
+  } else if (node) {
     start = node.pos >= 0 ? node.getStart() : 0;
     length = node.end - node.pos;
   }
   return {
-    file: node.getSourceFile(),
-    start,
+    category,
+    code: 0,
+    file: node?.getSourceFile(),
     length,
     messageText,
-    category,
-    code: 0
+    start
   };
 }
 function getAllLeadingComments(node) {
@@ -308,7 +308,7 @@ function getPreviousDeclaration(sym, thisDecl) {
 
 // src/tsickle/googmodule.ts
 function jsPathToNamespace(host, context, diagnostics, importPath, getModuleSymbol) {
-  const namespace = localJsPathToNamespace(host, importPath);
+  const namespace = localJsPathToNamespace(host, context, diagnostics, importPath);
   if (namespace)
     return namespace;
   const moduleSymbol = getModuleSymbol();
@@ -316,12 +316,18 @@ function jsPathToNamespace(host, context, diagnostics, importPath, getModuleSymb
     return;
   return getGoogNamespaceFromClutzComments(context, diagnostics, importPath, moduleSymbol);
 }
-function localJsPathToNamespace(host, importPath) {
+function localJsPathToNamespace(host, context, diagnostics, importPath) {
   if (importPath.match(/^goog:/)) {
     return importPath.substring("goog:".length);
   }
   if (host.jsPathToModuleName) {
-    return host.jsPathToModuleName(importPath);
+    const module2 = host.jsPathToModuleName(importPath);
+    if (!module2)
+      return;
+    if (module2.multipleProvides) {
+      reportMultipleProvidesError(context, diagnostics, importPath);
+    }
+    return module2.name;
   }
   return;
 }
@@ -462,7 +468,7 @@ function getGoogNamespaceFromClutzComments(context, tsickleDiagnostics, tsImport
     return;
   const hasMultipleProvides = findLocalInDeclarations(moduleSymbol, "__clutz_multiple_provides");
   if (hasMultipleProvides) {
-    reportDiagnostic(tsickleDiagnostics, context, `referenced JavaScript module ${tsImport} provides multiple namespaces and cannot be imported by path.`);
+    reportMultipleProvidesError(context, tsickleDiagnostics, tsImport);
   }
   const actualNamespace = literalTypeOfSymbol(actualNamespaceSymbol);
   if (actualNamespace === undefined || typeof actualNamespace !== "string") {
@@ -470,6 +476,9 @@ function getGoogNamespaceFromClutzComments(context, tsickleDiagnostics, tsImport
     return;
   }
   return actualNamespace;
+}
+function reportMultipleProvidesError(context, diagnostics, importPath) {
+  reportDiagnostic(diagnostics, context, `referenced JavaScript module ${importPath} provides multiple namespaces and cannot be imported by path.`);
 }
 function importPathToGoogNamespace(host, context, diagnostics, file, tsImport, getModuleSymbol) {
   const nsImport = jsPathToNamespace(host, context, diagnostics, tsImport, getModuleSymbol);
@@ -488,21 +497,6 @@ function rewriteModuleExportsAssignment(expr) {
     return null;
   return ts3.setOriginalNode(ts3.setTextRange(ts3.factory.createExpressionStatement(ts3.factory.createAssignment(ts3.factory.createIdentifier("exports"), expr.expression.right)), expr), expr);
 }
-function isExportsAssignment(expr) {
-  if (!ts3.isBinaryExpression(expr))
-    return null;
-  if (expr.operatorToken.kind !== ts3.SyntaxKind.EqualsToken)
-    return null;
-  if (!ts3.isPropertyAccessExpression(expr.left))
-    return null;
-  if (!ts3.isIdentifier(expr.left.expression))
-    return null;
-  if (expr.left.expression.escapedText !== "exports")
-    return null;
-  if (!ts3.isIdentifier(expr.right))
-    return null;
-  return expr.left.name.escapedText.toString();
-}
 function rewriteCommaExpressions(expr) {
   const isBinaryCommaExpression = (expr2) => ts3.isBinaryExpression(expr2) && expr2.operatorToken.kind === ts3.SyntaxKind.CommaToken;
   const isCommaList = (expr2) => expr2.kind === ts3.SyntaxKind.CommaListExpression;
@@ -517,7 +511,9 @@ function rewriteCommaExpressions(expr) {
     if (isCommaList(expr2)) {
       return [].concat(...expr2.elements.map(visit));
     }
-    return [ts3.setOriginalNode(ts3.factory.createExpressionStatement(expr2), expr2)];
+    return [
+      ts3.setOriginalNode(ts3.factory.createExpressionStatement(expr2), expr2)
+    ];
   }
 }
 function getAmbientModuleSymbol(typeChecker, moduleUrl) {
@@ -672,12 +668,14 @@ function commonJsToGoogmoduleTransformer(host, modulesManifest, typeChecker) {
           return null;
         }
         const updatedDecl = ts3.factory.updateVariableDeclaration(decl, decl.name, decl.exclamationToken, decl.type, decl.initializer.right);
-        const newStmt = ts3.factory.updateVariableStatement(stmt, stmt.modifiers, ts3.factory.updateVariableDeclarationList(stmt.declarationList, [updatedDecl]));
+        const newStmt = ts3.factory.updateVariableStatement(stmt, stmt.modifiers, ts3.factory.updateVariableDeclarationList(stmt.declarationList, [
+          updatedDecl
+        ]));
         return {
-          statement: newStmt,
           exports: [
             ts3.factory.createExpressionStatement(ts3.factory.createAssignment(decl.initializer.left, decl.name))
-          ]
+          ],
+          statement: newStmt
         };
       }
       function isExportsAssignmentForDecoratedClass(stmt) {
@@ -719,11 +717,11 @@ function commonJsToGoogmoduleTransformer(host, modulesManifest, typeChecker) {
         if (matchingExports.length === 0)
           return null;
         ts3.setEmitFlags(arg.right.expression, ts3.EmitFlags.NoSubstitution);
-        const notAlreadyExported = matchingExports.filter((decl) => !ts3.isClassDeclaration(decl.declarationSymbol.valueDeclaration) && !ts3.isFunctionDeclaration(decl.declarationSymbol.valueDeclaration));
+        const notAlreadyExported = matchingExports.filter((decl) => !ts3.isClassDeclaration(decl.declarationSymbol.valueDeclaration) && !ts3.isFunctionDeclaration(decl.declarationSymbol.valueDeclaration) && !(host.transformTypesToClosure && ts3.isEnumDeclaration(decl.declarationSymbol.valueDeclaration)));
         const exportNames = notAlreadyExported.map((decl) => decl.exportName);
         return {
-          statement: stmt,
-          exports: exportNames.map((exportName) => ts3.factory.createExpressionStatement(ts3.factory.createAssignment(ts3.factory.createPropertyAccessExpression(ts3.factory.createIdentifier("exports"), ts3.factory.createIdentifier(exportName)), name)))
+          exports: exportNames.map((exportName) => ts3.factory.createExpressionStatement(ts3.factory.createAssignment(ts3.factory.createPropertyAccessExpression(ts3.factory.createIdentifier("exports"), ts3.factory.createIdentifier(exportName)), name))),
+          statement: stmt
         };
       }
       function maybeRewriteExportStarAsNs(stmt) {
@@ -808,7 +806,6 @@ function commonJsToGoogmoduleTransformer(host, modulesManifest, typeChecker) {
         const exportStmt = ts3.setOriginalNode(ts3.setTextRange(ts3.factory.createExpressionStatement(ts3.factory.createAssignment(ts3.factory.createPropertyAccessExpression(ts3.factory.createIdentifier("exports"), objDefArg2.text), realExportValue)), stmt), stmt);
         return exportStmt;
       }
-      const exportsSeen = new Set;
       const seenNamespaceOrEnumExports = new Set;
       const delayedDecoratedClassExports = new Map;
       function visitTopLevelStatement(stmts2, sf2, node) {
@@ -843,27 +840,17 @@ function commonJsToGoogmoduleTransformer(host, modulesManifest, typeChecker) {
               stmts2.push(exportFromObjDefProp);
               return;
             }
-            const exportName = isExportsAssignment(exprStmt.expression);
-            if (exportName) {
-              if (exportsSeen.has(exportName)) {
-                stmts2.push(createNotEmittedStatementWithComments(sf2, exprStmt));
-                return;
-              }
-              exportsSeen.add(exportName);
-            }
-            if (ts3.versionMajorMinor !== "5.0") {
-              const exportInIifeArguments = maybeRewriteExportsAssignmentInIifeArguments(exprStmt);
-              if (exportInIifeArguments) {
-                stmts2.push(exportInIifeArguments.statement);
-                for (const newExport of exportInIifeArguments.exports) {
-                  const exportName2 = newExport.expression.left.name.text;
-                  if (!seenNamespaceOrEnumExports.has(exportName2)) {
-                    stmts2.push(newExport);
-                    seenNamespaceOrEnumExports.add(exportName2);
-                  }
+            const exportInIifeArguments = maybeRewriteExportsAssignmentInIifeArguments(exprStmt);
+            if (exportInIifeArguments) {
+              stmts2.push(exportInIifeArguments.statement);
+              for (const newExport of exportInIifeArguments.exports) {
+                const exportName = newExport.expression.left.name.text;
+                if (!seenNamespaceOrEnumExports.has(exportName)) {
+                  stmts2.push(newExport);
+                  seenNamespaceOrEnumExports.add(exportName);
                 }
-                return;
               }
+              return;
             }
             if (isExportsAssignmentForDecoratedClass(exprStmt)) {
               delayedDecoratedClassExports.set(exprStmt.expression.left.name.text, exprStmt);
@@ -1002,8 +989,12 @@ function maybeAddModuleId(host, typeChecker, sourceFile, headerStmts) {
       return;
   }
   const moduleId = host.fileNameToModuleId(sourceFile.fileName);
-  const moduleVarInitializer = ts3.factory.createBinaryExpression(ts3.factory.createIdentifier("module"), ts3.SyntaxKind.BarBarToken, ts3.factory.createObjectLiteralExpression([ts3.factory.createPropertyAssignment("id", createSingleQuoteStringLiteral(moduleId))]));
-  const modAssign = ts3.factory.createVariableStatement(undefined, ts3.factory.createVariableDeclarationList([ts3.factory.createVariableDeclaration("module", undefined, undefined, moduleVarInitializer)]));
+  const moduleVarInitializer = ts3.factory.createBinaryExpression(ts3.factory.createIdentifier("module"), ts3.SyntaxKind.BarBarToken, ts3.factory.createObjectLiteralExpression([
+    ts3.factory.createPropertyAssignment("id", createSingleQuoteStringLiteral(moduleId))
+  ]));
+  const modAssign = ts3.factory.createVariableStatement(undefined, ts3.factory.createVariableDeclarationList([
+    ts3.factory.createVariableDeclaration("module", undefined, undefined, moduleVarInitializer)
+  ]));
   headerStmts.push(modAssign);
 }
 
@@ -1174,9 +1165,9 @@ class TypeTranslator {
   symbolToNameCache;
   ensureSymbolDeclared;
   seenTypes = [];
+  dropFinalTypeArgument = false;
   isForExterns = false;
   useInternalNamespaceForExterns = false;
-  dropFinalTypeArgument = false;
   constructor(host, typeChecker, node, pathUnknownSymbolsSet, symbolsToAliasedNames, symbolToNameCache, ensureSymbolDeclared = () => {
   }) {
     this.host = host;
@@ -1187,6 +1178,304 @@ class TypeTranslator {
     this.symbolToNameCache = symbolToNameCache;
     this.ensureSymbolDeclared = ensureSymbolDeclared;
     this.pathUnknownSymbolsSet = new Set(Array.from(this.pathUnknownSymbolsSet.values()).map((p) => normalize(p)));
+  }
+  convertParams(sig, paramDecls) {
+    const paramTypes = [];
+    for (let i = 0;i < sig.parameters.length; i++) {
+      const param = sig.parameters[i];
+      const paramDecl = paramDecls[i];
+      const optional = !!paramDecl.questionToken || !!paramDecl.initializer;
+      const varArgs = !!paramDecl.dotDotDotToken;
+      const paramType = this.typeChecker.getTypeOfSymbolAtLocation(param, this.node);
+      let typeStr;
+      if (varArgs) {
+        const argType = restParameterType(this.typeChecker, paramType);
+        if (argType) {
+          typeStr = "..." + this.translate(argType);
+        } else {
+          this.warn("unable to translate rest args type");
+          typeStr = "...?";
+        }
+      } else {
+        typeStr = this.translate(paramType);
+      }
+      if (optional)
+        typeStr = typeStr + "=";
+      paramTypes.push(typeStr);
+    }
+    return paramTypes;
+  }
+  signatureToClosure(sig) {
+    if (!sig.declaration) {
+      this.warn("signature without declaration");
+      return "Function";
+    }
+    if (sig.declaration.kind === ts4.SyntaxKind.JSDocSignature) {
+      this.warn("signature with JSDoc declaration");
+      return "Function";
+    }
+    this.markTypeParameterAsUnknown(this.symbolsToAliasedNames, sig.declaration.typeParameters);
+    let typeStr = `function(`;
+    let paramDecls = sig.declaration.parameters || [];
+    const maybeThisParam = paramDecls[0];
+    if (maybeThisParam && maybeThisParam.name.getText() === "this") {
+      if (maybeThisParam.type) {
+        const thisType = this.typeChecker.getTypeAtLocation(maybeThisParam.type);
+        typeStr += `this: (${this.translate(thisType)})`;
+        if (paramDecls.length > 1)
+          typeStr += ", ";
+      } else {
+        this.warn("this type without type");
+      }
+      paramDecls = paramDecls.slice(1);
+    }
+    const params = this.convertParams(sig, paramDecls);
+    typeStr += `${params.join(", ")})`;
+    const retType = this.translate(this.typeChecker.getReturnTypeOfSignature(sig));
+    if (retType) {
+      typeStr += `: ${retType}`;
+    }
+    return typeStr;
+  }
+  stripClutzNamespace(name) {
+    if (name.startsWith("\u0CA0_\u0CA0.clutz."))
+      return name.substring("\u0CA0_\u0CA0.clutz.".length);
+    return name;
+  }
+  translateAnonymousType(type) {
+    this.seenTypes.push(type);
+    try {
+      if (!type.symbol) {
+        this.warn("anonymous type has no symbol");
+        return "?";
+      }
+      if (type.symbol.flags & ts4.SymbolFlags.Function || type.symbol.flags & ts4.SymbolFlags.Method) {
+        const sigs = this.typeChecker.getSignaturesOfType(type, ts4.SignatureKind.Call);
+        if (sigs.length === 1) {
+          return this.signatureToClosure(sigs[0]);
+        }
+        const declWithBody = type.symbol.declarations?.filter((d) => isFunctionLikeDeclaration(d) && d.body != null);
+        if (declWithBody?.length === 1) {
+          const sig = this.typeChecker.getSignatureFromDeclaration(declWithBody[0]);
+          if (sig) {
+            return this.signatureToClosure(sig);
+          }
+        }
+        this.warn("unhandled anonymous type with multiple call signatures");
+        return "?";
+      }
+      let callable = false;
+      let indexable = false;
+      const fields = [];
+      if (!type.symbol.members) {
+        this.warn("anonymous type has no symbol");
+        return "?";
+      }
+      const ctors = type.getConstructSignatures();
+      if (ctors.length) {
+        const decl = ctors[0].declaration;
+        if (!decl) {
+          this.warn("unhandled anonymous type with constructor signature but no declaration");
+          return "?";
+        }
+        if (decl.kind === ts4.SyntaxKind.JSDocSignature) {
+          this.warn("unhandled JSDoc based constructor signature");
+          return "?";
+        }
+        this.markTypeParameterAsUnknown(this.symbolsToAliasedNames, decl.typeParameters);
+        const params = this.convertParams(ctors[0], decl.parameters);
+        const paramsStr = params.length ? ", " + params.join(", ") : "";
+        const constructedType = this.translate(ctors[0].getReturnType());
+        let constructedTypeStr = constructedType[0] === "!" ? constructedType.substring(1) : constructedType;
+        if (constructedTypeStr === "*") {
+          constructedTypeStr = "?";
+        }
+        return `function(new:${constructedTypeStr}${paramsStr})`;
+      }
+      for (const field of type.symbol.members.keys()) {
+        const fieldName = ts4.unescapeLeadingUnderscores(field);
+        switch (field) {
+          case ts4.InternalSymbolName.Call:
+            callable = true;
+            break;
+          case ts4.InternalSymbolName.Index:
+            indexable = true;
+            break;
+          default:
+            if (!isValidClosurePropertyName(fieldName)) {
+              this.warn(`omitting inexpressible property name: ${field}`);
+              continue;
+            }
+            const member = type.symbol.members.get(field);
+            const memberType = this.translate(this.typeChecker.getTypeOfSymbolAtLocation(member, this.node));
+            fields.push(`${fieldName}: ${memberType}`);
+            break;
+        }
+      }
+      if (fields.length === 0) {
+        if (callable && !indexable) {
+          const sigs = this.typeChecker.getSignaturesOfType(type, ts4.SignatureKind.Call);
+          if (sigs.length === 1) {
+            return this.signatureToClosure(sigs[0]);
+          }
+        } else if (indexable && !callable) {
+          let keyType = "string";
+          let valType = this.typeChecker.getIndexTypeOfType(type, ts4.IndexKind.String);
+          if (!valType) {
+            keyType = "number";
+            valType = this.typeChecker.getIndexTypeOfType(type, ts4.IndexKind.Number);
+          }
+          if (!valType) {
+            this.warn("unknown index key type");
+            return `!Object<?,?>`;
+          }
+          return `!Object<${keyType},${this.translate(valType)}>`;
+        } else if (!callable && !indexable) {
+          return "*";
+        }
+      }
+      if (!callable && !indexable) {
+        return `{${fields.join(", ")}}`;
+      }
+      this.warn("unhandled anonymous type");
+      return "?";
+    } finally {
+      this.seenTypes.pop();
+    }
+  }
+  translateEnumLiteral(type) {
+    const enumLiteralBaseType = this.typeChecker.getBaseTypeOfLiteralType(type);
+    if (!enumLiteralBaseType.symbol) {
+      this.warn(`EnumLiteralType without a symbol`);
+      return "?";
+    }
+    let symbol = enumLiteralBaseType.symbol;
+    if (enumLiteralBaseType === type) {
+      const parent = symbol["parent"];
+      if (!parent)
+        return "?";
+      symbol = parent;
+    }
+    const name = this.symbolToString(symbol);
+    if (!name)
+      return "?";
+    return "!" + name;
+  }
+  translateObject(type) {
+    if (type.symbol && this.isAlwaysUnknownSymbol(type.symbol))
+      return "?";
+    if (type.objectFlags & ts4.ObjectFlags.Class) {
+      if (!type.symbol) {
+        this.warn("class has no symbol");
+        return "?";
+      }
+      const name = this.symbolToString(type.symbol);
+      if (!name) {
+        return "?";
+      }
+      return "!" + name;
+    } else if (type.objectFlags & ts4.ObjectFlags.Interface) {
+      if (!type.symbol) {
+        this.warn("interface has no symbol");
+        return "?";
+      }
+      if (type.symbol.flags & ts4.SymbolFlags.Value) {
+        if (!typeValueConflictHandled(type.symbol)) {
+          this.warn(`type/symbol conflict for ${type.symbol.name}, using {?} for now`);
+          return "?";
+        }
+      }
+      return "!" + this.symbolToString(type.symbol);
+    } else if (type.objectFlags & ts4.ObjectFlags.Reference) {
+      const referenceType = type;
+      if (referenceType.target.objectFlags & ts4.ObjectFlags.Tuple) {
+        return "!Array<?>";
+      }
+      let typeStr = "";
+      if (referenceType.target === referenceType) {
+        throw new Error(`reference loop in ${typeToDebugString(referenceType)} ${referenceType.flags}`);
+      }
+      typeStr += this.translate(referenceType.target);
+      if (typeStr === "?")
+        return "?";
+      let typeArgs = this.typeChecker.getTypeArguments(referenceType) ?? [];
+      const outerTypeParameters = referenceType.target.outerTypeParameters;
+      if (outerTypeParameters) {
+        typeArgs = typeArgs.slice(outerTypeParameters.length);
+      }
+      if (this.dropFinalTypeArgument) {
+        typeArgs = typeArgs.slice(0, typeArgs.length - 1);
+      }
+      const localTypeParameters = referenceType.target.localTypeParameters;
+      const maxExpectedTypeArgs = (localTypeParameters?.length ?? 0) + 1;
+      if (typeArgs.length > maxExpectedTypeArgs) {
+        this.warn(`more type args (${typeArgs.length}) than expected (${maxExpectedTypeArgs})`);
+      }
+      if (localTypeParameters && typeArgs.length > 0) {
+        typeArgs = typeArgs.slice(0, localTypeParameters.length);
+        this.seenTypes.push(referenceType);
+        const params = typeArgs.map((t) => this.translate(t));
+        this.seenTypes.pop();
+        typeStr += `<${params.join(", ")}>`;
+      }
+      return typeStr;
+    } else if (type.objectFlags & ts4.ObjectFlags.Anonymous) {
+      return this.translateAnonymousType(type);
+    }
+    this.warn(`unhandled type ${typeToDebugString(type)}`);
+    return "?";
+  }
+  translateUnion(type) {
+    return this.translateUnionMembers(type.types);
+  }
+  translateUnionMembers(types) {
+    const parts = new Set(types.map((t) => this.translate(t)));
+    if (parts.size === 1)
+      return parts.values().next().value;
+    return `(${Array.from(parts.values()).join("|")})`;
+  }
+  isAlwaysUnknownSymbol(symbol) {
+    return isAlwaysUnknownSymbol(this.pathUnknownSymbolsSet, symbol);
+  }
+  markTypeParameterAsUnknown(unknownSymbolsMap, decls) {
+    if (!decls || !decls.length)
+      return;
+    for (const tpd of decls) {
+      const sym = this.typeChecker.getSymbolAtLocation(tpd.name);
+      if (!sym) {
+        this.warn(`type parameter with no symbol`);
+        continue;
+      }
+      unknownSymbolsMap.set(sym, "?");
+    }
+  }
+  maybeGetMangledNamePrefix(symbol) {
+    if (!symbol.declarations)
+      return "";
+    const declarations = symbol.declarations;
+    let ambientModuleDeclaration = null;
+    if (!isTopLevelExternal(declarations)) {
+      ambientModuleDeclaration = getContainingAmbientModuleDeclaration(declarations);
+      if (!ambientModuleDeclaration)
+        return "";
+    }
+    if (!this.isForExterns && !declarations.every((d) => isDeclaredInSameFile(this.node, d) && isAmbient(d) && hasModifierFlag(d, ts4.ModifierFlags.Export))) {
+      return "";
+    }
+    let fileName;
+    let context;
+    if (ambientModuleDeclaration) {
+      fileName = ambientModuleDeclaration.name.text;
+      context = ambientModuleDeclaration.getSourceFile().fileName;
+    } else {
+      fileName = ts4.getOriginalNode(declarations[0]).getSourceFile().fileName;
+      context = "";
+    }
+    const mangled = moduleNameAsIdentifier(this.host, fileName, context);
+    if (this.isForExterns && this.useInternalNamespaceForExterns && !ambientModuleDeclaration && isDeclaredInSameFile(this.node, declarations[0])) {
+      return mangled + "_.";
+    }
+    return mangled + ".";
   }
   symbolToString(sym) {
     const cachedName = this.symbolToNameCache.get(sym);
@@ -1229,39 +1518,6 @@ class TypeTranslator {
     str = this.stripClutzNamespace(str);
     this.symbolToNameCache.set(sym, str);
     return str;
-  }
-  maybeGetMangledNamePrefix(symbol) {
-    if (!symbol.declarations)
-      return "";
-    const declarations = symbol.declarations;
-    let ambientModuleDeclaration = null;
-    if (!isTopLevelExternal(declarations)) {
-      ambientModuleDeclaration = getContainingAmbientModuleDeclaration(declarations);
-      if (!ambientModuleDeclaration)
-        return "";
-    }
-    if (!this.isForExterns && !declarations.every((d) => isDeclaredInSameFile(this.node, d) && isAmbient(d) && hasModifierFlag(d, ts4.ModifierFlags.Export))) {
-      return "";
-    }
-    let fileName;
-    let context;
-    if (ambientModuleDeclaration) {
-      fileName = ambientModuleDeclaration.name.text;
-      context = ambientModuleDeclaration.getSourceFile().fileName;
-    } else {
-      fileName = ts4.getOriginalNode(declarations[0]).getSourceFile().fileName;
-      context = "";
-    }
-    const mangled = moduleNameAsIdentifier(this.host, fileName, context);
-    if (this.isForExterns && this.useInternalNamespaceForExterns && !ambientModuleDeclaration && isDeclaredInSameFile(this.node, declarations[0])) {
-      return mangled + "_.";
-    }
-    return mangled + ".";
-  }
-  stripClutzNamespace(name) {
-    if (name.startsWith("\u0CA0_\u0CA0.clutz."))
-      return name.substring("\u0CA0_\u0CA0.clutz.".length);
-    return name;
   }
   translate(type) {
     if (type.flags === ts4.TypeFlags.NonPrimitive)
@@ -1407,265 +1663,7 @@ class TypeTranslator {
         throw new Error(`unknown type flags ${type.flags} on ${typeToDebugString(type)}`);
     }
   }
-  translateUnion(type) {
-    return this.translateUnionMembers(type.types);
-  }
-  translateUnionMembers(types) {
-    const parts = new Set(types.map((t) => this.translate(t)));
-    if (parts.size === 1)
-      return parts.values().next().value;
-    return `(${Array.from(parts.values()).join("|")})`;
-  }
-  translateEnumLiteral(type) {
-    const enumLiteralBaseType = this.typeChecker.getBaseTypeOfLiteralType(type);
-    if (!enumLiteralBaseType.symbol) {
-      this.warn(`EnumLiteralType without a symbol`);
-      return "?";
-    }
-    let symbol = enumLiteralBaseType.symbol;
-    if (enumLiteralBaseType === type) {
-      const parent = symbol["parent"];
-      if (!parent)
-        return "?";
-      symbol = parent;
-    }
-    const name = this.symbolToString(symbol);
-    if (!name)
-      return "?";
-    return "!" + name;
-  }
-  translateObject(type) {
-    if (type.symbol && this.isAlwaysUnknownSymbol(type.symbol))
-      return "?";
-    if (type.objectFlags & ts4.ObjectFlags.Class) {
-      if (!type.symbol) {
-        this.warn("class has no symbol");
-        return "?";
-      }
-      const name = this.symbolToString(type.symbol);
-      if (!name) {
-        return "?";
-      }
-      return "!" + name;
-    } else if (type.objectFlags & ts4.ObjectFlags.Interface) {
-      if (!type.symbol) {
-        this.warn("interface has no symbol");
-        return "?";
-      }
-      if (type.symbol.flags & ts4.SymbolFlags.Value) {
-        if (!typeValueConflictHandled(type.symbol)) {
-          this.warn(`type/symbol conflict for ${type.symbol.name}, using {?} for now`);
-          return "?";
-        }
-      }
-      return "!" + this.symbolToString(type.symbol);
-    } else if (type.objectFlags & ts4.ObjectFlags.Reference) {
-      const referenceType = type;
-      if (referenceType.target.objectFlags & ts4.ObjectFlags.Tuple) {
-        return "!Array<?>";
-      }
-      let typeStr = "";
-      if (referenceType.target === referenceType) {
-        throw new Error(`reference loop in ${typeToDebugString(referenceType)} ${referenceType.flags}`);
-      }
-      typeStr += this.translate(referenceType.target);
-      if (typeStr === "?")
-        return "?";
-      let typeArgs = this.typeChecker.getTypeArguments(referenceType) ?? [];
-      const outerTypeParameters = referenceType.target.outerTypeParameters;
-      if (outerTypeParameters) {
-        typeArgs = typeArgs.slice(outerTypeParameters.length);
-      }
-      if (this.dropFinalTypeArgument) {
-        typeArgs = typeArgs.slice(0, typeArgs.length - 1);
-      }
-      const localTypeParameters = referenceType.target.localTypeParameters;
-      const maxExpectedTypeArgs = (localTypeParameters?.length ?? 0) + 1;
-      if (typeArgs.length > maxExpectedTypeArgs) {
-        this.warn(`more type args (${typeArgs.length}) than expected (${maxExpectedTypeArgs})`);
-      }
-      if (localTypeParameters && typeArgs.length > 0) {
-        typeArgs = typeArgs.slice(0, localTypeParameters.length);
-        this.seenTypes.push(referenceType);
-        const params = typeArgs.map((t) => this.translate(t));
-        this.seenTypes.pop();
-        typeStr += `<${params.join(", ")}>`;
-      }
-      return typeStr;
-    } else if (type.objectFlags & ts4.ObjectFlags.Anonymous) {
-      return this.translateAnonymousType(type);
-    }
-    this.warn(`unhandled type ${typeToDebugString(type)}`);
-    return "?";
-  }
-  translateAnonymousType(type) {
-    this.seenTypes.push(type);
-    try {
-      if (!type.symbol) {
-        this.warn("anonymous type has no symbol");
-        return "?";
-      }
-      if (type.symbol.flags & ts4.SymbolFlags.Function || type.symbol.flags & ts4.SymbolFlags.Method) {
-        const sigs = this.typeChecker.getSignaturesOfType(type, ts4.SignatureKind.Call);
-        if (sigs.length === 1) {
-          return this.signatureToClosure(sigs[0]);
-        }
-        this.warn("unhandled anonymous type with multiple call signatures");
-        return "?";
-      }
-      let callable = false;
-      let indexable = false;
-      const fields = [];
-      if (!type.symbol.members) {
-        this.warn("anonymous type has no symbol");
-        return "?";
-      }
-      const ctors = type.getConstructSignatures();
-      if (ctors.length) {
-        const decl = ctors[0].declaration;
-        if (!decl) {
-          this.warn("unhandled anonymous type with constructor signature but no declaration");
-          return "?";
-        }
-        if (decl.kind === ts4.SyntaxKind.JSDocSignature) {
-          this.warn("unhandled JSDoc based constructor signature");
-          return "?";
-        }
-        this.markTypeParameterAsUnknown(this.symbolsToAliasedNames, decl.typeParameters);
-        const params = this.convertParams(ctors[0], decl.parameters);
-        const paramsStr = params.length ? ", " + params.join(", ") : "";
-        const constructedType = this.translate(ctors[0].getReturnType());
-        let constructedTypeStr = constructedType[0] === "!" ? constructedType.substring(1) : constructedType;
-        if (constructedTypeStr === "*") {
-          constructedTypeStr = "?";
-        }
-        return `function(new:${constructedTypeStr}${paramsStr})`;
-      }
-      for (const field of type.symbol.members.keys()) {
-        const fieldName = ts4.unescapeLeadingUnderscores(field);
-        switch (field) {
-          case ts4.InternalSymbolName.Call:
-            callable = true;
-            break;
-          case ts4.InternalSymbolName.Index:
-            indexable = true;
-            break;
-          default:
-            if (!isValidClosurePropertyName(fieldName)) {
-              this.warn(`omitting inexpressible property name: ${field}`);
-              continue;
-            }
-            const member = type.symbol.members.get(field);
-            const memberType = this.translate(this.typeChecker.getTypeOfSymbolAtLocation(member, this.node));
-            fields.push(`${fieldName}: ${memberType}`);
-            break;
-        }
-      }
-      if (fields.length === 0) {
-        if (callable && !indexable) {
-          const sigs = this.typeChecker.getSignaturesOfType(type, ts4.SignatureKind.Call);
-          if (sigs.length === 1) {
-            return this.signatureToClosure(sigs[0]);
-          }
-        } else if (indexable && !callable) {
-          let keyType = "string";
-          let valType = this.typeChecker.getIndexTypeOfType(type, ts4.IndexKind.String);
-          if (!valType) {
-            keyType = "number";
-            valType = this.typeChecker.getIndexTypeOfType(type, ts4.IndexKind.Number);
-          }
-          if (!valType) {
-            this.warn("unknown index key type");
-            return `!Object<?,?>`;
-          }
-          return `!Object<${keyType},${this.translate(valType)}>`;
-        } else if (!callable && !indexable) {
-          return "*";
-        }
-      }
-      if (!callable && !indexable) {
-        return `{${fields.join(", ")}}`;
-      }
-      this.warn("unhandled anonymous type");
-      return "?";
-    } finally {
-      this.seenTypes.pop();
-    }
-  }
-  signatureToClosure(sig) {
-    if (!sig.declaration) {
-      this.warn("signature without declaration");
-      return "Function";
-    }
-    if (sig.declaration.kind === ts4.SyntaxKind.JSDocSignature) {
-      this.warn("signature with JSDoc declaration");
-      return "Function";
-    }
-    this.markTypeParameterAsUnknown(this.symbolsToAliasedNames, sig.declaration.typeParameters);
-    let typeStr = `function(`;
-    let paramDecls = sig.declaration.parameters || [];
-    const maybeThisParam = paramDecls[0];
-    if (maybeThisParam && maybeThisParam.name.getText() === "this") {
-      if (maybeThisParam.type) {
-        const thisType = this.typeChecker.getTypeAtLocation(maybeThisParam.type);
-        typeStr += `this: (${this.translate(thisType)})`;
-        if (paramDecls.length > 1)
-          typeStr += ", ";
-      } else {
-        this.warn("this type without type");
-      }
-      paramDecls = paramDecls.slice(1);
-    }
-    const params = this.convertParams(sig, paramDecls);
-    typeStr += `${params.join(", ")})`;
-    const retType = this.translate(this.typeChecker.getReturnTypeOfSignature(sig));
-    if (retType) {
-      typeStr += `: ${retType}`;
-    }
-    return typeStr;
-  }
-  convertParams(sig, paramDecls) {
-    const paramTypes = [];
-    for (let i = 0;i < sig.parameters.length; i++) {
-      const param = sig.parameters[i];
-      const paramDecl = paramDecls[i];
-      const optional = !!paramDecl.questionToken || !!paramDecl.initializer;
-      const varArgs = !!paramDecl.dotDotDotToken;
-      const paramType = this.typeChecker.getTypeOfSymbolAtLocation(param, this.node);
-      let typeStr;
-      if (varArgs) {
-        const argType = restParameterType(this.typeChecker, paramType);
-        if (argType) {
-          typeStr = "..." + this.translate(argType);
-        } else {
-          this.warn("unable to translate rest args type");
-          typeStr = "...?";
-        }
-      } else {
-        typeStr = this.translate(paramType);
-      }
-      if (optional)
-        typeStr = typeStr + "=";
-      paramTypes.push(typeStr);
-    }
-    return paramTypes;
-  }
   warn(msg) {
-  }
-  isAlwaysUnknownSymbol(symbol) {
-    return isAlwaysUnknownSymbol(this.pathUnknownSymbolsSet, symbol);
-  }
-  markTypeParameterAsUnknown(unknownSymbolsMap, decls) {
-    if (!decls || !decls.length)
-      return;
-    for (const tpd of decls) {
-      const sym = this.typeChecker.getSymbolAtLocation(tpd.name);
-      if (!sym) {
-        this.warn(`type parameter with no symbol`);
-        continue;
-      }
-      unknownSymbolsMap.set(sym, "?");
-    }
   }
 }
 function isAlwaysUnknownSymbol(pathUnknownSymbolsSet, symbol) {
@@ -1698,9 +1696,12 @@ function restParameterType(typeChecker, type) {
   }
   return typeArgs[0];
 }
+function isFunctionLikeDeclaration(node) {
+  return ts4.isFunctionDeclaration(node) || ts4.isMethodDeclaration(node) || ts4.isConstructorDeclaration(node) || ts4.isGetAccessorDeclaration(node) || ts4.isSetAccessorDeclaration(node) || ts4.isFunctionExpression(node) || ts4.isArrowFunction(node);
+}
 
 // src/tsickle/clutz.ts
-function makeDeclarationTransformerFactory(typeChecker, googmoduleHost) {
+function makeDeclarationTransformerFactory(typeChecker, host) {
   return (context) => {
     return {
       transformBundle() {
@@ -1708,7 +1709,7 @@ function makeDeclarationTransformerFactory(typeChecker, googmoduleHost) {
       },
       transformSourceFile(file) {
         const options = context.getCompilerOptions();
-        const imports = gatherNecessaryClutzImports(googmoduleHost, typeChecker, file);
+        const imports = gatherNecessaryClutzImports(host, typeChecker, file);
         let importStmts;
         if (imports.length > 0) {
           importStmts = imports.map((fileName) => {
@@ -1716,17 +1717,29 @@ function makeDeclarationTransformerFactory(typeChecker, googmoduleHost) {
             return ts5.factory.createImportDeclaration(undefined, undefined, ts5.factory.createStringLiteral(fileName));
           });
         }
-        const globalBlock = generateClutzAliases(file, googmoduleHost.pathToModuleName("", file.fileName), typeChecker, options);
+        const globalBlock = generateClutzAliases(file, host.pathToModuleName("", file.fileName), typeChecker, options);
         if (!importStmts && !globalBlock)
           return file;
-        return ts5.factory.updateSourceFile(file, [
+        return ts5.factory.updateSourceFile(file, ts5.setTextRange(ts5.factory.createNodeArray([
           ...importStmts ?? [],
           ...file.statements,
           ...globalBlock ? [globalBlock] : []
-        ]);
+        ]), file.statements), file.isDeclarationFile, file.referencedFiles.map((f) => fixRelativeReference(f, file, options, host)), []);
       }
     };
   };
+}
+function fixRelativeReference(reference, origin, options, host) {
+  if (!options.outDir || !options.rootDir) {
+    return reference;
+  }
+  const originDir = dirname(origin.fileName);
+  const expectedOutDir = join(options.outDir, relative(options.rootDir, originDir));
+  const referencedFile = join(expectedOutDir, reference.fileName);
+  const actualOutDir = join(options.outDir, host.rootDirsRelative(originDir));
+  const fixedReference = relative(actualOutDir, referencedFile);
+  reference.fileName = fixedReference;
+  return reference;
 }
 function stringCompare(a, b) {
   if (a < b)
@@ -1958,6 +1971,8 @@ var CLOSURE_ALLOWED_JSDOC_TAGS_OUTPUT = new Set([
   "wizcallback",
   "wizmodule"
 ]);
+var BANNED_JSDOC_TAGS_IN_FREESTANDING_COMMENTS = new Set(CLOSURE_ALLOWED_JSDOC_TAGS_OUTPUT);
+BANNED_JSDOC_TAGS_IN_FREESTANDING_COMMENTS.delete("license");
 var BANNED_JSDOC_TAGS_INPUT = new Set([
   "augments",
   "class",
@@ -1988,7 +2003,13 @@ var JSDOC_TAGS_WITH_TYPES = new Set([
   "export",
   ...TAGS_CONFLICTING_WITH_TYPE
 ]);
-var ONE_LINER_TAGS = new Set(["type", "typedef", "nocollapse", "const", "enum"]);
+var ONE_LINER_TAGS = new Set([
+  "type",
+  "typedef",
+  "nocollapse",
+  "const",
+  "enum"
+]);
 function parse(comment) {
   if (comment.kind !== ts6.SyntaxKind.MultiLineCommentTrivia)
     return null;
@@ -2009,7 +2030,7 @@ function parseContents(commentText) {
   for (const line of lines) {
     let match = line.match(/^\s*@([^\s{]+) *({?.*)/);
     if (match) {
-      let [_, tagName, text] = match;
+      let [, tagName, text] = match;
       if (tagName === "returns") {
         tagName = "return";
       }
@@ -2041,7 +2062,7 @@ function parseContents(commentText) {
       if (tagName === "param") {
         match = text.match(/^(\S+) ?(.*)/);
         if (match)
-          [_, parameterName, text] = match;
+          [, parameterName, text] = match;
       }
       const tag = { tagName };
       if (parameterName)
@@ -2096,7 +2117,7 @@ function tagToString(tag, escapeExtraTags = new Set) {
 var SINGLETON_TAGS = new Set(["deprecated"]);
 function synthesizeLeadingComments(node) {
   const existing = ts6.getSyntheticLeadingComments(node);
-  if (existing)
+  if (existing && hasLeadingCommentsSuppressed(node))
     return existing;
   const text = ts6.getOriginalNode(node).getFullText();
   const synthComments = getLeadingCommentRangesSynthesized(text, node.getFullStart());
@@ -2106,16 +2127,22 @@ function synthesizeLeadingComments(node) {
   }
   return synthComments;
 }
+function hasLeadingCommentsSuppressed(node) {
+  const internalNode = node;
+  if (!internalNode.emitNode)
+    return false;
+  return (internalNode.emitNode.flags & ts6.EmitFlags.NoLeadingComments) === ts6.EmitFlags.NoLeadingComments;
+}
 function getLeadingCommentRangesSynthesized(text, offset = 0) {
   const comments = ts6.getLeadingCommentRanges(text, 0) || [];
   return comments.map((cr) => {
     const commentText = cr.kind === ts6.SyntaxKind.SingleLineCommentTrivia ? text.substring(cr.pos + 2, cr.end) : text.substring(cr.pos + 2, cr.end - 2);
     return {
       ...cr,
-      text: commentText,
-      pos: -1,
       end: -1,
-      originalRange: { pos: cr.pos + offset, end: cr.end + offset }
+      originalRange: { end: cr.end + offset, pos: cr.pos + offset },
+      pos: -1,
+      text: commentText
     };
   });
 }
@@ -2133,11 +2160,11 @@ function suppressLeadingCommentsRecursively(node) {
 }
 function toSynthesizedComment(tags, escapeExtraTags, hasTrailingNewLine = true) {
   return {
-    kind: ts6.SyntaxKind.MultiLineCommentTrivia,
-    text: toStringWithoutStartEnd(tags, escapeExtraTags),
-    pos: -1,
     end: -1,
-    hasTrailingNewLine
+    hasTrailingNewLine,
+    kind: ts6.SyntaxKind.MultiLineCommentTrivia,
+    pos: -1,
+    text: toStringWithoutStartEnd(tags, escapeExtraTags)
   };
 }
 function toStringWithoutStartEnd(tags, escapeExtraTags = new Set) {
@@ -2198,7 +2225,7 @@ function merge(tags) {
   const type = types.size > 0 ? Array.from(types).join("|") : undefined;
   const isTemplateTag = tagName === "template";
   const text = texts.size > 0 ? Array.from(texts).join(isTemplateTag ? "," : " / ") : undefined;
-  const tag = { tagName, parameterName, type, text };
+  const tag = { parameterName, tagName, text, type };
   if (restParam) {
     tag.restParam = true;
   } else if (optional) {
@@ -2212,60 +2239,73 @@ function createGeneratedFromComment(file) {
 
 class MutableJSDoc {
   node;
+  allComments;
   sourceComment;
   tags;
-  constructor(node, sourceComment, tags) {
+  sanitizedOtherComments = false;
+  constructor(node, allComments, sourceComment, tags) {
     this.node = node;
+    this.allComments = allComments;
     this.sourceComment = sourceComment;
     this.tags = tags;
   }
   updateComment(escapeExtraTags) {
+    if (!this.sanitizedOtherComments) {
+      for (let i = 0;i < this.allComments.length; i++) {
+        if (i === this.sourceComment)
+          continue;
+        const comment2 = this.allComments[i];
+        const parsed = parse(comment2);
+        if (!parsed)
+          continue;
+        comment2.text = toStringWithoutStartEnd(parsed.tags, BANNED_JSDOC_TAGS_IN_FREESTANDING_COMMENTS);
+      }
+      this.sanitizedOtherComments = true;
+    }
     const text = toStringWithoutStartEnd(this.tags, escapeExtraTags);
-    if (this.sourceComment) {
+    if (this.sourceComment >= 0) {
       if (!text) {
-        const comments2 = ts6.getSyntheticLeadingComments(this.node);
-        const idx = comments2.indexOf(this.sourceComment);
-        comments2.splice(idx, 1);
-        this.sourceComment = null;
+        this.allComments.splice(this.sourceComment, 1);
+        this.sourceComment = -1;
         return;
       }
-      this.sourceComment.text = text;
+      this.allComments[this.sourceComment].text = text;
       return;
     }
     if (!text)
       return;
     const comment = {
-      kind: ts6.SyntaxKind.MultiLineCommentTrivia,
-      text,
+      end: -1,
       hasTrailingNewLine: true,
+      kind: ts6.SyntaxKind.MultiLineCommentTrivia,
       pos: -1,
-      end: -1
+      text
     };
-    const comments = ts6.getSyntheticLeadingComments(this.node) || [];
-    comments.push(comment);
-    ts6.setSyntheticLeadingComments(this.node, comments);
+    this.allComments.push(comment);
+    this.sourceComment = this.allComments.length - 1;
+    ts6.setSyntheticLeadingComments(this.node, this.allComments);
   }
 }
 function getJSDocTags(node, diagnostics, sourceFile) {
   if (!ts6.getParseTreeNode(node))
     return [];
-  const [tags] = parseJSDoc(node, diagnostics, sourceFile);
+  const [, , tags] = parseJSDoc(node, diagnostics, sourceFile);
   return tags;
 }
 function getMutableJSDoc(node, diagnostics, sourceFile) {
-  const [tags, comment] = parseJSDoc(node, diagnostics, sourceFile);
-  return new MutableJSDoc(node, comment, tags);
+  const [comments, i, tags] = parseJSDoc(node, diagnostics, sourceFile);
+  return new MutableJSDoc(node, comments, i, tags);
 }
 function parseJSDoc(node, diagnostics, sourceFile) {
   let nodeCommentRange;
   if (diagnostics !== undefined) {
     const pos = node.getFullStart();
     const length = node.getLeadingTriviaWidth(sourceFile);
-    nodeCommentRange = { pos, end: pos + length };
+    nodeCommentRange = { end: pos + length, pos };
   }
   const comments = synthesizeLeadingComments(node);
   if (!comments || comments.length === 0)
-    return [[], null];
+    return [[], -1, []];
   for (let i = comments.length - 1;i >= 0; i--) {
     const comment = comments[i];
     const parsed = parse(comment);
@@ -2274,10 +2314,10 @@ function parseJSDoc(node, diagnostics, sourceFile) {
         const range = comment.originalRange || nodeCommentRange;
         reportDiagnostic(diagnostics, node, parsed.warnings.join("\n"), range, ts6.DiagnosticCategory.Warning);
       }
-      return [parsed.tags, comment];
+      return [comments, i, parsed.tags];
     }
   }
-  return [[], null];
+  return [comments, -1, []];
 }
 
 // src/tsickle/decorators.ts
@@ -2336,7 +2376,9 @@ function transformDecoratorsOutputForClosurePropertyRenaming(diagnostics) {
           reportDiagnostic(diagnostics, nodeNeedingGoogReflect, "Internal tsickle error: could not find goog.module statement to import __tsickle_googReflect for decorator compilation.");
           return sourceFile;
         }
-        const googRequireReflectObjectProperty = ts7.factory.createVariableStatement(undefined, ts7.factory.createVariableDeclarationList([ts7.factory.createVariableDeclaration("__tsickle_googReflect", undefined, undefined, ts7.factory.createCallExpression(ts7.factory.createPropertyAccessExpression(ts7.factory.createIdentifier("goog"), "require"), undefined, [ts7.factory.createStringLiteral("goog.reflect")]))], ts7.NodeFlags.Const));
+        const googRequireReflectObjectProperty = ts7.factory.createVariableStatement(undefined, ts7.factory.createVariableDeclarationList([
+          ts7.factory.createVariableDeclaration("__tsickle_googReflect", undefined, undefined, ts7.factory.createCallExpression(ts7.factory.createPropertyAccessExpression(ts7.factory.createIdentifier("goog"), "require"), undefined, [ts7.factory.createStringLiteral("goog.reflect")]))
+        ], ts7.NodeFlags.Const));
         statements.splice(googModuleIndex + 3, 0, googRequireReflectObjectProperty);
         updatedSourceFile = ts7.factory.updateSourceFile(updatedSourceFile, ts7.setTextRange(ts7.factory.createNodeArray(statements), updatedSourceFile.statements), updatedSourceFile.isDeclarationFile, updatedSourceFile.referencedFiles, updatedSourceFile.typeReferenceDirectives, updatedSourceFile.hasNoDefaultLib, updatedSourceFile.libReferenceDirectives);
       }
@@ -2452,10 +2494,12 @@ function shouldLower(decorator, typeChecker) {
 var DECORATOR_INVOCATION_JSDOC_TYPE = "!Array<{type: !Function, args: (undefined|!Array<?>)}>";
 function addJSDocTypeAnnotation(node, jsdocType) {
   ts8.setSyntheticLeadingComments(node, [
-    toSynthesizedComment([{
-      tagName: "type",
-      type: jsdocType
-    }])
+    toSynthesizedComment([
+      {
+        tagName: "type",
+        type: jsdocType
+      }
+    ])
   ]);
 }
 function extractMetadataFromSingleDecorator(decorator, diagnostics) {
@@ -2479,12 +2523,12 @@ function extractMetadataFromSingleDecorator(decorator, diagnostics) {
       break;
     default:
       diagnostics.push({
+        category: ts8.DiagnosticCategory.Error,
+        code: 0,
         file: decorator.getSourceFile(),
-        start: decorator.getStart(),
         length: decorator.getEnd() - decorator.getStart(),
         messageText: `${ts8.SyntaxKind[decorator.kind]} not implemented in gathering decorator metadata`,
-        category: ts8.DiagnosticCategory.Error,
-        code: 0
+        start: decorator.getStart()
       });
       break;
   }
@@ -2505,7 +2549,9 @@ function createCtorParametersClassProperty(diagnostics, entityNameToExpression, 
       continue;
     }
     const paramType = ctorParam.type ? typeReferenceToExpression(entityNameToExpression, ctorParam.type) : undefined;
-    const members = [ts8.factory.createPropertyAssignment("type", paramType || ts8.factory.createIdentifier("undefined"))];
+    const members = [
+      ts8.factory.createPropertyAssignment("type", paramType || ts8.factory.createIdentifier("undefined"))
+    ];
     const decorators = [];
     for (const deco of ctorParam.decorators) {
       decorators.push(extractMetadataFromSingleDecorator(deco, diagnostics));
@@ -2606,12 +2652,12 @@ function decoratorDownlevelTransformer(typeChecker, diagnostics) {
         return [undefined, element, []];
       if (!element.name || element.name.kind !== ts8.SyntaxKind.Identifier) {
         diagnostics.push({
+          category: ts8.DiagnosticCategory.Error,
+          code: 0,
           file: element.getSourceFile(),
-          start: element.getStart(),
           length: element.getEnd() - element.getStart(),
           messageText: `cannot process decorators on strangely named method`,
-          category: ts8.DiagnosticCategory.Error,
-          code: 0
+          start: element.getStart()
         });
         return [undefined, element, []];
       }
@@ -2643,7 +2689,10 @@ function decoratorDownlevelTransformer(typeChecker, diagnostics) {
       const parametersInfo = [];
       for (const param of oldParameters) {
         const modifiersToKeep = [];
-        const paramInfo = { decorators: [], type: null };
+        const paramInfo = {
+          decorators: [],
+          type: null
+        };
         for (const modifier of param.modifiers || []) {
           if (ts8.isDecorator(modifier)) {
             if (shouldLower(modifier, typeChecker)) {
@@ -2798,7 +2847,7 @@ function getEnumType(typeChecker, enumDecl) {
     return "?";
   }
 }
-function enumTransformer(typeChecker) {
+function enumTransformer(host, typeChecker) {
   return (context) => {
     function visitor(node) {
       if (!ts9.isEnumDeclaration(node))
@@ -2835,7 +2884,7 @@ function enumTransformer(typeChecker) {
         values.push(ts9.setOriginalNode(ts9.setTextRange(ts9.factory.createPropertyAssignment(member.name, enumValue), member), member));
       }
       const varDecl = ts9.factory.createVariableDeclaration(node.name, undefined, undefined, ts9.factory.createObjectLiteralExpression(ts9.setTextRange(ts9.factory.createNodeArray(values, true), node.members), true));
-      const varDeclStmt = ts9.setOriginalNode(ts9.setTextRange(ts9.factory.createVariableStatement(undefined, ts9.factory.createVariableDeclarationList([varDecl], ts9.NodeFlags.Const)), node), node);
+      const varDeclStmt = ts9.setOriginalNode(ts9.setTextRange(ts9.factory.createVariableStatement(undefined, ts9.factory.createVariableDeclarationList([varDecl], host.useDeclarationMergingTransformation ? ts9.NodeFlags.Const : undefined)), node), node);
       const tags = getJSDocTags(ts9.getOriginalNode(node));
       tags.push({ tagName: "enum", type: enumType });
       const comment = toSynthesizedComment(tags);
@@ -2843,7 +2892,9 @@ function enumTransformer(typeChecker) {
       const name = getIdentifierText(node.name);
       const resultNodes = [varDeclStmt];
       if (isExported) {
-        resultNodes.push(ts9.factory.createExportDeclaration(undefined, false, ts9.factory.createNamedExports([ts9.factory.createExportSpecifier(false, undefined, name)])));
+        resultNodes.push(ts9.factory.createExportDeclaration(undefined, false, ts9.factory.createNamedExports([
+          ts9.factory.createExportSpecifier(false, undefined, name)
+        ])));
       }
       if (hasModifierFlag(node, ts9.ModifierFlags.Const)) {
         return resultNodes;
@@ -2912,10 +2963,10 @@ class ModuleTypeTranslator {
   diagnostics;
   isForExterns;
   useInternalNamespaceForExterns;
-  symbolsToAliasedNames = new Map;
-  symbolToNameCache = new Map;
-  requireTypeModules = new Set;
   additionalImports = [];
+  requireTypeModules = new Set;
+  symbolToNameCache = new Map;
+  symbolsToAliasedNames = new Map;
   constructor(sourceFile, typeChecker, host, diagnostics, isForExterns, useInternalNamespaceForExterns = false) {
     this.sourceFile = sourceFile;
     this.typeChecker = typeChecker;
@@ -2924,56 +2975,6 @@ class ModuleTypeTranslator {
     this.isForExterns = isForExterns;
     this.useInternalNamespaceForExterns = useInternalNamespaceForExterns;
     this.host.unknownTypesPaths = this.host.unknownTypesPaths ?? this.host.typeBlackListPaths;
-  }
-  debugWarn(context, messageText) {
-    reportDebugWarning(this.host, context, messageText);
-  }
-  error(node, messageText) {
-    reportDiagnostic(this.diagnostics, node, messageText);
-  }
-  typeToClosure(context, type) {
-    if (this.host.untyped) {
-      return "?";
-    }
-    context = ts10.getOriginalNode(context);
-    const typeChecker = this.typeChecker;
-    if (!type) {
-      type = typeChecker.getTypeAtLocation(context);
-    }
-    try {
-      return this.newTypeTranslator(context).translate(type);
-    } catch (e) {
-      if (!(e instanceof Error))
-        throw e;
-      const sourceFile = context.getSourceFile();
-      const { line, character } = context.pos !== -1 ? sourceFile.getLineAndCharacterOfPosition(context.pos) : { line: 0, character: 0 };
-      e.message = `internal error converting type at ${sourceFile.fileName}:${line}:${character}:\n\n` + e.message;
-      throw e;
-    }
-  }
-  newTypeTranslator(context) {
-    const translationContext = this.isForExterns ? this.sourceFile : context;
-    const translator = new TypeTranslator(this.host, this.typeChecker, translationContext, this.host.unknownTypesPaths || new Set, this.symbolsToAliasedNames, this.symbolToNameCache, (sym) => void this.ensureSymbolDeclared(sym));
-    translator.isForExterns = this.isForExterns;
-    translator.useInternalNamespaceForExterns = this.useInternalNamespaceForExterns;
-    translator.warn = (msg) => void this.debugWarn(context, msg);
-    return translator;
-  }
-  isAlwaysUnknownSymbol(context) {
-    const type = this.typeChecker.getTypeAtLocation(context);
-    let sym = type.symbol;
-    if (!sym)
-      return false;
-    if (sym.flags & ts10.SymbolFlags.Alias) {
-      sym = this.typeChecker.getAliasedSymbol(sym);
-    }
-    return this.newTypeTranslator(context).isAlwaysUnknownSymbol(sym);
-  }
-  mustGetSymbolAtLocation(node) {
-    const sym = this.typeChecker.getSymbolAtLocation(node);
-    if (!sym)
-      throw new Error("no symbol");
-    return sym;
   }
   addRequireTypeIfIsExported(decl, sym) {
     if (!hasModifierFlag(decl, ts10.ModifierFlags.ExportDefault))
@@ -2998,24 +2999,17 @@ class ModuleTypeTranslator {
     const modulePrefix = importPath.replace(/(\/index)?(\.d)?\.[tj]sx?$/, "").replace(/^.*[/.](.+?)/, "$1").replace(/\W/g, "_");
     return `tsickle_${modulePrefix || "reqType"}_`;
   }
-  requireType(context, importPath, moduleSymbol, isDefaultImport = false) {
-    if (this.host.untyped)
-      return;
-    if (this.requireTypeModules.has(moduleSymbol))
-      return;
-    if (isAlwaysUnknownSymbol(this.host.unknownTypesPaths, moduleSymbol)) {
+  getTypeSymbolOfSymbolIfClassOrInterface(symbol) {
+    const type = this.typeChecker.getDeclaredTypeOfSymbol(symbol);
+    const typeSymbol = type.getSymbol();
+    if (!typeSymbol) {
       return;
     }
-    const nsImport = jsPathToNamespace(this.host, context, this.diagnostics, importPath, () => moduleSymbol);
-    const requireTypePrefix = this.generateModulePrefix(importPath) + String(this.requireTypeModules.size + 1);
-    const moduleNamespace = nsImport != null ? nsImport : this.host.pathToModuleName(this.sourceFile.fileName, importPath);
-    if (jsPathToStripProperty(this.host, importPath, () => moduleSymbol)) {
-      isDefaultImport = true;
+    if (!(type.flags & ts10.TypeFlags.Object)) {
+      return;
     }
-    this.additionalImports.push(ts10.factory.createVariableStatement(undefined, ts10.factory.createVariableDeclarationList([ts10.factory.createVariableDeclaration(requireTypePrefix, undefined, undefined, ts10.factory.createCallExpression(ts10.factory.createPropertyAccessExpression(ts10.factory.createIdentifier("goog"), "requireType"), undefined, [ts10.factory.createStringLiteral(moduleNamespace)]))], ts10.NodeFlags.Const)));
-    this.requireTypeModules.add(moduleSymbol);
-    this.registerImportSymbolAliases(nsImport, isDefaultImport, moduleSymbol, () => requireTypePrefix);
-    this.registerImportTypeSymbolAliases(nsImport, isDefaultImport, moduleSymbol, requireTypePrefix);
+    const objectFlags = type.objectFlags;
+    return objectFlags & ts10.ObjectFlags.ClassOrInterface ? typeSymbol : undefined;
   }
   qualifiedNameFromSymbolChain(leafSymbol, googNamespace, isDefaultImport, aliasPrefix, namedDefaultImport) {
     if (googNamespace && (isDefaultImport || namedDefaultImport)) {
@@ -3062,48 +3056,18 @@ class ModuleTypeTranslator {
       }
     }
   }
-  getTypeSymbolOfSymbolIfClassOrInterface(symbol) {
-    const type = this.typeChecker.getDeclaredTypeOfSymbol(symbol);
-    const typeSymbol = type.getSymbol();
-    if (!typeSymbol) {
+  resolveRestParameterType(newTag, fnDecl, paramNode) {
+    const type = restParameterType(this.typeChecker, this.typeChecker.getTypeAtLocation(paramNode));
+    newTag.restParam = true;
+    if (!type) {
+      this.debugWarn(paramNode, "failed to resolve rest parameter type, emitting ?");
+      newTag.type = "?";
       return;
     }
-    if (!(type.flags & ts10.TypeFlags.Object)) {
-      return;
-    }
-    const objectFlags = type.objectFlags;
-    return objectFlags & ts10.ObjectFlags.ClassOrInterface ? typeSymbol : undefined;
+    newTag.type = this.typeToClosure(fnDecl, type);
   }
-  registerImportSymbolAliases(googNamespace, isDefaultImport, moduleSymbol, getAliasPrefix) {
-    for (let sym of this.typeChecker.getExportsOfModule(moduleSymbol)) {
-      const aliasPrefix = getAliasPrefix(sym);
-      const namedDefaultImport = sym.name === "default";
-      const qualifiedName = googNamespace && (isDefaultImport || namedDefaultImport) ? aliasPrefix : aliasPrefix + "." + sym.name;
-      if (sym.flags & ts10.SymbolFlags.Alias) {
-        sym = this.typeChecker.getAliasedSymbol(sym);
-      }
-      this.symbolsToAliasedNames.set(sym, qualifiedName);
-    }
-  }
-  registerExternSymbolAliases(importPath, moduleSymbol) {
-    const moduleNamespace = moduleNameAsIdentifier(this.host, importPath, this.sourceFile.fileName);
-    for (let sym of this.typeChecker.getExportsOfModule(moduleSymbol)) {
-      const namedDefaultImport = sym.name === "default";
-      let qualifiedName;
-      if (moduleNamespace) {
-        if (namedDefaultImport) {
-          qualifiedName = moduleNamespace;
-        } else {
-          qualifiedName = moduleNamespace + "." + sym.name;
-        }
-      } else {
-        qualifiedName = sym.name;
-      }
-      if (sym.flags & ts10.SymbolFlags.Alias) {
-        sym = this.typeChecker.getAliasedSymbol(sym);
-      }
-      this.symbolsToAliasedNames.set(sym, qualifiedName);
-    }
+  debugWarn(context, messageText) {
+    reportDebugWarning(this.host, context, messageText);
   }
   ensureSymbolDeclared(sym) {
     if (this.symbolsToAliasedNames.has(sym))
@@ -3141,32 +3105,8 @@ class ModuleTypeTranslator {
       this.requireType(clutzDecl, clutzModule.getName().slice(1, -1), clutzModule);
     }
   }
-  insertAdditionalImports(sourceFile) {
-    let insertion = 0;
-    if (sourceFile.statements.length && sourceFile.statements[0].kind === ts10.SyntaxKind.NotEmittedStatement) {
-      insertion++;
-    }
-    return ts10.factory.updateSourceFile(sourceFile, [
-      ...sourceFile.statements.slice(0, insertion),
-      ...this.additionalImports,
-      ...sourceFile.statements.slice(insertion)
-    ]);
-  }
-  getJSDoc(node, reportWarnings) {
-    return getJSDocTags(node, reportWarnings ? this.diagnostics : undefined, this.sourceFile);
-  }
-  getMutableJSDoc(node) {
-    return getMutableJSDoc(node, this.diagnostics, this.sourceFile);
-  }
-  resolveRestParameterType(newTag, fnDecl, paramNode) {
-    const type = restParameterType(this.typeChecker, this.typeChecker.getTypeAtLocation(paramNode));
-    newTag.restParam = true;
-    if (!type) {
-      this.debugWarn(paramNode, "failed to resolve rest parameter type, emitting ?");
-      newTag.type = "?";
-      return;
-    }
-    newTag.type = this.typeToClosure(fnDecl, type);
+  error(node, messageText) {
+    reportDiagnostic(this.diagnostics, node, messageText);
   }
   getFunctionTypeJSDoc(fnDecls, extraTags = []) {
     const typeChecker = this.typeChecker;
@@ -3226,16 +3166,16 @@ class ModuleTypeTranslator {
         if (isThisParam)
           hasThisParam = true;
         const newTag = {
-          tagName: isThisParam ? "this" : "param",
           optional: paramNode.initializer !== undefined || paramNode.questionToken !== undefined,
-          parameterName: isThisParam ? undefined : name
+          parameterName: isThisParam ? undefined : name,
+          tagName: isThisParam ? "this" : "param"
         };
         if (paramNode.dotDotDotToken === undefined) {
           newTag.type = this.typeToClosure(fnDecl, this.typeChecker.getTypeAtLocation(paramNode));
         } else {
           this.resolveRestParameterType(newTag, fnDecl, paramNode);
         }
-        for (const { tagName, parameterName, text } of tags) {
+        for (const { parameterName, tagName, text } of tags) {
           if (tagName === "param" && parameterName === newTag.parameterName) {
             newTag.text = text;
             break;
@@ -3312,10 +3252,123 @@ class ModuleTypeTranslator {
       newDoc.push(merge(returnTags));
     }
     return {
-      tags: newDoc,
       parameterNames: newDoc.filter((t) => t.tagName === "param").map((t) => t.parameterName),
+      tags: newDoc,
       thisReturnType
     };
+  }
+  getJSDoc(node, reportWarnings) {
+    return getJSDocTags(node, reportWarnings ? this.diagnostics : undefined, this.sourceFile);
+  }
+  getMutableJSDoc(node) {
+    return getMutableJSDoc(node, this.diagnostics, this.sourceFile);
+  }
+  insertAdditionalImports(sourceFile) {
+    let insertion = 0;
+    if (sourceFile.statements.length && sourceFile.statements[0].kind === ts10.SyntaxKind.NotEmittedStatement) {
+      insertion++;
+    }
+    return ts10.factory.updateSourceFile(sourceFile, [
+      ...sourceFile.statements.slice(0, insertion),
+      ...this.additionalImports,
+      ...sourceFile.statements.slice(insertion)
+    ]);
+  }
+  isAlwaysUnknownSymbol(context) {
+    const type = this.typeChecker.getTypeAtLocation(context);
+    let sym = type.symbol;
+    if (!sym)
+      return false;
+    if (sym.flags & ts10.SymbolFlags.Alias) {
+      sym = this.typeChecker.getAliasedSymbol(sym);
+    }
+    return this.newTypeTranslator(context).isAlwaysUnknownSymbol(sym);
+  }
+  mustGetSymbolAtLocation(node) {
+    const sym = this.typeChecker.getSymbolAtLocation(node);
+    if (!sym)
+      throw new Error("no symbol");
+    return sym;
+  }
+  newTypeTranslator(context) {
+    const translationContext = this.isForExterns ? this.sourceFile : context;
+    const translator = new TypeTranslator(this.host, this.typeChecker, translationContext, this.host.unknownTypesPaths || new Set, this.symbolsToAliasedNames, this.symbolToNameCache, (sym) => void this.ensureSymbolDeclared(sym));
+    translator.isForExterns = this.isForExterns;
+    translator.useInternalNamespaceForExterns = this.useInternalNamespaceForExterns;
+    translator.warn = (msg) => void this.debugWarn(context, msg);
+    return translator;
+  }
+  registerExternSymbolAliases(importPath, moduleSymbol) {
+    const moduleNamespace = moduleNameAsIdentifier(this.host, importPath, this.sourceFile.fileName);
+    for (let sym of this.typeChecker.getExportsOfModule(moduleSymbol)) {
+      const namedDefaultImport = sym.name === "default";
+      let qualifiedName;
+      if (moduleNamespace) {
+        if (namedDefaultImport) {
+          qualifiedName = moduleNamespace;
+        } else {
+          qualifiedName = moduleNamespace + "." + sym.name;
+        }
+      } else {
+        qualifiedName = sym.name;
+      }
+      if (sym.flags & ts10.SymbolFlags.Alias) {
+        sym = this.typeChecker.getAliasedSymbol(sym);
+      }
+      this.symbolsToAliasedNames.set(sym, qualifiedName);
+    }
+  }
+  registerImportSymbolAliases(googNamespace, isDefaultImport, moduleSymbol, getAliasPrefix) {
+    for (let sym of this.typeChecker.getExportsOfModule(moduleSymbol)) {
+      const aliasPrefix = getAliasPrefix(sym);
+      const namedDefaultImport = sym.name === "default";
+      const qualifiedName = googNamespace && (isDefaultImport || namedDefaultImport) ? aliasPrefix : aliasPrefix + "." + sym.name;
+      if (sym.flags & ts10.SymbolFlags.Alias) {
+        sym = this.typeChecker.getAliasedSymbol(sym);
+      }
+      this.symbolsToAliasedNames.set(sym, qualifiedName);
+    }
+  }
+  requireType(context, importPath, moduleSymbol, isDefaultImport = false) {
+    if (this.host.untyped)
+      return;
+    if (this.requireTypeModules.has(moduleSymbol))
+      return;
+    if (isAlwaysUnknownSymbol(this.host.unknownTypesPaths, moduleSymbol)) {
+      return;
+    }
+    const nsImport = jsPathToNamespace(this.host, context, this.diagnostics, importPath, () => moduleSymbol);
+    const requireTypePrefix = this.generateModulePrefix(importPath) + String(this.requireTypeModules.size + 1);
+    const moduleNamespace = nsImport != null ? nsImport : this.host.pathToModuleName(this.sourceFile.fileName, importPath);
+    if (jsPathToStripProperty(this.host, importPath, () => moduleSymbol)) {
+      isDefaultImport = true;
+    }
+    this.additionalImports.push(ts10.factory.createVariableStatement(undefined, ts10.factory.createVariableDeclarationList([
+      ts10.factory.createVariableDeclaration(requireTypePrefix, undefined, undefined, ts10.factory.createCallExpression(ts10.factory.createPropertyAccessExpression(ts10.factory.createIdentifier("goog"), "requireType"), undefined, [ts10.factory.createStringLiteral(moduleNamespace)]))
+    ], ts10.NodeFlags.Const)));
+    this.requireTypeModules.add(moduleSymbol);
+    this.registerImportSymbolAliases(nsImport, isDefaultImport, moduleSymbol, () => requireTypePrefix);
+    this.registerImportTypeSymbolAliases(nsImport, isDefaultImport, moduleSymbol, requireTypePrefix);
+  }
+  typeToClosure(context, type) {
+    if (this.host.untyped) {
+      return "?";
+    }
+    context = ts10.getOriginalNode(context);
+    const typeChecker = this.typeChecker;
+    if (!type) {
+      type = typeChecker.getTypeAtLocation(context);
+    }
+    try {
+      return this.newTypeTranslator(context).translate(type);
+    } catch (e) {
+      if (!(e instanceof Error))
+        throw e;
+      const sourceFile = context.getSourceFile();
+      const { character, line } = context.pos !== -1 ? sourceFile.getLineAndCharacterOfPosition(context.pos) : { character: 0, line: 0 };
+      e.message = `internal error converting type at ${sourceFile.fileName}:${line}:${character}:\n\n` + e.message;
+      throw e;
+    }
   }
 }
 function isGlobalAugmentation(decl) {
@@ -3452,12 +3505,14 @@ function createMemberTypeDeclaration(mtt, typeDecl) {
       mtt.error(fnDecl, "anonymous abstract function");
       continue;
     }
-    const { tags, parameterNames } = mtt.getFunctionTypeJSDoc([fnDecl], []);
+    const { parameterNames, tags } = mtt.getFunctionTypeJSDoc([fnDecl], []);
     if (hasExportingDecorator(fnDecl, mtt.typeChecker))
       tags.push({ tagName: "export" });
     const lhs = typeof name === "string" ? ts11.factory.createPropertyAccessExpression(instancePropAccess, name) : ts11.factory.createElementAccessExpression(instancePropAccess, name);
     const abstractFnDecl = ts11.factory.createExpressionStatement(ts11.factory.createAssignment(lhs, ts11.factory.createFunctionExpression(undefined, undefined, undefined, undefined, parameterNames.map((n) => ts11.factory.createParameterDeclaration(undefined, undefined, n)), undefined, ts11.factory.createBlock([]))));
-    ts11.setSyntheticLeadingComments(abstractFnDecl, [toSynthesizedComment(tags)]);
+    ts11.setSyntheticLeadingComments(abstractFnDecl, [
+      toSynthesizedComment(tags)
+    ]);
     propertyDecls.push(ts11.setSourceMapRange(abstractFnDecl, fnDecl));
   }
   const ifStmt = ts11.factory.createIfStatement(ts11.factory.createFalse(), ts11.factory.createBlock(propertyDecls, true));
@@ -3588,7 +3643,9 @@ function jsdocTransformer(host, tsOptions, typeChecker, diagnostics) {
         while (ts11.isParenthesizedExpression(expr) || ts11.isNonNullExpression(expr) || ts11.isAssertionExpression(expr)) {
           expr = expr.expression;
         }
-        return ts11.factory.updateHeritageClause(heritageClause, [ts11.factory.updateExpressionWithTypeArguments(type, expr, type.typeArguments || [])]);
+        return ts11.factory.updateHeritageClause(heritageClause, [
+          ts11.factory.updateExpressionWithTypeArguments(type, expr, type.typeArguments || [])
+        ]);
       }
       function visitInterfaceDeclaration(iface) {
         const sym = typeChecker.getSymbolAtLocation(iface.name);
@@ -3598,7 +3655,9 @@ function jsdocTransformer(host, tsOptions, typeChecker, diagnostics) {
         }
         if (symbolIsValue(typeChecker, sym) && !isMergedDeclaration(iface)) {
           moduleTypeTranslator.debugWarn(iface, `type/symbol conflict for ${sym.name}, using {?} for now`);
-          return [createSingleLineComment(iface, "WARNING: interface has both a type and a value, skipping emit")];
+          return [
+            createSingleLineComment(iface, "WARNING: interface has both a type and a value, skipping emit")
+          ];
         }
         const tags = moduleTypeTranslator.getJSDoc(iface, true) || [];
         tags.push({ tagName: "record" });
@@ -3714,6 +3773,7 @@ function jsdocTransformer(host, tsOptions, typeChecker, diagnostics) {
           ts11.setSyntheticLeadingComments(commentHolder, leading.filter((c) => c.text[0] !== "*"));
           stmts.push(commentHolder);
         }
+        const isExported = varStmt.modifiers?.some((modifier) => modifier.kind === ts11.SyntaxKind.ExportKeyword);
         for (const decl of varStmt.declarationList.declarations) {
           const localTags = [];
           if (tags) {
@@ -3737,16 +3797,16 @@ function jsdocTransformer(host, tsOptions, typeChecker, diagnostics) {
             if (updatedBinding && aliases.length > 0) {
               const declVisited = ts11.visitNode(decl, visitor, ts11.isVariableDeclaration);
               const newDecl2 = ts11.factory.updateVariableDeclaration(declVisited, updatedBinding, declVisited.exclamationToken, declVisited.type, declVisited.initializer);
-              const newStmt2 = ts11.factory.createVariableStatement(varStmt.modifiers, ts11.factory.createVariableDeclarationList([newDecl2], flags));
+              const newStmt2 = ts11.factory.createVariableStatement(varStmt.modifiers?.filter((modifier) => modifier.kind !== ts11.SyntaxKind.ExportKeyword), ts11.factory.createVariableDeclarationList([newDecl2], flags));
               if (localTags.length) {
                 addCommentOn(newStmt2, localTags, TAGS_CONFLICTING_WITH_TYPE);
               }
               stmts.push(newStmt2);
-              stmts.push(...createArrayBindingAliases(varStmt.declarationList.flags, aliases));
+              stmts.push(...createArrayBindingAliases(varStmt.declarationList.flags, aliases, isExported));
               continue;
             }
           }
-          const newDecl = ts11.visitNode(decl, visitor, ts11.isVariableDeclaration);
+          const newDecl = ts11.setEmitFlags(ts11.visitNode(decl, visitor, ts11.isVariableDeclaration), ts11.EmitFlags.NoComments);
           const newStmt = ts11.factory.createVariableStatement(varStmt.modifiers, ts11.factory.createVariableDeclarationList([newDecl], flags));
           if (localTags.length)
             addCommentOn(newStmt, localTags, TAGS_CONFLICTING_WITH_TYPE);
@@ -3780,7 +3840,9 @@ function jsdocTransformer(host, tsOptions, typeChecker, diagnostics) {
         if (propertyBase !== null) {
           decl = ts11.factory.createExpressionStatement(ts11.factory.createPropertyAccessExpression(ts11.factory.createIdentifier(propertyBase), ts11.factory.createIdentifier(typeName)));
         } else {
-          decl = ts11.factory.createVariableStatement(undefined, ts11.factory.createVariableDeclarationList([ts11.factory.createVariableDeclaration(ts11.factory.createIdentifier(typeName))]));
+          decl = ts11.factory.createVariableStatement(undefined, ts11.factory.createVariableDeclarationList([
+            ts11.factory.createVariableDeclaration(ts11.factory.createIdentifier(typeName))
+          ]));
         }
         decl = ts11.setSourceMapRange(decl, typeAlias);
         addCommentOn(decl, tags, TAGS_CONFLICTING_WITH_TYPE);
@@ -3788,7 +3850,12 @@ function jsdocTransformer(host, tsOptions, typeChecker, diagnostics) {
       }
       function createClosureCast(context2, expression, type) {
         const inner = ts11.factory.createParenthesizedExpression(expression);
-        const comment = addCommentOn(inner, [{ tagName: "type", type: moduleTypeTranslator.typeToClosure(context2, type) }]);
+        const comment = addCommentOn(inner, [
+          {
+            tagName: "type",
+            type: moduleTypeTranslator.typeToClosure(context2, type)
+          }
+        ]);
         comment.hasTrailingNewLine = false;
         return ts11.setSourceMapRange(ts11.factory.createParenthesizedExpression(inner), context2);
       }
@@ -3861,8 +3928,12 @@ function jsdocTransformer(host, tsOptions, typeChecker, diagnostics) {
         if ((sym.flags & ts11.SymbolFlags.Value) === 0) {
           return false;
         }
-        if (!tsOptions.preserveConstEnums && sym.flags & ts11.SymbolFlags.ConstEnum) {
-          return false;
+        if (sym.flags & ts11.SymbolFlags.ConstEnum) {
+          if (tsOptions.preserveConstEnums) {
+            return !sym.valueDeclaration.getSourceFile().isDeclarationFile;
+          } else {
+            return false;
+          }
         }
         return true;
       }
@@ -3894,11 +3965,14 @@ function jsdocTransformer(host, tsOptions, typeChecker, diagnostics) {
             }
           }
           const isTypeOnlyExport = false;
-          exportDecl = ts11.factory.updateExportDeclaration(exportDecl, exportDecl.modifiers, isTypeOnlyExport, ts11.factory.createNamedExports(exportSpecifiers), exportDecl.moduleSpecifier, exportDecl.assertClause);
+          exportDecl = ts11.factory.updateExportDeclaration(exportDecl, exportDecl.modifiers, isTypeOnlyExport, ts11.factory.createNamedExports(exportSpecifiers), exportDecl.moduleSpecifier, exportDecl.attributes);
         } else if (ts11.isNamedExports(exportDecl.exportClause)) {
           for (const exp of exportDecl.exportClause.elements) {
             const exportedName = getIdentifierText(exp.name);
-            typesToExport.push([exportedName, moduleTypeTranslator.mustGetSymbolAtLocation(exp.name)]);
+            typesToExport.push([
+              exportedName,
+              moduleTypeTranslator.mustGetSymbolAtLocation(exp.name)
+            ]);
           }
         }
         if (host.untyped)
@@ -3910,7 +3984,8 @@ function jsdocTransformer(host, tsOptions, typeChecker, diagnostics) {
             aliasedSymbol = typeChecker.getAliasedSymbol(sym);
           }
           const isTypeAlias = (aliasedSymbol.flags & ts11.SymbolFlags.Value) === 0 && (aliasedSymbol.flags & (ts11.SymbolFlags.TypeAlias | ts11.SymbolFlags.Interface)) !== 0;
-          if (!isTypeAlias)
+          const isConstEnum = (aliasedSymbol.flags & ts11.SymbolFlags.ConstEnum) !== 0;
+          if (!isTypeAlias && !isConstEnum)
             continue;
           const typeName = moduleTypeTranslator.symbolsToAliasedNames.get(aliasedSymbol) || aliasedSymbol.name;
           const stmt = ts11.factory.createExpressionStatement(ts11.factory.createPropertyAccessExpression(ts11.factory.createIdentifier("exports"), exportedName));
@@ -3958,14 +4033,13 @@ function jsdocTransformer(host, tsOptions, typeChecker, diagnostics) {
             const mangledName = moduleNameAsIdentifier(host, sourceFile.fileName);
             const declName = getIdentifierText(decl);
             const stmt = ts11.factory.createExpressionStatement(ts11.factory.createPropertyAccessExpression(ts11.factory.createIdentifier("exports"), declName));
-            addCommentOn(stmt, [{ tagName: "typedef", type: `!${mangledName}.${declName}` }]);
+            addCommentOn(stmt, [
+              { tagName: "typedef", type: `!${mangledName}.${declName}` }
+            ]);
             result.push(stmt);
           }
         }
         return result;
-      }
-      function visitEnumDeclaration(node) {
-        moduleTypeTranslator.getJSDoc(node, true);
       }
       let aliasCounter = 1;
       function renameArrayBindings(node, aliases) {
@@ -3991,14 +4065,16 @@ function jsdocTransformer(host, tsOptions, typeChecker, diagnostics) {
         }
         return ts11.factory.updateArrayBindingPattern(node, updatedElements);
       }
-      function createArrayBindingAliases(flags, aliases) {
+      function createArrayBindingAliases(flags, aliases, needsExport = false) {
         const aliasDecls = [];
         for (const [oldName, aliasName] of aliases) {
           const typeStr = moduleTypeTranslator.typeToClosure(ts11.getOriginalNode(oldName));
           const closureCastExpr = ts11.factory.createParenthesizedExpression(aliasName);
           addCommentOn(closureCastExpr, [{ tagName: "type", type: typeStr }], undefined, false);
-          const varDeclList = ts11.factory.createVariableDeclarationList([ts11.factory.createVariableDeclaration(oldName, undefined, undefined, closureCastExpr)], flags);
-          const varStmt = ts11.factory.createVariableStatement(undefined, varDeclList);
+          const varDeclList = ts11.factory.createVariableDeclarationList([
+            ts11.factory.createVariableDeclaration(oldName, undefined, undefined, closureCastExpr)
+          ], flags);
+          const varStmt = ts11.factory.createVariableStatement(needsExport ? [ts11.factory.createModifier(ts11.SyntaxKind.ExportKeyword)] : undefined, varDeclList);
           aliasDecls.push(varStmt);
         }
         return aliasDecls;
@@ -4020,7 +4096,9 @@ function jsdocTransformer(host, tsOptions, typeChecker, diagnostics) {
         if (!updatedPattern || aliases.length === 0) {
           return ts11.visitEachChild(node, visitor, context);
         }
-        const updatedInitializer = ts11.factory.updateVariableDeclarationList(varDecls, [ts11.factory.updateVariableDeclaration(varDecl, updatedPattern, varDecl.exclamationToken, varDecl.type, varDecl.initializer)]);
+        const updatedInitializer = ts11.factory.updateVariableDeclarationList(varDecls, [
+          ts11.factory.updateVariableDeclaration(varDecl, updatedPattern, varDecl.exclamationToken, varDecl.type, varDecl.initializer)
+        ]);
         const aliasDecls = createArrayBindingAliases(varDecls.flags, aliases);
         let updatedStatement;
         if (ts11.isBlock(node.statement)) {
@@ -4072,6 +4150,7 @@ function jsdocTransformer(host, tsOptions, typeChecker, diagnostics) {
           case ts11.SyntaxKind.PropertyDeclaration:
           case ts11.SyntaxKind.ModuleDeclaration:
           case ts11.SyntaxKind.EnumMember:
+          case ts11.SyntaxKind.EnumDeclaration:
             escapeIllegalJSDoc(node);
             break;
           case ts11.SyntaxKind.Parameter:
@@ -4090,9 +4169,6 @@ function jsdocTransformer(host, tsOptions, typeChecker, diagnostics) {
             return visitNonNullExpression(node);
           case ts11.SyntaxKind.PropertyAccessExpression:
             return visitPropertyAccessExpression(node);
-          case ts11.SyntaxKind.EnumDeclaration:
-            visitEnumDeclaration(node);
-            break;
           case ts11.SyntaxKind.ForOfStatement:
             return visitForOfStatement(node);
           case ts11.SyntaxKind.DeleteExpression:
@@ -4203,7 +4279,7 @@ function generateExterns(typeChecker, sourceFile, host) {
       }
     }
   }
-  return { output, diagnostics, moduleNamespace };
+  return { diagnostics, moduleNamespace, output };
   function emit(str) {
     output += str;
   }
@@ -4214,7 +4290,7 @@ function generateExterns(typeChecker, sourceFile, host) {
     if (!sym.declarations || sym.declarations.length < 2)
       return true;
     const earlierDecls = sym.declarations.slice(0, sym.declarations.indexOf(decl));
-    return earlierDecls.length === 0 || earlierDecls.every(ts12.isVariableDeclaration);
+    return earlierDecls.length === 0 || earlierDecls.every((d) => ts12.isVariableDeclaration(d) && d.getSourceFile() !== decl.getSourceFile());
   }
   function writeVariableStatement(name, namespace, value) {
     const qualifiedName = namespace.concat([name]).join(".");
@@ -4238,7 +4314,7 @@ function generateExterns(typeChecker, sourceFile, host) {
     }
   }
   function emitFunctionType(decls, extraTags = []) {
-    const { tags, parameterNames } = mtt.getFunctionTypeJSDoc(decls, extraTags);
+    const { parameterNames, tags } = mtt.getFunctionTypeJSDoc(decls, extraTags);
     emit("\n");
     emit(toString(tags));
     return parameterNames;
@@ -4365,7 +4441,9 @@ function generateExterns(typeChecker, sourceFile, host) {
               type = "?|undefined";
             }
             const isReadonly = hasModifierFlag(prop, ts12.ModifierFlags.Readonly);
-            emit(toString([{ tagName: isReadonly ? "const" : "type", type }]));
+            emit(toString([
+              { tagName: isReadonly ? "const" : "type", type }
+            ]));
             if (hasModifierFlag(prop, ts12.ModifierFlags.Static)) {
               emit(`\n${typeName}.${prop.name.getText()};\n`);
             } else {
@@ -4632,7 +4710,13 @@ function generateExterns(typeChecker, sourceFile, host) {
 
 // src/tsickle/fileoverview_comment_transformer.ts
 var ts13 = __toESM(require("typescript"));
-var FILEOVERVIEW_COMMENT_MARKERS = new Set(["fileoverview", "externs", "modName", "mods", "pintomodule"]);
+var FILEOVERVIEW_COMMENT_MARKERS = new Set([
+  "fileoverview",
+  "externs",
+  "modName",
+  "mods",
+  "pintomodule"
+]);
 function augmentFileoverviewComments(options, source, tags, generateExtraSuppressions) {
   let fileOverview = tags.find((t) => t.tagName === "fileoverview");
   if (!fileOverview) {
@@ -4649,12 +4733,17 @@ function augmentFileoverviewComments(options, source, tags, generateExtraSuppres
       "extraRequire",
       "missingRequire",
       "uselessCode",
+      "suspiciousCode",
       "missingReturn",
       "unusedPrivateMembers",
       "missingOverride",
       "const"
     ];
-    const suppressTags = suppressions.map((s) => ({ tagName: "suppress", text: "added by tsickle", type: s }));
+    const suppressTags = suppressions.map((s) => ({
+      tagName: "suppress",
+      text: "added by tsickle",
+      type: s
+    }));
     const licenseTagIndex = tags.findIndex((t) => t.tagName === "license");
     if (licenseTagIndex !== -1) {
       tags.splice(licenseTagIndex, 0, ...suppressTags);
@@ -4690,52 +4779,40 @@ function transformFileoverviewCommentFactory(options, diagnostics, generateExtra
             continue;
           }
           const synthesizedComments = synthesizeLeadingComments(firstStatement);
-          const notEmitted = ts13.factory.createNotEmittedStatement(sourceFile);
           fileComments = synthesizedComments.splice(0, i + 1);
-          ts13.setSyntheticLeadingComments(notEmitted, fileComments);
-          sourceFile = updateSourceFileNode(sourceFile, ts13.factory.createNodeArray([
-            notEmitted,
-            firstStatement,
-            ...sourceFile.statements.slice(1)
-          ]));
           break;
         }
-        for (let i = 0;i < sourceFile.statements.length; i++) {
-          const stmt = sourceFile.statements[i];
-          if (i === 0 && stmt.kind === ts13.SyntaxKind.NotEmittedStatement) {
-            continue;
-          }
-          const comments = synthesizeLeadingComments(stmt);
-          checkNoFileoverviewComments(stmt, comments, `file comments must be at the top of the file, ` + `separated from the file body by an empty line.`);
+      }
+      const notEmitted = ts13.factory.createNotEmittedStatement(sourceFile);
+      ts13.setSyntheticLeadingComments(notEmitted, fileComments);
+      sourceFile = updateSourceFileNode(sourceFile, ts13.factory.createNodeArray([notEmitted, ...sourceFile.statements]));
+      for (let i = 0;i < sourceFile.statements.length; i++) {
+        const stmt = sourceFile.statements[i];
+        if (i === 0 && stmt.kind === ts13.SyntaxKind.NotEmittedStatement) {
+          continue;
         }
+        const comments = synthesizeLeadingComments(stmt);
+        checkNoFileoverviewComments(stmt, comments, `file comments must be at the top of the file, ` + `separated from the file body by an empty line.`);
       }
       let fileoverviewIdx = -1;
       let tags = [];
       for (let i = fileComments.length - 1;i >= 0; i--) {
-        const parse2 = parseContents(fileComments[i].text);
-        if (parse2 !== null && parse2.tags.some((t) => FILEOVERVIEW_COMMENT_MARKERS.has(t.tagName))) {
+        const parsed = parse(fileComments[i]);
+        if (parsed !== null && parsed.tags.some((t) => FILEOVERVIEW_COMMENT_MARKERS.has(t.tagName))) {
           fileoverviewIdx = i;
-          tags = parse2.tags;
+          tags = parsed.tags;
           break;
         }
       }
+      const mutableJsDoc = new MutableJSDoc(notEmitted, fileComments, fileoverviewIdx, tags);
       if (fileoverviewIdx !== -1) {
         checkNoFileoverviewComments(firstStatement || sourceFile, fileComments.slice(0, fileoverviewIdx), `duplicate file level comment`);
       }
-      augmentFileoverviewComments(options, sourceFile, tags, generateExtraSuppressions);
-      const commentText = toStringWithoutStartEnd(tags);
-      if (fileoverviewIdx < 0) {
-        return addNewFileoverviewComment(sourceFile, commentText);
-      }
-      fileComments[fileoverviewIdx].text = commentText;
+      augmentFileoverviewComments(options, sourceFile, mutableJsDoc.tags, generateExtraSuppressions);
+      mutableJsDoc.updateComment();
       return sourceFile;
     };
   };
-}
-function addNewFileoverviewComment(sf, commentText) {
-  let syntheticFirstStatement = createNotEmittedStatement(sf);
-  syntheticFirstStatement = ts13.addSyntheticTrailingComment(syntheticFirstStatement, ts13.SyntaxKind.MultiLineCommentTrivia, commentText, true);
-  return updateSourceFileNode(sf, ts13.factory.createNodeArray([syntheticFirstStatement, ...sf.statements]));
 }
 
 // src/tsickle/modules_manifest.ts
@@ -4753,17 +4830,17 @@ class ModulesManifest {
   addReferencedModule(fileName, resolvedModule) {
     this.referencedModules[fileName].push(resolvedModule);
   }
-  get modules() {
-    return Object.keys(this.moduleToFileName);
+  get fileNames() {
+    return Object.keys(this.referencedModules);
   }
   getFileNameFromModule(module2) {
     return this.moduleToFileName[module2];
   }
-  get fileNames() {
-    return Object.keys(this.referencedModules);
-  }
   getReferencedModules(fileName) {
     return this.referencedModules[fileName];
+  }
+  get modules() {
+    return Object.keys(this.moduleToFileName);
   }
 }
 
@@ -4790,32 +4867,58 @@ function namespaceTransformer(host, tsOptions, typeChecker, diagnostics) {
           return [ns];
         }
         const nsName = getIdentifierText(ns.name);
+        const mergingWithEnum = ts14.isEnumDeclaration(mergedDecl);
         const transformedNsStmts = [];
         for (const stmt of ns.body.statements) {
           if (ts14.isEmptyStatement(stmt))
             continue;
           if (ts14.isClassDeclaration(stmt)) {
+            if (mergingWithEnum) {
+              errorNotAllowed(stmt, "class");
+              continue;
+            }
             transformInnerDeclaration(stmt, (classDecl, notExported, hoistedIdent) => {
               return ts14.factory.updateClassDeclaration(classDecl, notExported, hoistedIdent, classDecl.typeParameters, classDecl.heritageClauses, classDecl.members);
             });
           } else if (ts14.isEnumDeclaration(stmt)) {
+            if (mergingWithEnum) {
+              errorNotAllowed(stmt, "enum");
+              continue;
+            }
             transformInnerDeclaration(stmt, (enumDecl, notExported, hoistedIdent) => {
               return ts14.factory.updateEnumDeclaration(enumDecl, notExported, hoistedIdent, enumDecl.members);
             });
           } else if (ts14.isInterfaceDeclaration(stmt)) {
+            if (mergingWithEnum) {
+              errorNotAllowed(stmt, "interface");
+              continue;
+            }
             transformInnerDeclaration(stmt, (interfDecl, notExported, hoistedIdent) => {
               return ts14.factory.updateInterfaceDeclaration(interfDecl, notExported, hoistedIdent, interfDecl.typeParameters, interfDecl.heritageClauses, interfDecl.members);
             });
           } else if (ts14.isTypeAliasDeclaration(stmt)) {
+            if (mergingWithEnum) {
+              errorNotAllowed(stmt, "type alias");
+              continue;
+            }
             transformTypeAliasDeclaration(stmt);
           } else if (ts14.isVariableStatement(stmt)) {
             if ((ts14.getCombinedNodeFlags(stmt.declarationList) & ts14.NodeFlags.Const) === 0) {
               error(stmt, "non-const values are not supported. (go/ts-merged-namespaces)");
+              continue;
             }
             if (!ts14.isInterfaceDeclaration(mergedDecl)) {
               error(stmt, "const declaration only allowed when merging with an interface (go/ts-merged-namespaces)");
+              continue;
             }
             transformConstDeclaration(stmt);
+          } else if (ts14.isFunctionDeclaration(stmt)) {
+            if (!ts14.isEnumDeclaration(mergedDecl)) {
+              error(stmt, "function declaration only allowed when merging with an enum (go/ts-merged-namespaces)");
+            }
+            transformInnerDeclaration(stmt, (funcDecl, notExported, hoistedIdent) => {
+              return ts14.factory.updateFunctionDeclaration(funcDecl, notExported, funcDecl.asteriskToken, hoistedIdent, funcDecl.typeParameters, funcDecl.parameters, funcDecl.type, funcDecl.body);
+            });
           } else {
             error(stmt, `unsupported statement in declaration merging namespace '${nsName}' (go/ts-merged-namespaces)`);
           }
@@ -4828,6 +4931,9 @@ function namespaceTransformer(host, tsOptions, typeChecker, diagnostics) {
         haveTransformedNs = true;
         transformedNsStmts.push(ts14.factory.createNotEmittedStatement(ns));
         return transformedNsStmts;
+        function errorNotAllowed(stmt, declKind) {
+          error(stmt, `${declKind} cannot be merged with enum declaration. (go/ts-merged-namespaces)`);
+        }
         function transformConstDeclaration(varDecl) {
           for (let decl of varDecl.declarationList.declarations) {
             if (!decl.name || !ts14.isIdentifier(decl.name)) {
@@ -4881,7 +4987,10 @@ function namespaceTransformer(host, tsOptions, typeChecker, diagnostics) {
           const prop = ts14.factory.createExpressionStatement(ts14.factory.createAssignment(ts14.factory.createPropertyAccessExpression(mergedDecl.name, propName), initializer));
           ts14.setTextRange(prop, original);
           ts14.setOriginalNode(prop, original);
-          return ts14.addSyntheticLeadingComment(prop, ts14.SyntaxKind.MultiLineCommentTrivia, "* @const ", true);
+          const jsDoc = getMutableJSDoc(prop, diagnostics, sourceFile);
+          jsDoc.tags.push({ tagName: "const" });
+          jsDoc.updateComment();
+          return prop;
         }
         function isNamespaceRef(ident) {
           const sym = typeChecker.getSymbolAtLocation(ident);
@@ -4959,9 +5068,9 @@ function namespaceTransformer(host, tsOptions, typeChecker, diagnostics) {
           error(ns.name, "transformation of plain namespace not supported. (go/ts-merged-namespaces)");
           return;
         }
-        if (!ts14.isInterfaceDeclaration(mergedDecl) && !ts14.isClassDeclaration(mergedDecl)) {
+        if (!ts14.isInterfaceDeclaration(mergedDecl) && !ts14.isClassDeclaration(mergedDecl) && !ts14.isEnumDeclaration(mergedDecl)) {
           transformedStmts.push(ns);
-          error(ns.name, "merged declaration must be local class or interface. (go/ts-merged-namespaces)");
+          error(ns.name, "merged declaration must be local class, enum, or interface. (go/ts-merged-namespaces)");
           return;
         }
         transformedStmts.push(...transformNamespace(ns, mergedDecl));
@@ -4979,34 +5088,60 @@ var ts15 = __toESM(require("typescript"));
 
 // src/tsickle/summary.ts
 class FileSummary {
+  dynamicRequireSet = new Map;
+  enhancedSet = new Map;
+  maybeRequireSet = new Map;
+  modSet = new Map;
   provideSet = new Map;
   strongRequireSet = new Map;
   weakRequireSet = new Map;
-  dynamicRequireSet = new Map;
-  modSet = new Map;
-  enhancedSet = new Map;
-  toggles = [];
-  modName;
   autochunk = false;
   enhanceable = false;
+  legacyNamespace = false;
+  modName;
   moduleType = 0 /* UNKNOWN */;
+  toggles = [];
   stringify(symbol) {
     return JSON.stringify(symbol);
+  }
+  addDynamicRequire(dynamicRequire) {
+    this.dynamicRequireSet.set(this.stringify(dynamicRequire), dynamicRequire);
+  }
+  addEnhanced(enhanced) {
+    this.enhancedSet.set(this.stringify(enhanced), enhanced);
+  }
+  addMaybeRequire(maybeRequire) {
+    this.maybeRequireSet.set(this.stringify(maybeRequire), maybeRequire);
+  }
+  addMods(mods) {
+    this.modSet.set(this.stringify(mods), mods);
   }
   addProvide(provide) {
     this.provideSet.set(this.stringify(provide), provide);
   }
-  get provides() {
-    return [...this.provideSet.values()];
-  }
   addStrongRequire(strongRequire) {
     this.strongRequireSet.set(this.stringify(strongRequire), strongRequire);
   }
-  get strongRequires() {
-    return [...this.strongRequireSet.values()];
-  }
   addWeakRequire(weakRequire) {
     this.weakRequireSet.set(this.stringify(weakRequire), weakRequire);
+  }
+  get dynamicRequires() {
+    return [...this.dynamicRequireSet.values()];
+  }
+  get enhanced() {
+    return [...this.enhancedSet.values()];
+  }
+  get maybeRequires() {
+    return [...this.maybeRequireSet.values()];
+  }
+  get mods() {
+    return [...this.modSet.values()];
+  }
+  get provides() {
+    return [...this.provideSet.values()];
+  }
+  get strongRequires() {
+    return [...this.strongRequireSet.values()];
   }
   get weakRequires() {
     const weakRequires = [];
@@ -5016,24 +5151,6 @@ class FileSummary {
       weakRequires.push(v);
     }
     return weakRequires;
-  }
-  addDynamicRequire(dynamicRequire) {
-    this.dynamicRequireSet.set(this.stringify(dynamicRequire), dynamicRequire);
-  }
-  get dynamicRequires() {
-    return [...this.dynamicRequireSet.values()];
-  }
-  addMods(mods) {
-    this.modSet.set(this.stringify(mods), mods);
-  }
-  get mods() {
-    return [...this.modSet.values()];
-  }
-  addEnhanced(enhanced) {
-    this.enhancedSet.set(this.stringify(enhanced), enhanced);
-  }
-  get enhanced() {
-    return [...this.enhancedSet.values()];
   }
 }
 
@@ -5084,8 +5201,8 @@ class Generator {
   manifest;
   diagnostics;
   mainExports;
-  tsmesBreakdown;
   outputIds;
+  tsmesBreakdown;
   constructor(src, srcIds, typeChecker, host, manifest, diagnostics) {
     this.src = src;
     this.srcIds = srcIds;
@@ -5101,8 +5218,78 @@ class Generator {
       this.outputIds = new FileIdGroup(outputFilename, this.tsmesBreakdown.googModuleId.text);
     }
   }
-  foundMigrationExportsShim() {
-    return !!this.tsmesBreakdown;
+  checkIsModuleExport(node, symbol) {
+    if (!symbol) {
+      this.report(node, `could not resolve symbol of exported property`);
+    } else if (this.mainExports.indexOf(symbol) === -1) {
+      this.report(node, `export must be an exported symbol of the module`);
+    } else {
+      return true;
+    }
+    return false;
+  }
+  checkNonTopLevelTsmesCalls(topLevelStatement) {
+    const inner = (node) => {
+      if (isAnyTsmesCall(node) || isTsmesDeclareLegacyNamespaceCall(node)) {
+        const name = getGoogFunctionName(node);
+        this.report(node, `goog.${name} is only allowed in top level statements`);
+      }
+      ts15.forEachChild(node, inner);
+    };
+    ts15.forEachChild(topLevelStatement, inner);
+  }
+  extractGoogExports(exportsExpr) {
+    let googExports;
+    const diagnosticCount = this.diagnostics.length;
+    if (ts15.isObjectLiteralExpression(exportsExpr)) {
+      googExports = new Map;
+      for (const property of exportsExpr.properties) {
+        if (ts15.isShorthandPropertyAssignment(property)) {
+          const symbol = this.typeChecker.getShorthandAssignmentValueSymbol(property);
+          this.checkIsModuleExport(property.name, symbol);
+          googExports.set(property.name.text, property.name.text);
+        } else if (ts15.isPropertyAssignment(property)) {
+          const name = property.name;
+          if (!ts15.isIdentifier(name)) {
+            this.report(name, "export names must be simple keys");
+            continue;
+          }
+          const initializer = property.initializer;
+          let identifier = null;
+          if (ts15.isAsExpression(initializer)) {
+            identifier = this.maybeExtractTypeName(initializer);
+          } else if (ts15.isIdentifier(initializer)) {
+            identifier = initializer;
+          } else {
+            this.report(initializer, "export values must be plain identifiers");
+            continue;
+          }
+          if (identifier == null) {
+            continue;
+          }
+          const symbol = this.typeChecker.getSymbolAtLocation(identifier);
+          this.checkIsModuleExport(identifier, symbol);
+          googExports.set(name.text, identifier.text);
+        } else {
+          this.report(property, `exports object must only contain (shorthand) properties`);
+        }
+      }
+    } else if (ts15.isIdentifier(exportsExpr)) {
+      const symbol = this.typeChecker.getSymbolAtLocation(exportsExpr);
+      this.checkIsModuleExport(exportsExpr, symbol);
+      googExports = exportsExpr.text;
+    } else if (ts15.isAsExpression(exportsExpr)) {
+      const identifier = this.maybeExtractTypeName(exportsExpr);
+      if (!identifier) {
+        return;
+      }
+      const symbol = this.typeChecker.getSymbolAtLocation(identifier);
+      this.checkIsModuleExport(identifier, symbol);
+      googExports = identifier.text;
+    } else {
+      this.report(exportsExpr, `exports object must be either an object literal ({A, B}) or the ` + `identifier of a module export (A)`);
+    }
+    return diagnosticCount === this.diagnostics.length ? googExports : undefined;
   }
   extractTsmesStatement() {
     const startDiagnosticsCount = this.diagnostics.length;
@@ -5183,63 +5370,10 @@ class Generator {
     }
     return {
       callStatement: tsmesCallStatement,
-      googModuleId: moduleId,
+      declareLegacyNamespaceStatement: tsmesDlnCallStatement,
       googExports,
-      declareLegacyNamespaceStatement: tsmesDlnCallStatement
+      googModuleId: moduleId
     };
-  }
-  extractGoogExports(exportsExpr) {
-    let googExports;
-    const diagnosticCount = this.diagnostics.length;
-    if (ts15.isObjectLiteralExpression(exportsExpr)) {
-      googExports = new Map;
-      for (const property of exportsExpr.properties) {
-        if (ts15.isShorthandPropertyAssignment(property)) {
-          const symbol = this.typeChecker.getShorthandAssignmentValueSymbol(property);
-          this.checkIsModuleExport(property.name, symbol);
-          googExports.set(property.name.text, property.name.text);
-        } else if (ts15.isPropertyAssignment(property)) {
-          const name = property.name;
-          if (!ts15.isIdentifier(name)) {
-            this.report(name, "export names must be simple keys");
-            continue;
-          }
-          const initializer = property.initializer;
-          let identifier = null;
-          if (ts15.isAsExpression(initializer)) {
-            identifier = this.maybeExtractTypeName(initializer);
-          } else if (ts15.isIdentifier(initializer)) {
-            identifier = initializer;
-          } else {
-            this.report(initializer, "export values must be plain identifiers");
-            continue;
-          }
-          if (identifier == null) {
-            continue;
-          }
-          const symbol = this.typeChecker.getSymbolAtLocation(identifier);
-          this.checkIsModuleExport(identifier, symbol);
-          googExports.set(name.text, identifier.text);
-        } else {
-          this.report(property, `exports object must only contain (shorthand) properties`);
-        }
-      }
-    } else if (ts15.isIdentifier(exportsExpr)) {
-      const symbol = this.typeChecker.getSymbolAtLocation(exportsExpr);
-      this.checkIsModuleExport(exportsExpr, symbol);
-      googExports = exportsExpr.text;
-    } else if (ts15.isAsExpression(exportsExpr)) {
-      const identifier = this.maybeExtractTypeName(exportsExpr);
-      if (!identifier) {
-        return;
-      }
-      const symbol = this.typeChecker.getSymbolAtLocation(identifier);
-      this.checkIsModuleExport(identifier, symbol);
-      googExports = identifier.text;
-    } else {
-      this.report(exportsExpr, `exports object must be either an object literal ({A, B}) or the ` + `identifier of a module export (A)`);
-    }
-    return diagnosticCount === this.diagnostics.length ? googExports : undefined;
   }
   maybeExtractTypeName(cast) {
     if (!ts15.isObjectLiteralExpression(cast.expression) || cast.expression.properties.length !== 0) {
@@ -5258,15 +5392,30 @@ class Generator {
     }
     return typeName;
   }
-  checkNonTopLevelTsmesCalls(topLevelStatement) {
-    const inner = (node) => {
-      if (isAnyTsmesCall(node) || isTsmesDeclareLegacyNamespaceCall(node)) {
-        const name = getGoogFunctionName(node);
-        this.report(node, `goog.${name} is only allowed in top level statements`);
-      }
-      ts15.forEachChild(node, inner);
-    };
-    ts15.forEachChild(topLevelStatement, inner);
+  report(node, messageText) {
+    reportDiagnostic(this.diagnostics, node, messageText, undefined, ts15.DiagnosticCategory.Error);
+  }
+  foundMigrationExportsShim() {
+    return !!this.tsmesBreakdown;
+  }
+  generateExportShimDeclarations() {
+    if (!this.outputIds || !this.tsmesBreakdown) {
+      throw new Error("tsmes call must be extracted first");
+    }
+    const generatedFromComment = "// Generated from " + this.srcIds.google3Path;
+    const dependencyFileImports = lines2(`declare module '\u0CA0_\u0CA0.clutz._dependencies' {`, `  import '${this.srcIds.esModuleImportPath()}';`, `}`);
+    let clutzNamespaceDeclaration;
+    let googColonModuleDeclaration;
+    if (this.tsmesBreakdown.googExports instanceof Map) {
+      const clutzNamespace = this.srcIds.clutzNamespace();
+      const clutzNamespaceReexports = Array.from(this.tsmesBreakdown.googExports).map(([k, v]) => `  export import ${k} = ${clutzNamespace}.${v};`);
+      clutzNamespaceDeclaration = lines2(generatedFromComment, `declare namespace ${this.outputIds.clutzNamespace()} {`, ...clutzNamespaceReexports, `}`);
+      googColonModuleDeclaration = lines2(generatedFromComment, `declare module '${this.outputIds.clutzModuleId()}' {`, `  import x = ${this.outputIds.clutzNamespace()};`, `  export = x;`, `}`);
+    } else {
+      clutzNamespaceDeclaration = lines2(generatedFromComment, `declare namespace \u0CA0_\u0CA0.clutz {`, `  export import ${this.outputIds.googModuleRewrittenId()} =`, `      ${this.srcIds.clutzNamespace()}.${this.tsmesBreakdown.googExports};`, `}`);
+      googColonModuleDeclaration = lines2(generatedFromComment, `declare module '${this.outputIds.clutzModuleId()}' {`, `  import x = ${this.outputIds.clutzNamespace()};`, `  export default x;`, `}`);
+    }
+    return lines2("/**", " * @fileoverview generator:ts_migration_exports_shim.ts", " */", dependencyFileImports, clutzNamespaceDeclaration, googColonModuleDeclaration, "");
   }
   generateExportShimJavaScript() {
     if (!this.outputIds || !this.tsmesBreakdown) {
@@ -5290,31 +5439,21 @@ class Generator {
     const pintoModuleAnnotation = isAutoChunk ? "@pintomodule found in original_file" : "pintomodule absent in original_file";
     const content = lines2("/**", " * @fileoverview generator:ts_migration_exports_shim.ts", " * original_file:" + this.srcIds.google3Path, ` * ${pintoModuleAnnotation}`, " */", `goog.module('${this.outputIds.googModuleId}');`, maybeDeclareLegacyNameCall, mainModuleRequire, exportsAssignment, "");
     const fileSummary = new FileSummary;
-    fileSummary.addProvide({ type: 1 /* CLOSURE */, name: this.outputIds.googModuleId });
-    fileSummary.addStrongRequire({ type: 1 /* CLOSURE */, name: "goog" });
-    fileSummary.addStrongRequire({ type: 1 /* CLOSURE */, name: this.srcIds.googModuleId });
+    fileSummary.addProvide({
+      name: this.outputIds.googModuleId,
+      type: 1 /* CLOSURE */
+    });
+    fileSummary.addStrongRequire({ name: "goog", type: 1 /* CLOSURE */ });
+    fileSummary.addStrongRequire({
+      name: this.srcIds.googModuleId,
+      type: 1 /* CLOSURE */
+    });
+    if (maybeDeclareLegacyNameCall) {
+      fileSummary.legacyNamespace = true;
+    }
     fileSummary.autochunk = isAutoChunk;
     fileSummary.moduleType = 2 /* GOOG_MODULE */;
     return [content, fileSummary];
-  }
-  generateExportShimDeclarations() {
-    if (!this.outputIds || !this.tsmesBreakdown) {
-      throw new Error("tsmes call must be extracted first");
-    }
-    const generatedFromComment = "// Generated from " + this.srcIds.google3Path;
-    const dependencyFileImports = lines2(`declare module '\u0CA0_\u0CA0.clutz._dependencies' {`, `  import '${this.srcIds.esModuleImportPath()}';`, `}`);
-    let clutzNamespaceDeclaration;
-    let googColonModuleDeclaration;
-    if (this.tsmesBreakdown.googExports instanceof Map) {
-      const clutzNamespace = this.srcIds.clutzNamespace();
-      const clutzNamespaceReexports = Array.from(this.tsmesBreakdown.googExports).map(([k, v]) => `  export import ${k} = ${clutzNamespace}.${v};`);
-      clutzNamespaceDeclaration = lines2(generatedFromComment, `declare namespace ${this.outputIds.clutzNamespace()} {`, ...clutzNamespaceReexports, `}`);
-      googColonModuleDeclaration = lines2(generatedFromComment, `declare module '${this.outputIds.clutzModuleId()}' {`, `  import x = ${this.outputIds.clutzNamespace()};`, `  export = x;`, `}`);
-    } else {
-      clutzNamespaceDeclaration = lines2(generatedFromComment, `declare namespace \u0CA0_\u0CA0.clutz {`, `  export import ${this.outputIds.googModuleRewrittenId()} =`, `      ${this.srcIds.clutzNamespace()}.${this.tsmesBreakdown.googExports};`, `}`);
-      googColonModuleDeclaration = lines2(generatedFromComment, `declare module '${this.outputIds.clutzModuleId()}' {`, `  import x = ${this.outputIds.clutzNamespace()};`, `  export default x;`, `}`);
-    }
-    return lines2("/**", " * @fileoverview generator:ts_migration_exports_shim.ts", " */", dependencyFileImports, clutzNamespaceDeclaration, googColonModuleDeclaration, "");
   }
   transformSourceFile() {
     if (!this.outputIds || !this.tsmesBreakdown) {
@@ -5335,19 +5474,6 @@ class Generator {
     }
     return ts15.factory.updateSourceFile(this.src, ts15.setTextRange(ts15.factory.createNodeArray(outputStatements), this.src.statements));
   }
-  checkIsModuleExport(node, symbol) {
-    if (!symbol) {
-      this.report(node, `could not resolve symbol of exported property`);
-    } else if (this.mainExports.indexOf(symbol) === -1) {
-      this.report(node, `export must be an exported symbol of the module`);
-    } else {
-      return true;
-    }
-    return false;
-  }
-  report(node, messageText) {
-    reportDiagnostic(this.diagnostics, node, messageText, undefined, ts15.DiagnosticCategory.Error);
-  }
 }
 function lines2(...lines3) {
   return lines3.filter((line) => line != null).join("\n");
@@ -5360,49 +5486,36 @@ class FileIdGroup {
     this.google3Path = google3Path;
     this.googModuleId = googModuleId;
   }
-  google3PathWithoutExtension() {
-    return stripSupportedExtensions(this.google3Path);
-  }
-  esModuleImportPath() {
-    return "google3/" + this.google3PathWithoutExtension();
-  }
-  googModuleRewrittenId() {
-    return "module$exports$" + this.googModuleId.replace(/\./g, "$");
+  clutzModuleId() {
+    return "goog:" + this.googModuleId;
   }
   clutzNamespace() {
     return "\u0CA0_\u0CA0.clutz." + this.googModuleRewrittenId();
   }
-  clutzModuleId() {
-    return "goog:" + this.googModuleId;
+  esModuleImportPath() {
+    return "google3/" + this.google3PathWithoutExtension();
+  }
+  google3PathWithoutExtension() {
+    return stripSupportedExtensions(this.google3Path);
+  }
+  googModuleRewrittenId() {
+    return "module$exports$" + this.googModuleId.replace(/\./g, "$");
   }
 }
 function containsAtPintoModule(file) {
   const leadingTrivia = file.getFullText().substring(0, file.getLeadingTriviaWidth());
   return /\s@pintomodule\s/.test(leadingTrivia);
 }
-
-// src/tsickle/tsickle_declaration_marker.ts
-var ts16 = __toESM(require("typescript"));
-function makeTsickleDeclarationMarkerTransformerFactory(options) {
-  return (context) => {
-    return {
-      transformBundle() {
-        throw new Error("did not expect to transform a bundle");
-      },
-      transformSourceFile(sf) {
-        if (!options.rootDir)
-          return sf;
-        let syntheticFirstStatement = createNotEmittedStatement(sf);
-        syntheticFirstStatement = ts16.addSyntheticTrailingComment(syntheticFirstStatement, ts16.SyntaxKind.SingleLineCommentTrivia, `!! generated by tsickle from ${relative(options.rootDir, sf.fileName)}`, true);
-        return updateSourceFileNode(sf, ts16.factory.createNodeArray([
-          syntheticFirstStatement,
-          ...sf.statements
-        ]));
-      }
-    };
+// src/tsickle/index.ts
+function writeWithTsickleHeader(writeFile, rootDir) {
+  return (fileName, content, writeByteOrderMark, onError, sourceFiles, data) => {
+    if (fileName.endsWith(".d.ts")) {
+      const sources = sourceFiles?.map((sf) => relative(rootDir, sf.fileName));
+      content = `//!! generated by tsickle from ${sources?.join(" ") || "???"}\n${content}`;
+    }
+    writeFile(fileName, content, writeByteOrderMark, onError, sourceFiles, data);
   };
 }
-// src/tsickle/index.ts
 function emit(program, host, writeFile, targetSourceFile, cancellationToken, emitOnlyDtsFiles, customTransformers = {}) {
   for (const sf of program.getSourceFiles()) {
     assertAbsolute(sf.fileName);
@@ -5412,19 +5525,21 @@ function emit(program, host, writeFile, targetSourceFile, cancellationToken, emi
   const tsOptions = program.getCompilerOptions();
   if (!tsOptions.rootDir) {
     return {
+      diagnostics: [
+        {
+          category: ts16.DiagnosticCategory.Error,
+          code: 0,
+          file: undefined,
+          length: undefined,
+          messageText: "TypeScript options must specify rootDir",
+          start: undefined
+        }
+      ],
       emitSkipped: false,
-      diagnostics: [{
-        category: ts17.DiagnosticCategory.Error,
-        code: 0,
-        file: undefined,
-        start: undefined,
-        length: undefined,
-        messageText: "TypeScript options must specify rootDir"
-      }],
-      modulesManifest: new ModulesManifest,
       externs: {},
-      tsMigrationExportsShimFiles: new Map,
-      fileSummaries: new Map
+      fileSummaries: new Map,
+      modulesManifest: new ModulesManifest,
+      tsMigrationExportsShimFiles: new Map
     };
   }
   const modulesManifest = new ModulesManifest;
@@ -5438,18 +5553,18 @@ function emit(program, host, writeFile, targetSourceFile, cancellationToken, emi
       tsickleSourceTransformers.push(namespaceTransformer(host, tsOptions, typeChecker, tsickleDiagnostics));
     }
     tsickleSourceTransformers.push(jsdocTransformer(host, tsOptions, typeChecker, tsickleDiagnostics));
-    tsickleSourceTransformers.push(enumTransformer(typeChecker));
+    tsickleSourceTransformers.push(enumTransformer(host, typeChecker));
   }
   if (host.transformDecorators) {
     tsickleSourceTransformers.push(decoratorDownlevelTransformer(typeChecker, tsickleDiagnostics));
   }
   const tsTransformers = {
+    after: [...customTransformers.afterTs || []],
+    afterDeclarations: [...customTransformers.afterDeclarations || []],
     before: [
       ...(tsickleSourceTransformers || []).map((tf) => skipTransformForSourceFileIfNeeded(host, tf)),
       ...customTransformers.beforeTs || []
-    ],
-    after: [...customTransformers.afterTs || []],
-    afterDeclarations: [...customTransformers.afterDeclarations || []]
+    ]
   };
   if (host.transformTypesToClosure) {
     tsTransformers.before.push(removeTypeAssertions());
@@ -5462,8 +5577,11 @@ function emit(program, host, writeFile, targetSourceFile, cancellationToken, emi
   if (host.addDtsClutzAliases) {
     tsTransformers.afterDeclarations.push(makeDeclarationTransformerFactory(typeChecker, host));
   }
-  tsTransformers.afterDeclarations.push(makeTsickleDeclarationMarkerTransformerFactory(tsOptions));
-  const { diagnostics: tsDiagnostics, emitSkipped, emittedFiles } = program.emit(targetSourceFile, writeFile, cancellationToken, emitOnlyDtsFiles, tsTransformers);
+  const {
+    diagnostics: tsDiagnostics,
+    emitSkipped,
+    emittedFiles
+  } = program.emit(targetSourceFile, writeWithTsickleHeader(writeFile, tsOptions.rootDir), cancellationToken, emitOnlyDtsFiles, tsTransformers);
   const externs = {};
   if (host.transformTypesToClosure) {
     const sourceFiles = targetSourceFile ? [targetSourceFile] : program.getSourceFiles();
@@ -5472,24 +5590,24 @@ function emit(program, host, writeFile, targetSourceFile, cancellationToken, emi
       if (isDts && host.shouldSkipTsickleProcessing(sourceFile.fileName)) {
         continue;
       }
-      const { output, diagnostics, moduleNamespace } = generateExterns(typeChecker, sourceFile, host);
+      const { diagnostics, moduleNamespace, output } = generateExterns(typeChecker, sourceFile, host);
       if (output) {
-        externs[sourceFile.fileName] = { output, moduleNamespace };
+        externs[sourceFile.fileName] = { moduleNamespace, output };
       }
       if (diagnostics) {
         tsickleDiagnostics.push(...diagnostics);
       }
     }
   }
-  tsickleDiagnostics = tsickleDiagnostics.filter((d) => d.category === ts17.DiagnosticCategory.Error || !host.shouldIgnoreWarningsForPath(d.file.fileName));
+  tsickleDiagnostics = tsickleDiagnostics.filter((d) => d.category === ts16.DiagnosticCategory.Error || !host.shouldIgnoreWarningsForPath(d.file.fileName));
   return {
-    modulesManifest,
+    diagnostics: [...tsDiagnostics, ...tsickleDiagnostics],
     emitSkipped,
     emittedFiles: emittedFiles || [],
-    diagnostics: [...tsDiagnostics, ...tsickleDiagnostics],
     externs,
-    tsMigrationExportsShimFiles,
-    fileSummaries
+    fileSummaries,
+    modulesManifest,
+    tsMigrationExportsShimFiles
   };
 }
 function skipTransformForSourceFileIfNeeded(host, delegateFactory) {
@@ -5584,6 +5702,7 @@ function ensureDirectoryExistence(filePath) {
 }
 
 // src/compiler/tsickleCompiler.ts
+var modulePrefix = "_gcc_";
 function toClosureJS(options, fileNames, settings, writeFile) {
   const absoluteFileNames = fileNames.map((fileName) => import_path2.default.resolve(fileName));
   const compilerHost = import_typescript.default.createCompilerHost(options);
@@ -5591,7 +5710,8 @@ function toClosureJS(options, fileNames, settings, writeFile) {
   const rootModulePath = options.rootDir || getCommonParentDirectory(absoluteFileNames);
   const filesToProcess = new Set(absoluteFileNames);
   const transformerHost = {
-    fileNameToModuleId: (fileName) => import_path2.default.relative(rootModulePath, fileName),
+    addDtsClutzAliases: true,
+    fileNameToModuleId: (fileName) => modulePrefix + import_path2.default.relative(rootModulePath, fileName),
     generateExtraSuppressions: true,
     googmodule: true,
     logWarning: (warning) => {
@@ -5602,7 +5722,7 @@ function toClosureJS(options, fileNames, settings, writeFile) {
       }
     },
     options,
-    pathToModuleName: (context, fileName) => pathToModuleName(rootModulePath, context, fileName),
+    pathToModuleName: (context, fileName) => fileName === "tslib" ? "tslib" : modulePrefix + pathToModuleName(rootModulePath, context, fileName),
     rootDirsRelative: (fileName) => fileName,
     shouldIgnoreWarningsForPath: () => !settings.fatalWarnings,
     shouldSkipTsickleProcessing: (fileName) => !filesToProcess.has(import_path2.default.resolve(fileName)),

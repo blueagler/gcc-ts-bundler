@@ -5,17 +5,7 @@ import ts from "typescript";
 import { Settings } from "../settings";
 import { getCommonParentDirectory } from "../utils/fileUtils";
 
-interface TsickleHost extends tsickle.TsickleHost {
-  fileNameToModuleId: (fileName: string) => string;
-  generateExtraSuppressions: boolean;
-  logWarning: (warning: ts.Diagnostic) => void;
-  options: ts.CompilerOptions;
-  pathToModuleName: (context: string, fileName: string) => string;
-  rootDirsRelative: (f: string) => string;
-  transformDynamicImport: "nodejs";
-  typeBlackListPaths: Set<string>;
-  untyped: boolean;
-}
+const modulePrefix = "_gcc_";
 
 export function toClosureJS(
   options: ts.CompilerOptions,
@@ -31,8 +21,10 @@ export function toClosureJS(
     options.rootDir || getCommonParentDirectory(absoluteFileNames);
   const filesToProcess = new Set(absoluteFileNames);
 
-  const transformerHost: TsickleHost = {
-    fileNameToModuleId: (fileName) => path.relative(rootModulePath, fileName),
+  const transformerHost: tsickle.TsickleHost = {
+    addDtsClutzAliases: true,
+    fileNameToModuleId: (fileName) =>
+      modulePrefix + path.relative(rootModulePath, fileName),
     generateExtraSuppressions: true,
     googmodule: true,
     logWarning: (warning) => {
@@ -48,7 +40,10 @@ export function toClosureJS(
     },
     options,
     pathToModuleName: (context, fileName) =>
-      tsickle.pathToModuleName(rootModulePath, context, fileName),
+      fileName === "tslib"
+        ? "tslib"
+        : modulePrefix +
+          tsickle.pathToModuleName(rootModulePath, context, fileName),
     rootDirsRelative: (fileName) => fileName,
     shouldIgnoreWarningsForPath: () => !settings.fatalWarnings,
     shouldSkipTsickleProcessing: (fileName) =>

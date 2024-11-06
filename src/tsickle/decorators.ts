@@ -116,7 +116,7 @@ export function transformDecoratorsOutputForClosurePropertyRenaming(
       sourceFile: ts.SourceFile,
     ) => {
       let nodeNeedingGoogReflect: ts.Node | undefined = undefined;
-      const visitor: ts.Visitor = (node) => {
+      const visitor = (node: ts.Node) => {
         const replacementNode = rewriteDecorator(node);
         if (replacementNode) {
           nodeNeedingGoogReflect = node;
@@ -124,10 +124,11 @@ export function transformDecoratorsOutputForClosurePropertyRenaming(
         }
         return ts.visitEachChild(node, visitor, context);
       };
-      let updatedSourceFile =
-        // TODO: go/ts50upgrade - Remove after upgrade.
-        // tslint:disable-next-line:no-unnecessary-type-assertion
-        ts.visitNode(sourceFile, visitor, ts.isSourceFile)!;
+      let updatedSourceFile = ts.visitNode(
+        sourceFile,
+        visitor,
+        ts.isSourceFile,
+      );
       if (nodeNeedingGoogReflect !== undefined) {
         const statements = [...updatedSourceFile.statements];
         const googModuleIndex = statements.findIndex(isGoogModuleStatement);

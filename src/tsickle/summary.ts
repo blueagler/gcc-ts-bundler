@@ -43,6 +43,7 @@ export interface Symbol {
 export class FileSummary {
   private readonly dynamicRequireSet = new Map<string, Symbol>();
   private readonly enhancedSet = new Map<string, Symbol>();
+  private readonly maybeRequireSet = new Map<string, Symbol>();
   private readonly modSet = new Map<string, Symbol>();
   // These sets are implemented as Maps of jsonified Symbol to Symbol because
   // JavaScript Sets use object address, not object contents.  Similarly, we use
@@ -52,6 +53,7 @@ export class FileSummary {
   private readonly weakRequireSet = new Map<string, Symbol>();
   autochunk = false;
   enhanceable = false;
+  legacyNamespace = false;
   modName: string | undefined;
   moduleType = ModuleType.UNKNOWN;
   toggles: string[] = [];
@@ -66,6 +68,10 @@ export class FileSummary {
 
   addEnhanced(enhanced: Symbol) {
     this.enhancedSet.set(this.stringify(enhanced), enhanced);
+  }
+
+  addMaybeRequire(maybeRequire: Symbol) {
+    this.maybeRequireSet.set(this.stringify(maybeRequire), maybeRequire);
   }
 
   addMods(mods: Symbol) {
@@ -90,6 +96,10 @@ export class FileSummary {
 
   get enhanced(): Symbol[] {
     return [...this.enhancedSet.values()];
+  }
+
+  get maybeRequires(): Symbol[] {
+    return [...this.maybeRequireSet.values()];
   }
 
   get mods(): Symbol[] {

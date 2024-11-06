@@ -604,6 +604,9 @@ class Generator {
       name: this.srcIds.googModuleId,
       type: Type.CLOSURE,
     });
+    if (maybeDeclareLegacyNameCall) {
+      fileSummary.legacyNamespace = true;
+    }
 
     fileSummary.autochunk = isAutoChunk;
     fileSummary.moduleType = ModuleType.GOOG_MODULE;

@@ -1009,7 +1009,9 @@ export function jsdocTransformer(
           );
           stmts.push(commentHolder);
         }
-
+        const isExported = varStmt.modifiers?.some(
+          (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+        );
         for (const decl of varStmt.declarationList.declarations) {
           const localTags: jsdoc.Tag[] = [];
           if (tags) {
@@ -1049,10 +1051,11 @@ export function jsdocTransformer(
             const aliases: Array<[ts.Identifier, ts.Identifier]> = [];
             const updatedBinding = renameArrayBindings(decl.name, aliases);
             if (updatedBinding && aliases.length > 0) {
-              const declVisited =
-                // TODO: go/ts50upgrade - Remove after upgrade.
-                // tslint:disable-next-line:no-unnecessary-type-assertion
-                ts.visitNode(decl, visitor, ts.isVariableDeclaration)!;
+              const declVisited = ts.visitNode(
+                decl,
+                visitor,
+                ts.isVariableDeclaration,
+              )!;
               const newDecl = ts.factory.updateVariableDeclaration(
                 declVisited,
                 updatedBinding,
@@ -1061,7 +1064,9 @@ export function jsdocTransformer(
                 declVisited.initializer,
               );
               const newStmt = ts.factory.createVariableStatement(
-                varStmt.modifiers,
+                varStmt.modifiers?.filter(
+                  (modifier) => modifier.kind !== ts.SyntaxKind.ExportKeyword,
+                ),
                 ts.factory.createVariableDeclarationList([newDecl], flags),
               );
               if (localTags.length) {
@@ -1076,15 +1081,16 @@ export function jsdocTransformer(
                 ...createArrayBindingAliases(
                   varStmt.declarationList.flags,
                   aliases,
+                  isExported,
                 ),
               );
               continue;
             }
           }
-          const newDecl =
-            // TODO: go/ts50upgrade - Remove after upgrade.
-            // tslint:disable-next-line:no-unnecessary-type-assertion
-            ts.visitNode(decl, visitor, ts.isVariableDeclaration)!;
+          const newDecl = ts.setEmitFlags(
+            ts.visitNode(decl, visitor, ts.isVariableDeclaration)!,
+            ts.EmitFlags.NoComments,
+          );
           const newStmt = ts.factory.createVariableStatement(
             varStmt.modifiers,
             ts.factory.createVariableDeclarationList([newDecl], flags),
@@ -1403,11 +1409,12 @@ export function jsdocTransformer(
           // Note: We create explicit exports of type symbols for closure in visitExportDeclaration.
           return false;
         }
-        if (
-          !tsOptions.preserveConstEnums &&
-          sym.flags & ts.SymbolFlags.ConstEnum
-        ) {
-          return false;
+        if (sym.flags & ts.SymbolFlags.ConstEnum) {
+          if (tsOptions.preserveConstEnums) {
+            return !sym.valueDeclaration!.getSourceFile().isDeclarationFile;
+          } else {
+            return false;
+          }
         }
         return true;
       }
@@ -1485,7 +1492,7 @@ export function jsdocTransformer(
             isTypeOnlyExport,
             ts.factory.createNamedExports(exportSpecifiers),
             exportDecl.moduleSpecifier,
-            exportDecl.assertClause,
+            exportDecl.attributes,
           );
         } else if (ts.isNamedExports(exportDecl.exportClause)) {
           // export {a, b, c} from 'abc';
@@ -1511,7 +1518,9 @@ export function jsdocTransformer(
             (aliasedSymbol.flags &
               (ts.SymbolFlags.TypeAlias | ts.SymbolFlags.Interface)) !==
               0;
-          if (!isTypeAlias) continue;
+          const isConstEnum =
+            (aliasedSymbol.flags & ts.SymbolFlags.ConstEnum) !== 0;
+          if (!isTypeAlias && !isConstEnum) continue;
           const typeName =
             moduleTypeTranslator.symbolsToAliasedNames.get(aliasedSymbol) ||
             aliasedSymbol.name;
@@ -1612,16 +1621,6 @@ export function jsdocTransformer(
       }
 
       /**
-       * Visits enum declarations to check for validity of JSDoc comments without transforming the
-       * node at all.
-       */
-      function visitEnumDeclaration(node: ts.EnumDeclaration) {
-        // Calling `getJSDoc` will validate and report any errors, but this code
-        // doesn't really care about the return value.
-        moduleTypeTranslator.getJSDoc(node, /* reportWarnings */ true);
-      }
-
-      /**
        * Counter to generate (reasonably) unique alias names for array
        * rebindings.
        */
@@ -1664,8 +1663,6 @@ export function jsdocTransformer(
               e.dotDotDotToken,
               ts.visitNode(e.propertyName, visitor, ts.isPropertyName),
               updatedBindingName,
-              // TODO: go/ts50upgrade - Remove after upgrade.
-              // tslint:disable-next-line:no-unnecessary-type-assertion
               ts.visitNode(e.initializer, visitor) as ts.Expression,
             ),
           );
@@ -1682,6 +1679,7 @@ export function jsdocTransformer(
       function createArrayBindingAliases(
         flags: ts.NodeFlags,
         aliases: Array<[ts.Identifier, ts.Identifier]>,
+        needsExport = false,
       ): ts.Statement[] {
         const aliasDecls: ts.Statement[] = [];
         for (const [oldName, aliasName] of aliases) {
@@ -1708,7 +1706,9 @@ export function jsdocTransformer(
             flags,
           );
           const varStmt = ts.factory.createVariableStatement(
-            /*modifiers*/ undefined,
+            needsExport
+              ? [ts.factory.createModifier(ts.SyntaxKind.ExportKeyword)]
+              : undefined,
             varDeclList,
           );
           aliasDecls.push(varStmt);
@@ -1770,15 +1770,11 @@ export function jsdocTransformer(
         if (ts.isBlock(node.statement)) {
           updatedStatement = ts.factory.updateBlock(node.statement, [
             ...aliasDecls,
-            // TODO: go/ts50upgrade - Remove after upgrade.
-            // tslint:disable-next-line:no-unnecessary-type-assertion
             ...ts.visitNode(node.statement, visitor, ts.isBlock)!.statements,
           ]);
         } else {
           updatedStatement = ts.factory.createBlock([
             ...aliasDecls,
-            // TODO: go/ts50upgrade - Remove after upgrade.
-            // tslint:disable-next-line:no-unnecessary-type-assertion
             ts.visitNode(node.statement, visitor) as ts.Statement,
           ]);
         }
@@ -1786,8 +1782,6 @@ export function jsdocTransformer(
           node,
           node.awaitModifier,
           updatedInitializer,
-          // TODO: go/ts50upgrade - Remove after upgrade.
-          // tslint:disable-next-line:no-unnecessary-type-assertion
           ts.visitNode(node.expression, visitor) as ts.Expression,
           updatedStatement,
         );
@@ -1843,6 +1837,7 @@ export function jsdocTransformer(
           case ts.SyntaxKind.PropertyDeclaration:
           case ts.SyntaxKind.ModuleDeclaration:
           case ts.SyntaxKind.EnumMember:
+          case ts.SyntaxKind.EnumDeclaration:
             escapeIllegalJSDoc(node);
             break;
           case ts.SyntaxKind.Parameter:
@@ -1872,9 +1867,6 @@ export function jsdocTransformer(
             return visitPropertyAccessExpression(
               node as ts.PropertyAccessExpression,
             );
-          case ts.SyntaxKind.EnumDeclaration:
-            visitEnumDeclaration(node as ts.EnumDeclaration);
-            break;
           case ts.SyntaxKind.ForOfStatement:
             return visitForOfStatement(node as ts.ForOfStatement);
           case ts.SyntaxKind.DeleteExpression:
