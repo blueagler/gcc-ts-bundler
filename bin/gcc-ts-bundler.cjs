@@ -46,8 +46,59 @@ __export(exports_src, {
   main: () => main
 });
 module.exports = __toCommonJS(exports_src);
-var import_fs3 = __toESM(require("fs"));
-var import_path5 = __toESM(require("path"));
+var import_fs4 = __toESM(require("fs"));
+var import_path6 = __toESM(require("path"));
+var import_typescript3 = __toESM(require("typescript"));
+
+// src/compiler/closureCompiler.ts
+var import_google_closure_compiler = require("google-closure-compiler");
+var NAMESPACE_VARIABLE = "$";
+async function runClosureCompiler(settings) {
+  const closureCompiler = new import_google_closure_compiler.compiler({
+    assumeFunctionWrapper: true,
+    compilationLevel: settings.compilationLevel,
+    dependencyMode: "PRUNE",
+    entryPoint: settings.entryPoint,
+    externs: settings.externs,
+    js: settings.js,
+    jsOutputFile: settings.jsOutputFile,
+    languageIn: "UNSTABLE",
+    languageOut: settings.languageOut,
+    renamePrefixNamespace: NAMESPACE_VARIABLE,
+    rewritePolyfills: true,
+    warningLevel: settings.verbose ? "VERBOSE" : "DEFAULT"
+  });
+  return new Promise((resolve) => {
+    closureCompiler.run((exitCode, stdOut, stdErr) => {
+      if (stdErr) {
+        console.error(stdErr);
+      }
+      if (stdOut) {
+        console.log(stdOut);
+      }
+      resolve(exitCode);
+    });
+  });
+}
+
+// src/compiler/preCompiler.ts
+var import_core = require("@babel/core");
+var import_plugin_syntax_typescript = __toESM(require("@babel/plugin-syntax-typescript"));
+async function customTransform(code) {
+  const ast = await import_core.parseAsync(code, {
+    babelrc: false,
+    plugins: [[import_plugin_syntax_typescript.default]]
+  });
+  console.log(code);
+  return (await import_core.transformFromAstAsync(ast, code, {
+    babelrc: false,
+    plugins: [[import_plugin_syntax_typescript.default]]
+  })).code;
+}
+
+// src/compiler/tsickleCompiler.ts
+var import_path2 = __toESM(require("path"));
+var import_typescript = __toESM(require("typescript"));
 
 // src/tsickle/index.ts
 var ts16 = __toESM(require("typescript"));
@@ -5622,43 +5673,6 @@ function skipTransformForSourceFileIfNeeded(host, delegateFactory) {
   };
 }
 
-// src/index.ts
-var import_typescript3 = __toESM(require("typescript"));
-
-// src/compiler/closureCompiler.ts
-var import_child_process = require("child_process");
-function runClosureCompiler(settings) {
-  const closureCompilerArgs = [
-    "--entry_point",
-    settings.entryPoint,
-    "--js_output_file",
-    settings.jsOutputFile,
-    "--language_in",
-    "UNSTABLE",
-    "--language_out",
-    settings.languageOut,
-    "--compilation_level",
-    settings.compilationLevel,
-    ...settings.externs.flatMap((externFile) => ["--externs", externFile]),
-    ...settings.js.flatMap((jsFile) => ["--js", jsFile]),
-    "--assume_function_wrapper",
-    "--warning_level",
-    settings.verbose ? "VERBOSE" : "DEFAULT"
-  ];
-  const ccProcess = import_child_process.spawnSync("google-closure-compiler", closureCompilerArgs);
-  if (ccProcess.stderr.length > 0) {
-    console.error(ccProcess.stderr.toString());
-  }
-  if (ccProcess.stdout.length > 0) {
-    console.log(ccProcess.stdout.toString());
-  }
-  return ccProcess.status || 0;
-}
-
-// src/compiler/tsickleCompiler.ts
-var import_path2 = __toESM(require("path"));
-var import_typescript = __toESM(require("typescript"));
-
 // src/utils/fileUtils.ts
 var import_fs = __toESM(require("fs"));
 var import_path = __toESM(require("path"));
@@ -5725,11 +5739,12 @@ function toClosureJS(options, fileNames, settings, writeFile) {
     },
     options,
     pathToModuleName: (context, fileName) => fileName === "tslib" ? "tslib" : modulePrefix + pathToModuleName(rootModulePath, context, fileName),
+    provideExternalModuleDtsNamespace: true,
     rootDirsRelative: (fileName) => fileName,
     shouldIgnoreWarningsForPath: () => !settings.fatalWarnings,
     shouldSkipTsickleProcessing: (fileName) => !filesToProcess.has(import_path2.default.resolve(fileName)),
     transformDecorators: true,
-    transformDynamicImport: "nodejs",
+    transformDynamicImport: "closure",
     transformTypesToClosure: true,
     typeBlackListPaths: new Set,
     untyped: false,
@@ -5800,9 +5815,40 @@ function loadSettingsFromArgs(args) {
   return { settings };
 }
 
-// src/utils/tsConfigLoader.ts
+// src/utils/fileOperations.ts
 var import_fs2 = __toESM(require("fs"));
 var import_path4 = __toESM(require("path"));
+function copyDirectoryRecursive(src, dest) {
+  if (!import_fs2.default.existsSync(dest)) {
+    import_fs2.default.mkdirSync(dest, { recursive: true });
+  }
+  const entries = import_fs2.default.readdirSync(src, { withFileTypes: true });
+  for (const entry of entries) {
+    const srcPath = import_path4.default.join(src, entry.name);
+    const destPath = import_path4.default.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      copyDirectoryRecursive(srcPath, destPath);
+    } else {
+      import_fs2.default.copyFileSync(srcPath, destPath);
+    }
+  }
+}
+function cleanDirectory(dir) {
+  if (import_fs2.default.existsSync(dir)) {
+    import_fs2.default.readdirSync(dir).forEach((file) => {
+      const filePath = import_path4.default.join(dir, file);
+      import_fs2.default.unlinkSync(filePath);
+    });
+  }
+}
+function writeFileContent(filePath, contents) {
+  ensureDirectoryExistence(filePath);
+  import_fs2.default.writeFileSync(filePath, contents, "utf-8");
+}
+
+// src/utils/tsConfigLoader.ts
+var import_fs3 = __toESM(require("fs"));
+var import_path5 = __toESM(require("path"));
 var import_typescript2 = __toESM(require("typescript"));
 function loadTscConfig(args) {
   const parsedCommandLine = import_typescript2.default.parseCommandLine(args);
@@ -5828,19 +5874,19 @@ function loadTscConfig(args) {
       options: {}
     };
   }
-  const configFileText = import_fs2.default.readFileSync(configFileName, "utf-8");
+  const configFileText = import_fs3.default.readFileSync(configFileName, "utf-8");
   const result = import_typescript2.default.parseConfigFileTextToJson(configFileName, configFileText);
   if (result.error) {
     return { errors: [result.error], fileNames: [], options: {} };
   }
   result.config.compilerOptions.rootDir = "./";
-  result.config.compilerOptions.outDir = import_path4.default.join(projectDir, "../.closured");
+  result.config.compilerOptions.outDir = import_path5.default.join(projectDir, "../.closured");
   result.config.compilerOptions.module = "CommonJS";
   result.config.compilerOptions.moduleResolution = "Node";
   result.config.compilerOptions.target = "ESNext";
   result.config.compilerOptions.skipLibCheck = true;
   result.config.exclude = [];
-  result.config.include = [import_path4.default.join(projectDir, "*.ts")];
+  result.config.include = [import_path5.default.join(projectDir, "*.ts")];
   const configParseResult = import_typescript2.default.parseJsonConfigFileContent(result.config, import_typescript2.default.sys, projectDir, parsedCommandLine.options, configFileName);
   if (configParseResult.errors.length > 0) {
     return { errors: configParseResult.errors, fileNames: [], options: {} };
@@ -5851,10 +5897,16 @@ function loadTscConfig(args) {
 
 // src/index.ts
 var __dirname = "/Users/Blueagle/Code/gcc-ts-bundler/src";
-function main(args) {
+async function main(args) {
   const { settings } = loadSettingsFromArgs(args);
   const cwd = process.cwd();
-  process.chdir(settings.srcDir);
+  const srcDir = import_path6.default.join(cwd, settings.srcDir);
+  const preCompiledDir = import_path6.default.join(cwd, "./.pre-compiled");
+  process.chdir(srcDir);
+  cleanDirectory(preCompiledDir);
+  ensureDirectoryExistence(preCompiledDir);
+  copyDirectoryRecursive(srcDir, preCompiledDir);
+  process.chdir(preCompiledDir);
   const config = loadTscConfig([]);
   if (config.errors.length > 0) {
     console.error(import_typescript3.default.formatDiagnosticsWithColorAndContext(config.errors, import_typescript3.default.createCompilerHost(config.options)));
@@ -5864,41 +5916,44 @@ function main(args) {
     console.error("tsickle converts TypeScript modules to Closure modules via CommonJS internally. " + 'Set tsconfig.json "module": "commonjs"');
     return 1;
   }
-  const closuredDir = import_path5.default.join(cwd, "./.closured");
-  if (import_fs3.default.existsSync(closuredDir)) {
-    import_fs3.default.readdirSync(closuredDir).forEach((file) => {
-      const filePath = import_path5.default.join(closuredDir, file);
-      import_fs3.default.unlinkSync(filePath);
-    });
-  }
+  const closuredDir = import_path6.default.join(cwd, "./.closured");
+  cleanDirectory(closuredDir);
+  await Promise.all(config.fileNames.map(async (file) => {
+    const relativePath = import_path6.default.relative(srcDir, file);
+    const preCompiledPath = import_path6.default.join(preCompiledDir, relativePath);
+    const contents = import_fs4.default.readFileSync(preCompiledPath, "utf-8");
+    const transformed = await customTransform(contents);
+    const closuredPath = import_path6.default.join(closuredDir, relativePath);
+    writeFileContent(closuredPath, transformed);
+  }));
   const result = toClosureJS(config.options, config.fileNames, settings, (filePath, contents) => {
     ensureDirectoryExistence(filePath);
-    import_fs3.default.writeFileSync(filePath, contents, "utf-8");
+    import_fs4.default.writeFileSync(filePath, contents, "utf-8");
   });
   if (result.diagnostics.length > 0) {
     console.error(import_typescript3.default.formatDiagnosticsWithColorAndContext(result.diagnostics, import_typescript3.default.createCompilerHost(config.options)));
     return 1;
   }
-  const modulesExterns = import_path5.default.join(cwd, "./.closure-externs/modules-externs.js");
+  const modulesExterns = import_path6.default.join(cwd, "./.closure-externs/modules-externs.js");
   ensureDirectoryExistence(modulesExterns);
-  import_fs3.default.writeFileSync(modulesExterns, getGeneratedExterns(result.externs, config.options.rootDir || ""));
-  const closureExternsPath = import_path5.default.join(__dirname, "../closure-externs");
-  import_fs3.default.readdirSync(closureExternsPath).forEach((file) => {
-    const filePath = import_path5.default.join(closureExternsPath, file);
+  import_fs4.default.writeFileSync(modulesExterns, getGeneratedExterns(result.externs, config.options.rootDir || ""));
+  const closureExternsPath = import_path6.default.join(__dirname, "../closure-externs");
+  import_fs4.default.readdirSync(closureExternsPath).forEach((file) => {
+    const filePath = import_path6.default.join(closureExternsPath, file);
     settings.externs.push(filePath);
   });
-  settings.externs.push(import_path5.default.join(cwd, "./.closure-externs/modules-externs.js"));
-  settings.js.push(import_path5.default.join(__dirname, "../closure-lib/**.js"));
-  settings.js.push(import_path5.default.join(cwd, "./.closured/**.js"));
-  const parentDir = import_path5.default.dirname(settings.jsOutputFile);
-  if (import_fs3.default.existsSync(parentDir)) {
-    import_fs3.default.readdirSync(parentDir).forEach((file) => {
-      const filePath = import_path5.default.join(parentDir, file);
-      import_fs3.default.unlinkSync(filePath);
+  settings.externs.push(import_path6.default.join(cwd, "./.closure-externs/modules-externs.js"));
+  settings.js.push(import_path6.default.join(__dirname, "../closure-lib/**.js"));
+  settings.js.push(import_path6.default.join(cwd, "./.closured/**.js"));
+  const parentDir = import_path6.default.dirname(settings.jsOutputFile);
+  if (import_fs4.default.existsSync(parentDir)) {
+    import_fs4.default.readdirSync(parentDir).forEach((file) => {
+      const filePath = import_path6.default.join(parentDir, file);
+      import_fs4.default.unlinkSync(filePath);
     });
   }
   console.log("Building with Closure Compiler...");
-  const exitCode = runClosureCompiler(settings);
+  const exitCode = await runClosureCompiler(settings);
   if (exitCode !== 0) {
     console.error("Failed to build with Closure Compiler.");
   } else {
@@ -5906,4 +5961,6 @@ function main(args) {
   }
   return exitCode;
 }
-process.exit(main(process.argv.slice(2)));
+main(process.argv.slice(2)).then((exitCode) => {
+  process.exit(exitCode);
+});

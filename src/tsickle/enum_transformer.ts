@@ -19,9 +19,9 @@
  * type resolve ("@type {Foo}").
  */
 
-import { TsickleHost } from "tsickle";
 import * as ts from "typescript";
 
+import { TsickleHost } from "./";
 import * as jsdoc from "./jsdoc";
 import {
   createSingleQuoteStringLiteral,

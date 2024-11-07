@@ -1,18 +1,35 @@
 import fs from "fs";
 import path from "path";
-import * as tsickle from "tsickle";
 import ts from "typescript";
 
 import { runClosureCompiler } from "./compiler/closureCompiler";
+import { customTransform } from "./compiler/preCompiler";
 import { toClosureJS } from "./compiler/tsickleCompiler";
 import { loadSettingsFromArgs } from "./settings";
+import * as tsickle from "./tsickle";
+import {
+  cleanDirectory,
+  copyDirectoryRecursive,
+  writeFileContent,
+} from "./utils/fileOperations";
 import { ensureDirectoryExistence } from "./utils/fileUtils";
 import { loadTscConfig } from "./utils/tsConfigLoader";
 
-export function main(args: string[]): number {
+export async function main(args: string[]): Promise<number> {
   const { settings } = loadSettingsFromArgs(args);
   const cwd = process.cwd();
-  process.chdir(settings.srcDir);
+
+  const srcDir = path.join(cwd, settings.srcDir);
+  const preCompiledDir = path.join(cwd, "./.pre-compiled");
+
+  process.chdir(srcDir);
+
+  cleanDirectory(preCompiledDir);
+  ensureDirectoryExistence(preCompiledDir);
+  copyDirectoryRecursive(srcDir, preCompiledDir);
+
+  process.chdir(preCompiledDir);
+
   const config = loadTscConfig([]);
 
   if (config.errors.length > 0) {
@@ -34,12 +51,18 @@ export function main(args: string[]): number {
   }
 
   const closuredDir = path.join(cwd, "./.closured");
-  if (fs.existsSync(closuredDir)) {
-    fs.readdirSync(closuredDir).forEach((file) => {
-      const filePath = path.join(closuredDir, file);
-      fs.unlinkSync(filePath);
-    });
-  }
+  cleanDirectory(closuredDir);
+
+  await Promise.all(
+    config.fileNames.map(async (file) => {
+      const relativePath = path.relative(srcDir, file);
+      const preCompiledPath = path.join(preCompiledDir, relativePath);
+      const contents = fs.readFileSync(preCompiledPath, "utf-8");
+      const transformed = await customTransform(contents);
+      const closuredPath = path.join(closuredDir, relativePath);
+      writeFileContent(closuredPath, transformed);
+    }),
+  );
 
   const result = toClosureJS(
     config.options,
@@ -93,7 +116,7 @@ export function main(args: string[]): number {
 
   console.log("Building with Closure Compiler...");
 
-  const exitCode = runClosureCompiler(settings);
+  const exitCode = await runClosureCompiler(settings);
 
   if (exitCode !== 0) {
     console.error("Failed to build with Closure Compiler.");
@@ -106,4 +129,6 @@ export function main(args: string[]): number {
   return exitCode;
 }
 
-process.exit(main(process.argv.slice(2)));
+main(process.argv.slice(2)).then((exitCode) => {
+  process.exit(exitCode);
+});

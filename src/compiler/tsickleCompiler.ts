@@ -1,8 +1,8 @@
 import path from "path";
-import * as tsickle from "tsickle";
 import ts from "typescript";
 
 import { Settings } from "../settings";
+import * as tsickle from "../tsickle";
 import { getCommonParentDirectory } from "../utils/fileUtils";
 
 const modulePrefix = "_gcc_";
@@ -46,12 +46,13 @@ export function toClosureJS(
         ? "tslib"
         : modulePrefix +
           tsickle.pathToModuleName(rootModulePath, context, fileName),
+    provideExternalModuleDtsNamespace: true,
     rootDirsRelative: (fileName) => fileName,
     shouldIgnoreWarningsForPath: () => !settings.fatalWarnings,
     shouldSkipTsickleProcessing: (fileName) =>
       !filesToProcess.has(path.resolve(fileName)),
     transformDecorators: true,
-    transformDynamicImport: "nodejs",
+    transformDynamicImport: "closure",
     transformTypesToClosure: true,
     typeBlackListPaths: new Set(),
     untyped: false,

@@ -1,35 +1,34 @@
-import { spawnSync } from "child_process";
+import { compiler } from "google-closure-compiler";
 
 import { Settings } from "../settings";
 
-export function runClosureCompiler(settings: Settings): number {
-  const closureCompilerArgs = [
-    "--entry_point",
-    settings.entryPoint,
-    "--js_output_file",
-    settings.jsOutputFile,
-    "--language_in",
-    "UNSTABLE",
-    "--language_out",
-    settings.languageOut,
-    "--compilation_level",
-    settings.compilationLevel,
-    ...settings.externs.flatMap((externFile) => ["--externs", externFile]),
-    ...settings.js.flatMap((jsFile) => ["--js", jsFile]),
-    "--assume_function_wrapper",
-    "--warning_level",
-    settings.verbose ? "VERBOSE" : "DEFAULT",
-  ];
+const NAMESPACE_VARIABLE = "$";
 
-  const ccProcess = spawnSync("google-closure-compiler", closureCompilerArgs);
+export async function runClosureCompiler(settings: Settings): Promise<number> {
+  const closureCompiler = new compiler({
+    assumeFunctionWrapper: true,
+    compilationLevel: settings.compilationLevel,
+    dependencyMode: "PRUNE",
+    entryPoint: settings.entryPoint,
+    externs: settings.externs,
+    js: settings.js,
+    jsOutputFile: settings.jsOutputFile,
+    languageIn: "UNSTABLE",
+    languageOut: settings.languageOut,
+    renamePrefixNamespace: NAMESPACE_VARIABLE,
+    rewritePolyfills: true,
+    warningLevel: settings.verbose ? "VERBOSE" : "DEFAULT",
+  });
 
-  if (ccProcess.stderr.length > 0) {
-    console.error(ccProcess.stderr.toString());
-  }
-
-  if (ccProcess.stdout.length > 0) {
-    console.log(ccProcess.stdout.toString());
-  }
-
-  return ccProcess.status || 0;
+  return new Promise((resolve) => {
+    closureCompiler.run((exitCode, stdOut, stdErr) => {
+      if (stdErr) {
+        console.error(stdErr);
+      }
+      if (stdOut) {
+        console.log(stdOut);
+      }
+      resolve(exitCode);
+    });
+  });
 }

@@ -10,11 +10,6 @@
     "target": "ESNext",
     "strict": true,
     "outDir": "out",
-    "paths": {
-      "tsickle": [
-        "./src/tsickle/index.ts"
-      ]
-    },
     "moduleResolution": "Bundler"
   },
   "exclude": [

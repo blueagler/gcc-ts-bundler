@@ -7,6 +7,7 @@
     "gcc-ts-bundler": "./bin/gcc-ts-bundler.cjs"
   },
   "devDependencies": {
+    "@types/babel__core": "^7.20.5",
     "@types/google-closure-compiler": "^20231112.0.0",
     "@types/minimist": "^1.2.5",
     "@types/node": "^22.9.0",
@@ -15,7 +16,7 @@
     "typescript-eslint": "^8.13.1-alpha.1"
   },
   "scripts": {
-    "build": "bun build ./src/index.ts --outdir ./bin --format cjs --external minimist --external typescript --banner \"#!/usr/bin/env node\" --entry-naming \"gcc-ts-bundler.cjs\" --target node",
+    "build": "bun build ./src/index.ts --outdir ./bin --format cjs --packages external --banner \"#!/usr/bin/env node\" --entry-naming \"gcc-ts-bundler.cjs\" --target node",
     "lint": "bun --bun prettier \"**/*.ts\" --write && bun --bun eslint \"**/*.ts\" --fix",
     "publish": "bun publish"
   },
@@ -24,7 +25,9 @@
     "closure"
   ],
   "dependencies": {
-    "google-closure-compiler": "20241105.0.0-nightly",
+    "@babel/core": "^7.26.0",
+    "@babel/plugin-syntax-typescript": "7.25.9",
+    "google-closure-compiler": "20241106.0.0-nightly",
     "minimist": "1.2.8",
     "typescript": "^5.8.0-dev.20241106"
   },
