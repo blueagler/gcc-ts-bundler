@@ -63,6 +63,7 @@ export async function main(args: string[]): Promise<number> {
       const contents = fs.readFileSync(preCompiledPath, "utf-8");
       const transformed = await preCompile(
         contents,
+        preCompiledPath,
         settings.entryPoint
           .replace(/\.js$/, ".ts")
           .endsWith(relativePath.split(PRE_COMPILED_DIR)[1]),
