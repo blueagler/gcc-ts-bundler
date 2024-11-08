@@ -1,6 +1,6 @@
 {
   "name": "gcc-ts-bundler",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "A TypeScript bundler that uses Google Closure Compiler and Tsickle to bundle TypeScript code.",
   "type": "module",
   "bin": {
@@ -11,6 +11,7 @@
     "@types/google-closure-compiler": "^20231112.0.0",
     "@types/minimist": "^1.2.5",
     "@types/node": "^22.9.0",
+    "@types/uglify-js": "^3.17.5",
     "eslint-plugin-perfectionist": "^3.9.1",
     "prettier": "^3.3.3",
     "typescript-eslint": "^8.13.1-alpha.1"
@@ -29,7 +30,8 @@
     "@babel/plugin-syntax-typescript": "7.25.9",
     "google-closure-compiler": "20241106.0.0-nightly",
     "minimist": "1.2.8",
-    "typescript": "^5.8.0-dev.20241106"
+    "typescript": "^5.8.0-dev.20241106",
+    "uglify-js": "3.19.3"
   },
   "files": [
     "bin",

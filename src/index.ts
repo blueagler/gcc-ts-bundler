@@ -3,7 +3,8 @@ import path from "path";
 import ts from "typescript";
 
 import { runClosureCompiler } from "./compiler/closureCompiler";
-import { customTransform } from "./compiler/preCompiler";
+import { customTransform as postCompile } from "./compiler/postCompiler";
+import { customTransform as preCompile } from "./compiler/preCompiler";
 import { toClosureJS } from "./compiler/tsickleCompiler";
 import { loadSettingsFromArgs } from "./settings";
 import * as tsickle from "./tsickle";
@@ -15,12 +16,14 @@ import {
 import { ensureDirectoryExistence } from "./utils/fileUtils";
 import { loadTscConfig } from "./utils/tsConfigLoader";
 
+const PRE_COMPILED_DIR = ".pre-compiled";
+
 export async function main(args: string[]): Promise<number> {
   const { settings } = loadSettingsFromArgs(args);
   const cwd = process.cwd();
 
   const srcDir = path.join(cwd, settings.srcDir);
-  const preCompiledDir = path.join(cwd, "./.pre-compiled");
+  const preCompiledDir = path.join(cwd, PRE_COMPILED_DIR);
 
   process.chdir(srcDir);
 
@@ -58,7 +61,12 @@ export async function main(args: string[]): Promise<number> {
       const relativePath = path.relative(srcDir, file);
       const preCompiledPath = path.join(preCompiledDir, relativePath);
       const contents = fs.readFileSync(preCompiledPath, "utf-8");
-      const transformed = await customTransform(contents);
+      const transformed = await preCompile(
+        contents,
+        settings.entryPoint
+          .replace(/\.js$/, ".ts")
+          .endsWith(relativePath.split(PRE_COMPILED_DIR)[1]),
+      );
       const closuredPath = path.join(closuredDir, relativePath);
       writeFileContent(closuredPath, transformed);
     }),
@@ -116,7 +124,20 @@ export async function main(args: string[]): Promise<number> {
 
   console.log("Building with Closure Compiler...");
 
-  const exitCode = await runClosureCompiler(settings);
+  let exitCode = 0;
+
+  try {
+    exitCode = await runClosureCompiler(settings);
+    if (exitCode === 0) {
+      writeFileContent(
+        settings.jsOutputFile,
+        await postCompile(fs.readFileSync(settings.jsOutputFile, "utf-8")),
+      );
+    }
+  } catch (error) {
+    exitCode = 1;
+    console.error(error);
+  }
 
   if (exitCode !== 0) {
     console.error("Failed to build with Closure Compiler.");

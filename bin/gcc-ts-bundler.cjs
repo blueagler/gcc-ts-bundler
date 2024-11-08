@@ -81,20 +81,131 @@ async function runClosureCompiler(settings) {
   });
 }
 
-// src/compiler/preCompiler.ts
+// src/compiler/postCompiler.ts
 var import_core = require("@babel/core");
-var import_plugin_syntax_typescript = __toESM(require("@babel/plugin-syntax-typescript"));
+var import_uglify_js = require("uglify-js");
 async function customTransform(code) {
-  const ast = await import_core.parseAsync(code, {
+  const plugins = [convertGCCExportsToESM];
+  const transformed = import_core.transformSync(code, {
     babelrc: false,
-    plugins: [[import_plugin_syntax_typescript.default]]
+    plugins
   });
-  console.log(code);
-  return (await import_core.transformFromAstAsync(ast, code, {
-    babelrc: false,
-    plugins: [[import_plugin_syntax_typescript.default]]
-  })).code;
+  if (!transformed?.code) {
+    throw new Error("Babel transform failed");
+  }
+  const minified = import_uglify_js.minify(transformed.code, {
+    compress: {
+      passes: 3,
+      pure_getters: true,
+      toplevel: true,
+      unsafe: true
+    },
+    module: true
+  });
+  if (minified.error) {
+    throw new Error(`UglifyJS minify failed: ${minified.error.message}`);
+  }
+  return minified.code;
 }
+var convertGCCExportsToESM = () => {
+  return {
+    visitor: {
+      Program(path) {
+        const exports2 = new Map;
+        path.traverse({
+          AssignmentExpression(assignPath) {
+            const left = assignPath.node.left;
+            if (import_core.types.isMemberExpression(left) && import_core.types.isMemberExpression(left.object) && import_core.types.isIdentifier(left.object.object) && left.object.object.name === "globalThis" && import_core.types.isIdentifier(left.object.property) && left.object.property.name === "GCC" && import_core.types.isIdentifier(left.property)) {
+              const exportName = left.property.name;
+              if (!exports2.has(exportName)) {
+                const uid = path.scope.generateUidIdentifier("GCC").name;
+                exports2.set(exportName, uid);
+              }
+            }
+          }
+        });
+        path.traverse({
+          ExpressionStatement(stmtPath) {
+            const expr = stmtPath.node.expression;
+            if (import_core.types.isAssignmentExpression(expr) && import_core.types.isMemberExpression(expr.left) && import_core.types.isMemberExpression(expr.left.object) && import_core.types.isIdentifier(expr.left.object.object) && expr.left.object.object.name === "globalThis" && import_core.types.isIdentifier(expr.left.object.property) && expr.left.object.property.name === "GCC" && import_core.types.isIdentifier(expr.left.property)) {
+              const exportName = expr.left.property.name;
+              const shortName = exports2.get(exportName);
+              stmtPath.replaceWith(import_core.types.variableDeclaration("const", [
+                import_core.types.variableDeclarator(import_core.types.identifier(shortName), expr.right)
+              ]));
+            }
+          }
+        });
+        if (exports2.size > 0) {
+          const exportSpecifiers = Array.from(exports2.entries()).map(([exportName, shortName]) => import_core.types.exportSpecifier(import_core.types.identifier(shortName), import_core.types.identifier(exportName)));
+          const exportDeclaration = import_core.types.exportNamedDeclaration(null, exportSpecifiers);
+          path.pushContainer("body", exportDeclaration);
+        }
+      }
+    }
+  };
+};
+
+// src/compiler/preCompiler.ts
+var import_core2 = require("@babel/core");
+var import_plugin_syntax_typescript = __toESM(require("@babel/plugin-syntax-typescript"));
+async function customTransform2(code, isEntryPoint) {
+  const plugins = [import_plugin_syntax_typescript.default];
+  if (isEntryPoint) {
+    plugins.push(addGCCExportsFromESM);
+  }
+  const transformed = import_core2.transformSync(code, {
+    babelrc: false,
+    plugins
+  });
+  if (!transformed?.code) {
+    throw new Error("Babel transform failed");
+  }
+  return transformed.code;
+}
+var addGCCExportsFromESM = () => {
+  return {
+    visitor: {
+      Program(path) {
+        const identifiers = new Set;
+        path.traverse({
+          ExportNamedDeclaration(exportPath) {
+            if (exportPath.node.specifiers.length > 0) {
+              exportPath.node.specifiers.forEach((specifier) => {
+                if (import_core2.types.isExportSpecifier(specifier) && import_core2.types.isIdentifier(specifier.exported)) {
+                  identifiers.add(specifier.exported.name);
+                }
+              });
+            } else if (exportPath.node.declaration) {
+              const declaration = exportPath.node.declaration;
+              if (import_core2.types.isVariableDeclaration(declaration)) {
+                declaration.declarations.forEach((decl) => {
+                  if (import_core2.types.isIdentifier(decl.id)) {
+                    identifiers.add(decl.id.name);
+                  }
+                });
+              } else if (import_core2.types.isFunctionDeclaration(declaration) || import_core2.types.isClassDeclaration(declaration)) {
+                if (import_core2.types.isIdentifier(declaration.id)) {
+                  identifiers.add(declaration.id.name);
+                }
+              }
+            }
+          }
+        });
+        const gccIdentifier = import_core2.types.identifier("GCC");
+        gccIdentifier.typeAnnotation = import_core2.types.tsTypeAnnotation(import_core2.types.tsTypeLiteral(Array.from(identifiers).map((name) => import_core2.types.tsPropertySignature(import_core2.types.identifier(name), import_core2.types.tsTypeAnnotation(import_core2.types.tsTypeQuery(import_core2.types.identifier(name)))))));
+        const gccVariableDeclaration = import_core2.types.variableDeclaration("var", [
+          import_core2.types.variableDeclarator(gccIdentifier)
+        ]);
+        const gccDeclaration = import_core2.types.tsModuleDeclaration(import_core2.types.identifier("globalThis"), import_core2.types.tsModuleBlock([gccVariableDeclaration]));
+        gccDeclaration.declare = true;
+        path.unshiftContainer("body", gccDeclaration);
+        const gccAssignments = Array.from(identifiers).map((name) => import_core2.types.expressionStatement(import_core2.types.assignmentExpression("=", import_core2.types.memberExpression(import_core2.types.memberExpression(import_core2.types.identifier("globalThis"), import_core2.types.identifier("GCC")), import_core2.types.identifier(name)), import_core2.types.identifier(name))));
+        path.pushContainer("body", gccAssignments);
+      }
+    }
+  };
+};
 
 // src/compiler/tsickleCompiler.ts
 var import_path2 = __toESM(require("path"));
@@ -1479,8 +1590,8 @@ class TypeTranslator {
   translateUnion(type) {
     return this.translateUnionMembers(type.types);
   }
-  translateUnionMembers(types) {
-    const parts = new Set(types.map((t) => this.translate(t)));
+  translateUnionMembers(types3) {
+    const parts = new Set(types3.map((t) => this.translate(t)));
     if (parts.size === 1)
       return parts.values().next().value;
     return `(${Array.from(parts.values()).join("|")})`;
@@ -2251,7 +2362,7 @@ function serialize(tags, includeStartEnd, escapeExtraTags = new Set) {
 function merge(tags) {
   const tagNames = new Set;
   const parameterNames = new Set;
-  const types = new Set;
+  const types3 = new Set;
   const texts = new Set;
   let optional = false;
   let restParam = false;
@@ -2260,7 +2371,7 @@ function merge(tags) {
     if (tag2.parameterName !== undefined)
       parameterNames.add(tag2.parameterName);
     if (tag2.type !== undefined)
-      types.add(tag2.type);
+      types3.add(tag2.type);
     if (tag2.text !== undefined)
       texts.add(tag2.text);
     if (tag2.optional)
@@ -2273,7 +2384,7 @@ function merge(tags) {
   }
   const tagName = tagNames.values().next().value;
   const parameterName = parameterNames.size > 0 ? Array.from(parameterNames).join("_or_") : undefined;
-  const type = types.size > 0 ? Array.from(types).join("|") : undefined;
+  const type = types3.size > 0 ? Array.from(types3).join("|") : undefined;
   const isTemplateTag = tagName === "template";
   const text = texts.size > 0 ? Array.from(texts).join(isTemplateTag ? "," : " / ") : undefined;
   const tag = { parameterName, tagName, text, type };
@@ -5897,11 +6008,12 @@ function loadTscConfig(args) {
 
 // src/index.ts
 var __dirname = "/Users/Blueagle/Code/gcc-ts-bundler/src";
+var PRE_COMPILED_DIR = ".pre-compiled";
 async function main(args) {
   const { settings } = loadSettingsFromArgs(args);
   const cwd = process.cwd();
   const srcDir = import_path6.default.join(cwd, settings.srcDir);
-  const preCompiledDir = import_path6.default.join(cwd, "./.pre-compiled");
+  const preCompiledDir = import_path6.default.join(cwd, PRE_COMPILED_DIR);
   process.chdir(srcDir);
   cleanDirectory(preCompiledDir);
   ensureDirectoryExistence(preCompiledDir);
@@ -5922,7 +6034,7 @@ async function main(args) {
     const relativePath = import_path6.default.relative(srcDir, file);
     const preCompiledPath = import_path6.default.join(preCompiledDir, relativePath);
     const contents = import_fs4.default.readFileSync(preCompiledPath, "utf-8");
-    const transformed = await customTransform(contents);
+    const transformed = await customTransform2(contents, settings.entryPoint.replace(/\.js$/, ".ts").endsWith(relativePath.split(PRE_COMPILED_DIR)[1]));
     const closuredPath = import_path6.default.join(closuredDir, relativePath);
     writeFileContent(closuredPath, transformed);
   }));
@@ -5953,7 +6065,16 @@ async function main(args) {
     });
   }
   console.log("Building with Closure Compiler...");
-  const exitCode = await runClosureCompiler(settings);
+  let exitCode = 0;
+  try {
+    exitCode = await runClosureCompiler(settings);
+    if (exitCode === 0) {
+      writeFileContent(settings.jsOutputFile, await customTransform(import_fs4.default.readFileSync(settings.jsOutputFile, "utf-8")));
+    }
+  } catch (error) {
+    exitCode = 1;
+    console.error(error);
+  }
   if (exitCode !== 0) {
     console.error("Failed to build with Closure Compiler.");
   } else {
