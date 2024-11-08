@@ -115,12 +115,8 @@ export async function main(args: string[]): Promise<number> {
   settings.js.push(path.join(cwd, "./.closured/**.js"));
 
   const parentDir = path.dirname(settings.jsOutputFile);
-  if (fs.existsSync(parentDir)) {
-    fs.readdirSync(parentDir).forEach((file) => {
-      const filePath = path.join(parentDir, file);
-      fs.unlinkSync(filePath);
-    });
-  }
+  cleanDirectory(parentDir);
+  ensureDirectoryExistence(parentDir);
 
   console.log("Building with Closure Compiler...");
 

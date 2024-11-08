@@ -23,11 +23,20 @@ export function copyDirectoryRecursive(src: string, dest: string) {
 }
 
 export function cleanDirectory(dir: string) {
-  if (fs.existsSync(dir)) {
-    fs.readdirSync(dir).forEach((file) => {
-      const filePath = path.join(dir, file);
-      fs.unlinkSync(filePath);
-    });
+  if (!fs.existsSync(dir)) {
+    return;
+  }
+
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      cleanDirectory(fullPath);
+      fs.rmdirSync(fullPath);
+    } else {
+      fs.unlinkSync(fullPath);
+    }
   }
 }
 

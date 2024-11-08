@@ -5945,11 +5945,18 @@ function copyDirectoryRecursive(src, dest) {
   }
 }
 function cleanDirectory(dir) {
-  if (import_fs2.default.existsSync(dir)) {
-    import_fs2.default.readdirSync(dir).forEach((file) => {
-      const filePath = import_path4.default.join(dir, file);
-      import_fs2.default.unlinkSync(filePath);
-    });
+  if (!import_fs2.default.existsSync(dir)) {
+    return;
+  }
+  const entries = import_fs2.default.readdirSync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = import_path4.default.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      cleanDirectory(fullPath);
+      import_fs2.default.rmdirSync(fullPath);
+    } else {
+      import_fs2.default.unlinkSync(fullPath);
+    }
   }
 }
 function writeFileContent(filePath, contents) {
@@ -6058,12 +6065,8 @@ async function main(args) {
   settings.js.push(import_path6.default.join(__dirname, "../closure-lib/**.js"));
   settings.js.push(import_path6.default.join(cwd, "./.closured/**.js"));
   const parentDir = import_path6.default.dirname(settings.jsOutputFile);
-  if (import_fs4.default.existsSync(parentDir)) {
-    import_fs4.default.readdirSync(parentDir).forEach((file) => {
-      const filePath = import_path6.default.join(parentDir, file);
-      import_fs4.default.unlinkSync(filePath);
-    });
-  }
+  cleanDirectory(parentDir);
+  ensureDirectoryExistence(parentDir);
   console.log("Building with Closure Compiler...");
   let exitCode = 0;
   try {
