@@ -64,9 +64,13 @@ export async function main(args: string[]): Promise<number> {
       const transformed = await preCompile(
         contents,
         preCompiledPath,
-        settings.entryPoint
-          .replace(/\.js$/, ".ts")
-          .endsWith(relativePath.split(PRE_COMPILED_DIR)[1]),
+        settings.entryPoints.some((entryPoint) =>
+          entryPoint
+            .replace(/\.[^/.]+$/, "")
+            .endsWith(
+              relativePath.split(PRE_COMPILED_DIR)[1].replace(/\.[^/.]+$/, ""),
+            ),
+        ),
       );
       const closuredPath = path.join(closuredDir, relativePath);
       writeFileContent(closuredPath, transformed);
@@ -115,9 +119,8 @@ export async function main(args: string[]): Promise<number> {
   settings.js.push(path.join(__dirname, "../closure-lib/**.js"));
   settings.js.push(path.join(cwd, "./.closured/**.js"));
 
-  const parentDir = path.dirname(settings.jsOutputFile);
-  cleanDirectory(parentDir);
-  ensureDirectoryExistence(parentDir);
+  cleanDirectory(settings.outputDir);
+  ensureDirectoryExistence(settings.outputDir);
 
   console.log("Building with Closure Compiler...");
 
@@ -125,12 +128,6 @@ export async function main(args: string[]): Promise<number> {
 
   try {
     exitCode = await runClosureCompiler(settings);
-    if (exitCode === 0) {
-      writeFileContent(
-        settings.jsOutputFile,
-        await postCompile(fs.readFileSync(settings.jsOutputFile, "utf-8")),
-      );
-    }
   } catch (error) {
     exitCode = 1;
     console.error(error);

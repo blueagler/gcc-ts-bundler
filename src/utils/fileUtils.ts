@@ -5,16 +5,16 @@ export function usage(): void {
   console.error(`Usage: gcc-ts-compiler [gcc-ts-compiler options]
 
 Example:
-  gcc-ts-bundler --src-dir='./src' --entry_point='./index.ts' --js_output_file='./dist/index.js'
+  gcc-ts-bundler --src_dir='./src' --entry_point='./index.ts' --output_dir='./dist' --language_out=ECMASCRIPT_NEXT
 
 gcc-ts-compiler flags are:
-  --fatalWarnings       Whether warnings should be fatal, causing tsickle to return a non-zero exit code
+  --fatal_warnings       Whether warnings should be fatal, causing tsickle to return a non-zero exit code
   --verbose             Print diagnostics to the console
   --language_out        ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT
   --entry_point         The entry point for the application
-  --js_output_file      The output file for the generated JS
+  --output_dir          The output directory
   --compilation_level   WHITESPACE_ONLY | SIMPLE | ADVANCED
-  --src-dir             The source directory
+  --src_dir             The source directory
   -h, --help            Show this help message
 `);
 }

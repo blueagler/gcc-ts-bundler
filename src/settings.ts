@@ -5,12 +5,12 @@ import { usage } from "./utils/fileUtils";
 
 export interface Settings {
   compilationLevel: string;
-  entryPoint: string;
+  entryPoints: string[];
   externs: string[];
   fatalWarnings: boolean;
   js: string[];
-  jsOutputFile: string;
   languageOut: string;
+  outputDir: string;
   srcDir: string;
   verbose: boolean;
 }
@@ -19,13 +19,13 @@ export function loadSettingsFromArgs(args: string[]): { settings: Settings } {
   const cwd = process.cwd();
   const defaultSettings: Settings = {
     compilationLevel: "ADVANCED",
-    entryPoint: "",
+    entryPoints: [],
     externs: [],
     fatalWarnings: false,
     js: [],
-    jsOutputFile: "",
-    languageOut: "ES5",
-    srcDir: "./",
+    languageOut: "ECMASCRIPT_NEXT",
+    outputDir: "./dist",
+    srcDir: "./src",
     verbose: false,
   };
 
@@ -41,26 +41,27 @@ export function loadSettingsFromArgs(args: string[]): { settings: Settings } {
       case "verbose":
         settings.verbose = true;
         break;
-      case "fatalWarnings":
+      case "fatal_warnings":
         settings.fatalWarnings = true;
         break;
       case "language_out":
         settings.languageOut = String(value);
         break;
       case "entry_point":
-        settings.entryPoint = path.join(
-          cwd,
-          "./.closured/",
-          value.replace(/\.ts$/, ".js"),
-        );
+        const entryPoints: string[] = Array.isArray(value) ? value : [value];
+        for (const entryPoint of entryPoints) {
+          settings.entryPoints.push(
+            path.join(cwd, "./.closured/", entryPoint.replace(/\.ts$/, ".js")),
+          );
+        }
         break;
-      case "js_output_file":
-        settings.jsOutputFile = path.join(cwd, value);
+      case "output_dir":
+        settings.outputDir = path.join(cwd, value);
         break;
       case "compilation_level":
         settings.compilationLevel = String(value);
         break;
-      case "src-dir":
+      case "src_dir":
         settings.srcDir = value;
         break;
     }

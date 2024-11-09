@@ -1,34 +1,58 @@
+import fs from "fs";
 import { compiler } from "google-closure-compiler";
+import path from "path";
 
 import { Settings } from "../settings";
-
-const NAMESPACE_VARIABLE = "$";
+import { writeFileContent } from "../utils/fileOperations";
+import { customTransform } from "./postCompiler";
 
 export async function runClosureCompiler(settings: Settings): Promise<number> {
-  const closureCompiler = new compiler({
+  const options = {
     assumeFunctionWrapper: true,
     compilationLevel: settings.compilationLevel,
-    dependencyMode: "PRUNE",
-    entryPoint: settings.entryPoint,
     externs: settings.externs,
     js: settings.js,
-    jsOutputFile: settings.jsOutputFile,
     languageIn: "UNSTABLE",
     languageOut: settings.languageOut,
-    renamePrefixNamespace: NAMESPACE_VARIABLE,
-    rewritePolyfills: true,
     warningLevel: settings.verbose ? "VERBOSE" : "DEFAULT",
-  });
+  };
 
-  return new Promise((resolve) => {
-    closureCompiler.run((exitCode, stdOut, stdErr) => {
-      if (stdErr) {
-        console.error(stdErr);
-      }
-      if (stdOut) {
-        console.log(stdOut);
-      }
-      resolve(exitCode);
-    });
-  });
+  try {
+    await Promise.all(
+      settings.entryPoints.map(
+        (entryPoint) =>
+          new Promise((resolve, reject) => {
+            const baseName = path.basename(entryPoint);
+            const outputPath = path.join(settings.outputDir, baseName);
+            new compiler({
+              ...options,
+              entryPoint,
+              jsOutputFile: outputPath,
+            }).run(async (exitCode, stdOut, stdErr) => {
+              if (exitCode === 0) {
+                console.log(`Compilation of ${baseName} successful.`);
+                if (stdOut) {
+                  console.log(stdOut);
+                }
+                writeFileContent(
+                  outputPath,
+                  await customTransform(fs.readFileSync(outputPath, "utf-8")),
+                );
+                resolve(exitCode);
+              } else {
+                console.error(`Compilation of ${baseName} failed.`);
+                if (stdErr) {
+                  console.error(stdErr);
+                }
+                reject(new Error(`Compilation failed for ${baseName}`));
+              }
+            });
+          }),
+      ),
+    );
+    return 0;
+  } catch (error) {
+    console.error("Compilation process encountered an error:", error);
+    return 1;
+  }
 }
