@@ -263,326 +263,236 @@ async function runClosureCompiler(settings) {
 // src/compiler/preCompiler.ts
 var import_core2 = require("@babel/core");
 var import_plugin_syntax_typescript = __toESM(require("@babel/plugin-syntax-typescript"));
-var import_fs = __toESM(require("fs"));
+var import_traverse = __toESM(require("@babel/traverse"));
+var import_fs = require("fs");
 var import_path2 = __toESM(require("path"));
-var exportCache = new Map;
-var processingModules = new Set;
-var pendingPromises = new Map;
+var modulePathCache = new Map;
+var fileContentCache = new Map;
+var parsedASTCache = new Map;
 async function customTransform2(code, filePath, isEntryPoint) {
   const plugins = [import_plugin_syntax_typescript.default];
   if (isEntryPoint) {
-    const filePromise = new Promise((resolve) => {
-      plugins.push(addGCCExportsFromESM(filePath, {
-        defaultExportIdentifier: "__DEFAULT_EXPORT__",
-        gccIdentifier: "GCC",
-        onComplete: resolve
-      }));
-    });
-    pendingPromises.set(filePath, filePromise);
+    plugins.push(addGCCExportsFromESM(filePath));
   }
-  const transformed = await import_core2.transformAsync(code, {
+  const transformed = import_core2.transformSync(code, {
     babelrc: false,
-    filename: filePath,
     plugins
   });
   if (!transformed?.code) {
     throw new Error("Babel transform failed");
   }
-  if (pendingPromises.has(filePath)) {
-    await pendingPromises.get(filePath);
-    pendingPromises.delete(filePath);
-  }
   return transformed.code;
 }
-var addGCCExportsFromESM = (filePath, options) => ({
-  name: "add-gcc-exports-from-esm",
-  visitor: {
-    Program: {
-      exit(programPath) {
-        const promises = [];
-        const { defaultExportIdentifier, gccIdentifier } = options;
-        const existingImports = new Map;
-        const existingExports = new Set;
+var GCC = "GCC";
+var DEFAULT_EXPORT_IDENTIFIER = "__DEFAULT_EXPORT__";
+var addGCCExportsFromESM = (filePath) => {
+  return {
+    visitor: {
+      Program(programPath) {
         const globalIdentifiers = new Set;
-        let defaultExportId = null;
+        const existingImports = new Map;
         programPath.traverse({
+          ExportDefaultDeclaration(exportPath) {
+            const { node } = exportPath;
+            const name = DEFAULT_EXPORT_IDENTIFIER;
+            if (import_core2.types.isIdentifier(node.declaration) && node.declaration.name === DEFAULT_EXPORT_IDENTIFIER) {
+              return;
+            }
+            if (import_core2.types.isTSDeclareFunction(node.declaration)) {
+              return;
+            }
+            const id = import_core2.types.identifier(name);
+            const declaration = node.declaration;
+            if (import_core2.types.isFunctionDeclaration(declaration) || import_core2.types.isClassDeclaration(declaration)) {
+              const expr = import_core2.types.toExpression(declaration);
+              const variableDeclaration = import_core2.types.variableDeclaration("const", [
+                import_core2.types.variableDeclarator(id, expr)
+              ]);
+              globalIdentifiers.add(name);
+              exportPath.replaceWithMultiple([
+                variableDeclaration,
+                import_core2.types.exportDefaultDeclaration(id)
+              ]);
+            } else {
+              const variableDeclaration = import_core2.types.variableDeclaration("const", [
+                import_core2.types.variableDeclarator(id, declaration)
+              ]);
+              globalIdentifiers.add(name);
+              exportPath.replaceWithMultiple([
+                variableDeclaration,
+                import_core2.types.exportDefaultDeclaration(id)
+              ]);
+            }
+          },
           ExportNamedDeclaration(exportPath) {
             const { node } = exportPath;
-            if (node.source) {
-              const source = node.source.value;
-              const specifiers = node.specifiers;
-              const importedNames = existingImports.get(source) || new Set;
-              const importSpecifiers = specifiers.map((specifier) => {
-                if (import_core2.types.isExportSpecifier(specifier)) {
-                  const localName = getImportedName(specifier.local);
-                  importedNames.add(localName);
-                  return import_core2.types.importSpecifier(import_core2.types.identifier(localName), import_core2.types.identifier(localName));
-                }
-                throw new Error("Unsupported export specifier type");
-              });
-              const importDecl = import_core2.types.importDeclaration(importSpecifiers, import_core2.types.stringLiteral(source));
-              exportPath.insertBefore(importDecl);
-              existingImports.set(source, importedNames);
-              specifiers.forEach((specifier) => {
-                if (import_core2.types.isExportSpecifier(specifier)) {
-                  const exportedName = getExportedName(specifier.exported);
-                  existingExports.add(exportedName);
-                  globalIdentifiers.add(exportedName);
-                }
-              });
-            } else if (node.specifiers.length > 0) {
+            if (node.specifiers.length > 0) {
               node.specifiers.forEach((specifier) => {
-                if (import_core2.types.isExportSpecifier(specifier)) {
-                  const exportedName = getExportedName(specifier.exported);
-                  existingExports.add(exportedName);
-                  globalIdentifiers.add(exportedName);
+                if (import_core2.types.isExportSpecifier(specifier) && import_core2.types.isIdentifier(specifier.exported)) {
+                  globalIdentifiers.add(specifier.exported.name);
                 }
               });
             } else if (node.declaration) {
-              const declarationIds = getDeclarationIdentifiers(node.declaration);
-              declarationIds.forEach((id) => {
-                existingExports.add(id);
-                globalIdentifiers.add(id);
-              });
+              const declaration = node.declaration;
+              if (import_core2.types.isVariableDeclaration(declaration)) {
+                declaration.declarations.forEach((decl) => {
+                  if (import_core2.types.isIdentifier(decl.id)) {
+                    globalIdentifiers.add(decl.id.name);
+                  }
+                });
+              } else if (import_core2.types.isFunctionDeclaration(declaration) || import_core2.types.isClassDeclaration(declaration)) {
+                if (import_core2.types.isIdentifier(declaration.id)) {
+                  globalIdentifiers.add(declaration.id.name);
+                }
+              }
             }
           },
           ImportDeclaration(importPath) {
             const source = importPath.node.source.value;
             const specifiers = importPath.node.specifiers;
-            const importedNames = existingImports.get(source) || new Set;
+            if (!existingImports.has(source)) {
+              existingImports.set(source, new Set);
+            }
             specifiers.forEach((specifier) => {
-              if (import_core2.types.isImportSpecifier(specifier)) {
-                const importedName = getImportedName(specifier.imported);
-                importedNames.add(importedName);
+              if (import_core2.types.isImportSpecifier(specifier) && import_core2.types.isIdentifier(specifier.imported)) {
+                existingImports.get(source).add(specifier.imported.name);
               }
             });
-            existingImports.set(source, importedNames);
           }
         });
-        programPath.traverse({
-          ExportDefaultDeclaration(exportPath) {
-            const defaultExportNode = exportPath.node;
-            defaultExportId = handleDefaultExport(programPath, defaultExportNode, defaultExportIdentifier);
-            exportPath.remove();
+        const resolveModulePath = (source) => {
+          if (modulePathCache.has(source)) {
+            return modulePathCache.get(source);
           }
-        });
-        const exportAllPromises = [];
+          const extensions = [".ts", ".tsx", ".js", ".jsx"];
+          for (const ext of extensions) {
+            const resolvedPath = import_path2.default.resolve(import_path2.default.dirname(filePath), `${source}${ext}`);
+            if (import_fs.existsSync(resolvedPath)) {
+              modulePathCache.set(source, resolvedPath);
+              return resolvedPath;
+            }
+          }
+          throw new Error(`Module not found: ${source}`);
+        };
         programPath.traverse({
           ExportAllDeclaration(exportAllPath) {
-            const promise = (async () => {
-              const source = exportAllPath.node.source.value;
-              try {
-                const modulePath = await resolveModulePath(source, filePath);
-                const collectedExports = await collectExportsFromModule(modulePath);
-                const newImports = collectedExports.filter((name) => !existingImports.get(source)?.has(name));
-                if (newImports.length > 0) {
-                  const importDeclaration = import_core2.types.importDeclaration(newImports.map((name) => import_core2.types.importSpecifier(import_core2.types.identifier(name), import_core2.types.identifier(name))), import_core2.types.stringLiteral(source));
-                  exportAllPath.replaceWith(importDeclaration);
-                  const importedNames = existingImports.get(source) || new Set;
-                  newImports.forEach((name) => importedNames.add(name));
-                  existingImports.set(source, importedNames);
-                  collectedExports.forEach((name) => {
-                    globalIdentifiers.add(name);
-                    existingExports.add(name);
-                  });
+            const source = exportAllPath.node.source.value;
+            const modulePath = resolveModulePath(source);
+            const collectedExports = new Set;
+            const exportCollector = {
+              ExportAllDeclaration(nestedExportAllPath) {
+                const nestedSource = nestedExportAllPath.node.source.value;
+                const nestedModulePath = resolveModulePath(nestedSource);
+                let nestedCode;
+                if (fileContentCache.has(nestedModulePath)) {
+                  nestedCode = fileContentCache.get(nestedModulePath);
                 } else {
-                  exportAllPath.remove();
+                  nestedCode = import_fs.readFileSync(nestedModulePath, "utf-8");
+                  fileContentCache.set(nestedModulePath, nestedCode);
                 }
-              } catch (error) {
-                console.error(error instanceof Error ? error.message : "Unknown error during export collection.");
-                exportAllPath.remove();
+                let nestedAST;
+                if (parsedASTCache.has(nestedModulePath)) {
+                  nestedAST = parsedASTCache.get(nestedModulePath);
+                } else {
+                  nestedAST = import_core2.parse(nestedCode, {
+                    plugins: ["typescript"],
+                    sourceType: "module"
+                  });
+                  parsedASTCache.set(nestedModulePath, nestedAST);
+                }
+                import_traverse.default(nestedAST, exportCollector);
+              },
+              ExportNamedDeclaration(namedExportPath) {
+                const { node } = namedExportPath;
+                if (node.specifiers.length > 0) {
+                  node.specifiers.forEach((specifier) => {
+                    if (import_core2.types.isExportSpecifier(specifier) && import_core2.types.isIdentifier(specifier.exported)) {
+                      collectedExports.add(specifier.exported.name);
+                    }
+                  });
+                } else if (node.declaration) {
+                  const declaration = node.declaration;
+                  if (import_core2.types.isVariableDeclaration(declaration)) {
+                    declaration.declarations.forEach((decl) => {
+                      if (import_core2.types.isIdentifier(decl.id)) {
+                        collectedExports.add(decl.id.name);
+                      }
+                    });
+                  } else if (import_core2.types.isFunctionDeclaration(declaration) || import_core2.types.isClassDeclaration(declaration)) {
+                    if (import_core2.types.isIdentifier(declaration.id)) {
+                      collectedExports.add(declaration.id.name);
+                    }
+                  }
+                }
               }
-            })();
-            promises.push(promise);
+            };
+            try {
+              const moduleCode = import_fs.readFileSync(modulePath, "utf-8");
+              const ast = import_core2.parse(moduleCode, {
+                plugins: [import_plugin_syntax_typescript.default]
+              });
+              import_traverse.default(ast, exportCollector);
+            } catch (error) {
+              throw new Error(`Failed to process module ${modulePath}: ${error.message}`);
+            }
+            const identifiersToImport = Array.from(collectedExports).filter((name) => {
+              return !existingImports.get(source)?.has(name);
+            });
+            if (identifiersToImport.length > 0) {
+              exportAllPath.replaceWithMultiple([
+                import_core2.types.importDeclaration(identifiersToImport.map((name) => import_core2.types.importSpecifier(import_core2.types.identifier(name), import_core2.types.identifier(name))), import_core2.types.stringLiteral(source))
+              ]);
+              if (!existingImports.has(source)) {
+                existingImports.set(source, new Set);
+              }
+              identifiersToImport.forEach((name) => existingImports.get(source).add(name));
+            } else {
+              exportAllPath.remove();
+            }
+            collectedExports.forEach((name) => globalIdentifiers.add(name));
+          },
+          ExportNamedDeclaration(exportPath) {
+            const { node } = exportPath;
+            if (node.specifiers.length > 0) {
+              node.specifiers.forEach((specifier) => {
+                if (import_core2.types.isExportSpecifier(specifier) && import_core2.types.isIdentifier(specifier.exported)) {
+                  globalIdentifiers.add(specifier.exported.name);
+                }
+              });
+            } else if (node.declaration) {
+              const declaration = node.declaration;
+              if (import_core2.types.isVariableDeclaration(declaration)) {
+                declaration.declarations.forEach((decl) => {
+                  if (import_core2.types.isIdentifier(decl.id)) {
+                    globalIdentifiers.add(decl.id.name);
+                  }
+                });
+              } else if (import_core2.types.isFunctionDeclaration(declaration) || import_core2.types.isClassDeclaration(declaration)) {
+                if (import_core2.types.isIdentifier(declaration.id)) {
+                  globalIdentifiers.add(declaration.id.name);
+                }
+              }
+            }
           }
         });
-        Promise.all(promises).then(() => {
-          options.onComplete();
-        }).catch((error) => {
-          console.error("Error in async operations:", error);
-          options.onComplete();
-        });
-        if (globalIdentifiers.size > 0 || defaultExportId) {
-          addGCCDeclarations(programPath, Array.from(globalIdentifiers), defaultExportId, gccIdentifier);
-          addGCCAssignments(programPath, Array.from(globalIdentifiers), defaultExportId, gccIdentifier);
-          addMissingExports(programPath, Array.from(globalIdentifiers), existingExports);
+        const identifiersToAssign = Array.from(globalIdentifiers);
+        if (identifiersToAssign.length > 0) {
+          const gccIdentifier = import_core2.types.identifier(GCC);
+          gccIdentifier.typeAnnotation = import_core2.types.tsTypeAnnotation(import_core2.types.tsTypeLiteral(identifiersToAssign.map((name) => import_core2.types.tsPropertySignature(import_core2.types.identifier(name), import_core2.types.tsTypeAnnotation(import_core2.types.tsTypeQuery(import_core2.types.identifier(name)))))));
+          const globalDeclaration = import_core2.types.tsModuleDeclaration(import_core2.types.identifier("globalThis"), import_core2.types.tsModuleBlock([
+            import_core2.types.variableDeclaration("var", [
+              import_core2.types.variableDeclarator(gccIdentifier)
+            ])
+          ]));
+          globalDeclaration.declare = true;
+          programPath.unshiftContainer("body", globalDeclaration);
+          const gccAssignments = identifiersToAssign.map((name) => import_core2.types.expressionStatement(import_core2.types.assignmentExpression("=", import_core2.types.memberExpression(import_core2.types.memberExpression(import_core2.types.identifier("globalThis"), import_core2.types.identifier(GCC)), import_core2.types.identifier(name)), import_core2.types.identifier(name))));
+          programPath.pushContainer("body", gccAssignments);
         }
       }
     }
-  }
-});
-function getDeclarationIdentifiers(declaration) {
-  const identifiers = [];
-  if (import_core2.types.isVariableDeclaration(declaration)) {
-    declaration.declarations.forEach((decl) => {
-      if (import_core2.types.isIdentifier(decl.id)) {
-        identifiers.push(decl.id.name);
-      }
-    });
-  } else if (import_core2.types.isFunctionDeclaration(declaration) || import_core2.types.isClassDeclaration(declaration)) {
-    if (declaration.id) {
-      identifiers.push(declaration.id.name);
-    }
-  }
-  return identifiers;
-}
-async function resolveModulePath(source, filePath) {
-  const extensions = [".ts", ".tsx", ".js", ".jsx"];
-  const resolveAttempts = extensions.map(async (ext) => {
-    const resolvedPath2 = import_path2.default.resolve(import_path2.default.dirname(filePath), source + ext);
-    return await import_fs.default.promises.access(resolvedPath2).then(() => true).catch(() => false) ? resolvedPath2 : null;
-  });
-  const results = await Promise.all(resolveAttempts);
-  const resolvedPath = results.find((path3) => path3 !== null);
-  if (!resolvedPath) {
-    throw new Error(`Module not found: ${source} from ${filePath}`);
-  }
-  return resolvedPath;
-}
-async function collectExportsFromModule(modulePath) {
-  if (exportCache.has(modulePath)) {
-    return Array.from(exportCache.get(modulePath));
-  }
-  if (processingModules.has(modulePath)) {
-    throw new Error(`Circular dependency detected: ${modulePath}`);
-  }
-  processingModules.add(modulePath);
-  const code = await import_fs.default.promises.readFile(modulePath, "utf-8");
-  const ast = parseCode(code, modulePath);
-  const exports2 = new Set;
-  const traversalPromises = [];
-  import_core2.traverse(ast, {
-    ExportAllDeclaration(exportAllPath) {
-      const nestedSource = exportAllPath.node.source.value;
-      traversalPromises.push((async () => {
-        try {
-          const nestedModulePath = await resolveModulePath(nestedSource, modulePath);
-          const nestedExports = await collectExportsFromModule(nestedModulePath);
-          nestedExports.forEach((name) => exports2.add(name));
-        } catch (error) {
-          console.error(error instanceof Error ? error.message : "Unknown error during nested export collection.");
-        }
-      })());
-    },
-    ExportNamedDeclaration(exportPath) {
-      const { node } = exportPath;
-      if (node.specifiers.length > 0) {
-        node.specifiers.forEach((specifier) => {
-          if (import_core2.types.isExportSpecifier(specifier)) {
-            const exportedName = getExportedName(specifier.exported);
-            exports2.add(exportedName);
-          }
-        });
-      } else if (node.declaration) {
-        const ids = getDeclarationIdentifiers(node.declaration);
-        ids.forEach((id) => exports2.add(id));
-      }
-    }
-  });
-  await Promise.all(traversalPromises);
-  processingModules.delete(modulePath);
-  exportCache.set(modulePath, exports2);
-  return Array.from(exports2);
-}
-function parseCode(code, filePath) {
-  return import_core2.parse(code, {
-    plugins: [import_plugin_syntax_typescript.default],
-    sourceFileName: filePath
-  });
-}
-function handleDefaultExport(programPath, defaultExportNode, defaultExportIdentifier) {
-  let defaultIdentifierName = defaultExportIdentifier;
-  if (import_core2.types.isFunctionDeclaration(defaultExportNode.declaration)) {
-    if (defaultExportNode.declaration.id) {
-      defaultIdentifierName = defaultExportNode.declaration.id.name;
-      programPath.unshiftContainer("body", defaultExportNode.declaration);
-    } else {
-      const funcExpr = import_core2.types.functionExpression(null, defaultExportNode.declaration.params, defaultExportNode.declaration.body, defaultExportNode.declaration.generator, defaultExportNode.declaration.async);
-      const defaultVariableDeclaration = import_core2.types.variableDeclaration("const", [
-        import_core2.types.variableDeclarator(import_core2.types.identifier(defaultExportIdentifier), funcExpr)
-      ]);
-      programPath.pushContainer("body", defaultVariableDeclaration);
-    }
-  } else if (import_core2.types.isClassDeclaration(defaultExportNode.declaration)) {
-    if (defaultExportNode.declaration.id) {
-      defaultIdentifierName = defaultExportNode.declaration.id.name;
-      programPath.unshiftContainer("body", defaultExportNode.declaration);
-    } else {
-      const classExpr = import_core2.types.classExpression(null, defaultExportNode.declaration.superClass, defaultExportNode.declaration.body, defaultExportNode.declaration.decorators || []);
-      const defaultVariableDeclaration = import_core2.types.variableDeclaration("const", [
-        import_core2.types.variableDeclarator(import_core2.types.identifier(defaultExportIdentifier), classExpr)
-      ]);
-      programPath.pushContainer("body", defaultVariableDeclaration);
-    }
-  } else if (import_core2.types.isTSDeclareFunction(defaultExportNode.declaration)) {
-    throw new Error("Unsupported default export: TSDeclareFunction");
-  } else if (import_core2.types.isExpression(defaultExportNode.declaration)) {
-    const defaultVariableDeclaration = import_core2.types.variableDeclaration("const", [
-      import_core2.types.variableDeclarator(import_core2.types.identifier(defaultExportIdentifier), defaultExportNode.declaration)
-    ]);
-    programPath.pushContainer("body", defaultVariableDeclaration);
-  } else {
-    throw new Error("Unsupported default export type");
-  }
-  return defaultIdentifierName;
-}
-function addGCCDeclarations(programPath, identifiers, defaultExportIdentifier, gccIdentifier) {
-  const properties = identifiers.map((name) => import_core2.types.tsPropertySignature(import_core2.types.identifier(name), import_core2.types.tsTypeAnnotation(import_core2.types.tsTypeQuery(import_core2.types.identifier(name)))));
-  if (defaultExportIdentifier) {
-    properties.push(import_core2.types.tsPropertySignature(import_core2.types.identifier(defaultExportIdentifier), import_core2.types.tsTypeAnnotation(import_core2.types.tsTypeQuery(import_core2.types.identifier(defaultExportIdentifier)))));
-  }
-  const gccId = import_core2.types.identifier(gccIdentifier);
-  gccId.typeAnnotation = import_core2.types.tsTypeAnnotation(import_core2.types.tsTypeLiteral(properties));
-  const globalDeclaration = import_core2.types.tsModuleDeclaration(import_core2.types.identifier("globalThis"), import_core2.types.tsModuleBlock([
-    import_core2.types.variableDeclaration("var", [import_core2.types.variableDeclarator(gccId)])
-  ]));
-  globalDeclaration.declare = true;
-  let lastVarIndex = -1;
-  for (let i = programPath.node.body.length - 1;i >= 0; i--) {
-    const node = programPath.node.body[i];
-    if (import_core2.types.isVariableDeclaration(node)) {
-      lastVarIndex = i;
-      break;
-    }
-  }
-  if (lastVarIndex !== -1) {
-    programPath.node.body.splice(lastVarIndex + 1, 0, globalDeclaration);
-  } else {
-    programPath.pushContainer("body", globalDeclaration);
-  }
-}
-function addGCCAssignments(programPath, identifiers, defaultExportIdentifier, gccIdentifier) {
-  const assignments = identifiers.map((name) => import_core2.types.expressionStatement(import_core2.types.assignmentExpression("=", import_core2.types.memberExpression(import_core2.types.memberExpression(import_core2.types.identifier("globalThis"), import_core2.types.identifier(gccIdentifier)), import_core2.types.identifier(name)), import_core2.types.identifier(name))));
-  if (defaultExportIdentifier) {
-    const defaultAssignment = import_core2.types.expressionStatement(import_core2.types.assignmentExpression("=", import_core2.types.memberExpression(import_core2.types.memberExpression(import_core2.types.identifier("globalThis"), import_core2.types.identifier(gccIdentifier)), import_core2.types.identifier(defaultExportIdentifier)), import_core2.types.identifier(defaultExportIdentifier)));
-    assignments.push(defaultAssignment);
-  }
-  programPath.pushContainer("body", assignments);
-}
-function addMissingExports(programPath, identifiers, existingExports) {
-  const exportsToAdd = identifiers.filter((name) => !existingExports.has(name));
-  if (exportsToAdd.length > 0) {
-    const exportSpecifiers = exportsToAdd.map((name) => import_core2.types.exportSpecifier(import_core2.types.identifier(name), import_core2.types.identifier(name)));
-    const exportNamedDeclaration = import_core2.types.exportNamedDeclaration(null, exportSpecifiers);
-    programPath.pushContainer("body", exportNamedDeclaration);
-  }
-}
-function getExportedName(exported) {
-  if (import_core2.types.isIdentifier(exported)) {
-    return exported.name;
-  } else if (import_core2.types.isStringLiteral(exported)) {
-    return exported.value;
-  }
-  throw new Error("Unsupported exported node type");
-}
-function getImportedName(imported) {
-  if (import_core2.types.isIdentifier(imported)) {
-    return imported.name;
-  } else if (import_core2.types.isStringLiteral(imported)) {
-    return imported.value;
-  }
-  throw new Error("Unsupported imported node type");
-}
+  };
+};
 
 // src/compiler/tsickleCompiler.ts
 var import_path4 = __toESM(require("path"));
