@@ -4,23 +4,35 @@ import ts from "typescript";
 import { Settings } from "../settings";
 import * as tsickle from "../tsickle";
 import { getCommonParentDirectory } from "../utils/fileUtils";
-
 const modulePrefix = "_gcc_";
-
-export function toClosureJS(
+export async function toClosureJS(
   options: ts.CompilerOptions,
   fileNames: string[],
   settings: Settings,
   writeFile: ts.WriteFileCallback,
-): tsickle.EmitResult {
+): Promise<tsickle.EmitResult> {
   const absoluteFileNames = fileNames.map((fileName) => path.resolve(fileName));
   const compilerHost = ts.createCompilerHost(options);
   const program = ts.createProgram(absoluteFileNames, options, compilerHost);
-
   const rootModulePath =
     options.rootDir || getCommonParentDirectory(absoluteFileNames);
   const filesToProcess = new Set(absoluteFileNames);
-
+  const writePromises: Promise<void>[] = [];
+  const asyncWriteFile: ts.WriteFileCallback = (
+    fileName: string,
+    content: string,
+    writeByteOrderMark: boolean,
+  ) => {
+    const writePromise = new Promise<void>((resolve, reject) => {
+      try {
+        writeFile(fileName, content, writeByteOrderMark);
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
+    });
+    writePromises.push(writePromise);
+  };
   const transformerHost: tsickle.TsickleHost = {
     addDtsClutzAliases: true,
     fileNameToModuleId: (fileName) =>
@@ -58,9 +70,7 @@ export function toClosureJS(
     untyped: false,
     useDeclarationMergingTransformation: true,
   };
-
   const diagnostics = ts.getPreEmitDiagnostics(program);
-
   if (diagnostics.length > 0) {
     return {
       diagnostics,
@@ -72,6 +82,13 @@ export function toClosureJS(
       tsMigrationExportsShimFiles: new Map(),
     };
   }
-
-  return tsickle.emit(program, transformerHost, writeFile);
+  return new Promise(async (resolve, reject) => {
+    try {
+      const result = tsickle.emit(program, transformerHost, asyncWriteFile);
+      await Promise.all(writePromises);
+      resolve(result);
+    } catch (error) {
+      reject(error);
+    }
+  });
 }

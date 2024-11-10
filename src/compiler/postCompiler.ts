@@ -17,6 +17,7 @@ export async function customTransform(code: string): Promise<string> {
   }
   const minified = minify(transformed.code, {
     compress: {
+      hoist_vars: true,
       passes: 3,
       pure_getters: true,
       toplevel: true,

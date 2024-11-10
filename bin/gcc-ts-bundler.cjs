@@ -46,96 +46,14 @@ __export(exports_src, {
   main: () => main
 });
 module.exports = __toCommonJS(exports_src);
-var import_fs6 = __toESM(require("fs"));
+var import_fs5 = __toESM(require("fs"));
 var import_path8 = __toESM(require("path"));
 var import_typescript3 = __toESM(require("typescript"));
 
 // src/compiler/closureCompiler.ts
-var import_fs3 = __toESM(require("fs"));
+var import_promises = __toESM(require("fs/promises"));
 var import_google_closure_compiler = require("google-closure-compiler");
-var import_path3 = __toESM(require("path"));
-
-// src/utils/fileOperations.ts
-var import_fs2 = __toESM(require("fs"));
-var import_path2 = __toESM(require("path"));
-
-// src/utils/fileUtils.ts
-var import_fs = __toESM(require("fs"));
 var import_path = __toESM(require("path"));
-function usage() {
-  console.error(`Usage: gcc-ts-compiler [gcc-ts-compiler options]
-
-Example:
-  gcc-ts-bundler --src_dir='./src' --entry_point='./index.ts' --output_dir='./dist' --language_out=ECMASCRIPT_NEXT
-
-gcc-ts-compiler flags are:
-  --fatal_warnings       Whether warnings should be fatal, causing tsickle to return a non-zero exit code
-  --verbose             Print diagnostics to the console
-  --language_out        ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT
-  --entry_point         The entry point for the application
-  --output_dir          The output directory
-  --compilation_level   WHITESPACE_ONLY | SIMPLE | ADVANCED
-  --src_dir             The source directory
-  -h, --help            Show this help message
-`);
-}
-function getCommonParentDirectory(fileNames) {
-  if (fileNames.length === 0)
-    return "/";
-  const commonPath = fileNames.map((fileName) => fileName.split(import_path.default.sep)).reduce((commonParts, pathParts) => {
-    const minLength = Math.min(commonParts.length, pathParts.length);
-    const newCommonParts = [];
-    for (let i = 0;i < minLength; i++) {
-      if (commonParts[i] !== pathParts[i])
-        break;
-      newCommonParts.push(commonParts[i]);
-    }
-    return newCommonParts;
-  });
-  return commonPath.length > 0 ? commonPath.join(import_path.default.sep) : "/";
-}
-function ensureDirectoryExistence(filePath) {
-  const dirName = import_path.default.dirname(filePath);
-  if (import_fs.default.existsSync(dirName))
-    return;
-  import_fs.default.mkdirSync(dirName, { recursive: true });
-}
-
-// src/utils/fileOperations.ts
-function copyDirectoryRecursive(src, dest) {
-  if (!import_fs2.default.existsSync(dest)) {
-    import_fs2.default.mkdirSync(dest, { recursive: true });
-  }
-  const entries = import_fs2.default.readdirSync(src, { withFileTypes: true });
-  for (const entry of entries) {
-    const srcPath = import_path2.default.join(src, entry.name);
-    const destPath = import_path2.default.join(dest, entry.name);
-    if (entry.isDirectory()) {
-      copyDirectoryRecursive(srcPath, destPath);
-    } else {
-      import_fs2.default.copyFileSync(srcPath, destPath);
-    }
-  }
-}
-function cleanDirectory(dir) {
-  if (!import_fs2.default.existsSync(dir)) {
-    return;
-  }
-  const entries = import_fs2.default.readdirSync(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = import_path2.default.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      cleanDirectory(fullPath);
-      import_fs2.default.rmdirSync(fullPath);
-    } else {
-      import_fs2.default.unlinkSync(fullPath);
-    }
-  }
-}
-function writeFileContent(filePath, contents) {
-  ensureDirectoryExistence(filePath);
-  import_fs2.default.writeFileSync(filePath, contents, "utf-8");
-}
 
 // src/compiler/postCompiler.ts
 var import_core = require("@babel/core");
@@ -156,6 +74,7 @@ async function customTransform(code) {
   }
   const minified = import_uglify_js.minify(transformed.code, {
     compress: {
+      hoist_vars: true,
       passes: 3,
       pure_getters: true,
       toplevel: true,
@@ -182,11 +101,11 @@ var convertGCCExportsToESM = (options) => {
   return {
     name: "convert-gcc-exports-to-esm",
     visitor: {
-      Program(path3) {
+      Program(path) {
         const exportsMap = new Map;
         const processedExports = new Set;
         const existingExportNames = new Set;
-        path3.node.body.forEach((node) => {
+        path.node.body.forEach((node) => {
           if (import_core.types.isExportNamedDeclaration(node)) {
             node.specifiers.forEach((specifier) => {
               if (import_core.types.isExportSpecifier(specifier)) {
@@ -196,7 +115,7 @@ var convertGCCExportsToESM = (options) => {
             });
           }
         });
-        path3.traverse({
+        path.traverse({
           AssignmentExpression(assignPath) {
             const left = assignPath.node.left;
             if (import_core.types.isMemberExpression(left) && import_core.types.isMemberExpression(left.object) && import_core.types.isIdentifier(left.object.object, { name: "globalThis" }) && import_core.types.isIdentifier(left.object.property, { name: gccId }) && (import_core.types.isIdentifier(left.property) || import_core.types.isStringLiteral(left.property))) {
@@ -208,7 +127,7 @@ var convertGCCExportsToESM = (options) => {
                 return;
               }
               processedExports.add(exportName);
-              const variableName = exportName === defaultExportId ? "defaultExport" : path3.scope.generateUidIdentifier(exportName).name;
+              const variableName = exportName === defaultExportId ? "defaultExport" : path.scope.generateUidIdentifier(exportName).name;
               exportsMap.set(exportName, variableName);
               const variableDeclaration = import_core.types.variableDeclaration("const", [
                 import_core.types.variableDeclarator(import_core.types.identifier(variableName), assignPath.node.right)
@@ -230,17 +149,17 @@ var convertGCCExportsToESM = (options) => {
           }
         });
         if (defaultExportName) {
-          const hasDefaultExport = path3.node.body.some((node) => import_core.types.isExportDefaultDeclaration(node));
+          const hasDefaultExport = path.node.body.some((node) => import_core.types.isExportDefaultDeclaration(node));
           if (!hasDefaultExport) {
             const exportDefault = import_core.types.exportDefaultDeclaration(import_core.types.identifier(defaultExportName));
-            path3.pushContainer("body", exportDefault);
+            path.pushContainer("body", exportDefault);
           }
         }
         if (namedExportSpecifiers.length > 0) {
           const exportNamedDeclaration = import_core.types.exportNamedDeclaration(null, namedExportSpecifiers);
-          path3.pushContainer("body", exportNamedDeclaration);
+          path.pushContainer("body", exportNamedDeclaration);
         }
-        path3.node.body = path3.node.body.filter((node) => {
+        path.node.body = path.node.body.filter((node) => {
           if (import_core.types.isExpressionStatement(node) && import_core.types.isAssignmentExpression(node.expression) && import_core.types.isMemberExpression(node.expression.left) && import_core.types.isMemberExpression(node.expression.left.object) && import_core.types.isIdentifier(node.expression.left.object.object, {
             name: "globalThis"
           }) && import_core.types.isIdentifier(node.expression.left.object.property, {
@@ -256,6 +175,32 @@ var convertGCCExportsToESM = (options) => {
 };
 
 // src/compiler/closureCompiler.ts
+var GCC_ENTRY = "globalThis.GCC";
+function unlockGCCAssignments(code) {
+  return code.replace(new RegExp(`//${GCC_ENTRY}.([\\w]+)\\s*=\\s*([^;]+);`, "g"), `${GCC_ENTRY}.\$1 = \$2;`);
+}
+function lockGCCAssignments(code) {
+  return code.replace(new RegExp(`${GCC_ENTRY}.([\\w]+)\\s*=\\s*([^;]+);`, "g"), `//${GCC_ENTRY}.\$1 = \$2;`);
+}
+async function prepareEntryPoints(entryPoints) {
+  const reads = entryPoints.map(async (path2) => ({
+    isLocked: false,
+    originalContent: await import_promises.default.readFile(path2, "utf-8"),
+    path: path2
+  }));
+  return Promise.all(reads);
+}
+async function updateEntryPointStates(states, currentPath) {
+  const writes = states.filter((state) => {
+    const shouldBeLocked = state.path !== currentPath;
+    return shouldBeLocked !== state.isLocked;
+  }).map(async (state) => {
+    const content = state.path === currentPath ? unlockGCCAssignments(state.originalContent) : lockGCCAssignments(state.originalContent);
+    await import_promises.default.writeFile(state.path, content);
+    state.isLocked = state.path !== currentPath;
+  });
+  await Promise.all(writes);
+}
 async function runClosureCompiler(settings) {
   const options = {
     assumeFunctionWrapper: true,
@@ -266,34 +211,51 @@ async function runClosureCompiler(settings) {
     languageOut: settings.languageOut,
     warningLevel: settings.verbose ? "VERBOSE" : "DEFAULT"
   };
+  let entryPointStates = [];
   try {
-    await Promise.all(settings.entryPoints.map((entryPoint) => new Promise((resolve, reject) => {
-      const baseName = import_path3.default.basename(entryPoint);
-      const outputPath = import_path3.default.join(settings.outputDir, baseName);
-      new import_google_closure_compiler.compiler({
-        ...options,
-        entryPoint,
-        jsOutputFile: outputPath
-      }).run(async (exitCode, stdOut, stdErr) => {
-        if (exitCode === 0) {
-          console.log(`Compilation of ${baseName} successful.`);
-          if (stdOut) {
-            console.log(stdOut);
-          }
-          writeFileContent(outputPath, await customTransform(import_fs3.default.readFileSync(outputPath, "utf-8")));
-          resolve(exitCode);
-        } else {
-          console.error(`Compilation of ${baseName} failed.`);
-          if (stdErr) {
-            console.error(stdErr);
-          }
-          reject(new Error(`Compilation failed for ${baseName}`));
-        }
-      });
-    })));
+    entryPointStates = await prepareEntryPoints(settings.entryPoints);
+    for (const entryPoint of settings.entryPoints) {
+      const baseName = import_path.default.basename(entryPoint);
+      const outputPath = import_path.default.join(settings.outputDir, baseName);
+      try {
+        await updateEntryPointStates(entryPointStates, entryPoint);
+        await new Promise((resolve, reject) => {
+          new import_google_closure_compiler.compiler({
+            ...options,
+            entryPoint,
+            jsOutputFile: outputPath
+          }).run(async (exitCode, stdOut, stdErr) => {
+            if (exitCode === 0) {
+              console.log(`Compilation of ${baseName} successful.`);
+              if (stdOut)
+                console.log(stdOut);
+              const compiledCode = await import_promises.default.readFile(outputPath, "utf-8");
+              const transformedCode = await customTransform(compiledCode);
+              const lockedCode = lockGCCAssignments(transformedCode);
+              await import_promises.default.writeFile(outputPath, lockedCode);
+              resolve();
+            } else {
+              console.error(`Compilation of ${baseName} failed.`);
+              if (stdErr)
+                console.error(stdErr);
+              reject(new Error(`Compilation failed for ${baseName}`));
+            }
+          });
+        });
+      } catch (error) {
+        throw error;
+      }
+    }
+    const finalRestores = entryPointStates.filter((state) => state.isLocked).map((state) => import_promises.default.writeFile(state.path, state.originalContent));
+    await Promise.all(finalRestores);
     return 0;
   } catch (error) {
     console.error("Compilation process encountered an error:", error);
+    try {
+      await Promise.all(entryPointStates.map((state) => import_promises.default.writeFile(state.path, state.originalContent)));
+    } catch (restoreError) {
+      console.error("Failed to restore files:", restoreError);
+    }
     return 1;
   }
 }
@@ -301,17 +263,22 @@ async function runClosureCompiler(settings) {
 // src/compiler/preCompiler.ts
 var import_core2 = require("@babel/core");
 var import_plugin_syntax_typescript = __toESM(require("@babel/plugin-syntax-typescript"));
-var import_fs4 = require("fs");
-var import_path4 = __toESM(require("path"));
+var import_fs = __toESM(require("fs"));
+var import_path2 = __toESM(require("path"));
 var exportCache = new Map;
 var processingModules = new Set;
+var pendingPromises = new Map;
 async function customTransform2(code, filePath, isEntryPoint) {
   const plugins = [import_plugin_syntax_typescript.default];
   if (isEntryPoint) {
-    plugins.push(addGCCExportsFromESM(filePath, {
-      defaultExportIdentifier: "__DEFAULT_EXPORT__",
-      gccIdentifier: "GCC"
-    }));
+    const filePromise = new Promise((resolve) => {
+      plugins.push(addGCCExportsFromESM(filePath, {
+        defaultExportIdentifier: "__DEFAULT_EXPORT__",
+        gccIdentifier: "GCC",
+        onComplete: resolve
+      }));
+    });
+    pendingPromises.set(filePath, filePromise);
   }
   const transformed = await import_core2.transformAsync(code, {
     babelrc: false,
@@ -321,95 +288,125 @@ async function customTransform2(code, filePath, isEntryPoint) {
   if (!transformed?.code) {
     throw new Error("Babel transform failed");
   }
+  if (pendingPromises.has(filePath)) {
+    await pendingPromises.get(filePath);
+    pendingPromises.delete(filePath);
+  }
   return transformed.code;
 }
 var addGCCExportsFromESM = (filePath, options) => ({
   name: "add-gcc-exports-from-esm",
   visitor: {
-    Program(programPath) {
-      const { defaultExportIdentifier, gccIdentifier } = options;
-      const existingImports = new Map;
-      const existingExports = new Set;
-      const globalIdentifiers = new Set;
-      let defaultExportId = null;
-      programPath.traverse({
-        ExportNamedDeclaration(exportPath) {
-          const { node } = exportPath;
-          if (node.specifiers.length > 0) {
-            node.specifiers.forEach((specifier) => {
-              if (import_core2.types.isExportSpecifier(specifier)) {
-                const exportedName = getExportedName(specifier.exported);
-                existingExports.add(exportedName);
-                globalIdentifiers.add(exportedName);
+    Program: {
+      exit(programPath) {
+        const promises = [];
+        const { defaultExportIdentifier, gccIdentifier } = options;
+        const existingImports = new Map;
+        const existingExports = new Set;
+        const globalIdentifiers = new Set;
+        let defaultExportId = null;
+        programPath.traverse({
+          ExportNamedDeclaration(exportPath) {
+            const { node } = exportPath;
+            if (node.source) {
+              const source = node.source.value;
+              const specifiers = node.specifiers;
+              const importedNames = existingImports.get(source) || new Set;
+              const importSpecifiers = specifiers.map((specifier) => {
+                if (import_core2.types.isExportSpecifier(specifier)) {
+                  const localName = getImportedName(specifier.local);
+                  importedNames.add(localName);
+                  return import_core2.types.importSpecifier(import_core2.types.identifier(localName), import_core2.types.identifier(localName));
+                }
+                throw new Error("Unsupported export specifier type");
+              });
+              const importDecl = import_core2.types.importDeclaration(importSpecifiers, import_core2.types.stringLiteral(source));
+              exportPath.insertBefore(importDecl);
+              existingImports.set(source, importedNames);
+              specifiers.forEach((specifier) => {
+                if (import_core2.types.isExportSpecifier(specifier)) {
+                  const exportedName = getExportedName(specifier.exported);
+                  existingExports.add(exportedName);
+                  globalIdentifiers.add(exportedName);
+                }
+              });
+            } else if (node.specifiers.length > 0) {
+              node.specifiers.forEach((specifier) => {
+                if (import_core2.types.isExportSpecifier(specifier)) {
+                  const exportedName = getExportedName(specifier.exported);
+                  existingExports.add(exportedName);
+                  globalIdentifiers.add(exportedName);
+                }
+              });
+            } else if (node.declaration) {
+              const declarationIds = getDeclarationIdentifiers(node.declaration);
+              declarationIds.forEach((id) => {
+                existingExports.add(id);
+                globalIdentifiers.add(id);
+              });
+            }
+          },
+          ImportDeclaration(importPath) {
+            const source = importPath.node.source.value;
+            const specifiers = importPath.node.specifiers;
+            const importedNames = existingImports.get(source) || new Set;
+            specifiers.forEach((specifier) => {
+              if (import_core2.types.isImportSpecifier(specifier)) {
+                const importedName = getImportedName(specifier.imported);
+                importedNames.add(importedName);
               }
             });
-          } else if (node.declaration) {
-            const declarationIds = getDeclarationIdentifiers(node.declaration);
-            declarationIds.forEach((id) => {
-              existingExports.add(id);
-              globalIdentifiers.add(id);
-            });
-          }
-        },
-        ImportDeclaration(importPath) {
-          const source = importPath.node.source.value;
-          const specifiers = importPath.node.specifiers;
-          const importedNames = existingImports.get(source) || new Set;
-          specifiers.forEach((specifier) => {
-            if (import_core2.types.isImportSpecifier(specifier)) {
-              const importedName = getImportedName(specifier.imported);
-              importedNames.add(importedName);
-            }
-          });
-          existingImports.set(source, importedNames);
-        }
-      });
-      programPath.traverse({
-        ExportDefaultDeclaration(exportPath) {
-          const defaultExportNode = exportPath.node;
-          defaultExportId = handleDefaultExport(programPath, defaultExportNode, defaultExportIdentifier);
-          exportPath.remove();
-        }
-      });
-      programPath.traverse({
-        ExportAllDeclaration(exportAllPath) {
-          const source = exportAllPath.node.source.value;
-          let modulePath;
-          try {
-            modulePath = resolveModulePath(source, filePath);
-          } catch (error) {
-            console.error(error instanceof Error ? error.message : "Unknown error during module resolution.");
-            exportAllPath.remove();
-            return;
-          }
-          let collectedExports;
-          try {
-            collectedExports = collectExportsFromModule(modulePath);
-          } catch (error) {
-            console.error(error instanceof Error ? error.message : "Unknown error during export collection.");
-            exportAllPath.remove();
-            return;
-          }
-          const newImports = collectedExports.filter((name) => !existingImports.get(source)?.has(name));
-          if (newImports.length > 0) {
-            const importDeclaration = import_core2.types.importDeclaration(newImports.map((name) => import_core2.types.importSpecifier(import_core2.types.identifier(name), import_core2.types.identifier(name))), import_core2.types.stringLiteral(source));
-            exportAllPath.replaceWith(importDeclaration);
-            const importedNames = existingImports.get(source) || new Set;
-            newImports.forEach((name) => importedNames.add(name));
             existingImports.set(source, importedNames);
-            collectedExports.forEach((name) => {
-              globalIdentifiers.add(name);
-              existingExports.add(name);
-            });
-          } else {
-            exportAllPath.remove();
           }
+        });
+        programPath.traverse({
+          ExportDefaultDeclaration(exportPath) {
+            const defaultExportNode = exportPath.node;
+            defaultExportId = handleDefaultExport(programPath, defaultExportNode, defaultExportIdentifier);
+            exportPath.remove();
+          }
+        });
+        const exportAllPromises = [];
+        programPath.traverse({
+          ExportAllDeclaration(exportAllPath) {
+            const promise = (async () => {
+              const source = exportAllPath.node.source.value;
+              try {
+                const modulePath = await resolveModulePath(source, filePath);
+                const collectedExports = await collectExportsFromModule(modulePath);
+                const newImports = collectedExports.filter((name) => !existingImports.get(source)?.has(name));
+                if (newImports.length > 0) {
+                  const importDeclaration = import_core2.types.importDeclaration(newImports.map((name) => import_core2.types.importSpecifier(import_core2.types.identifier(name), import_core2.types.identifier(name))), import_core2.types.stringLiteral(source));
+                  exportAllPath.replaceWith(importDeclaration);
+                  const importedNames = existingImports.get(source) || new Set;
+                  newImports.forEach((name) => importedNames.add(name));
+                  existingImports.set(source, importedNames);
+                  collectedExports.forEach((name) => {
+                    globalIdentifiers.add(name);
+                    existingExports.add(name);
+                  });
+                } else {
+                  exportAllPath.remove();
+                }
+              } catch (error) {
+                console.error(error instanceof Error ? error.message : "Unknown error during export collection.");
+                exportAllPath.remove();
+              }
+            })();
+            promises.push(promise);
+          }
+        });
+        Promise.all(promises).then(() => {
+          options.onComplete();
+        }).catch((error) => {
+          console.error("Error in async operations:", error);
+          options.onComplete();
+        });
+        if (globalIdentifiers.size > 0 || defaultExportId) {
+          addGCCDeclarations(programPath, Array.from(globalIdentifiers), defaultExportId, gccIdentifier);
+          addGCCAssignments(programPath, Array.from(globalIdentifiers), defaultExportId, gccIdentifier);
+          addMissingExports(programPath, Array.from(globalIdentifiers), existingExports);
         }
-      });
-      if (globalIdentifiers.size > 0 || defaultExportId) {
-        addGCCDeclarations(programPath, Array.from(globalIdentifiers), defaultExportId, gccIdentifier);
-        addGCCAssignments(programPath, Array.from(globalIdentifiers), defaultExportId, gccIdentifier);
-        addMissingExports(programPath, Array.from(globalIdentifiers), existingExports);
       }
     }
   }
@@ -429,47 +426,43 @@ function getDeclarationIdentifiers(declaration) {
   }
   return identifiers;
 }
-function resolveModulePath(source, filePath) {
+async function resolveModulePath(source, filePath) {
   const extensions = [".ts", ".tsx", ".js", ".jsx"];
-  for (const ext of extensions) {
-    const resolvedPath = import_path4.default.resolve(import_path4.default.dirname(filePath), source + ext);
-    if (import_fs4.existsSync(resolvedPath))
-      return resolvedPath;
+  const resolveAttempts = extensions.map(async (ext) => {
+    const resolvedPath2 = import_path2.default.resolve(import_path2.default.dirname(filePath), source + ext);
+    return await import_fs.default.promises.access(resolvedPath2).then(() => true).catch(() => false) ? resolvedPath2 : null;
+  });
+  const results = await Promise.all(resolveAttempts);
+  const resolvedPath = results.find((path3) => path3 !== null);
+  if (!resolvedPath) {
+    throw new Error(`Module not found: ${source} from ${filePath}`);
   }
-  throw new Error(`Module not found: ${source} from ${filePath}`);
+  return resolvedPath;
 }
-function collectExportsFromModule(modulePath) {
+async function collectExportsFromModule(modulePath) {
   if (exportCache.has(modulePath)) {
     return Array.from(exportCache.get(modulePath));
   }
   if (processingModules.has(modulePath)) {
     throw new Error(`Circular dependency detected: ${modulePath}`);
   }
-  if (!import_fs4.existsSync(modulePath)) {
-    throw new Error(`Module not found: ${modulePath}`);
-  }
   processingModules.add(modulePath);
-  const code = import_fs4.readFileSync(modulePath, "utf-8");
+  const code = await import_fs.default.promises.readFile(modulePath, "utf-8");
   const ast = parseCode(code, modulePath);
   const exports2 = new Set;
+  const traversalPromises = [];
   import_core2.traverse(ast, {
     ExportAllDeclaration(exportAllPath) {
       const nestedSource = exportAllPath.node.source.value;
-      let nestedModulePath;
-      try {
-        nestedModulePath = resolveModulePath(nestedSource, modulePath);
-      } catch (error) {
-        console.error(error instanceof Error ? error.message : "Unknown error during nested module resolution.");
-        return;
-      }
-      let nestedExports;
-      try {
-        nestedExports = collectExportsFromModule(nestedModulePath);
-      } catch (error) {
-        console.error(error instanceof Error ? error.message : "Unknown error during nested export collection.");
-        return;
-      }
-      nestedExports.forEach((name) => exports2.add(name));
+      traversalPromises.push((async () => {
+        try {
+          const nestedModulePath = await resolveModulePath(nestedSource, modulePath);
+          const nestedExports = await collectExportsFromModule(nestedModulePath);
+          nestedExports.forEach((name) => exports2.add(name));
+        } catch (error) {
+          console.error(error instanceof Error ? error.message : "Unknown error during nested export collection.");
+        }
+      })());
     },
     ExportNamedDeclaration(exportPath) {
       const { node } = exportPath;
@@ -486,6 +479,7 @@ function collectExportsFromModule(modulePath) {
       }
     }
   });
+  await Promise.all(traversalPromises);
   processingModules.delete(modulePath);
   exportCache.set(modulePath, exports2);
   return Array.from(exports2);
@@ -591,7 +585,7 @@ function getImportedName(imported) {
 }
 
 // src/compiler/tsickleCompiler.ts
-var import_path5 = __toESM(require("path"));
+var import_path4 = __toESM(require("path"));
 var import_typescript = __toESM(require("typescript"));
 
 // src/tsickle/index.ts
@@ -599,20 +593,20 @@ var ts16 = __toESM(require("typescript"));
 
 // src/tsickle/path.ts
 var ts = __toESM(require("typescript"));
-function isAbsolute(path5) {
-  return ts.isRootedDiskPath(path5);
+function isAbsolute(path3) {
+  return ts.isRootedDiskPath(path3);
 }
 function join(p1, p2) {
   return ts.combinePaths(p1, p2);
 }
-function dirname(path5) {
-  return ts.getDirectoryPath(path5);
+function dirname(path3) {
+  return ts.getDirectoryPath(path3);
 }
 function relative(base, rel) {
   return ts.convertToRelativePath(rel, base, (p) => p);
 }
-function normalize(path5) {
-  return ts.resolvePath(path5);
+function normalize(path3) {
+  return ts.resolvePath(path3);
 }
 
 // src/tsickle/cli_support.ts
@@ -5733,8 +5727,8 @@ function createTsMigrationExportsShimTransformerFactory(typeChecker, host, manif
     };
   };
 }
-function stripSupportedExtensions(path5) {
-  return path5.replace(SUPPORTED_EXTENSIONS, "");
+function stripSupportedExtensions(path3) {
+  return path3.replace(SUPPORTED_EXTENSIONS, "");
 }
 var SUPPORTED_EXTENSIONS = /(?<!\.d)\.ts$/;
 
@@ -6167,17 +6161,72 @@ function skipTransformForSourceFileIfNeeded(host, delegateFactory) {
   };
 }
 
+// src/utils/fileUtils.ts
+var import_fs2 = __toESM(require("fs"));
+var import_path3 = __toESM(require("path"));
+function usage() {
+  console.error(`Usage: gcc-ts-compiler [gcc-ts-compiler options]
+
+Example:
+  gcc-ts-bundler --src_dir='./src' --entry_point='./index.ts' --output_dir='./dist' --language_out=ECMASCRIPT_NEXT
+
+gcc-ts-compiler flags are:
+  --src_dir             The source directory
+  --entry_point         The entry point for the application
+  --output_dir          The output directory
+  --language_out        ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT
+  --compilation_level   WHITESPACE_ONLY | SIMPLE | ADVANCED
+  --preserve_cache      Whether to preserve the cache files for debugging
+  --verbose             Print diagnostics to the console
+  --fatal_warnings       Whether warnings should be fatal, causing tsickle to return a non-zero exit code
+  -h, --help            Show this help message
+`);
+}
+function getCommonParentDirectory(fileNames) {
+  if (fileNames.length === 0)
+    return "/";
+  const commonPath = fileNames.map((fileName) => fileName.split(import_path3.default.sep)).reduce((commonParts, pathParts) => {
+    const minLength = Math.min(commonParts.length, pathParts.length);
+    const newCommonParts = [];
+    for (let i = 0;i < minLength; i++) {
+      if (commonParts[i] !== pathParts[i])
+        break;
+      newCommonParts.push(commonParts[i]);
+    }
+    return newCommonParts;
+  });
+  return commonPath.length > 0 ? commonPath.join(import_path3.default.sep) : "/";
+}
+async function ensureDirectoryExistence(filePath) {
+  const dirName = import_path3.default.dirname(filePath);
+  if (await import_fs2.default.promises.access(dirName).then(() => true).catch(() => false))
+    return;
+  await import_fs2.default.promises.mkdir(dirName, { recursive: true });
+}
+
 // src/compiler/tsickleCompiler.ts
 var modulePrefix = "_gcc_";
-function toClosureJS(options, fileNames, settings, writeFile) {
-  const absoluteFileNames = fileNames.map((fileName) => import_path5.default.resolve(fileName));
+async function toClosureJS(options, fileNames, settings, writeFile) {
+  const absoluteFileNames = fileNames.map((fileName) => import_path4.default.resolve(fileName));
   const compilerHost = import_typescript.default.createCompilerHost(options);
   const program = import_typescript.default.createProgram(absoluteFileNames, options, compilerHost);
   const rootModulePath = options.rootDir || getCommonParentDirectory(absoluteFileNames);
   const filesToProcess = new Set(absoluteFileNames);
+  const writePromises = [];
+  const asyncWriteFile = (fileName, content, writeByteOrderMark) => {
+    const writePromise = new Promise((resolve, reject) => {
+      try {
+        writeFile(fileName, content, writeByteOrderMark);
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
+    });
+    writePromises.push(writePromise);
+  };
   const transformerHost = {
     addDtsClutzAliases: true,
-    fileNameToModuleId: (fileName) => modulePrefix + import_path5.default.relative(rootModulePath, fileName),
+    fileNameToModuleId: (fileName) => modulePrefix + import_path4.default.relative(rootModulePath, fileName),
     generateExtraSuppressions: true,
     generateSummary: true,
     generateTsMigrationExportsShim: true,
@@ -6194,7 +6243,7 @@ function toClosureJS(options, fileNames, settings, writeFile) {
     provideExternalModuleDtsNamespace: true,
     rootDirsRelative: (fileName) => fileName,
     shouldIgnoreWarningsForPath: () => !settings.fatalWarnings,
-    shouldSkipTsickleProcessing: (fileName) => !filesToProcess.has(import_path5.default.resolve(fileName)),
+    shouldSkipTsickleProcessing: (fileName) => !filesToProcess.has(import_path4.default.resolve(fileName)),
     transformDecorators: true,
     transformDynamicImport: "closure",
     transformTypesToClosure: true,
@@ -6214,12 +6263,20 @@ function toClosureJS(options, fileNames, settings, writeFile) {
       tsMigrationExportsShimFiles: new Map
     };
   }
-  return emit(program, transformerHost, writeFile);
+  return new Promise(async (resolve, reject) => {
+    try {
+      const result = emit(program, transformerHost, asyncWriteFile);
+      await Promise.all(writePromises);
+      resolve(result);
+    } catch (error) {
+      reject(error);
+    }
+  });
 }
 
 // src/settings.ts
 var import_minimist = __toESM(require("minimist"));
-var import_path6 = __toESM(require("path"));
+var import_path5 = __toESM(require("path"));
 function loadSettingsFromArgs(args) {
   const cwd = process.cwd();
   const defaultSettings = {
@@ -6230,6 +6287,7 @@ function loadSettingsFromArgs(args) {
     js: [],
     languageOut: "ECMASCRIPT_NEXT",
     outputDir: "./dist",
+    preserveCache: false,
     srcDir: "./src",
     verbose: false
   };
@@ -6237,52 +6295,101 @@ function loadSettingsFromArgs(args) {
   const settings = { ...defaultSettings };
   for (const [flag, value] of Object.entries(parsedArgs)) {
     switch (flag) {
-      case "h":
-      case "help":
-        usage();
-        process.exit(0);
+      case "src_dir":
+        settings.srcDir = value;
+        break;
+      case "entry_point":
+        const entryPoints = Array.isArray(value) ? value : [value];
+        for (const entryPoint of entryPoints) {
+          settings.entryPoints.push(import_path5.default.join(cwd, "./.closured/", entryPoint.replace(/\.ts$/, ".js")));
+        }
+        break;
+      case "output_dir":
+        settings.outputDir = import_path5.default.join(cwd, value);
+        break;
+      case "language_out":
+        settings.languageOut = String(value);
+        break;
+      case "compilation_level":
+        settings.compilationLevel = String(value);
+        break;
+      case "preserve_cache":
+        settings.preserveCache = true;
+        break;
       case "verbose":
         settings.verbose = true;
         break;
       case "fatal_warnings":
         settings.fatalWarnings = true;
         break;
-      case "language_out":
-        settings.languageOut = String(value);
-        break;
-      case "entry_point":
-        const entryPoints = Array.isArray(value) ? value : [value];
-        for (const entryPoint of entryPoints) {
-          settings.entryPoints.push(import_path6.default.join(cwd, "./.closured/", entryPoint.replace(/\.ts$/, ".js")));
-        }
-        break;
-      case "output_dir":
-        settings.outputDir = import_path6.default.join(cwd, value);
-        break;
-      case "compilation_level":
-        settings.compilationLevel = String(value);
-        break;
-      case "src_dir":
-        settings.srcDir = value;
-        break;
+      case "h":
+      case "help":
+        usage();
+        process.exit(0);
     }
   }
   return { settings };
 }
 
+// src/utils/fileOperations.ts
+var import_fs3 = __toESM(require("fs"));
+var import_path6 = __toESM(require("path"));
+async function copyDirectoryRecursive(src, dest) {
+  if (!await import_fs3.default.promises.access(dest).then(() => true).catch(() => false)) {
+    await import_fs3.default.promises.mkdir(dest, { recursive: true });
+  }
+  const entries = await import_fs3.default.promises.readdir(src, { withFileTypes: true });
+  await Promise.all(entries.map(async (entry) => {
+    const srcPath = import_path6.default.join(src, entry.name);
+    const destPath = import_path6.default.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      await copyDirectoryRecursive(srcPath, destPath);
+    } else {
+      await import_fs3.default.promises.copyFile(srcPath, destPath);
+    }
+  }));
+}
+async function cleanDirectory(dir) {
+  if (!await import_fs3.default.promises.access(dir).then(() => true).catch(() => false)) {
+    return;
+  }
+  const entries = await import_fs3.default.promises.readdir(dir, { withFileTypes: true });
+  await Promise.all(entries.map(async (entry) => {
+    const fullPath = import_path6.default.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      await cleanDirectory(fullPath);
+      await import_fs3.default.promises.rmdir(fullPath);
+    } else {
+      await import_fs3.default.promises.unlink(fullPath);
+    }
+  }));
+}
+async function writeFileContent(filePath, contents) {
+  await ensureDirectoryExistence(filePath);
+  await import_fs3.default.promises.writeFile(filePath, contents, "utf-8");
+}
+async function cleanupDirectories(dirs, remove = true) {
+  await Promise.all(dirs.map(async (dir) => {
+    await cleanDirectory(dir);
+    if (remove) {
+      await import_fs3.default.promises.rmdir(dir);
+    }
+  }));
+}
+
 // src/utils/tsConfigLoader.ts
-var import_fs5 = __toESM(require("fs"));
+var import_fs4 = __toESM(require("fs"));
 var import_path7 = __toESM(require("path"));
 var import_typescript2 = __toESM(require("typescript"));
-function loadTscConfig(args) {
+async function loadTscConfig(args) {
   const parsedCommandLine = import_typescript2.default.parseCommandLine(args);
   if (parsedCommandLine.errors.length > 0) {
     return { errors: parsedCommandLine.errors, fileNames: [], options: {} };
   }
   const tsFileArguments = parsedCommandLine.fileNames;
   const projectDir = parsedCommandLine.options.project || process.cwd();
-  const configFileName = import_typescript2.default.findConfigFile(projectDir, (file) => import_typescript2.default.sys.fileExists(file));
-  if (!configFileName) {
+  const possibleConfigFile = import_typescript2.default.findConfigFile(projectDir, import_typescript2.default.sys.fileExists);
+  if (!possibleConfigFile) {
     return {
       errors: [
         {
@@ -6298,8 +6405,8 @@ function loadTscConfig(args) {
       options: {}
     };
   }
-  const configFileText = import_fs5.default.readFileSync(configFileName, "utf-8");
-  const result = import_typescript2.default.parseConfigFileTextToJson(configFileName, configFileText);
+  const configFileText = import_fs4.default.readFileSync(possibleConfigFile, "utf-8");
+  const result = import_typescript2.default.parseConfigFileTextToJson(possibleConfigFile, configFileText);
   if (result.error) {
     return { errors: [result.error], fileNames: [], options: {} };
   }
@@ -6311,82 +6418,107 @@ function loadTscConfig(args) {
   result.config.compilerOptions.skipLibCheck = true;
   result.config.exclude = [];
   result.config.include = [import_path7.default.join(projectDir, "*.ts")];
-  const configParseResult = import_typescript2.default.parseJsonConfigFileContent(result.config, import_typescript2.default.sys, projectDir, parsedCommandLine.options, configFileName);
+  const configParseResult = import_typescript2.default.parseJsonConfigFileContent(result.config, import_typescript2.default.sys, projectDir, parsedCommandLine.options, possibleConfigFile);
   if (configParseResult.errors.length > 0) {
     return { errors: configParseResult.errors, fileNames: [], options: {} };
   }
   const fileNames = tsFileArguments.length > 0 ? tsFileArguments : configParseResult.fileNames;
+  if (fileNames.length > 0) {
+    try {
+      await validateFiles(fileNames);
+    } catch (error) {
+      return {
+        errors: [
+          {
+            category: import_typescript2.default.DiagnosticCategory.Error,
+            code: 0,
+            file: undefined,
+            length: undefined,
+            messageText: error instanceof Error ? error.message : "Unknown error validating files",
+            start: undefined
+          }
+        ],
+        fileNames: [],
+        options: {}
+      };
+    }
+  }
   return { errors: [], fileNames, options: configParseResult.options };
+}
+async function validateFiles(files) {
+  const fileChecks = await Promise.all(files.map(async (file) => {
+    try {
+      await import_fs4.default.promises.access(file);
+      return { exists: true, file };
+    } catch {
+      return { exists: false, file };
+    }
+  }));
+  const nonExistentFiles = fileChecks.filter((check) => !check.exists).map((check) => check.file);
+  if (nonExistentFiles.length > 0) {
+    throw new Error(`Files do not exist: ${nonExistentFiles.join(", ")}`);
+  }
 }
 
 // src/index.ts
 var __dirname = "/Users/Blueagle/Code/gcc-ts-bundler/src";
 var PRE_COMPILED_DIR = ".pre-compiled";
+async function processTsFiles(config, srcDir, preCompiledDir, closuredDir, settings) {
+  await Promise.all(config.fileNames.map(async (file) => {
+    const relativePath = import_path8.default.relative(srcDir, file);
+    const preCompiledPath = import_path8.default.join(preCompiledDir, relativePath);
+    const contents = await import_fs5.default.promises.readFile(preCompiledPath, "utf-8");
+    const isEntryPoint = settings.entryPoints.some((entryPoint) => entryPoint.replace(/\.[^/.]+$/, "").endsWith(relativePath.split(PRE_COMPILED_DIR)[1].replace(/\.[^/.]+$/, "")));
+    const transformed = await customTransform2(contents, preCompiledPath, isEntryPoint);
+    const closuredPath = import_path8.default.join(closuredDir, relativePath);
+    await writeFileContent(closuredPath, transformed);
+  }));
+}
 async function main(args) {
   const { settings } = loadSettingsFromArgs(args);
   const cwd = process.cwd();
   const srcDir = import_path8.default.join(cwd, settings.srcDir);
   const preCompiledDir = import_path8.default.join(cwd, PRE_COMPILED_DIR);
-  process.chdir(srcDir);
-  cleanDirectory(preCompiledDir);
-  ensureDirectoryExistence(preCompiledDir);
-  copyDirectoryRecursive(srcDir, preCompiledDir);
-  process.chdir(preCompiledDir);
-  const config = loadTscConfig([]);
-  if (config.errors.length > 0) {
-    console.error(import_typescript3.default.formatDiagnosticsWithColorAndContext(config.errors, import_typescript3.default.createCompilerHost(config.options)));
-    return 1;
-  }
-  if (config.options.module !== import_typescript3.default.ModuleKind.CommonJS) {
-    console.error("tsickle converts TypeScript modules to Closure modules via CommonJS internally. " + 'Set tsconfig.json "module": "commonjs"');
-    return 1;
-  }
   const closuredDir = import_path8.default.join(cwd, "./.closured");
-  cleanDirectory(closuredDir);
-  await Promise.all(config.fileNames.map(async (file) => {
-    const relativePath = import_path8.default.relative(srcDir, file);
-    const preCompiledPath = import_path8.default.join(preCompiledDir, relativePath);
-    const contents = import_fs6.default.readFileSync(preCompiledPath, "utf-8");
-    const transformed = await customTransform2(contents, preCompiledPath, settings.entryPoints.some((entryPoint) => entryPoint.replace(/\.[^/.]+$/, "").endsWith(relativePath.split(PRE_COMPILED_DIR)[1].replace(/\.[^/.]+$/, ""))));
-    const closuredPath = import_path8.default.join(closuredDir, relativePath);
-    writeFileContent(closuredPath, transformed);
-  }));
-  const result = toClosureJS(config.options, config.fileNames, settings, (filePath, contents) => {
-    ensureDirectoryExistence(filePath);
-    import_fs6.default.writeFileSync(filePath, contents, "utf-8");
-  });
-  if (result.diagnostics.length > 0) {
-    console.error(import_typescript3.default.formatDiagnosticsWithColorAndContext(result.diagnostics, import_typescript3.default.createCompilerHost(config.options)));
+  const closureExternsDir = import_path8.default.join(cwd, "./.closure-externs");
+  try {
+    process.chdir(srcDir);
+    await cleanupDirectories([preCompiledDir, closuredDir], false);
+    await ensureDirectoryExistence(preCompiledDir);
+    await copyDirectoryRecursive(srcDir, preCompiledDir);
+    process.chdir(preCompiledDir);
+    const config = await loadTscConfig([]);
+    if (config.errors.length > 0) {
+      console.error(import_typescript3.default.formatDiagnosticsWithColorAndContext(config.errors, import_typescript3.default.createCompilerHost(config.options)));
+      return 1;
+    }
+    if (config.options.module !== import_typescript3.default.ModuleKind.CommonJS) {
+      console.error('tsickle converts TypeScript modules to Closure modules via CommonJS internally. Set tsconfig.json "module": "commonjs"');
+      return 1;
+    }
+    await processTsFiles(config, srcDir, preCompiledDir, closuredDir, settings);
+    const result = await toClosureJS(config.options, config.fileNames, settings, writeFileContent);
+    if (result.diagnostics.length > 0) {
+      console.error(import_typescript3.default.formatDiagnosticsWithColorAndContext(result.diagnostics, import_typescript3.default.createCompilerHost(config.options)));
+      return 1;
+    }
+    const modulesExterns = import_path8.default.join(closureExternsDir, "modules-externs.js");
+    await ensureDirectoryExistence(modulesExterns);
+    await import_fs5.default.promises.writeFile(modulesExterns, getGeneratedExterns(result.externs, config.options.rootDir || ""));
+    const closureExternsPath = import_path8.default.join(__dirname, "../closure-externs");
+    settings.externs.push(...import_fs5.default.readdirSync(closureExternsPath).map((file) => import_path8.default.join(closureExternsPath, file)));
+    settings.externs.push(modulesExterns);
+    settings.js.push(import_path8.default.join(__dirname, "../closure-lib/**.js"), import_path8.default.join(closuredDir, "**.js"));
+    console.log("Building with Closure Compiler...");
+    const exitCode = await runClosureCompiler(settings);
+    console.log(exitCode === 0 ? "Build succeeded. You may remove the .closured and .closure-externs directories." : "Failed to build with Closure Compiler.");
+    if (!settings.preserveCache) {
+      await cleanupDirectories([preCompiledDir, closureExternsDir, closuredDir], true);
+    }
+    return exitCode;
+  } catch (error) {
+    console.error(error);
     return 1;
   }
-  const modulesExterns = import_path8.default.join(cwd, "./.closure-externs/modules-externs.js");
-  ensureDirectoryExistence(modulesExterns);
-  import_fs6.default.writeFileSync(modulesExterns, getGeneratedExterns(result.externs, config.options.rootDir || ""));
-  const closureExternsPath = import_path8.default.join(__dirname, "../closure-externs");
-  import_fs6.default.readdirSync(closureExternsPath).forEach((file) => {
-    const filePath = import_path8.default.join(closureExternsPath, file);
-    settings.externs.push(filePath);
-  });
-  settings.externs.push(import_path8.default.join(cwd, "./.closure-externs/modules-externs.js"));
-  settings.js.push(import_path8.default.join(__dirname, "../closure-lib/**.js"));
-  settings.js.push(import_path8.default.join(cwd, "./.closured/**.js"));
-  cleanDirectory(settings.outputDir);
-  ensureDirectoryExistence(settings.outputDir);
-  console.log("Building with Closure Compiler...");
-  let exitCode = 0;
-  try {
-    exitCode = await runClosureCompiler(settings);
-  } catch (error) {
-    exitCode = 1;
-    console.error(error);
-  }
-  if (exitCode !== 0) {
-    console.error("Failed to build with Closure Compiler.");
-  } else {
-    console.log("Build succeeded. You may remove the .closured and .closure-externs directories.");
-  }
-  return exitCode;
 }
-main(process.argv.slice(2)).then((exitCode) => {
-  process.exit(exitCode);
-});
+main(process.argv.slice(2)).then((exitCode) => process.exit(exitCode));

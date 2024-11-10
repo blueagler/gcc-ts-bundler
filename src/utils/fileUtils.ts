@@ -8,13 +8,14 @@ Example:
   gcc-ts-bundler --src_dir='./src' --entry_point='./index.ts' --output_dir='./dist' --language_out=ECMASCRIPT_NEXT
 
 gcc-ts-compiler flags are:
-  --fatal_warnings       Whether warnings should be fatal, causing tsickle to return a non-zero exit code
-  --verbose             Print diagnostics to the console
-  --language_out        ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT
+  --src_dir             The source directory
   --entry_point         The entry point for the application
   --output_dir          The output directory
+  --language_out        ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT
   --compilation_level   WHITESPACE_ONLY | SIMPLE | ADVANCED
-  --src_dir             The source directory
+  --preserve_cache      Whether to preserve the cache files for debugging
+  --verbose             Print diagnostics to the console
+  --fatal_warnings       Whether warnings should be fatal, causing tsickle to return a non-zero exit code
   -h, --help            Show this help message
 `);
 }
@@ -35,8 +36,16 @@ export function getCommonParentDirectory(fileNames: string[]): string {
   return commonPath.length > 0 ? commonPath.join(path.sep) : "/";
 }
 
-export function ensureDirectoryExistence(filePath: string): void {
+export async function ensureDirectoryExistence(
+  filePath: string,
+): Promise<void> {
   const dirName = path.dirname(filePath);
-  if (fs.existsSync(dirName)) return;
-  fs.mkdirSync(dirName, { recursive: true });
+  if (
+    await fs.promises
+      .access(dirName)
+      .then(() => true)
+      .catch(() => false)
+  )
+    return;
+  await fs.promises.mkdir(dirName, { recursive: true });
 }

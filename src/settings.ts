@@ -11,6 +11,7 @@ export interface Settings {
   js: string[];
   languageOut: string;
   outputDir: string;
+  preserveCache: boolean;
   srcDir: string;
   verbose: boolean;
 }
@@ -25,6 +26,7 @@ export function loadSettingsFromArgs(args: string[]): { settings: Settings } {
     js: [],
     languageOut: "ECMASCRIPT_NEXT",
     outputDir: "./dist",
+    preserveCache: false,
     srcDir: "./src",
     verbose: false,
   };
@@ -34,18 +36,8 @@ export function loadSettingsFromArgs(args: string[]): { settings: Settings } {
 
   for (const [flag, value] of Object.entries(parsedArgs)) {
     switch (flag) {
-      case "h":
-      case "help":
-        usage();
-        process.exit(0);
-      case "verbose":
-        settings.verbose = true;
-        break;
-      case "fatal_warnings":
-        settings.fatalWarnings = true;
-        break;
-      case "language_out":
-        settings.languageOut = String(value);
+      case "src_dir":
+        settings.srcDir = value;
         break;
       case "entry_point":
         const entryPoints: string[] = Array.isArray(value) ? value : [value];
@@ -58,12 +50,25 @@ export function loadSettingsFromArgs(args: string[]): { settings: Settings } {
       case "output_dir":
         settings.outputDir = path.join(cwd, value);
         break;
+      case "language_out":
+        settings.languageOut = String(value);
+        break;
       case "compilation_level":
         settings.compilationLevel = String(value);
         break;
-      case "src_dir":
-        settings.srcDir = value;
+      case "preserve_cache":
+        settings.preserveCache = true;
         break;
+      case "verbose":
+        settings.verbose = true;
+        break;
+      case "fatal_warnings":
+        settings.fatalWarnings = true;
+        break;
+      case "h":
+      case "help":
+        usage();
+        process.exit(0);
     }
   }
 

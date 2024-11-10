@@ -6,181 +6,219 @@ import {
   transformAsync,
   traverse,
 } from "@babel/core";
-//@ts-expect-error - Babel plugin not found in types
+//@ts-expect-error - Babel plugin does not have types
 import syntaxTypescript from "@babel/plugin-syntax-typescript";
-import { existsSync, readFileSync } from "fs";
+import fs from "fs";
 import path from "path";
-
 interface GCCPluginOptions {
   defaultExportIdentifier: string;
   gccIdentifier: string;
+  onComplete: () => void;
 }
-
 const exportCache: Map<string, Set<string>> = new Map();
-
 const processingModules: Set<string> = new Set();
-
+const pendingPromises = new Map<string, Promise<void>>();
 export async function customTransform(
   code: string,
   filePath: string,
   isEntryPoint: boolean,
 ): Promise<string> {
   const plugins: PluginObj[] = [syntaxTypescript];
-
   if (isEntryPoint) {
-    plugins.push(
-      addGCCExportsFromESM(filePath, {
-        defaultExportIdentifier: "__DEFAULT_EXPORT__",
-        gccIdentifier: "GCC",
-      }),
-    );
+    const filePromise = new Promise<void>((resolve) => {
+      plugins.push(
+        addGCCExportsFromESM(filePath, {
+          defaultExportIdentifier: "__DEFAULT_EXPORT__",
+          gccIdentifier: "GCC",
+          onComplete: resolve,
+        }),
+      );
+    });
+    pendingPromises.set(filePath, filePromise);
   }
-
   const transformed = await transformAsync(code, {
     babelrc: false,
     filename: filePath,
     plugins,
   });
-
   if (!transformed?.code) {
     throw new Error("Babel transform failed");
   }
-
+  if (pendingPromises.has(filePath)) {
+    await pendingPromises.get(filePath);
+    pendingPromises.delete(filePath);
+  }
   return transformed.code;
 }
-
 const addGCCExportsFromESM = (
   filePath: string,
   options: GCCPluginOptions,
 ): PluginObj => ({
   name: "add-gcc-exports-from-esm",
   visitor: {
-    Program(programPath: NodePath<t.Program>): void {
-      const { defaultExportIdentifier, gccIdentifier } = options;
-      const existingImports = new Map<string, Set<string>>();
-      const existingExports = new Set<string>();
-      const globalIdentifiers = new Set<string>();
-      let defaultExportId: null | string = null;
-      programPath.traverse({
-        ExportNamedDeclaration(exportPath: NodePath<t.ExportNamedDeclaration>) {
-          const { node } = exportPath;
-          if (node.specifiers.length > 0) {
-            node.specifiers.forEach((specifier) => {
-              if (t.isExportSpecifier(specifier)) {
-                const exportedName = getExportedName(specifier.exported);
-                existingExports.add(exportedName);
-                globalIdentifiers.add(exportedName);
-              }
-            });
-          } else if (node.declaration) {
-            const declarationIds = getDeclarationIdentifiers(node.declaration);
-            declarationIds.forEach((id) => {
-              existingExports.add(id);
-              globalIdentifiers.add(id);
-            });
-          }
-        },
-        ImportDeclaration(importPath: NodePath<t.ImportDeclaration>) {
-          const source = importPath.node.source.value;
-          const specifiers = importPath.node.specifiers;
-          const importedNames =
-            existingImports.get(source) || new Set<string>();
-          specifiers.forEach((specifier) => {
-            if (t.isImportSpecifier(specifier)) {
-              const importedName = getImportedName(specifier.imported);
-              importedNames.add(importedName);
+    Program: {
+      exit(programPath: NodePath<t.Program>) {
+        const promises: Promise<void>[] = [];
+        const { defaultExportIdentifier, gccIdentifier } = options;
+        const existingImports = new Map<string, Set<string>>();
+        const existingExports = new Set<string>();
+        const globalIdentifiers = new Set<string>();
+        let defaultExportId: null | string = null;
+        programPath.traverse({
+          ExportNamedDeclaration(
+            exportPath: NodePath<t.ExportNamedDeclaration>,
+          ) {
+            const { node } = exportPath;
+            if (node.source) {
+              const source = node.source.value;
+              const specifiers = node.specifiers;
+              const importedNames =
+                existingImports.get(source) || new Set<string>();
+              const importSpecifiers = specifiers.map((specifier) => {
+                if (t.isExportSpecifier(specifier)) {
+                  const localName = getImportedName(specifier.local);
+                  importedNames.add(localName);
+                  return t.importSpecifier(
+                    t.identifier(localName),
+                    t.identifier(localName),
+                  );
+                }
+                throw new Error("Unsupported export specifier type");
+              });
+              const importDecl = t.importDeclaration(
+                importSpecifiers,
+                t.stringLiteral(source),
+              );
+              exportPath.insertBefore(importDecl);
+              existingImports.set(source, importedNames);
+              specifiers.forEach((specifier) => {
+                if (t.isExportSpecifier(specifier)) {
+                  const exportedName = getExportedName(specifier.exported);
+                  existingExports.add(exportedName);
+                  globalIdentifiers.add(exportedName);
+                }
+              });
+            } else if (node.specifiers.length > 0) {
+              node.specifiers.forEach((specifier) => {
+                if (t.isExportSpecifier(specifier)) {
+                  const exportedName = getExportedName(specifier.exported);
+                  existingExports.add(exportedName);
+                  globalIdentifiers.add(exportedName);
+                }
+              });
+            } else if (node.declaration) {
+              const declarationIds = getDeclarationIdentifiers(
+                node.declaration,
+              );
+              declarationIds.forEach((id) => {
+                existingExports.add(id);
+                globalIdentifiers.add(id);
+              });
             }
-          });
-          existingImports.set(source, importedNames);
-        },
-      });
-      programPath.traverse({
-        ExportDefaultDeclaration(
-          exportPath: NodePath<t.ExportDefaultDeclaration>,
-        ) {
-          const defaultExportNode = exportPath.node;
-          defaultExportId = handleDefaultExport(
-            programPath,
-            defaultExportNode,
-            defaultExportIdentifier,
-          );
-          exportPath.remove();
-        },
-      });
-      programPath.traverse({
-        ExportAllDeclaration(exportAllPath: NodePath<t.ExportAllDeclaration>) {
-          const source = exportAllPath.node.source.value;
-          let modulePath: string;
-          try {
-            modulePath = resolveModulePath(source, filePath);
-          } catch (error) {
-            console.error(
-              error instanceof Error
-                ? error.message
-                : "Unknown error during module resolution.",
-            );
-            exportAllPath.remove();
-            return;
-          }
-          let collectedExports: string[];
-          try {
-            collectedExports = collectExportsFromModule(modulePath);
-          } catch (error) {
-            console.error(
-              error instanceof Error
-                ? error.message
-                : "Unknown error during export collection.",
-            );
-            exportAllPath.remove();
-            return;
-          }
-          const newImports = collectedExports.filter(
-            (name) => !existingImports.get(source)?.has(name),
-          );
-          if (newImports.length > 0) {
-            const importDeclaration = t.importDeclaration(
-              newImports.map((name) =>
-                t.importSpecifier(t.identifier(name), t.identifier(name)),
-              ),
-              t.stringLiteral(source),
-            );
-            exportAllPath.replaceWith(importDeclaration);
+          },
+          ImportDeclaration(importPath: NodePath<t.ImportDeclaration>) {
+            const source = importPath.node.source.value;
+            const specifiers = importPath.node.specifiers;
             const importedNames =
               existingImports.get(source) || new Set<string>();
-            newImports.forEach((name) => importedNames.add(name));
-            existingImports.set(source, importedNames);
-            collectedExports.forEach((name) => {
-              globalIdentifiers.add(name);
-              existingExports.add(name);
+            specifiers.forEach((specifier) => {
+              if (t.isImportSpecifier(specifier)) {
+                const importedName = getImportedName(specifier.imported);
+                importedNames.add(importedName);
+              }
             });
-          } else {
-            exportAllPath.remove();
-          }
-        },
-      });
-      if (globalIdentifiers.size > 0 || defaultExportId) {
-        addGCCDeclarations(
-          programPath,
-          Array.from(globalIdentifiers),
-          defaultExportId,
-          gccIdentifier,
-        );
-        addGCCAssignments(
-          programPath,
-          Array.from(globalIdentifiers),
-          defaultExportId,
-          gccIdentifier,
-        );
-        addMissingExports(
-          programPath,
-          Array.from(globalIdentifiers),
-          existingExports,
-        );
-      }
+            existingImports.set(source, importedNames);
+          },
+        });
+        programPath.traverse({
+          ExportDefaultDeclaration(
+            exportPath: NodePath<t.ExportDefaultDeclaration>,
+          ) {
+            const defaultExportNode = exportPath.node;
+            defaultExportId = handleDefaultExport(
+              programPath,
+              defaultExportNode,
+              defaultExportIdentifier,
+            );
+            exportPath.remove();
+          },
+        });
+        const exportAllPromises: Promise<void>[] = [];
+        programPath.traverse({
+          ExportAllDeclaration(
+            exportAllPath: NodePath<t.ExportAllDeclaration>,
+          ) {
+            const promise = (async () => {
+              const source = exportAllPath.node.source.value;
+              try {
+                const modulePath = await resolveModulePath(source, filePath);
+                const collectedExports =
+                  await collectExportsFromModule(modulePath);
+                const newImports = collectedExports.filter(
+                  (name) => !existingImports.get(source)?.has(name),
+                );
+                if (newImports.length > 0) {
+                  const importDeclaration = t.importDeclaration(
+                    newImports.map((name) =>
+                      t.importSpecifier(t.identifier(name), t.identifier(name)),
+                    ),
+                    t.stringLiteral(source),
+                  );
+                  exportAllPath.replaceWith(importDeclaration);
+                  const importedNames =
+                    existingImports.get(source) || new Set<string>();
+                  newImports.forEach((name) => importedNames.add(name));
+                  existingImports.set(source, importedNames);
+                  collectedExports.forEach((name) => {
+                    globalIdentifiers.add(name);
+                    existingExports.add(name);
+                  });
+                } else {
+                  exportAllPath.remove();
+                }
+              } catch (error) {
+                console.error(
+                  error instanceof Error
+                    ? error.message
+                    : "Unknown error during export collection.",
+                );
+                exportAllPath.remove();
+              }
+            })();
+            promises.push(promise);
+          },
+        });
+        Promise.all(promises)
+          .then(() => {
+            options.onComplete();
+          })
+          .catch((error) => {
+            console.error("Error in async operations:", error);
+            options.onComplete();
+          });
+        if (globalIdentifiers.size > 0 || defaultExportId) {
+          addGCCDeclarations(
+            programPath,
+            Array.from(globalIdentifiers),
+            defaultExportId,
+            gccIdentifier,
+          );
+          addGCCAssignments(
+            programPath,
+            Array.from(globalIdentifiers),
+            defaultExportId,
+            gccIdentifier,
+          );
+          addMissingExports(
+            programPath,
+            Array.from(globalIdentifiers),
+            existingExports,
+          );
+        }
+      },
     },
   },
 });
-
 function getDeclarationIdentifiers(declaration: t.Declaration): string[] {
   const identifiers: string[] = [];
   if (t.isVariableDeclaration(declaration)) {
@@ -199,56 +237,61 @@ function getDeclarationIdentifiers(declaration: t.Declaration): string[] {
   }
   return identifiers;
 }
-
-function resolveModulePath(source: string, filePath: string): string {
+async function resolveModulePath(
+  source: string,
+  filePath: string,
+): Promise<string> {
   const extensions = [".ts", ".tsx", ".js", ".jsx"];
-  for (const ext of extensions) {
+  const resolveAttempts = extensions.map(async (ext) => {
     const resolvedPath = path.resolve(path.dirname(filePath), source + ext);
-    if (existsSync(resolvedPath)) return resolvedPath;
+    return (await fs.promises
+      .access(resolvedPath)
+      .then(() => true)
+      .catch(() => false))
+      ? resolvedPath
+      : null;
+  });
+  const results = await Promise.all(resolveAttempts);
+  const resolvedPath = results.find((path) => path !== null);
+  if (!resolvedPath) {
+    throw new Error(`Module not found: ${source} from ${filePath}`);
   }
-  throw new Error(`Module not found: ${source} from ${filePath}`);
+  return resolvedPath;
 }
-
-function collectExportsFromModule(modulePath: string): string[] {
+async function collectExportsFromModule(modulePath: string): Promise<string[]> {
   if (exportCache.has(modulePath)) {
     return Array.from(exportCache.get(modulePath)!);
   }
   if (processingModules.has(modulePath)) {
     throw new Error(`Circular dependency detected: ${modulePath}`);
   }
-  if (!existsSync(modulePath)) {
-    throw new Error(`Module not found: ${modulePath}`);
-  }
   processingModules.add(modulePath);
-  const code = readFileSync(modulePath, "utf-8");
+  const code = await fs.promises.readFile(modulePath, "utf-8");
   const ast = parseCode(code, modulePath);
   const exports = new Set<string>();
+  const traversalPromises: Promise<void>[] = [];
   traverse(ast, {
     ExportAllDeclaration(exportAllPath: NodePath<t.ExportAllDeclaration>) {
       const nestedSource = exportAllPath.node.source.value;
-      let nestedModulePath: string;
-      try {
-        nestedModulePath = resolveModulePath(nestedSource, modulePath);
-      } catch (error) {
-        console.error(
-          error instanceof Error
-            ? error.message
-            : "Unknown error during nested module resolution.",
-        );
-        return;
-      }
-      let nestedExports: string[];
-      try {
-        nestedExports = collectExportsFromModule(nestedModulePath);
-      } catch (error) {
-        console.error(
-          error instanceof Error
-            ? error.message
-            : "Unknown error during nested export collection.",
-        );
-        return;
-      }
-      nestedExports.forEach((name) => exports.add(name));
+      traversalPromises.push(
+        (async () => {
+          try {
+            const nestedModulePath = await resolveModulePath(
+              nestedSource,
+              modulePath,
+            );
+            const nestedExports =
+              await collectExportsFromModule(nestedModulePath);
+            nestedExports.forEach((name) => exports.add(name));
+          } catch (error) {
+            console.error(
+              error instanceof Error
+                ? error.message
+                : "Unknown error during nested export collection.",
+            );
+          }
+        })(),
+      );
     },
     ExportNamedDeclaration(exportPath: NodePath<t.ExportNamedDeclaration>) {
       const { node } = exportPath;
@@ -265,19 +308,17 @@ function collectExportsFromModule(modulePath: string): string[] {
       }
     },
   });
-
+  await Promise.all(traversalPromises);
   processingModules.delete(modulePath);
   exportCache.set(modulePath, exports);
   return Array.from(exports);
 }
-
 function parseCode(code: string, filePath: string): t.File {
   return parse(code, {
     plugins: [syntaxTypescript],
     sourceFileName: filePath,
   })!;
 }
-
 function handleDefaultExport(
   programPath: NodePath<t.Program>,
   defaultExportNode: t.ExportDefaultDeclaration,
@@ -332,7 +373,6 @@ function handleDefaultExport(
   }
   return defaultIdentifierName;
 }
-
 function addGCCDeclarations(
   programPath: NodePath<t.Program>,
   identifiers: string[],
@@ -378,7 +418,6 @@ function addGCCDeclarations(
     programPath.pushContainer("body", globalDeclaration);
   }
 }
-
 function addGCCAssignments(
   programPath: NodePath<t.Program>,
   identifiers: string[],
@@ -418,7 +457,6 @@ function addGCCAssignments(
   }
   programPath.pushContainer("body", assignments);
 }
-
 function addMissingExports(
   programPath: NodePath<t.Program>,
   identifiers: string[],
@@ -436,7 +474,6 @@ function addMissingExports(
     programPath.pushContainer("body", exportNamedDeclaration);
   }
 }
-
 function getExportedName(exported: t.Identifier | t.StringLiteral): string {
   if (t.isIdentifier(exported)) {
     return exported.name;
@@ -445,7 +482,6 @@ function getExportedName(exported: t.Identifier | t.StringLiteral): string {
   }
   throw new Error("Unsupported exported node type");
 }
-
 function getImportedName(imported: t.Identifier | t.StringLiteral): string {
   if (t.isIdentifier(imported)) {
     return imported.name;
