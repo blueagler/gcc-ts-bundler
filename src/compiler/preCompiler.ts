@@ -4,26 +4,30 @@ import {
   PluginObj,
   types as t,
   transformSync,
+  traverse,
 } from "@babel/core";
-//@ts-expect-error - no types available
+//@ts-expect-error - missing types
 import syntaxTypescript from "@babel/plugin-syntax-typescript";
-import traverse from "@babel/traverse";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, promises as fs } from "fs";
 import path from "path";
 const modulePathCache = new Map<string, string>();
 const fileContentCache = new Map<string, string>();
 const parsedASTCache = new Map<string, t.File>();
+const DEFAULT_EXPORT_IDENTIFIER = "__DEFAULT_EXPORT__";
+const GCC = "GCC";
 export async function customTransform(
   code: string,
   filePath: string,
   isEntryPoint: boolean,
 ): Promise<string> {
+  await preloadModules(filePath);
   const plugins = [syntaxTypescript];
   if (isEntryPoint) {
     plugins.push(addGCCExportsFromESM(filePath));
   }
   const transformed = transformSync(code, {
     babelrc: false,
+    filename: filePath,
     plugins,
   });
   if (!transformed?.code) {
@@ -31,8 +35,67 @@ export async function customTransform(
   }
   return transformed.code;
 }
-const GCC = "GCC";
-const DEFAULT_EXPORT_IDENTIFIER = "__DEFAULT_EXPORT__";
+async function preloadModules(entryFilePath: string) {
+  const filesToProcess = new Set<string>();
+  await collectModules(entryFilePath, filesToProcess);
+  await Promise.all(
+    Array.from(filesToProcess).map(async (filePath) => {
+      if (!fileContentCache.has(filePath)) {
+        const code = await fs.readFile(filePath, "utf-8");
+        fileContentCache.set(filePath, code);
+        const ast = parse(code, {
+          plugins: [syntaxTypescript],
+        })!;
+        parsedASTCache.set(filePath, ast);
+      }
+    }),
+  );
+}
+async function collectModules(filePath: string, filesToProcess: Set<string>) {
+  if (filesToProcess.has(filePath)) {
+    return;
+  }
+  filesToProcess.add(filePath);
+  let ast = parsedASTCache.get(filePath);
+  if (!ast) {
+    const code = await fs.readFile(filePath, "utf-8");
+    fileContentCache.set(filePath, code);
+    ast = parse(code, {
+      plugins: [syntaxTypescript],
+    })!;
+    parsedASTCache.set(filePath, ast);
+  }
+  traverse(ast, {
+    ExportAllDeclaration(exportPath) {
+      const source = exportPath.node.source.value;
+      const resolvedPath = resolveModulePath(source, filePath);
+      collectModules(resolvedPath, filesToProcess);
+    },
+    ImportDeclaration(importPath) {
+      const source = importPath.node.source.value;
+      const resolvedPath = resolveModulePath(source, filePath);
+      collectModules(resolvedPath, filesToProcess);
+    },
+  });
+}
+function resolveModulePath(source: string, importerFile: string): string {
+  const cacheKey = path.resolve(path.dirname(importerFile), source);
+  if (modulePathCache.has(cacheKey)) {
+    return modulePathCache.get(cacheKey)!;
+  }
+  const extensions = [".ts", ".tsx", ".js", ".jsx"];
+  for (const ext of extensions) {
+    const resolvedPath = path.resolve(
+      path.dirname(importerFile),
+      `${source}${ext}`,
+    );
+    if (existsSync(resolvedPath)) {
+      modulePathCache.set(cacheKey, resolvedPath);
+      return resolvedPath;
+    }
+  }
+  throw new Error(`Module not found: ${source}`);
+}
 const addGCCExportsFromESM = (filePath: string): PluginObj => {
   return {
     visitor: {
@@ -127,54 +190,28 @@ const addGCCExportsFromESM = (filePath: string): PluginObj => {
             });
           },
         });
-        const resolveModulePath = (source: string): string => {
-          if (modulePathCache.has(source)) {
-            return modulePathCache.get(source)!;
-          }
-          const extensions = [".ts", ".tsx", ".js", ".jsx"];
-          for (const ext of extensions) {
-            const resolvedPath = path.resolve(
-              path.dirname(filePath),
-              `${source}${ext}`,
-            );
-            if (existsSync(resolvedPath)) {
-              modulePathCache.set(source, resolvedPath);
-              return resolvedPath;
-            }
-          }
-          throw new Error(`Module not found: ${source}`);
-        };
         programPath.traverse({
-          ExportAllDeclaration(
-            exportAllPath: NodePath<t.ExportAllDeclaration>,
-          ) {
+          ExportAllDeclaration(exportAllPath) {
             const source = exportAllPath.node.source.value;
-            const modulePath = resolveModulePath(source);
+            const modulePath = resolveModulePath(source, filePath);
+            const ast = parsedASTCache.get(modulePath);
+            if (!ast) {
+              throw new Error(`AST not found for module ${modulePath}`);
+            }
             const collectedExports = new Set<string>();
             const exportCollector = {
               ExportAllDeclaration(
                 nestedExportAllPath: NodePath<t.ExportAllDeclaration>,
               ) {
                 const nestedSource = nestedExportAllPath.node.source.value;
-                const nestedModulePath = resolveModulePath(nestedSource);
-                let nestedCode: string;
-                if (fileContentCache.has(nestedModulePath)) {
-                  nestedCode = fileContentCache.get(nestedModulePath)!;
-                } else {
-                  nestedCode = readFileSync(nestedModulePath, "utf-8");
-                  fileContentCache.set(nestedModulePath, nestedCode);
+                const nestedModulePath = resolveModulePath(
+                  nestedSource,
+                  modulePath,
+                );
+                const nestedAST = parsedASTCache.get(nestedModulePath);
+                if (nestedAST) {
+                  traverse(nestedAST, exportCollector);
                 }
-                let nestedAST: t.File;
-                if (parsedASTCache.has(nestedModulePath)) {
-                  nestedAST = parsedASTCache.get(nestedModulePath)!;
-                } else {
-                  nestedAST = parse(nestedCode, {
-                    plugins: ["typescript"],
-                    sourceType: "module",
-                  })!;
-                  parsedASTCache.set(nestedModulePath, nestedAST);
-                }
-                traverse(nestedAST, exportCollector);
               },
               ExportNamedDeclaration(
                 namedExportPath: NodePath<t.ExportNamedDeclaration>,
@@ -208,17 +245,7 @@ const addGCCExportsFromESM = (filePath: string): PluginObj => {
                 }
               },
             };
-            try {
-              const moduleCode = readFileSync(modulePath, "utf-8");
-              const ast = parse(moduleCode, {
-                plugins: [syntaxTypescript],
-              });
-              traverse(ast!, exportCollector);
-            } catch (error) {
-              throw new Error(
-                `Failed to process module ${modulePath}: ${(error as Error).message}`,
-              );
-            }
+            traverse(ast, exportCollector);
             const identifiersToImport = Array.from(collectedExports).filter(
               (name) => {
                 return !existingImports.get(source)?.has(name);
