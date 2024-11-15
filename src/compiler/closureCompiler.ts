@@ -63,6 +63,10 @@ export async function runClosureCompiler(settings: Settings): Promise<number> {
     languageIn: "UNSTABLE",
     languageOut: settings.languageOut,
     warningLevel: settings.verbose ? "VERBOSE" : "DEFAULT",
+    dependencyMode: "PRUNE",
+    rewritePolyfills: false,
+    processCommonJsModules: true,
+    moduleResolution: "NODE"
   };
   let entryPointStates: EntryPointState[] = [];
   try {

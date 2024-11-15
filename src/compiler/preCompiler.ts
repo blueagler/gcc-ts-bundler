@@ -83,7 +83,7 @@ function resolveModulePath(source: string, importerFile: string): string {
   if (modulePathCache.has(cacheKey)) {
     return modulePathCache.get(cacheKey)!;
   }
-  const extensions = [".ts", ".tsx", ".js", ".jsx"];
+  const extensions = [".ts", ".d.ts", ".tsx", ".js", ".jsx"];
   for (const ext of extensions) {
     const resolvedPath = path.resolve(
       path.dirname(importerFile),
@@ -102,6 +102,8 @@ const addGCCExportsFromESM = (filePath: string): PluginObj => {
       Program(programPath) {
         const globalIdentifiers = new Set<string>();
         const existingImports = new Map<string, Set<string>>();
+
+        // First pass: collect all exports and imports
         programPath.traverse({
           ExportDefaultDeclaration(
             exportPath: NodePath<t.ExportDefaultDeclaration>,
@@ -147,16 +149,55 @@ const addGCCExportsFromESM = (filePath: string): PluginObj => {
             exportPath: NodePath<t.ExportNamedDeclaration>,
           ) {
             const { node } = exportPath;
+            
+            // Handle exports with a source module - export { a, b } from './module'
+            if (node.source) {
+              const source = node.source.value;
+              const specifiers = node.specifiers;
+              const identifiersToImport = specifiers
+                .filter((spec): spec is t.ExportSpecifier => t.isExportSpecifier(spec))
+                .map(spec => ({
+                  local: spec.local.name,
+                  exported: t.isIdentifier(spec.exported) ? spec.exported.name : spec.exported.value
+                }));
+
+              // Add import declaration
+              if (identifiersToImport.length > 0) {
+                exportPath.insertBefore(
+                  t.importDeclaration(
+                    identifiersToImport.map(({ local, exported }) =>
+                      t.importSpecifier(
+                        t.identifier(local),
+                        t.identifier(exported)
+                      )
+                    ),
+                    t.stringLiteral(source)
+                  )
+                );
+
+                // Track imports
+                if (!existingImports.has(source)) {
+                  existingImports.set(source, new Set());
+                }
+                identifiersToImport.forEach(({ exported }) => {
+                  existingImports.get(source)!.add(exported);
+                  globalIdentifiers.add(exported);
+                });
+              }
+            }
+
+            // Handle direct named exports - export { a, b, c }
             if (node.specifiers.length > 0) {
               node.specifiers.forEach((specifier) => {
-                if (
-                  t.isExportSpecifier(specifier) &&
-                  t.isIdentifier(specifier.exported)
-                ) {
+                if (t.isExportSpecifier(specifier) && t.isIdentifier(specifier.exported)) {
                   globalIdentifiers.add(specifier.exported.name);
+                  // Keep original export statement
                 }
               });
-            } else if (node.declaration) {
+            }
+            
+            // Handle declaration exports - export const x = 1
+            else if (node.declaration) {
               const declaration = node.declaration;
               if (t.isVariableDeclaration(declaration)) {
                 declaration.declarations.forEach((decl) => {
@@ -168,7 +209,7 @@ const addGCCExportsFromESM = (filePath: string): PluginObj => {
                 t.isFunctionDeclaration(declaration) ||
                 t.isClassDeclaration(declaration)
               ) {
-                if (t.isIdentifier(declaration.id)) {
+                if (declaration.id) {
                   globalIdentifiers.add(declaration.id.name);
                 }
               }
@@ -190,6 +231,8 @@ const addGCCExportsFromESM = (filePath: string): PluginObj => {
             });
           },
         });
+
+        // Second pass remains the same...
         programPath.traverse({
           ExportAllDeclaration(exportAllPath) {
             const source = exportAllPath.node.source.value;

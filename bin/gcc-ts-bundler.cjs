@@ -209,7 +209,11 @@ async function runClosureCompiler(settings) {
     js: settings.js,
     languageIn: "UNSTABLE",
     languageOut: settings.languageOut,
-    warningLevel: settings.verbose ? "VERBOSE" : "DEFAULT"
+    warningLevel: settings.verbose ? "VERBOSE" : "DEFAULT",
+    dependencyMode: "PRUNE",
+    rewritePolyfills: false,
+    processCommonJsModules: true,
+    moduleResolution: "NODE"
   };
   let entryPointStates = [];
   try {
@@ -332,7 +336,7 @@ function resolveModulePath(source, importerFile) {
   if (modulePathCache.has(cacheKey)) {
     return modulePathCache.get(cacheKey);
   }
-  const extensions = [".ts", ".tsx", ".js", ".jsx"];
+  const extensions = [".ts", ".d.ts", ".tsx", ".js", ".jsx"];
   for (const ext of extensions) {
     const resolvedPath = import_path2.default.resolve(import_path2.default.dirname(importerFile), `${source}${ext}`);
     if (import_fs.existsSync(resolvedPath)) {
@@ -383,6 +387,24 @@ var addGCCExportsFromESM = (filePath) => {
           },
           ExportNamedDeclaration(exportPath) {
             const { node } = exportPath;
+            if (node.source) {
+              const source = node.source.value;
+              const specifiers = node.specifiers;
+              const identifiersToImport = specifiers.filter((spec) => import_core2.types.isExportSpecifier(spec)).map((spec) => ({
+                local: spec.local.name,
+                exported: import_core2.types.isIdentifier(spec.exported) ? spec.exported.name : spec.exported.value
+              }));
+              if (identifiersToImport.length > 0) {
+                exportPath.insertBefore(import_core2.types.importDeclaration(identifiersToImport.map(({ local, exported }) => import_core2.types.importSpecifier(import_core2.types.identifier(local), import_core2.types.identifier(exported))), import_core2.types.stringLiteral(source)));
+                if (!existingImports.has(source)) {
+                  existingImports.set(source, new Set);
+                }
+                identifiersToImport.forEach(({ exported }) => {
+                  existingImports.get(source).add(exported);
+                  globalIdentifiers.add(exported);
+                });
+              }
+            }
             if (node.specifiers.length > 0) {
               node.specifiers.forEach((specifier) => {
                 if (import_core2.types.isExportSpecifier(specifier) && import_core2.types.isIdentifier(specifier.exported)) {
@@ -398,7 +420,7 @@ var addGCCExportsFromESM = (filePath) => {
                   }
                 });
               } else if (import_core2.types.isFunctionDeclaration(declaration) || import_core2.types.isClassDeclaration(declaration)) {
-                if (import_core2.types.isIdentifier(declaration.id)) {
+                if (declaration.id) {
                   globalIdentifiers.add(declaration.id.name);
                 }
               }
