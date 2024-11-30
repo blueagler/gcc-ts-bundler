@@ -2,6 +2,9 @@ import { NodePath, PluginObj, types as t, transformAsync } from "@babel/core";
 import { minify } from "uglify-js";
 
 export async function customTransform(code: string): Promise<string> {
+  if (code.length === 0) {
+    return code;
+  }
   const plugins = [
     convertGCCExportsToESM({
       defaultExportIdentifier: "__DEFAULT_EXPORT__",

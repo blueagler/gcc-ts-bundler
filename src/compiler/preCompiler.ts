@@ -20,6 +20,9 @@ export async function customTransform(
   filePath: string,
   isEntryPoint: boolean,
 ): Promise<string> {
+  if (code.length === 0) {
+    return code;
+  }
   await preloadModules(filePath);
   const plugins = [syntaxTypescript];
   if (isEntryPoint) {
@@ -31,6 +34,7 @@ export async function customTransform(
     plugins,
   });
   if (!transformed?.code) {
+    console.log(transformed);
     throw new Error("Babel transform failed");
   }
   return transformed.code;
@@ -149,30 +153,34 @@ const addGCCExportsFromESM = (filePath: string): PluginObj => {
             exportPath: NodePath<t.ExportNamedDeclaration>,
           ) {
             const { node } = exportPath;
-            
+
             // Handle exports with a source module - export { a, b } from './module'
             if (node.source) {
               const source = node.source.value;
               const specifiers = node.specifiers;
               const identifiersToImport = specifiers
-                .filter((spec): spec is t.ExportSpecifier => t.isExportSpecifier(spec))
-                .map(spec => ({
+                .filter((spec): spec is t.ExportSpecifier =>
+                  t.isExportSpecifier(spec),
+                )
+                .map((spec) => ({
+                  exported: t.isIdentifier(spec.exported)
+                    ? spec.exported.name
+                    : spec.exported.value,
                   local: spec.local.name,
-                  exported: t.isIdentifier(spec.exported) ? spec.exported.name : spec.exported.value
                 }));
 
               // Add import declaration
               if (identifiersToImport.length > 0) {
                 exportPath.insertBefore(
                   t.importDeclaration(
-                    identifiersToImport.map(({ local, exported }) =>
+                    identifiersToImport.map(({ exported, local }) =>
                       t.importSpecifier(
                         t.identifier(local),
-                        t.identifier(exported)
-                      )
+                        t.identifier(exported),
+                      ),
                     ),
-                    t.stringLiteral(source)
-                  )
+                    t.stringLiteral(source),
+                  ),
                 );
 
                 // Track imports
@@ -189,13 +197,16 @@ const addGCCExportsFromESM = (filePath: string): PluginObj => {
             // Handle direct named exports - export { a, b, c }
             if (node.specifiers.length > 0) {
               node.specifiers.forEach((specifier) => {
-                if (t.isExportSpecifier(specifier) && t.isIdentifier(specifier.exported)) {
+                if (
+                  t.isExportSpecifier(specifier) &&
+                  t.isIdentifier(specifier.exported)
+                ) {
                   globalIdentifiers.add(specifier.exported.name);
                   // Keep original export statement
                 }
               });
             }
-            
+
             // Handle declaration exports - export const x = 1
             else if (node.declaration) {
               const declaration = node.declaration;

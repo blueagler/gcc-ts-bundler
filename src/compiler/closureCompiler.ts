@@ -58,15 +58,15 @@ export async function runClosureCompiler(settings: Settings): Promise<number> {
   const options = {
     assumeFunctionWrapper: true,
     compilationLevel: settings.compilationLevel,
+    dependencyMode: "PRUNE",
     externs: settings.externs,
     js: settings.js,
     languageIn: "UNSTABLE",
     languageOut: settings.languageOut,
-    warningLevel: settings.verbose ? "VERBOSE" : "DEFAULT",
-    dependencyMode: "PRUNE",
-    rewritePolyfills: false,
+    moduleResolution: "NODE",
     processCommonJsModules: true,
-    moduleResolution: "NODE"
+    rewritePolyfills: false,
+    warningLevel: settings.verbose ? "VERBOSE" : "DEFAULT",
   };
   let entryPointStates: EntryPointState[] = [];
   try {

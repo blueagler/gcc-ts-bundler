@@ -25,7 +25,7 @@ export function loadSettingsFromArgs(args: string[]): { settings: Settings } {
     fatalWarnings: false,
     js: [],
     languageOut: "ECMASCRIPT_NEXT",
-    outputDir: "./dist",
+    outputDir: path.join(cwd, "./dist"),
     preserveCache: false,
     srcDir: "./src",
     verbose: false,

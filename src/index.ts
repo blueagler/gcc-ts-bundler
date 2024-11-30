@@ -113,7 +113,9 @@ export async function main(args: string[]): Promise<number> {
     const exitCode = await runClosureCompiler(settings);
     console.log(
       exitCode === 0
-        ? "Build succeeded. You may remove the .closured and .closure-externs directories."
+        ? settings.preserveCache
+          ? "Build succeeded. .closured and .closure-externs are reserved."
+          : "Build succeeded."
         : "Failed to build with Closure Compiler.",
     );
     if (!settings.preserveCache) {

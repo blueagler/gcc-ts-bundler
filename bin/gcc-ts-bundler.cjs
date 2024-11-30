@@ -59,6 +59,9 @@ var import_path = __toESM(require("path"));
 var import_core = require("@babel/core");
 var import_uglify_js = require("uglify-js");
 async function customTransform(code) {
+  if (code.length === 0) {
+    return code;
+  }
   const plugins = [
     convertGCCExportsToESM({
       defaultExportIdentifier: "__DEFAULT_EXPORT__",
@@ -205,15 +208,15 @@ async function runClosureCompiler(settings) {
   const options = {
     assumeFunctionWrapper: true,
     compilationLevel: settings.compilationLevel,
+    dependencyMode: "PRUNE",
     externs: settings.externs,
     js: settings.js,
     languageIn: "UNSTABLE",
     languageOut: settings.languageOut,
-    warningLevel: settings.verbose ? "VERBOSE" : "DEFAULT",
-    dependencyMode: "PRUNE",
-    rewritePolyfills: false,
+    moduleResolution: "NODE",
     processCommonJsModules: true,
-    moduleResolution: "NODE"
+    rewritePolyfills: false,
+    warningLevel: settings.verbose ? "VERBOSE" : "DEFAULT"
   };
   let entryPointStates = [];
   try {
@@ -275,6 +278,9 @@ var parsedASTCache = new Map;
 var DEFAULT_EXPORT_IDENTIFIER = "__DEFAULT_EXPORT__";
 var GCC = "GCC";
 async function customTransform2(code, filePath, isEntryPoint) {
+  if (code.length === 0) {
+    return code;
+  }
   await preloadModules(filePath);
   const plugins = [import_plugin_syntax_typescript.default];
   if (isEntryPoint) {
@@ -286,6 +292,7 @@ async function customTransform2(code, filePath, isEntryPoint) {
     plugins
   });
   if (!transformed?.code) {
+    console.log(transformed);
     throw new Error("Babel transform failed");
   }
   return transformed.code;
@@ -391,11 +398,11 @@ var addGCCExportsFromESM = (filePath) => {
               const source = node.source.value;
               const specifiers = node.specifiers;
               const identifiersToImport = specifiers.filter((spec) => import_core2.types.isExportSpecifier(spec)).map((spec) => ({
-                local: spec.local.name,
-                exported: import_core2.types.isIdentifier(spec.exported) ? spec.exported.name : spec.exported.value
+                exported: import_core2.types.isIdentifier(spec.exported) ? spec.exported.name : spec.exported.value,
+                local: spec.local.name
               }));
               if (identifiersToImport.length > 0) {
-                exportPath.insertBefore(import_core2.types.importDeclaration(identifiersToImport.map(({ local, exported }) => import_core2.types.importSpecifier(import_core2.types.identifier(local), import_core2.types.identifier(exported))), import_core2.types.stringLiteral(source)));
+                exportPath.insertBefore(import_core2.types.importDeclaration(identifiersToImport.map(({ exported, local }) => import_core2.types.importSpecifier(import_core2.types.identifier(local), import_core2.types.identifier(exported))), import_core2.types.stringLiteral(source)));
                 if (!existingImports.has(source)) {
                   existingImports.set(source, new Set);
                 }
@@ -6243,7 +6250,7 @@ function loadSettingsFromArgs(args) {
     fatalWarnings: false,
     js: [],
     languageOut: "ECMASCRIPT_NEXT",
-    outputDir: "./dist",
+    outputDir: import_path5.default.join(cwd, "./dist"),
     preserveCache: false,
     srcDir: "./src",
     verbose: false
@@ -6468,7 +6475,7 @@ async function main(args) {
     settings.js.push(import_path8.default.join(__dirname, "../closure-lib/**.js"), import_path8.default.join(closuredDir, "**.js"));
     console.log("Building with Closure Compiler...");
     const exitCode = await runClosureCompiler(settings);
-    console.log(exitCode === 0 ? "Build succeeded. You may remove the .closured and .closure-externs directories." : "Failed to build with Closure Compiler.");
+    console.log(exitCode === 0 ? settings.preserveCache ? "Build succeeded. .closured and .closure-externs are reserved." : "Build succeeded." : "Failed to build with Closure Compiler.");
     if (!settings.preserveCache) {
       await cleanupDirectories([preCompiledDir, closureExternsDir, closuredDir], true);
     }
