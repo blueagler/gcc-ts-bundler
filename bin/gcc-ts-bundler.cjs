@@ -6475,14 +6475,19 @@ async function main(args) {
     settings.js.push(import_path8.default.join(__dirname, "../closure-lib/**.js"), import_path8.default.join(closuredDir, "**.js"));
     console.log("Building with Closure Compiler...");
     const exitCode = await runClosureCompiler(settings);
-    console.log(exitCode === 0 ? settings.preserveCache ? "Build succeeded. .closured and .closure-externs are reserved." : "Build succeeded." : "Failed to build with Closure Compiler.");
-    if (!settings.preserveCache) {
-      await cleanupDirectories([preCompiledDir, closureExternsDir, closuredDir], true);
+    if (exitCode !== 0) {
+      console.error("Failed to build with Closure Compiler.");
+    } else {
+      console.log("Build succeeded.");
     }
     return exitCode;
   } catch (error) {
     console.error(error);
     return 1;
+  } finally {
+    if (!settings.preserveCache) {
+      await cleanupDirectories([preCompiledDir, closureExternsDir, closuredDir], true);
+    }
   }
 }
 main(process.argv.slice(2)).then((exitCode) => process.exit(exitCode));

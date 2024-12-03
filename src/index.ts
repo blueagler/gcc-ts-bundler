@@ -111,23 +111,22 @@ export async function main(args: string[]): Promise<number> {
     );
     console.log("Building with Closure Compiler...");
     const exitCode = await runClosureCompiler(settings);
-    console.log(
-      exitCode === 0
-        ? settings.preserveCache
-          ? "Build succeeded. .closured and .closure-externs are reserved."
-          : "Build succeeded."
-        : "Failed to build with Closure Compiler.",
-    );
+    if (exitCode !== 0) {
+      console.error("Failed to build with Closure Compiler.");
+    } else {
+      console.log("Build succeeded.");
+    }
+    return exitCode;
+  } catch (error) {
+    console.error(error);
+    return 1;
+  } finally {
     if (!settings.preserveCache) {
       await cleanupDirectories(
         [preCompiledDir, closureExternsDir, closuredDir],
         true,
       );
     }
-    return exitCode;
-  } catch (error) {
-    console.error(error);
-    return 1;
   }
 }
 main(process.argv.slice(2)).then((exitCode) => process.exit(exitCode));
