@@ -1,5 +1,6 @@
 import fs from "fs/promises";
 import { compiler } from "google-closure-compiler";
+import os from "os";
 import path from "path";
 
 import { Settings } from "../settings";
@@ -74,22 +75,29 @@ export async function runClosureCompiler(settings: Settings): Promise<number> {
     for (const entryPoint of settings.entryPoints) {
       const baseName = path.basename(entryPoint);
       const outputPath = path.join(settings.outputDir, baseName);
+      const tempPath = path.join(settings.outputDir, `${baseName}.tmp`);
+
       try {
         await updateEntryPointStates(entryPointStates, entryPoint);
         await new Promise<void>((resolve, reject) => {
           new compiler({
             ...options,
             entryPoint,
-            jsOutputFile: outputPath,
+            jsOutputFile: tempPath,
           }).run(async (exitCode, stdOut, stdErr) => {
             if (exitCode === 0) {
               console.log(`Compilation of ${baseName} successful.`);
               if (stdOut) console.log(stdOut);
-              const compiledCode = await fs.readFile(outputPath, "utf-8");
-              const transformedCode = await customTransform(compiledCode);
-              const lockedCode = lockGCCAssignments(transformedCode);
-              await fs.writeFile(outputPath, lockedCode);
-              resolve();
+              try {
+                const compiledCode = await fs.readFile(tempPath, "utf-8");
+                const transformedCode = await customTransform(compiledCode);
+                const lockedCode = lockGCCAssignments(transformedCode);
+                await fs.writeFile(outputPath, lockedCode);
+                await fs.unlink(tempPath).catch(console.error);
+                resolve();
+              } catch (error) {
+                reject(error);
+              }
             } else {
               console.error(`Compilation of ${baseName} failed.`);
               if (stdErr) console.error(stdErr);
@@ -98,6 +106,7 @@ export async function runClosureCompiler(settings: Settings): Promise<number> {
           });
         });
       } catch (error) {
+        await fs.unlink(tempPath).catch(() => {});
         throw error;
       }
     }

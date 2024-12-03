@@ -224,23 +224,29 @@ async function runClosureCompiler(settings) {
     for (const entryPoint of settings.entryPoints) {
       const baseName = import_path.default.basename(entryPoint);
       const outputPath = import_path.default.join(settings.outputDir, baseName);
+      const tempPath = import_path.default.join(settings.outputDir, `${baseName}.tmp`);
       try {
         await updateEntryPointStates(entryPointStates, entryPoint);
         await new Promise((resolve, reject) => {
           new import_google_closure_compiler.compiler({
             ...options,
             entryPoint,
-            jsOutputFile: outputPath
+            jsOutputFile: tempPath
           }).run(async (exitCode, stdOut, stdErr) => {
             if (exitCode === 0) {
               console.log(`Compilation of ${baseName} successful.`);
               if (stdOut)
                 console.log(stdOut);
-              const compiledCode = await import_promises.default.readFile(outputPath, "utf-8");
-              const transformedCode = await customTransform(compiledCode);
-              const lockedCode = lockGCCAssignments(transformedCode);
-              await import_promises.default.writeFile(outputPath, lockedCode);
-              resolve();
+              try {
+                const compiledCode = await import_promises.default.readFile(tempPath, "utf-8");
+                const transformedCode = await customTransform(compiledCode);
+                const lockedCode = lockGCCAssignments(transformedCode);
+                await import_promises.default.writeFile(outputPath, lockedCode);
+                await import_promises.default.unlink(tempPath).catch(console.error);
+                resolve();
+              } catch (error) {
+                reject(error);
+              }
             } else {
               console.error(`Compilation of ${baseName} failed.`);
               if (stdErr)
@@ -250,6 +256,8 @@ async function runClosureCompiler(settings) {
           });
         });
       } catch (error) {
+        await import_promises.default.unlink(tempPath).catch(() => {
+        });
         throw error;
       }
     }
