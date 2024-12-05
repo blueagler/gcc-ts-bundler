@@ -20,13 +20,14 @@ bun install gcc-ts-bundler
 
 ### GCC-TS-Bundler Flags
 
+- `--src_dir`: The source directory.
+- `--entry_point`: The entry point for the application. (if it is a relative path, it will be resolved from the `--src_dir` directory)
+- `--output_dir`: The output file for the generated JS.
+- `--language_out`: ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT.
+- `--compilation_level`: WHITESPACE_ONLY | SIMPLE | ADVANCED.
+- `--preserve_cache`: Whether to preserve the cache files for debugging
 - `--fatalWarnings`: Whether warnings should be fatal, causing tsickle to return a non-zero exit code.
 - `--verbose`: Print diagnostics to the console.
-- `--language_out`: ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT.
-- `--entry_point`: The entry point for the application. (if it is a relative path, it will be resolved from the `--src-dir` directory)
-- `--js_output_file`: The output file for the generated JS.
-- `--compilation_level`: WHITESPACE_ONLY | SIMPLE | ADVANCED.
-- `--src-dir`: The source directory.
 - `-h, --help`: Show this help message.
 
 ### Example
