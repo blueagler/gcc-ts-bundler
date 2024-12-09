@@ -6433,8 +6433,8 @@ async function validateFiles(files) {
 }
 
 // src/index.ts
-var __dirname = "/Users/Blueagle/Code/gcc-ts-bundler/src";
 var PRE_COMPILED_DIR = ".pre-compiled";
+var __dirname2 = process.cwd();
 async function processTsFiles(config, srcDir, preCompiledDir, closuredDir, settings) {
   await Promise.all(config.fileNames.map(async (file) => {
     const relativePath = import_path8.default.relative(srcDir, file);
@@ -6477,10 +6477,10 @@ async function main(args) {
     const modulesExterns = import_path8.default.join(closureExternsDir, "modules-externs.js");
     await ensureDirectoryExistence(modulesExterns);
     await import_fs5.default.promises.writeFile(modulesExterns, getGeneratedExterns(result.externs, config.options.rootDir || ""));
-    const closureExternsPath = import_path8.default.join(__dirname, "../closure-externs");
+    const closureExternsPath = import_path8.default.join(__dirname2, "../closure-externs");
     settings.externs.push(...import_fs5.default.readdirSync(closureExternsPath).map((file) => import_path8.default.join(closureExternsPath, file)));
     settings.externs.push(modulesExterns);
-    settings.js.push(import_path8.default.join(__dirname, "../closure-lib/**.js"), import_path8.default.join(closuredDir, "**.js"));
+    settings.js.push(import_path8.default.join(__dirname2, "../closure-lib/**.js"), import_path8.default.join(closuredDir, "**.js"));
     console.log("Building with Closure Compiler...");
     const exitCode = await runClosureCompiler(settings);
     if (exitCode !== 0) {
