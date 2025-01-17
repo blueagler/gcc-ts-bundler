@@ -35,7 +35,7 @@ export interface GoogModuleProcessorHost {
    */
   jsPathToModuleName?(
     importPath: string,
-  ): { multipleProvides: boolean; name: string } | undefined;
+  ): undefined | { multipleProvides: boolean; name: string };
   /**
    * Takes the import URL of an ES6 import and returns the property name that
    * should be stripped from the usage.
@@ -330,11 +330,11 @@ function extractRequire(call: ts.CallExpression): null | ts.StringLiteral {
 export function extractModuleMarker(
   symbol: ts.Symbol,
   name:
+    | "__clutz2_actual_path"
     | "__clutz_actual_namespace"
     | "__clutz_actual_path"
     | "__clutz_multiple_provides"
-    | "__clutz_strip_property"
-    | "__clutz2_actual_path",
+    | "__clutz_strip_property",
 ): boolean | string | undefined {
   const localSymbol = findLocalInDeclarations(symbol, name);
   if (!localSymbol) return undefined;
@@ -1644,7 +1644,7 @@ export function commonJsToGoogmoduleTransformer(
           ignoredDiagnostics,
           sf,
           importedUrl.text,
-          () => getAmbientModuleSymbol(typeChecker, importedUrl!),
+          () => getAmbientModuleSymbol(typeChecker, importedUrl),
         );
         modulesManifest.addReferencedModule(sf.fileName, imp);
 
@@ -1761,7 +1761,7 @@ function maybeAddModuleId(
   // See if a top-level 'module' symbol exists in the source file.
   const moduleSymbol: ts.Symbol | undefined = typeChecker
     .getSymbolsInScope(sourceFile, ts.SymbolFlags.ModuleMember)
-    ?.find((s) => s.name === "module");
+    .find((s) => s.name === "module");
   if (moduleSymbol) {
     const declaration =
       moduleSymbol.valueDeclaration ?? moduleSymbol.declarations?.[0];

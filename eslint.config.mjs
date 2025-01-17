@@ -1,42 +1,33 @@
-// @ts-check
+//@ts-check
+import perfectionist from "eslint-plugin-perfectionist";
+import tseslint from "typescript-eslint";
+import eslint from "@eslint/js";
 
-import { config as _config, configs } from 'typescript-eslint';
-import perfectionist from 'eslint-plugin-perfectionist';
-
-export default _config(
-  ...configs.recommended.map((config) => ({
-    ...config,
-    files: ['**/*.ts'],
-  })),
+export default tseslint.config(
+  eslint.configs.recommended,
+  tseslint.configs.recommendedTypeChecked,
   {
-    files: ['**/*.ts'],
+    files: ["src/**/*.ts"],
+    ignores: ["src/tsickle/*.ts"],
     languageOptions: {
       parserOptions: {
         project: true,
-        tsconfigRootDir: __dirname,
+        tsconfigRootDir: import.meta.dirname,
+        projectService: true,
       },
-    }
-  },
-  {
+    },
+    plugins: {
+      perfectionist,
+    },
     rules: {
       "no-console": "off",
-    }
-  },
-  {
-    rules: {
       "@typescript-eslint/no-explicit-any": "off",
       "@typescript-eslint/no-for-in-array": "off",
       "@typescript-eslint/no-unsafe-assignment": "off",
       "@typescript-eslint/no-unsafe-member-access": "off",
       "@typescript-eslint/no-dynamic-delete": "off",
       "@typescript-eslint/no-unused-vars": "off",
-    },
-  },
-  {
-    plugins: {
-      perfectionist,
-    },
-    rules: {
+      "@typescript-eslint/no-non-null-assertion": "off",
       "perfectionist/sort-array-includes": [
         "error",
         {
@@ -91,13 +82,12 @@ export default _config(
             "unknown",
           ],
           internalPattern: [
-            "@/components/**",
-            "@/media/**",
-            "@/loaders/**",
-            "@/sections/**",
-            "@/utils/**",
+            "^@/components",
+            "^@/media",
+            "^@/loaders",
+            "^@/sections",
+            "^@/utils",
           ],
-          newlinesBetween: "always",
           order: "asc",
           type: "natural",
         },
@@ -148,10 +138,6 @@ export default _config(
       "perfectionist/sort-objects": [
         "error",
         {
-          groups: ["id", "unknown"],
-          customGroups: {
-            id: ["id", "name"],
-          },
           order: "asc",
           type: "alphabetical",
         },
@@ -163,6 +149,6 @@ export default _config(
           type: "natural",
         },
       ],
-    }
+    },
   },
 );

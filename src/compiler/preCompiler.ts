@@ -73,12 +73,12 @@ async function collectModules(filePath: string, filesToProcess: Set<string>) {
     ExportAllDeclaration(exportPath) {
       const source = exportPath.node.source.value;
       const resolvedPath = resolveModulePath(source, filePath);
-      collectModules(resolvedPath, filesToProcess);
+      void collectModules(resolvedPath, filesToProcess);
     },
     ImportDeclaration(importPath) {
       const source = importPath.node.source.value;
       const resolvedPath = resolveModulePath(source, filePath);
-      collectModules(resolvedPath, filesToProcess);
+      void collectModules(resolvedPath, filesToProcess);
     },
   });
 }

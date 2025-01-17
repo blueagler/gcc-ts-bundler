@@ -738,12 +738,16 @@ export class ModuleTypeTranslator {
       this.host.unknownTypesPaths || new Set(),
       this.symbolsToAliasedNames,
       this.symbolToNameCache,
-      (sym: ts.Symbol) => void this.ensureSymbolDeclared(sym),
+      (sym: ts.Symbol) => {
+        this.ensureSymbolDeclared(sym);
+      },
     );
     translator.isForExterns = this.isForExterns;
     translator.useInternalNamespaceForExterns =
       this.useInternalNamespaceForExterns;
-    translator.warn = (msg) => void this.debugWarn(context, msg);
+    translator.warn = (msg) => {
+      this.debugWarn(context, msg);
+    };
     return translator;
   }
 

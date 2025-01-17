@@ -15,7 +15,6 @@ interface EntryPointState {
 }
 function unlockGCCAssignments(code: string): string {
   return code.replace(
-    // /\/\/globalThis\.GCC\.([\w]+)\s*=\s*([^;]+);/g,
     new RegExp(`//${GCC_ENTRY}.([\\w]+)\\s*=\\s*([^;]+);`, "g"),
     `${GCC_ENTRY}.$1 = $2;`,
   );
@@ -84,20 +83,21 @@ export async function runClosureCompiler(settings: Settings): Promise<number> {
             ...options,
             entryPoint,
             jsOutputFile: tempPath,
-          }).run(async (exitCode, stdOut, stdErr) => {
+          }).run((exitCode, stdOut, stdErr) => {
             if (exitCode === 0) {
               console.log(`Compilation of ${baseName} successful.`);
               if (stdOut) console.log(stdOut);
-              try {
-                const compiledCode = await fs.readFile(tempPath, "utf-8");
-                const transformedCode = await customTransform(compiledCode);
-                const lockedCode = lockGCCAssignments(transformedCode);
-                await fs.writeFile(outputPath, lockedCode);
-                await fs.unlink(tempPath).catch(console.error);
-                resolve();
-              } catch (error) {
-                reject(error);
-              }
+              fs.readFile(tempPath, "utf-8")
+                .then((compiledCode) => customTransform(compiledCode))
+                .then((transformedCode) => {
+                  const lockedCode = lockGCCAssignments(transformedCode);
+                  return fs.writeFile(outputPath, lockedCode);
+                })
+                .then(() => fs.unlink(tempPath))
+                .then(() => resolve())
+                .catch((error) =>
+                  reject(new Error(`Failed to write file: ${error}`)),
+                );
             } else {
               console.error(`Compilation of ${baseName} failed.`);
               if (stdErr) console.error(stdErr);

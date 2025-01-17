@@ -44,7 +44,7 @@ export function isValidClosurePropertyName(name: string): boolean {
 export function isDeclaredInBuiltinLibDTS(
   node: null | ts.Node | undefined,
 ): boolean {
-  const fileName = node?.getSourceFile()?.fileName;
+  const fileName = node?.getSourceFile().fileName;
   return !!fileName && fileName.match(/\blib\.(?:[^/]+\.)?d\.ts$/) != null;
 }
 

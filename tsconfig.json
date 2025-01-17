@@ -3,21 +3,21 @@
     "lib": [
       "ESNext"
     ],
-    "declaration": true,
     "types": [
       "node",
     ],
     "target": "ESNext",
     "strict": true,
     "outDir": "out",
-    "moduleResolution": "Bundler"
+    "moduleResolution": "Bundler",
+    "module": "ESNext",
   },
   "exclude": [
     "node_modules",
     "bin"
   ],
   "include": [
-    "src/*.ts",
+    "src/**/*.ts",
     "eslint.config.mjs"
   ]
 }

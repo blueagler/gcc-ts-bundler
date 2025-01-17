@@ -1173,7 +1173,7 @@ export function jsdocTransformer(
         const ns = transformerUtil.getTransformedNs(typeAlias);
         if (
           ns !== null &&
-          ts.getOriginalNode(typeAlias).parent?.parent === ns &&
+          ts.getOriginalNode(typeAlias).parent.parent === ns &&
           ts.isIdentifier(ns.name)
         ) {
           // If the type alias T is defined at the top level of a transformed
