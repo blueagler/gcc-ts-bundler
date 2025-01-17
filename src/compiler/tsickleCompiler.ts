@@ -28,7 +28,8 @@ export async function toClosureJS(
         writeFile(fileName, content, writeByteOrderMark);
         resolve();
       } catch (error) {
-        reject(error);
+        const message = error instanceof Error ? error.message : String(error);
+        reject(new Error(`Failed to write file ${fileName}: ${message}`));
       }
     });
     writePromises.push(writePromise);
@@ -82,13 +83,14 @@ export async function toClosureJS(
       tsMigrationExportsShimFiles: new Map(),
     };
   }
-  return new Promise(async (resolve, reject) => {
+  return new Promise((resolve, reject) => {
     try {
       const result = tsickle.emit(program, transformerHost, asyncWriteFile);
-      await Promise.all(writePromises);
-      resolve(result);
+      Promise.all(writePromises)
+        .then(() => resolve(result))
+        .catch(reject);
     } catch (error) {
-      reject(error);
+      reject(error instanceof Error ? error : new Error(String(error)));
     }
   });
 }

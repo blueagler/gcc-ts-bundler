@@ -154,7 +154,6 @@ const addGCCExportsFromESM = (filePath: string): PluginObj => {
           ) {
             const { node } = exportPath;
 
-            // Handle exports with a source module - export { a, b } from './module'
             if (node.source) {
               const source = node.source.value;
               const specifiers = node.specifiers;
@@ -169,7 +168,6 @@ const addGCCExportsFromESM = (filePath: string): PluginObj => {
                   local: spec.local.name,
                 }));
 
-              // Add import declaration
               if (identifiersToImport.length > 0) {
                 exportPath.insertBefore(
                   t.importDeclaration(
@@ -183,7 +181,6 @@ const addGCCExportsFromESM = (filePath: string): PluginObj => {
                   ),
                 );
 
-                // Track imports
                 if (!existingImports.has(source)) {
                   existingImports.set(source, new Set());
                 }
@@ -194,7 +191,6 @@ const addGCCExportsFromESM = (filePath: string): PluginObj => {
               }
             }
 
-            // Handle direct named exports - export { a, b, c }
             if (node.specifiers.length > 0) {
               node.specifiers.forEach((specifier) => {
                 if (
@@ -202,13 +198,9 @@ const addGCCExportsFromESM = (filePath: string): PluginObj => {
                   t.isIdentifier(specifier.exported)
                 ) {
                   globalIdentifiers.add(specifier.exported.name);
-                  // Keep original export statement
                 }
               });
-            }
-
-            // Handle declaration exports - export const x = 1
-            else if (node.declaration) {
+            } else if (node.declaration) {
               const declaration = node.declaration;
               if (t.isVariableDeclaration(declaration)) {
                 declaration.declarations.forEach((decl) => {
@@ -243,7 +235,6 @@ const addGCCExportsFromESM = (filePath: string): PluginObj => {
           },
         });
 
-        // Second pass remains the same...
         programPath.traverse({
           ExportAllDeclaration(exportAllPath) {
             const source = exportAllPath.node.source.value;

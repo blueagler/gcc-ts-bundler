@@ -24,7 +24,7 @@ async function processTsFiles(
   srcDir: string,
   preCompiledDir: string,
   closuredDir: string,
-  settings: any,
+  settings: { entryPoints: string[] },
 ) {
   await Promise.all(
     config.fileNames.map(async (file) => {
@@ -83,7 +83,9 @@ export async function main(args: string[]): Promise<number> {
       config.options,
       config.fileNames,
       settings,
-      writeFileContent,
+      (fileName, content) => {
+        void writeFileContent(fileName, content);
+      },
     );
     if (result.diagnostics.length > 0) {
       console.error(
@@ -131,4 +133,4 @@ export async function main(args: string[]): Promise<number> {
     }
   }
 }
-main(process.argv.slice(2)).then((exitCode) => process.exit(exitCode));
+void main(process.argv.slice(2)).then((exitCode) => process.exit(exitCode));

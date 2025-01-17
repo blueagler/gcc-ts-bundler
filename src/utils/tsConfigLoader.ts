@@ -12,7 +12,9 @@ export async function loadTscConfig(args: string[]): Promise<{
   }
   const tsFileArguments = parsedCommandLine.fileNames;
   const projectDir = parsedCommandLine.options.project || process.cwd();
-  const possibleConfigFile = ts.findConfigFile(projectDir, ts.sys.fileExists);
+  const possibleConfigFile = ts.findConfigFile(projectDir, (fileName: string) =>
+    ts.sys.fileExists(fileName),
+  );
   if (!possibleConfigFile) {
     return {
       errors: [

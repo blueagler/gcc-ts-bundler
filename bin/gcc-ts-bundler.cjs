@@ -6258,7 +6258,8 @@ async function toClosureJS(options, fileNames, settings, writeFile) {
         writeFile(fileName, content, writeByteOrderMark);
         resolve();
       } catch (error) {
-        reject(error);
+        const message = error instanceof Error ? error.message : String(error);
+        reject(new Error(`Failed to write file ${fileName}: ${message}`));
       }
     });
     writePromises.push(writePromise);
@@ -6303,13 +6304,12 @@ async function toClosureJS(options, fileNames, settings, writeFile) {
       tsMigrationExportsShimFiles: new Map
     };
   }
-  return new Promise(async (resolve, reject) => {
+  return new Promise((resolve, reject) => {
     try {
       const result = emit(program, transformerHost, asyncWriteFile);
-      await Promise.all(writePromises);
-      resolve(result);
+      Promise.all(writePromises).then(() => resolve(result)).catch(reject);
     } catch (error) {
-      reject(error);
+      reject(error instanceof Error ? error : new Error(String(error)));
     }
   });
 }
@@ -6338,14 +6338,15 @@ function loadSettingsFromArgs(args) {
       case "src_dir":
         settings.srcDir = value;
         break;
-      case "entry_point":
+      case "entry_point": {
         const entryPoints = Array.isArray(value) ? value : [value];
         for (const entryPoint of entryPoints) {
           settings.entryPoints.push(import_path5.default.join(cwd, "./.closured/", entryPoint.replace(/\.ts$/, ".js")));
         }
         break;
+      }
       case "output_dir":
-        settings.outputDir = import_path5.default.join(cwd, value);
+        settings.outputDir = import_path5.default.join(cwd, String(value));
         break;
       case "language_out":
         settings.languageOut = String(value);
@@ -6428,7 +6429,7 @@ async function loadTscConfig(args) {
   }
   const tsFileArguments = parsedCommandLine.fileNames;
   const projectDir = parsedCommandLine.options.project || process.cwd();
-  const possibleConfigFile = import_typescript2.default.findConfigFile(projectDir, import_typescript2.default.sys.fileExists);
+  const possibleConfigFile = import_typescript2.default.findConfigFile(projectDir, (fileName) => import_typescript2.default.sys.fileExists(fileName));
   if (!possibleConfigFile) {
     return {
       errors: [
@@ -6537,7 +6538,9 @@ async function main(args) {
       return 1;
     }
     await processTsFiles(config, srcDir, preCompiledDir, closuredDir, settings);
-    const result = await toClosureJS(config.options, config.fileNames, settings, writeFileContent);
+    const result = await toClosureJS(config.options, config.fileNames, settings, (fileName, content) => {
+      writeFileContent(fileName, content);
+    });
     if (result.diagnostics.length > 0) {
       console.error(import_typescript3.default.formatDiagnosticsWithColorAndContext(result.diagnostics, import_typescript3.default.createCompilerHost(config.options)));
       return 1;

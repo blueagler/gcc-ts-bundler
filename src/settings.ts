@@ -39,7 +39,7 @@ export function loadSettingsFromArgs(args: string[]): { settings: Settings } {
       case "src_dir":
         settings.srcDir = value;
         break;
-      case "entry_point":
+      case "entry_point": {
         const entryPoints: string[] = Array.isArray(value) ? value : [value];
         for (const entryPoint of entryPoints) {
           settings.entryPoints.push(
@@ -47,8 +47,9 @@ export function loadSettingsFromArgs(args: string[]): { settings: Settings } {
           );
         }
         break;
+      }
       case "output_dir":
-        settings.outputDir = path.join(cwd, value);
+        settings.outputDir = path.join(cwd, String(value));
         break;
       case "language_out":
         settings.languageOut = String(value);
