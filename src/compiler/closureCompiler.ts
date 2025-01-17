@@ -1,6 +1,5 @@
 import fs from "fs/promises";
 import { compiler } from "google-closure-compiler";
-import os from "os";
 import path from "path";
 
 import { Settings } from "../settings";
