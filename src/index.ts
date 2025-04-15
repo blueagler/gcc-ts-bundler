@@ -17,8 +17,6 @@ import { loadTscConfig } from "./utils/tsConfigLoader";
 
 const PRE_COMPILED_DIR = ".pre-compiled";
 
-const __dirname = path.dirname(new URL(import.meta.url).pathname);
-
 async function processTsFiles(
   config: ts.ParsedCommandLine,
   srcDir: string,

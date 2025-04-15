@@ -7,18 +7,20 @@
     "gcc-ts-bundler": "./bin/gcc-ts-bundler.cjs"
   },
   "devDependencies": {
+    "@eslint/js": "9.24.0",
     "@types/babel__core": "^7.20.5",
+    "@types/eslint": "9.6.1",
     "@types/google-closure-compiler": "^20231112.0.0",
     "@types/minimist": "^1.2.5",
-    "@types/node": "^22.10.7",
+    "@types/node": "^22.14.1",
     "@types/uglify-js": "^3.17.5",
-    "eslint-plugin-perfectionist": "^4.6.0",
-    "prettier": "^3.4.2",
-    "typescript-eslint": "^8.20.1-alpha.0"
+    "eslint-plugin-perfectionist": "^4.11.0",
+    "prettier": "^4.0.0-alpha.12",
+    "typescript-eslint": "^8.30.2-alpha.5"
   },
   "scripts": {
     "build": "bun build ./src/index.ts --outdir ./bin --format cjs --packages external --banner \"#!/usr/bin/env node\" --entry-naming \"gcc-ts-bundler.cjs\" --target node",
-    "lint": "bun --bun prettier \"**/*.ts\" --write && bun --bun eslint \"**/*.ts\" --fix",
+    "lint": "prettier \"**/*.ts\" --write && bun --bun eslint -c eslint.config.ts \"**/*.ts\" --fix",
     "publish": "bun publish"
   },
   "keywords": [
@@ -26,11 +28,11 @@
     "closure"
   ],
   "dependencies": {
-    "@babel/core": "^7.26.0",
+    "@babel/core": "^7.26.10",
     "@babel/plugin-syntax-typescript": "7.25.9",
-    "google-closure-compiler": "20250101.0.0-nightly",
+    "google-closure-compiler": "20250415.0.0-nightly",
     "minimist": "1.2.8",
-    "typescript": "^5.8.0-dev.20250116",
+    "typescript": "^5.9.0-dev.20250415",
     "uglify-js": "3.19.3"
   },
   "files": [

@@ -26,14 +26,14 @@ bun install gcc-ts-bundler
 - `--language_out`: ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT.
 - `--compilation_level`: WHITESPACE_ONLY | SIMPLE | ADVANCED.
 - `--preserve_cache`: Whether to preserve the cache files for debugging
-- `--fatalWarnings`: Whether warnings should be fatal, causing tsickle to return a non-zero exit code.
+- `--fatal_warnings`: Whether warnings should be fatal, causing tsickle to return a non-zero exit code.
 - `--verbose`: Print diagnostics to the console.
 - `-h, --help`: Show this help message.
 
 ### Example
 
 ```sh
-gcc-ts-bundler --src-dir='./src' --entry_point='./index.ts' --js_output_file='./dist/index.js'
+gcc-ts-bundler --src_dir='./src' --entry_point='./index.ts' --js_output_file='./dist/index.js'
 ```
 
 ## License

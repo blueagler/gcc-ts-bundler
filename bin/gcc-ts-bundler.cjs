@@ -64,8 +64,8 @@ async function customTransform(code) {
   }
   const plugins = [
     convertGCCExportsToESM({
-      defaultExportIdentifier: "__DEFAULT_EXPORT__",
-      gccIdentifier: "GCC"
+      gccIdentifier: "GCC",
+      defaultExportIdentifier: "__DEFAULT_EXPORT__"
     })
   ];
   const transformed = await import_core.transformAsync(code, {
@@ -250,8 +250,7 @@ async function runClosureCompiler(settings) {
           });
         });
       } catch (error) {
-        await import_promises.default.unlink(tempPath).catch(() => {
-        });
+        await import_promises.default.unlink(tempPath).catch(() => {});
         throw error;
       }
     }
@@ -1673,8 +1672,7 @@ class TypeTranslator {
   dropFinalTypeArgument = false;
   isForExterns = false;
   useInternalNamespaceForExterns = false;
-  constructor(host, typeChecker, node, pathUnknownSymbolsSet, symbolsToAliasedNames, symbolToNameCache, ensureSymbolDeclared = () => {
-  }) {
+  constructor(host, typeChecker, node, pathUnknownSymbolsSet, symbolsToAliasedNames, symbolToNameCache, ensureSymbolDeclared = () => {}) {
     this.host = host;
     this.typeChecker = typeChecker;
     this.node = node;
@@ -2168,8 +2166,7 @@ class TypeTranslator {
         throw new Error(`unknown type flags ${type.flags} on ${typeToDebugString(type)}`);
     }
   }
-  warn(msg) {
-  }
+  warn(msg) {}
 }
 function isAlwaysUnknownSymbol(pathUnknownSymbolsSet, symbol) {
   if (pathUnknownSymbolsSet === undefined)
@@ -6502,8 +6499,8 @@ async function validateFiles(files) {
 }
 
 // src/index.ts
+var __dirname = "/Users/Blueagle/Code/gcc-ts-bundler/src";
 var PRE_COMPILED_DIR = ".pre-compiled";
-var __dirname2 = import_path8.default.dirname(new URL(import.meta.url).pathname);
 async function processTsFiles(config, srcDir, preCompiledDir, closuredDir, settings) {
   await Promise.all(config.fileNames.map(async (file) => {
     const relativePath = import_path8.default.relative(srcDir, file);
@@ -6548,10 +6545,10 @@ async function main(args) {
     const modulesExterns = import_path8.default.join(closureExternsDir, "modules-externs.js");
     await ensureDirectoryExistence(modulesExterns);
     await import_fs5.default.promises.writeFile(modulesExterns, getGeneratedExterns(result.externs, config.options.rootDir || ""));
-    const closureExternsPath = import_path8.default.join(__dirname2, "../closure-externs");
+    const closureExternsPath = import_path8.default.join(__dirname, "../closure-externs");
     settings.externs.push(...import_fs5.default.readdirSync(closureExternsPath).map((file) => import_path8.default.join(closureExternsPath, file)));
     settings.externs.push(modulesExterns);
-    settings.js.push(import_path8.default.join(__dirname2, "../closure-lib/**.js"), import_path8.default.join(closuredDir, "**.js"));
+    settings.js.push(import_path8.default.join(__dirname, "../closure-lib/**.js"), import_path8.default.join(closuredDir, "**.js"));
     console.log("Building with Closure Compiler...");
     const exitCode = await runClosureCompiler(settings);
     if (exitCode !== 0) {

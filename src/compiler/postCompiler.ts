@@ -7,8 +7,8 @@ export async function customTransform(code: string): Promise<string> {
   }
   const plugins = [
     convertGCCExportsToESM({
-      defaultExportIdentifier: "__DEFAULT_EXPORT__",
       gccIdentifier: "GCC",
+      defaultExportIdentifier: "__DEFAULT_EXPORT__",
     }),
   ];
   const transformed = await transformAsync(code, {
