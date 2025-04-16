@@ -6396,7 +6396,9 @@ async function cleanDirectory(dir) {
     const fullPath = import_path6.default.join(dir, entry.name);
     if (entry.isDirectory()) {
       await cleanDirectory(fullPath);
-      await import_fs3.default.promises.rmdir(fullPath);
+      try {
+        await import_fs3.default.promises.rmdir(fullPath);
+      } catch (_) {}
     } else {
       await import_fs3.default.promises.unlink(fullPath);
     }
@@ -6410,7 +6412,9 @@ async function cleanupDirectories(dirs, remove = true) {
   await Promise.all(dirs.map(async (dir) => {
     await cleanDirectory(dir);
     if (remove) {
-      await import_fs3.default.promises.rmdir(dir);
+      try {
+        await import_fs3.default.promises.rmdir(dir);
+      } catch (_) {}
     }
   }));
 }
@@ -6455,7 +6459,12 @@ async function loadTscConfig(args) {
   result.config.compilerOptions.target = "ESNext";
   result.config.compilerOptions.skipLibCheck = true;
   result.config.exclude = [];
-  result.config.include = [import_path7.default.join(projectDir, "*.ts")];
+  result.config.include = [
+    import_path7.default.join(projectDir, "*.ts"),
+    import_path7.default.join(projectDir, "*.js"),
+    import_path7.default.join(projectDir, "**/*.tsx"),
+    import_path7.default.join(projectDir, "**/*.jsx")
+  ];
   const configParseResult = import_typescript2.default.parseJsonConfigFileContent(result.config, import_typescript2.default.sys, projectDir, parsedCommandLine.options, possibleConfigFile);
   if (configParseResult.errors.length > 0) {
     return { errors: configParseResult.errors, fileNames: [], options: {} };
@@ -6499,8 +6508,8 @@ async function validateFiles(files) {
 }
 
 // src/index.ts
-var __dirname = "/Users/Blueagle/Code/gcc-ts-bundler/src";
 var PRE_COMPILED_DIR = ".pre-compiled";
+var gccDir = import_path8.default.resolve("./node_modules/gcc-ts-bundler");
 async function processTsFiles(config, srcDir, preCompiledDir, closuredDir, settings) {
   await Promise.all(config.fileNames.map(async (file) => {
     const relativePath = import_path8.default.relative(srcDir, file);
@@ -6545,10 +6554,10 @@ async function main(args) {
     const modulesExterns = import_path8.default.join(closureExternsDir, "modules-externs.js");
     await ensureDirectoryExistence(modulesExterns);
     await import_fs5.default.promises.writeFile(modulesExterns, getGeneratedExterns(result.externs, config.options.rootDir || ""));
-    const closureExternsPath = import_path8.default.join(__dirname, "../closure-externs");
+    const closureExternsPath = import_path8.default.join(gccDir, "./closure-externs");
     settings.externs.push(...import_fs5.default.readdirSync(closureExternsPath).map((file) => import_path8.default.join(closureExternsPath, file)));
     settings.externs.push(modulesExterns);
-    settings.js.push(import_path8.default.join(__dirname, "../closure-lib/**.js"), import_path8.default.join(closuredDir, "**.js"));
+    settings.js.push(import_path8.default.join(gccDir, "./closure-lib/**.js"), import_path8.default.join(closuredDir, "**.js"));
     console.log("Building with Closure Compiler...");
     const exitCode = await runClosureCompiler(settings);
     if (exitCode !== 0) {

@@ -49,7 +49,9 @@ export async function cleanDirectory(dir: string): Promise<void> {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         await cleanDirectory(fullPath);
-        await fs.promises.rmdir(fullPath);
+        try {
+          await fs.promises.rmdir(fullPath);
+        } catch (_) {}
       } else {
         await fs.promises.unlink(fullPath);
       }
@@ -70,7 +72,9 @@ export async function cleanupDirectories(dirs: string[], remove = true) {
     dirs.map(async (dir) => {
       await cleanDirectory(dir);
       if (remove) {
-        await fs.promises.rmdir(dir);
+        try {
+          await fs.promises.rmdir(dir);
+        } catch (_) {}
       }
     }),
   );

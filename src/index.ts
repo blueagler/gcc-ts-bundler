@@ -17,6 +17,8 @@ import { loadTscConfig } from "./utils/tsConfigLoader";
 
 const PRE_COMPILED_DIR = ".pre-compiled";
 
+const gccDir = path.resolve("./node_modules/gcc-ts-bundler");
+
 async function processTsFiles(
   config: ts.ParsedCommandLine,
   srcDir: string,
@@ -100,7 +102,7 @@ export async function main(args: string[]): Promise<number> {
       modulesExterns,
       tsickle.getGeneratedExterns(result.externs, config.options.rootDir || ""),
     );
-    const closureExternsPath = path.join(__dirname, "../closure-externs");
+    const closureExternsPath = path.join(gccDir, "./closure-externs");
     settings.externs.push(
       ...fs
         .readdirSync(closureExternsPath)
@@ -108,7 +110,7 @@ export async function main(args: string[]): Promise<number> {
     );
     settings.externs.push(modulesExterns);
     settings.js.push(
-      path.join(__dirname, "../closure-lib/**.js"),
+      path.join(gccDir, "./closure-lib/**.js"),
       path.join(closuredDir, "**.js"),
     );
     console.log("Building with Closure Compiler...");

@@ -46,7 +46,12 @@ export async function loadTscConfig(args: string[]): Promise<{
   result.config.compilerOptions.target = "ESNext";
   result.config.compilerOptions.skipLibCheck = true;
   result.config.exclude = [];
-  result.config.include = [path.join(projectDir, "*.ts")];
+  result.config.include = [
+    path.join(projectDir, "*.ts"),
+    path.join(projectDir, "*.js"),
+    path.join(projectDir, "**/*.tsx"),
+    path.join(projectDir, "**/*.jsx"),
+  ];
   const configParseResult = ts.parseJsonConfigFileContent(
     result.config,
     ts.sys,
