@@ -28,18 +28,18 @@
 
 import * as ts from "typescript";
 
-import { AnnotatorHost, moduleNameAsIdentifier } from "./annotator_host";
+import { AnnotatorHost, moduleNameAsIdentifier } from "./annotator-host";
 import { hasExportingDecorator } from "./decorators";
-import { GoogModuleProcessorHost } from "./googmodule";
+import { GoogModuleProcessorHost } from "./goog-module";
 import * as jsdoc from "./jsdoc";
-import { ModuleTypeTranslator } from "./module_type_translator";
-import * as transformerUtil from "./transformer_util";
+import { ModuleTypeTranslator } from "./module-type-translator";
+import * as transformerUtil from "./transformer-util";
 import {
   getPreviousDeclaration,
   isMergedDeclaration,
   symbolIsValue,
-} from "./transformer_util";
-import { isValidClosurePropertyName } from "./type_translator";
+} from "./transformer-util";
+import { isValidClosurePropertyName } from "./type-translator";
 
 function addCommentOn(
   node: ts.Node,
@@ -1497,7 +1497,9 @@ export function jsdocTransformer(
         } else if (ts.isNamedExports(exportDecl.exportClause)) {
           // export {a, b, c} from 'abc';
           for (const exp of exportDecl.exportClause.elements) {
-            const exportedName = transformerUtil.getIdentifierText(exp.name);
+            const exportedName = ts.isIdentifier(exp.name)
+              ? transformerUtil.getIdentifierText(exp.name)
+              : exp.name.text;
             typesToExport.push([
               exportedName,
               moduleTypeTranslator.mustGetSymbolAtLocation(exp.name),

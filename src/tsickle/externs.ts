@@ -67,16 +67,16 @@
 
 import * as ts from "typescript";
 
-import { AnnotatorHost, moduleNameAsIdentifier } from "./annotator_host";
-import { getEnumType } from "./enum_transformer";
-import { GoogModuleProcessorHost, jsPathToNamespace } from "./googmodule";
+import { AnnotatorHost, moduleNameAsIdentifier } from "./annotator-host";
+import { getEnumType } from "./enum-transformer";
+import { GoogModuleProcessorHost, jsPathToNamespace } from "./goog-module";
 import * as jsdoc from "./jsdoc";
 import {
   escapeForComment,
   maybeAddHeritageClauses,
   maybeAddTemplateClause,
-} from "./jsdoc_transformer";
-import { ModuleTypeTranslator } from "./module_type_translator";
+} from "./jsdoc-transformer";
+import { ModuleTypeTranslator } from "./module-type-translator";
 import * as path from "./path";
 import {
   getEntityNameText,
@@ -85,8 +85,8 @@ import {
   isAmbient,
   isDtsFileName,
   reportDiagnostic,
-} from "./transformer_util";
-import { isValidClosurePropertyName } from "./type_translator";
+} from "./transformer-util";
+import { isValidClosurePropertyName } from "./type-translator";
 
 /**
  * Symbols that are already declared as externs in Closure, that should

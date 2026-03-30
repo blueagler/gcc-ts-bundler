@@ -9,7 +9,7 @@
 import * as ts from "typescript";
 
 import * as jsdoc from "./jsdoc";
-import { getAllLeadingComments, reportDiagnostic } from "./transformer_util";
+import { getAllLeadingComments, reportDiagnostic } from "./transformer-util";
 
 /**
  * Returns the declarations for the given decorator.

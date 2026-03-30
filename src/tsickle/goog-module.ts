@@ -8,14 +8,14 @@
 
 import * as ts from "typescript";
 
-import { ModulesManifest } from "./modules_manifest";
+import { ModulesManifest } from "./modules-manifest";
 import {
   createGoogCall,
   createGoogLoadedModulesRegistration,
   createNotEmittedStatementWithComments,
   createSingleQuoteStringLiteral,
   reportDiagnostic,
-} from "./transformer_util";
+} from "./transformer-util";
 
 /**
  * Provides dependencies for and configures the goog namespace resolution

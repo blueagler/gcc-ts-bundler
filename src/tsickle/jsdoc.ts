@@ -8,7 +8,7 @@
 
 import * as ts from "typescript";
 
-import { reportDiagnostic } from "./transformer_util";
+import { reportDiagnostic } from "./transformer-util";
 
 /**
  * TypeScript has an API for JSDoc already, but it's not exposed.
@@ -579,7 +579,7 @@ export function merge(tags: Tag[]): Tag {
   if (tagNames.size !== 1) {
     throw new Error(`cannot merge differing tags: ${JSON.stringify(tags)}`);
   }
-  const tagName = tagNames.values().next().value;
+  const tagName = tagNames.values().next().value!;
   const parameterName =
     parameterNames.size > 0
       ? Array.from(parameterNames).join("_or_")
@@ -591,7 +591,13 @@ export function merge(tags: Tag[]): Tag {
     texts.size > 0
       ? Array.from(texts).join(isTemplateTag ? "," : " / ")
       : undefined;
-  const tag: Tag = { parameterName, tagName, text, type };
+  const tag: Tag = { parameterName, tagName };
+  if (text !== undefined) {
+    tag.text = text;
+  }
+  if (type !== undefined) {
+    tag.type = type;
+  }
   // Note: a param can either be optional or a rest param; if we merged an
   // optional and rest param together, prefer marking it as a rest param.
   if (restParam) {

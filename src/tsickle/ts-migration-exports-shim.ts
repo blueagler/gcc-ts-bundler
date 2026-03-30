@@ -10,7 +10,7 @@
 
 import * as ts from "typescript";
 
-import { ModulesManifest } from "./modules_manifest";
+import { ModulesManifest } from "./modules-manifest";
 import { FileSummary, ModuleType, Type } from "./summary";
 import {
   getGoogFunctionName,
@@ -19,7 +19,7 @@ import {
   isTsmesDeclareLegacyNamespaceCall,
   isTsmesShorthandCall,
   reportDiagnostic,
-} from "./transformer_util";
+} from "./transformer-util";
 
 /** Provides dependencies for file generation. */
 export interface TsMigrationExportsShimProcessorHost {

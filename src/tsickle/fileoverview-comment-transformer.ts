@@ -14,7 +14,7 @@ import {
   reportDiagnostic,
   synthesizeCommentRanges,
   updateSourceFileNode,
-} from "./transformer_util";
+} from "./transformer-util";
 
 /**
  * A set of JSDoc tags that mark a comment as a fileoverview comment. These are

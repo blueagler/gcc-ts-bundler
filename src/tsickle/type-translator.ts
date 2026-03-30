@@ -8,7 +8,7 @@
 
 import * as ts from "typescript";
 
-import { AnnotatorHost, moduleNameAsIdentifier } from "./annotator_host";
+import { AnnotatorHost, moduleNameAsIdentifier } from "./annotator-host";
 import * as path from "./path";
 import {
   getIdentifierText,
@@ -16,7 +16,7 @@ import {
   isAmbient,
   isMergedDeclaration,
   nodeIsInTransformedNs,
-} from "./transformer_util";
+} from "./transformer-util";
 
 /**
  * TypeScript allows you to write identifiers quoted, like:
@@ -814,7 +814,7 @@ export class TypeTranslator {
     // Remove duplicates to produce types that read better.
     const parts = new Set(types.map((t) => this.translate(t)));
     // If it's a single element set, return the single member.
-    if (parts.size === 1) return parts.values().next().value;
+    if (parts.size === 1) return parts.values().next().value ?? "?";
     return `(${Array.from(parts.values()).join("|")})`;
   }
 

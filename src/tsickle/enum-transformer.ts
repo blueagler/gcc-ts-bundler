@@ -29,7 +29,7 @@ import {
   hasModifierFlag,
   isAmbient,
   isMergedDeclaration,
-} from "./transformer_util";
+} from "./transformer-util";
 
 /**
  * isInUnsupportedNamespace returns true if any of node's ancestors is a

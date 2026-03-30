@@ -17,9 +17,9 @@
 
 import * as ts from "typescript";
 
-import * as googmodule from "./googmodule";
+import * as googmodule from "./goog-module";
 import * as path from "./path";
-import { isDeclaredInClutzDts } from "./type_translator";
+import { isDeclaredInClutzDts } from "./type-translator";
 
 interface ClutzHost {
   /** See compiler_host.ts */

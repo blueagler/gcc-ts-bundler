@@ -55,13 +55,6 @@ var RegExpExecArray;
 /** @typedef {!Set} */
 var ReadonlySet;
 
-/**
- * @record
- * @template T
- * @extends {IThenable<T>}
- */
-function PromiseLike() {};
-
 /** @typedef {function(new:Promise)} */
 var PromiseConstructor;
 

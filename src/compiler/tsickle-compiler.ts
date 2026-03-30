@@ -1,9 +1,9 @@
 import path from "path";
 import ts from "typescript";
 
-import { Settings } from "../settings";
+import { Settings } from "../entry/options";
 import * as tsickle from "../tsickle";
-import { getCommonParentDirectory } from "../utils/fileUtils";
+import { getCommonParentDirectory } from "../utils/file-utils";
 const modulePrefix = "_gcc_";
 export async function toClosureJS(
   options: ts.CompilerOptions,

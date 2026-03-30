@@ -8,35 +8,36 @@
 
 import * as ts from "typescript";
 
-import { AnnotatorHost } from "./annotator_host";
-import { assertAbsolute } from "./cli_support";
+import { AnnotatorHost } from "./annotator-host";
+import { assertAbsolute } from "./cli-support";
 import * as clutz from "./clutz";
-import { decoratorDownlevelTransformer } from "./decorator_downlevel_transformer";
+import { decoratorDownlevelTransformer } from "./decorator-downlevel-transformer";
 import {
   transformDecoratorJsdoc,
   transformDecoratorsOutputForClosurePropertyRenaming,
 } from "./decorators";
-import { enumTransformer } from "./enum_transformer";
+import { enumTransformer } from "./enum-transformer";
 import { generateExterns } from "./externs";
-import { transformFileoverviewCommentFactory } from "./fileoverview_comment_transformer";
-import * as googmodule from "./googmodule";
-import { jsdocTransformer, removeTypeAssertions } from "./jsdoc_transformer";
-import { ModulesManifest } from "./modules_manifest";
-import { namespaceTransformer } from "./ns_transformer";
+import { transformFileoverviewCommentFactory } from "./fileoverview-comment-transformer";
+import * as googmodule from "./goog-module";
+import { jsdocTransformer, removeTypeAssertions } from "./jsdoc-transformer";
+import { ModulesManifest } from "./modules-manifest";
+import { namespaceTransformer } from "./ns-transformer";
 import * as path from "./path";
 import { FileSummary, SummaryGenerationProcessorHost } from "./summary";
-import { isDtsFileName } from "./transformer_util";
-import * as tsmes from "./ts_migration_exports_shim";
+import { isDtsFileName } from "./transformer-util";
+import * as tsmes from "./ts-migration-exports-shim";
 
 // Exported for users as a default impl of pathToModuleName.
-export { pathToModuleName } from "./cli_support";
+export { pathToModuleName } from "./cli-support";
 // Retained here for API compatibility.
 export { getGeneratedExterns } from "./externs";
-export { type FileMap, ModulesManifest } from "./modules_manifest";
+export { type FileMap, ModulesManifest } from "./modules-manifest";
 export { FileSummary, ModuleType, type Symbol, Type } from "./summary";
 
 export interface TsickleHost
-  extends googmodule.GoogModuleProcessorHost,
+  extends
+    googmodule.GoogModuleProcessorHost,
     tsmes.TsMigrationExportsShimProcessorHost,
     AnnotatorHost,
     SummaryGenerationProcessorHost {

@@ -35,7 +35,7 @@ import {
   getAllLeadingComments,
   symbolIsValue,
   visitEachChild,
-} from "./transformer_util";
+} from "./transformer-util";
 
 /**
  * Returns true if the given decorator should be downleveled.

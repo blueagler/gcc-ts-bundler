@@ -14,16 +14,16 @@
 
 import * as ts from "typescript";
 
-import { AnnotatorHost, moduleNameAsIdentifier } from "./annotator_host";
-import * as googmodule from "./googmodule";
+import { AnnotatorHost, moduleNameAsIdentifier } from "./annotator-host";
+import * as googmodule from "./goog-module";
 import * as jsdoc from "./jsdoc";
 import {
   getIdentifierText,
   hasModifierFlag,
   reportDebugWarning,
   reportDiagnostic,
-} from "./transformer_util";
-import * as typeTranslator from "./type_translator";
+} from "./transformer-util";
+import * as typeTranslator from "./type-translator";
 
 /**
  * ts.Symbol to access internal .parent property.

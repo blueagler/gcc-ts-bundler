@@ -1,7 +1,21 @@
 import fs from "fs";
-import path from "path";
 import ts from "typescript";
-export async function loadTscConfig(args: string[]): Promise<{
+
+export interface TsConfigLoadOptions {
+  args?: string[];
+  configSearchDir?: string;
+  outDir: string;
+  projectDir: string;
+  rootDir?: string;
+}
+
+export async function loadTscConfig({
+  args = [],
+  configSearchDir,
+  outDir,
+  projectDir,
+  rootDir = "./",
+}: TsConfigLoadOptions): Promise<{
   errors: ts.Diagnostic[];
   fileNames: string[];
   options: ts.CompilerOptions;
@@ -11,9 +25,9 @@ export async function loadTscConfig(args: string[]): Promise<{
     return { errors: parsedCommandLine.errors, fileNames: [], options: {} };
   }
   const tsFileArguments = parsedCommandLine.fileNames;
-  const projectDir = parsedCommandLine.options.project || process.cwd();
-  const possibleConfigFile = ts.findConfigFile(projectDir, (fileName: string) =>
-    ts.sys.fileExists(fileName),
+  const possibleConfigFile = ts.findConfigFile(
+    configSearchDir ?? projectDir,
+    (fileName: string) => ts.sys.fileExists(fileName),
   );
   if (!possibleConfigFile) {
     return {
@@ -39,19 +53,17 @@ export async function loadTscConfig(args: string[]): Promise<{
   if (result.error) {
     return { errors: [result.error], fileNames: [], options: {} };
   }
-  result.config.compilerOptions.rootDir = "./";
-  result.config.compilerOptions.outDir = path.join(projectDir, "../.closured");
+  const projectFiles = await collectProjectFiles(projectDir);
+  result.config.compilerOptions.rootDir = rootDir;
+  result.config.compilerOptions.outDir = outDir;
   result.config.compilerOptions.module = "CommonJS";
   result.config.compilerOptions.moduleResolution = "Node";
+  result.config.compilerOptions.ignoreDeprecations = "6.0";
   result.config.compilerOptions.target = "ESNext";
   result.config.compilerOptions.skipLibCheck = true;
   result.config.exclude = [];
-  result.config.include = [
-    path.join(projectDir, "*.ts"),
-    path.join(projectDir, "*.js"),
-    path.join(projectDir, "**/*.tsx"),
-    path.join(projectDir, "**/*.jsx"),
-  ];
+  result.config.files = projectFiles;
+  result.config.include = [];
   const configParseResult = ts.parseJsonConfigFileContent(
     result.config,
     ts.sys,
@@ -88,6 +100,39 @@ export async function loadTscConfig(args: string[]): Promise<{
     }
   }
   return { errors: [], fileNames, options: configParseResult.options };
+}
+
+async function collectProjectFiles(projectDir: string): Promise<string[]> {
+  const files: string[] = [];
+  const pendingDirs = [projectDir];
+  const allowedExtensions = new Set([".js", ".jsx", ".ts", ".tsx"]);
+
+  while (pendingDirs.length > 0) {
+    const currentDir = pendingDirs.pop()!;
+    const entries = await fs.promises.readdir(currentDir, {
+      withFileTypes: true,
+    });
+
+    for (const entry of entries) {
+      if (entry.name === "node_modules") {
+        continue;
+      }
+
+      const entryPath = ts.sys.resolvePath(`${currentDir}/${entry.name}`);
+      if (entry.isDirectory()) {
+        pendingDirs.push(entryPath);
+        continue;
+      }
+
+      if (
+        allowedExtensions.has(entry.name.slice(entry.name.lastIndexOf(".")))
+      ) {
+        files.push(entryPath);
+      }
+    }
+  }
+
+  return files;
 }
 async function validateFiles(files: string[]): Promise<void> {
   const fileChecks = await Promise.all(

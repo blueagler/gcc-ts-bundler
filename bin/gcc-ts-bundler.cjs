@@ -5,77 +5,97 @@ var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
+function __accessProp(key) {
+  return this[key];
+}
+var __toESMCache_node;
+var __toESMCache_esm;
 var __toESM = (mod, isNodeMode, target) => {
+  var canCache = mod != null && typeof mod === "object";
+  if (canCache) {
+    var cache = isNodeMode ? __toESMCache_node ??= new WeakMap : __toESMCache_esm ??= new WeakMap;
+    var cached = cache.get(mod);
+    if (cached)
+      return cached;
+  }
   target = mod != null ? __create(__getProtoOf(mod)) : {};
   const to = isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target;
   for (let key of __getOwnPropNames(mod))
     if (!__hasOwnProp.call(to, key))
       __defProp(to, key, {
-        get: () => mod[key],
+        get: __accessProp.bind(mod, key),
         enumerable: true
       });
+  if (canCache)
+    cache.set(mod, to);
   return to;
 };
-var __moduleCache = /* @__PURE__ */ new WeakMap;
 var __toCommonJS = (from) => {
-  var entry = __moduleCache.get(from), desc;
+  var entry = (__moduleCache ??= new WeakMap).get(from), desc;
   if (entry)
     return entry;
   entry = __defProp({}, "__esModule", { value: true });
-  if (from && typeof from === "object" || typeof from === "function")
-    __getOwnPropNames(from).map((key) => !__hasOwnProp.call(entry, key) && __defProp(entry, key, {
-      get: () => from[key],
-      enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable
-    }));
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (var key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(entry, key))
+        __defProp(entry, key, {
+          get: __accessProp.bind(from, key),
+          enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable
+        });
+  }
   __moduleCache.set(from, entry);
   return entry;
 };
+var __moduleCache;
+var __returnValue = (v) => v;
+function __exportSetter(name, newValue) {
+  this[name] = __returnValue.bind(null, newValue);
+}
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, {
       get: all[name],
       enumerable: true,
       configurable: true,
-      set: (newValue) => all[name] = () => newValue
+      set: __exportSetter.bind(all, name)
     });
 };
 
-// src/index.ts
-var exports_src = {};
-__export(exports_src, {
-  main: () => main
+// src/entry/main.ts
+var exports_main = {};
+__export(exports_main, {
+  runCli: () => runCli,
+  main: () => main,
+  build: () => build
 });
-module.exports = __toCommonJS(exports_src);
+module.exports = __toCommonJS(exports_main);
 var import_fs5 = __toESM(require("fs"));
-var import_path8 = __toESM(require("path"));
+var import_os = __toESM(require("os"));
+var import_path6 = __toESM(require("path"));
 var import_typescript3 = __toESM(require("typescript"));
 
-// src/compiler/closureCompiler.ts
+// src/compiler/closure-compiler.ts
 var import_promises = __toESM(require("fs/promises"));
-var import_google_closure_compiler = require("google-closure-compiler");
+var closureCompilerPackage = __toESM(require("google-closure-compiler"));
+var import_utils = require("google-closure-compiler/lib/utils.js");
 var import_path = __toESM(require("path"));
 
-// src/compiler/postCompiler.ts
-var import_core = require("@babel/core");
+// src/compiler/post-compiler.ts
+var import_core = require("@swc/core");
 var import_uglify_js = require("uglify-js");
+var DEFAULT_EXPORT_IDENTIFIER = "__DEFAULT_EXPORT__";
+var GCC_IDENTIFIER = "GCC";
+var SWC_PARSE_OPTIONS = {
+  syntax: "ecmascript",
+  target: "es2022"
+};
 async function customTransform(code) {
   if (code.length === 0) {
     return code;
   }
-  const plugins = [
-    convertGCCExportsToESM({
-      gccIdentifier: "GCC",
-      defaultExportIdentifier: "__DEFAULT_EXPORT__"
-    })
-  ];
-  const transformed = await import_core.transformAsync(code, {
-    babelrc: false,
-    plugins
-  });
-  if (!transformed?.code) {
-    throw new Error("Babel transform failed");
-  }
-  const minified = import_uglify_js.minify(transformed.code, {
+  const module2 = import_core.parseSync(code, SWC_PARSE_OPTIONS);
+  const transformedCode = import_core.printSync(convertGCCExportsToESM(module2)).code;
+  const minified = import_uglify_js.minify(transformedCode, {
     compress: {
       hoist_vars: true,
       passes: 3,
@@ -90,95 +110,144 @@ async function customTransform(code) {
   }
   return minified.code;
 }
-function getPropertyName(property) {
-  if (import_core.types.isIdentifier(property)) {
-    return property.name;
-  } else if (import_core.types.isStringLiteral(property)) {
+function convertGCCExportsToESM(module2) {
+  const body = [];
+  const exportsMap = new Map;
+  const processedExports = new Set;
+  const existingExportNames = new Set;
+  let hasDefaultExport = false;
+  for (const item of module2.body) {
+    if (item.type === "ExportNamedDeclaration") {
+      for (const specifier of item.specifiers) {
+        if (specifier.type !== "ExportSpecifier") {
+          continue;
+        }
+        existingExportNames.add(getModuleExportName(specifier.exported ?? specifier.orig));
+      }
+      continue;
+    }
+    if (item.type === "ExportDefaultDeclaration" || item.type === "ExportDefaultExpression") {
+      hasDefaultExport = true;
+    }
+  }
+  for (const item of module2.body) {
+    const gccExport = getGccExportAssignment(item);
+    if (!gccExport) {
+      body.push(item);
+      continue;
+    }
+    if (processedExports.has(gccExport.exportName)) {
+      continue;
+    }
+    processedExports.add(gccExport.exportName);
+    const localName = gccExport.exportName === DEFAULT_EXPORT_IDENTIFIER ? "__gcc_default_export__" : `__gcc_export_${sanitizeIdentifier(gccExport.exportName)}`;
+    exportsMap.set(gccExport.exportName, localName);
+    body.push(createConstDeclaration(localName, gccExport.right));
+  }
+  for (const [exportName, localName] of exportsMap) {
+    if (exportName === DEFAULT_EXPORT_IDENTIFIER) {
+      if (!hasDefaultExport) {
+        body.push(createDefaultExport(localName));
+      }
+      continue;
+    }
+    if (!existingExportNames.has(exportName)) {
+      body.push(createNamedExport(localName, exportName));
+    }
+  }
+  module2.body = body;
+  return module2;
+}
+function getGccExportAssignment(item) {
+  if (item.type !== "ExpressionStatement") {
+    return;
+  }
+  const statement = item;
+  if (statement.expression.type !== "AssignmentExpression") {
+    return;
+  }
+  const expression = statement.expression;
+  if (expression.left.type !== "MemberExpression") {
+    return;
+  }
+  const left = expression.left;
+  if (left.object.type !== "MemberExpression") {
+    return;
+  }
+  const object = left.object;
+  if (object.object.type !== "Identifier" || object.object.value !== "globalThis" || getMemberPropertyName(object) !== GCC_IDENTIFIER) {
+    return;
+  }
+  const exportName = getMemberPropertyName(left);
+  if (!exportName) {
+    return;
+  }
+  return { exportName, right: expression.right };
+}
+function getMemberPropertyName(node) {
+  const property = node.property;
+  if (property.type === "Identifier" || property.type === "StringLiteral") {
     return property.value;
   }
   return;
 }
-var convertGCCExportsToESM = (options) => {
-  const gccId = options.gccIdentifier;
-  const defaultExportId = options.defaultExportIdentifier;
-  return {
-    name: "convert-gcc-exports-to-esm",
-    visitor: {
-      Program(path) {
-        const exportsMap = new Map;
-        const processedExports = new Set;
-        const existingExportNames = new Set;
-        path.node.body.forEach((node) => {
-          if (import_core.types.isExportNamedDeclaration(node)) {
-            node.specifiers.forEach((specifier) => {
-              if (import_core.types.isExportSpecifier(specifier)) {
-                const exportedName = import_core.types.isIdentifier(specifier.exported) ? specifier.exported.name : specifier.exported.value;
-                existingExportNames.add(exportedName);
-              }
-            });
-          }
-        });
-        path.traverse({
-          AssignmentExpression(assignPath) {
-            const left = assignPath.node.left;
-            if (import_core.types.isMemberExpression(left) && import_core.types.isMemberExpression(left.object) && import_core.types.isIdentifier(left.object.object, { name: "globalThis" }) && import_core.types.isIdentifier(left.object.property, { name: gccId }) && (import_core.types.isIdentifier(left.property) || import_core.types.isStringLiteral(left.property))) {
-              const exportName = getPropertyName(left.property);
-              if (!exportName)
-                return;
-              if (processedExports.has(exportName)) {
-                assignPath.parentPath.remove();
-                return;
-              }
-              processedExports.add(exportName);
-              const variableName = exportName === defaultExportId ? "defaultExport" : path.scope.generateUidIdentifier(exportName).name;
-              exportsMap.set(exportName, variableName);
-              const variableDeclaration = import_core.types.variableDeclaration("const", [
-                import_core.types.variableDeclarator(import_core.types.identifier(variableName), assignPath.node.right)
-              ]);
-              assignPath.parentPath.replaceWith(variableDeclaration);
-            }
-          }
-        });
-        if (exportsMap.size === 0) {
-          return;
-        }
-        const namedExportSpecifiers = [];
-        let defaultExportName;
-        exportsMap.forEach((variableName, exportName) => {
-          if (exportName === defaultExportId) {
-            defaultExportName = variableName;
-          } else if (!existingExportNames.has(exportName)) {
-            namedExportSpecifiers.push(import_core.types.exportSpecifier(import_core.types.identifier(variableName), import_core.types.identifier(exportName)));
-          }
-        });
-        if (defaultExportName) {
-          const hasDefaultExport = path.node.body.some((node) => import_core.types.isExportDefaultDeclaration(node));
-          if (!hasDefaultExport) {
-            const exportDefault = import_core.types.exportDefaultDeclaration(import_core.types.identifier(defaultExportName));
-            path.pushContainer("body", exportDefault);
-          }
-        }
-        if (namedExportSpecifiers.length > 0) {
-          const exportNamedDeclaration = import_core.types.exportNamedDeclaration(null, namedExportSpecifiers);
-          path.pushContainer("body", exportNamedDeclaration);
-        }
-        path.node.body = path.node.body.filter((node) => {
-          if (import_core.types.isExpressionStatement(node) && import_core.types.isAssignmentExpression(node.expression) && import_core.types.isMemberExpression(node.expression.left) && import_core.types.isMemberExpression(node.expression.left.object) && import_core.types.isIdentifier(node.expression.left.object.object, {
-            name: "globalThis"
-          }) && import_core.types.isIdentifier(node.expression.left.object.property, {
-            name: gccId
-          })) {
-            return false;
-          }
-          return true;
-        });
-      }
-    }
-  };
-};
+function getModuleExportName(node) {
+  return node.type === "Identifier" ? node.value : node.value;
+}
+function sanitizeIdentifier(name) {
+  return name.replace(/[^\w$]/g, "_");
+}
+function parseModuleItem(code) {
+  const module2 = import_core.parseSync(code, SWC_PARSE_OPTIONS);
+  const [item] = module2.body;
+  if (!item) {
+    throw new Error(`Failed to parse module item: ${code}`);
+  }
+  return item;
+}
+function createConstDeclaration(localName, right) {
+  const declaration = parseModuleItem(`const ${localName} = null;`);
+  if (declaration.type !== "VariableDeclaration") {
+    throw new Error("Failed to create variable declaration.");
+  }
+  declaration.declarations[0].init = right;
+  return declaration;
+}
+function createDefaultExport(localName) {
+  return parseModuleItem(`export default ${localName};`);
+}
+function createNamedExport(localName, exportName) {
+  const exportedName = /^[A-Za-z_$][\w$]*$/.test(exportName) ? exportName : JSON.stringify(exportName);
+  return parseModuleItem(`export { ${localName} as ${exportedName} };`);
+}
 
-// src/compiler/closureCompiler.ts
+// src/compiler/closure-compiler.ts
 var GCC_ENTRY = "globalThis.GCC";
+function getDefaultString(value) {
+  if (typeof value === "object" && value !== null && "default" in value && typeof value.default === "string") {
+    return value.default;
+  }
+  return;
+}
+function resolveClosureCompilerJarPath() {
+  const closureCompilerModule = closureCompilerPackage;
+  const closureCompiler = closureCompilerPackage.compiler;
+  const jarPath = typeof closureCompiler.JAR_PATH === "string" ? closureCompiler.JAR_PATH : typeof closureCompilerModule.JAR_PATH === "string" ? closureCompilerModule.JAR_PATH : getDefaultString(closureCompiler.JAR_PATH) ?? getDefaultString(closureCompilerModule.JAR_PATH);
+  return jarPath;
+}
+function configureClosureCompilerInstance(instance) {
+  const nativeImagePath = import_utils.getNativeImagePath();
+  if (nativeImagePath) {
+    instance.JAR_PATH = null;
+    instance.javaPath = nativeImagePath;
+    return instance;
+  }
+  const jarPath = resolveClosureCompilerJarPath();
+  if (jarPath) {
+    instance.JAR_PATH = jarPath;
+  }
+  return instance;
+}
 function unlockGCCAssignments(code) {
   return code.replace(new RegExp(`//${GCC_ENTRY}.([\\w]+)\\s*=\\s*([^;]+);`, "g"), `${GCC_ENTRY}.$1 = $2;`);
 }
@@ -205,6 +274,7 @@ async function updateEntryPointStates(states, currentPath) {
   await Promise.all(writes);
 }
 async function runClosureCompiler(settings) {
+  const closureCompiler = closureCompilerPackage.compiler;
   const options = {
     assumeFunctionWrapper: true,
     compilationLevel: settings.compilationLevel,
@@ -221,18 +291,20 @@ async function runClosureCompiler(settings) {
   let entryPointStates = [];
   try {
     entryPointStates = await prepareEntryPoints(settings.entryPoints);
-    for (const entryPoint of settings.entryPoints) {
+    for (const [index, entryPoint] of settings.entryPoints.entries()) {
+      const compilerEntryPoint = settings.compilerEntryPoints[index];
       const baseName = import_path.default.basename(entryPoint);
       const outputPath = import_path.default.join(settings.outputDir, baseName);
       const tempPath = import_path.default.join(settings.outputDir, `${baseName}.tmp`);
       try {
         await updateEntryPointStates(entryPointStates, entryPoint);
         await new Promise((resolve, reject) => {
-          new import_google_closure_compiler.compiler({
+          const compilerProcess = configureClosureCompilerInstance(new closureCompiler({
             ...options,
-            entryPoint,
+            entryPoint: compilerEntryPoint,
             jsOutputFile: tempPath
-          }).run((exitCode, stdOut, stdErr) => {
+          }));
+          compilerProcess.run((exitCode, stdOut, stdErr) => {
             if (exitCode === 0) {
               console.log(`Compilation of ${baseName} successful.`);
               if (stdOut)
@@ -240,7 +312,7 @@ async function runClosureCompiler(settings) {
               import_promises.default.readFile(tempPath, "utf-8").then((compiledCode) => customTransform(compiledCode)).then((transformedCode) => {
                 const lockedCode = lockGCCAssignments(transformedCode);
                 return import_promises.default.writeFile(outputPath, lockedCode);
-              }).then(() => import_promises.default.unlink(tempPath)).then(() => resolve()).catch((error) => reject(new Error(`Failed to write file: ${error}`)));
+              }).then(() => settings.preserveCache ? undefined : import_promises.default.unlink(tempPath).catch((error) => error.code === "ENOENT" ? undefined : Promise.reject(error))).then(() => resolve()).catch((error) => reject(new Error(`Failed to write file: ${error}`)));
             } else {
               console.error(`Compilation of ${baseName} failed.`);
               if (stdErr)
@@ -268,288 +340,320 @@ async function runClosureCompiler(settings) {
   }
 }
 
-// src/compiler/preCompiler.ts
-var import_core2 = require("@babel/core");
-var import_plugin_syntax_typescript = __toESM(require("@babel/plugin-syntax-typescript"));
+// src/compiler/pre-compiler.ts
+var import_core2 = require("@swc/core");
 var import_fs = require("fs");
 var import_path2 = __toESM(require("path"));
 var modulePathCache = new Map;
-var fileContentCache = new Map;
-var parsedASTCache = new Map;
-var DEFAULT_EXPORT_IDENTIFIER = "__DEFAULT_EXPORT__";
+var parsedModuleCache = new Map;
+var DEFAULT_EXPORT_IDENTIFIER2 = "__DEFAULT_EXPORT__";
 var GCC = "GCC";
-async function customTransform2(code, filePath, isEntryPoint) {
-  if (code.length === 0) {
+function getParseOptions(filePath) {
+  return {
+    syntax: "typescript",
+    target: "es2022",
+    decorators: true,
+    dts: filePath.endsWith(".d.ts"),
+    tsx: filePath.endsWith(".tsx")
+  };
+}
+async function customTransform2(code, filePath, isEntryPoint, projectRoot) {
+  if (code.length === 0 || !isEntryPoint) {
     return code;
   }
-  await preloadModules(filePath);
-  const plugins = [import_plugin_syntax_typescript.default];
-  if (isEntryPoint) {
-    plugins.push(addGCCExportsFromESM(filePath));
-  }
-  const transformed = import_core2.transformSync(code, {
-    babelrc: false,
-    filename: filePath,
-    plugins
-  });
-  if (!transformed?.code) {
-    console.log(transformed);
-    throw new Error("Babel transform failed");
-  }
-  return transformed.code;
+  await preloadModules(filePath, projectRoot);
+  const module2 = import_core2.parseSync(code, getParseOptions(filePath));
+  const transformed = transformEntryModule(module2, filePath);
+  return import_core2.printSync(transformed).code;
 }
-async function preloadModules(entryFilePath) {
-  const filesToProcess = new Set;
-  await collectModules(entryFilePath, filesToProcess);
-  await Promise.all(Array.from(filesToProcess).map(async (filePath) => {
-    if (!fileContentCache.has(filePath)) {
-      const code = await import_fs.promises.readFile(filePath, "utf-8");
-      fileContentCache.set(filePath, code);
-      const ast = import_core2.parse(code, {
-        plugins: [import_plugin_syntax_typescript.default]
-      });
-      parsedASTCache.set(filePath, ast);
+async function getParsedModule(filePath) {
+  const cachedModule = parsedModuleCache.get(filePath);
+  if (cachedModule) {
+    return cachedModule;
+  }
+  const code = await import_fs.promises.readFile(filePath, "utf-8");
+  const module2 = import_core2.parseSync(code, getParseOptions(filePath));
+  parsedModuleCache.set(filePath, module2);
+  return module2;
+}
+function collectStaticDependencies(module2, importerFile, projectRoot) {
+  const dependencies = new Set;
+  for (const item of module2.body) {
+    if (item.type === "ImportDeclaration") {
+      const resolvedPath = resolveModulePath(item.source.value, importerFile, projectRoot);
+      if (resolvedPath) {
+        dependencies.add(resolvedPath);
+      }
+      continue;
     }
-  }));
+    if (item.type === "ExportAllDeclaration") {
+      const resolvedPath = resolveModulePath(item.source.value, importerFile, projectRoot);
+      if (resolvedPath) {
+        dependencies.add(resolvedPath);
+      }
+      continue;
+    }
+    if (item.type === "ExportNamedDeclaration" && item.source) {
+      const resolvedPath = resolveModulePath(item.source.value, importerFile, projectRoot);
+      if (resolvedPath) {
+        dependencies.add(resolvedPath);
+      }
+    }
+  }
+  return Array.from(dependencies);
 }
-async function collectModules(filePath, filesToProcess) {
-  if (filesToProcess.has(filePath)) {
+async function preloadModules(entryFilePath, projectRoot) {
+  const pendingFiles = [entryFilePath];
+  const visitedFiles = new Set;
+  while (pendingFiles.length > 0) {
+    const currentFile = pendingFiles.pop();
+    if (visitedFiles.has(currentFile)) {
+      continue;
+    }
+    visitedFiles.add(currentFile);
+    const module2 = await getParsedModule(currentFile);
+    for (const dependency of collectStaticDependencies(module2, currentFile, projectRoot)) {
+      if (!visitedFiles.has(dependency)) {
+        pendingFiles.push(dependency);
+      }
+    }
+  }
+}
+function resolveModulePath(source, importerFile, projectRoot) {
+  if (!source.startsWith(".") && !import_path2.default.isAbsolute(source)) {
     return;
   }
-  filesToProcess.add(filePath);
-  let ast = parsedASTCache.get(filePath);
-  if (!ast) {
-    const code = await import_fs.promises.readFile(filePath, "utf-8");
-    fileContentCache.set(filePath, code);
-    ast = import_core2.parse(code, {
-      plugins: [import_plugin_syntax_typescript.default]
-    });
-    parsedASTCache.set(filePath, ast);
+  const resolvedBasePath = import_path2.default.resolve(import_path2.default.dirname(importerFile), source);
+  if (!resolvedBasePath.startsWith(projectRoot + import_path2.default.sep)) {
+    return;
   }
-  import_core2.traverse(ast, {
-    ExportAllDeclaration(exportPath) {
-      const source = exportPath.node.source.value;
-      const resolvedPath = resolveModulePath(source, filePath);
-      collectModules(resolvedPath, filesToProcess);
-    },
-    ImportDeclaration(importPath) {
-      const source = importPath.node.source.value;
-      const resolvedPath = resolveModulePath(source, filePath);
-      collectModules(resolvedPath, filesToProcess);
-    }
-  });
-}
-function resolveModulePath(source, importerFile) {
-  const cacheKey = import_path2.default.resolve(import_path2.default.dirname(importerFile), source);
-  if (modulePathCache.has(cacheKey)) {
-    return modulePathCache.get(cacheKey);
+  if (modulePathCache.has(resolvedBasePath)) {
+    return modulePathCache.get(resolvedBasePath);
   }
+  const candidates = [resolvedBasePath];
   const extensions = [".ts", ".d.ts", ".tsx", ".js", ".jsx"];
   for (const ext of extensions) {
-    const resolvedPath = import_path2.default.resolve(import_path2.default.dirname(importerFile), `${source}${ext}`);
-    if (import_fs.existsSync(resolvedPath)) {
-      modulePathCache.set(cacheKey, resolvedPath);
-      return resolvedPath;
+    candidates.push(`${resolvedBasePath}${ext}`);
+  }
+  for (const candidate of candidates) {
+    if (import_fs.existsSync(candidate)) {
+      modulePathCache.set(resolvedBasePath, candidate);
+      return candidate;
     }
   }
   throw new Error(`Module not found: ${source}`);
 }
-var addGCCExportsFromESM = (filePath) => {
-  return {
-    visitor: {
-      Program(programPath) {
-        const globalIdentifiers = new Set;
-        const existingImports = new Map;
-        programPath.traverse({
-          ExportDefaultDeclaration(exportPath) {
-            const { node } = exportPath;
-            const name = DEFAULT_EXPORT_IDENTIFIER;
-            if (import_core2.types.isIdentifier(node.declaration) && node.declaration.name === DEFAULT_EXPORT_IDENTIFIER) {
-              return;
-            }
-            if (import_core2.types.isTSDeclareFunction(node.declaration)) {
-              return;
-            }
-            const id = import_core2.types.identifier(name);
-            const declaration = node.declaration;
-            if (import_core2.types.isFunctionDeclaration(declaration) || import_core2.types.isClassDeclaration(declaration)) {
-              const expr = import_core2.types.toExpression(declaration);
-              const variableDeclaration = import_core2.types.variableDeclaration("const", [
-                import_core2.types.variableDeclarator(id, expr)
-              ]);
-              globalIdentifiers.add(name);
-              exportPath.replaceWithMultiple([
-                variableDeclaration,
-                import_core2.types.exportDefaultDeclaration(id)
-              ]);
-            } else {
-              const variableDeclaration = import_core2.types.variableDeclaration("const", [
-                import_core2.types.variableDeclarator(id, declaration)
-              ]);
-              globalIdentifiers.add(name);
-              exportPath.replaceWithMultiple([
-                variableDeclaration,
-                import_core2.types.exportDefaultDeclaration(id)
-              ]);
-            }
-          },
-          ExportNamedDeclaration(exportPath) {
-            const { node } = exportPath;
-            if (node.source) {
-              const source = node.source.value;
-              const specifiers = node.specifiers;
-              const identifiersToImport = specifiers.filter((spec) => import_core2.types.isExportSpecifier(spec)).map((spec) => ({
-                exported: import_core2.types.isIdentifier(spec.exported) ? spec.exported.name : spec.exported.value,
-                local: spec.local.name
-              }));
-              if (identifiersToImport.length > 0) {
-                exportPath.insertBefore(import_core2.types.importDeclaration(identifiersToImport.map(({ exported, local }) => import_core2.types.importSpecifier(import_core2.types.identifier(local), import_core2.types.identifier(exported))), import_core2.types.stringLiteral(source)));
-                if (!existingImports.has(source)) {
-                  existingImports.set(source, new Set);
-                }
-                identifiersToImport.forEach(({ exported }) => {
-                  existingImports.get(source).add(exported);
-                  globalIdentifiers.add(exported);
-                });
-              }
-            }
-            if (node.specifiers.length > 0) {
-              node.specifiers.forEach((specifier) => {
-                if (import_core2.types.isExportSpecifier(specifier) && import_core2.types.isIdentifier(specifier.exported)) {
-                  globalIdentifiers.add(specifier.exported.name);
-                }
-              });
-            } else if (node.declaration) {
-              const declaration = node.declaration;
-              if (import_core2.types.isVariableDeclaration(declaration)) {
-                declaration.declarations.forEach((decl) => {
-                  if (import_core2.types.isIdentifier(decl.id)) {
-                    globalIdentifiers.add(decl.id.name);
-                  }
-                });
-              } else if (import_core2.types.isFunctionDeclaration(declaration) || import_core2.types.isClassDeclaration(declaration)) {
-                if (declaration.id) {
-                  globalIdentifiers.add(declaration.id.name);
-                }
-              }
-            }
-          },
-          ImportDeclaration(importPath) {
-            const source = importPath.node.source.value;
-            const specifiers = importPath.node.specifiers;
-            if (!existingImports.has(source)) {
-              existingImports.set(source, new Set);
-            }
-            specifiers.forEach((specifier) => {
-              if (import_core2.types.isImportSpecifier(specifier) && import_core2.types.isIdentifier(specifier.imported)) {
-                existingImports.get(source).add(specifier.imported.name);
-              }
-            });
-          }
-        });
-        programPath.traverse({
-          ExportAllDeclaration(exportAllPath) {
-            const source = exportAllPath.node.source.value;
-            const modulePath = resolveModulePath(source, filePath);
-            const ast = parsedASTCache.get(modulePath);
-            if (!ast) {
-              throw new Error(`AST not found for module ${modulePath}`);
-            }
-            const collectedExports = new Set;
-            const exportCollector = {
-              ExportAllDeclaration(nestedExportAllPath) {
-                const nestedSource = nestedExportAllPath.node.source.value;
-                const nestedModulePath = resolveModulePath(nestedSource, modulePath);
-                const nestedAST = parsedASTCache.get(nestedModulePath);
-                if (nestedAST) {
-                  import_core2.traverse(nestedAST, exportCollector);
-                }
-              },
-              ExportNamedDeclaration(namedExportPath) {
-                const { node } = namedExportPath;
-                if (node.specifiers.length > 0) {
-                  node.specifiers.forEach((specifier) => {
-                    if (import_core2.types.isExportSpecifier(specifier) && import_core2.types.isIdentifier(specifier.exported)) {
-                      collectedExports.add(specifier.exported.name);
-                    }
-                  });
-                } else if (node.declaration) {
-                  const declaration = node.declaration;
-                  if (import_core2.types.isVariableDeclaration(declaration)) {
-                    declaration.declarations.forEach((decl) => {
-                      if (import_core2.types.isIdentifier(decl.id)) {
-                        collectedExports.add(decl.id.name);
-                      }
-                    });
-                  } else if (import_core2.types.isFunctionDeclaration(declaration) || import_core2.types.isClassDeclaration(declaration)) {
-                    if (import_core2.types.isIdentifier(declaration.id)) {
-                      collectedExports.add(declaration.id.name);
-                    }
-                  }
-                }
-              }
-            };
-            import_core2.traverse(ast, exportCollector);
-            const identifiersToImport = Array.from(collectedExports).filter((name) => {
-              return !existingImports.get(source)?.has(name);
-            });
-            if (identifiersToImport.length > 0) {
-              exportAllPath.replaceWithMultiple([
-                import_core2.types.importDeclaration(identifiersToImport.map((name) => import_core2.types.importSpecifier(import_core2.types.identifier(name), import_core2.types.identifier(name))), import_core2.types.stringLiteral(source))
-              ]);
-              if (!existingImports.has(source)) {
-                existingImports.set(source, new Set);
-              }
-              identifiersToImport.forEach((name) => existingImports.get(source).add(name));
-            } else {
-              exportAllPath.remove();
-            }
-            collectedExports.forEach((name) => globalIdentifiers.add(name));
-          },
-          ExportNamedDeclaration(exportPath) {
-            const { node } = exportPath;
-            if (node.specifiers.length > 0) {
-              node.specifiers.forEach((specifier) => {
-                if (import_core2.types.isExportSpecifier(specifier) && import_core2.types.isIdentifier(specifier.exported)) {
-                  globalIdentifiers.add(specifier.exported.name);
-                }
-              });
-            } else if (node.declaration) {
-              const declaration = node.declaration;
-              if (import_core2.types.isVariableDeclaration(declaration)) {
-                declaration.declarations.forEach((decl) => {
-                  if (import_core2.types.isIdentifier(decl.id)) {
-                    globalIdentifiers.add(decl.id.name);
-                  }
-                });
-              } else if (import_core2.types.isFunctionDeclaration(declaration) || import_core2.types.isClassDeclaration(declaration)) {
-                if (import_core2.types.isIdentifier(declaration.id)) {
-                  globalIdentifiers.add(declaration.id.name);
-                }
-              }
-            }
-          }
-        });
-        const identifiersToAssign = Array.from(globalIdentifiers);
-        if (identifiersToAssign.length > 0) {
-          const gccIdentifier = import_core2.types.identifier(GCC);
-          gccIdentifier.typeAnnotation = import_core2.types.tsTypeAnnotation(import_core2.types.tsTypeLiteral(identifiersToAssign.map((name) => import_core2.types.tsPropertySignature(import_core2.types.identifier(name), import_core2.types.tsTypeAnnotation(import_core2.types.tsTypeQuery(import_core2.types.identifier(name)))))));
-          const globalDeclaration = import_core2.types.tsModuleDeclaration(import_core2.types.identifier("globalThis"), import_core2.types.tsModuleBlock([
-            import_core2.types.variableDeclaration("var", [
-              import_core2.types.variableDeclarator(gccIdentifier)
-            ])
-          ]));
-          globalDeclaration.declare = true;
-          programPath.unshiftContainer("body", globalDeclaration);
-          const gccAssignments = identifiersToAssign.map((name) => import_core2.types.expressionStatement(import_core2.types.assignmentExpression("=", import_core2.types.memberExpression(import_core2.types.memberExpression(import_core2.types.identifier("globalThis"), import_core2.types.identifier(GCC)), import_core2.types.identifier(name)), import_core2.types.identifier(name))));
-          programPath.pushContainer("body", gccAssignments);
-        }
+function transformEntryModule(module2, filePath) {
+  const body = [];
+  const globalIdentifiers = new Set;
+  const existingImports = new Map;
+  for (const item of module2.body) {
+    if (item.type === "ImportDeclaration") {
+      recordImportedSpecifiers(existingImports, item);
+      body.push(item);
+      continue;
+    }
+    if (item.type === "ExportDefaultDeclaration") {
+      const localName = DEFAULT_EXPORT_IDENTIFIER2;
+      globalIdentifiers.add(localName);
+      body.push(...rewriteDefaultDeclaration(item, localName));
+      continue;
+    }
+    if (item.type === "ExportDefaultExpression") {
+      const localName = DEFAULT_EXPORT_IDENTIFIER2;
+      globalIdentifiers.add(localName);
+      body.push(...rewriteDefaultExpression(item, localName));
+      continue;
+    }
+    if (item.type === "ExportNamedDeclaration" && item.source) {
+      body.push(...createImportsForReExport(item, existingImports));
+      collectExportedNamesFromReExport(item, globalIdentifiers);
+      body.push(item);
+      continue;
+    }
+    if (item.type === "ExportAllDeclaration") {
+      body.push(...createImportsForExportAll(item, filePath, existingImports));
+      collectExportNamesFromExportAll(item, filePath, globalIdentifiers);
+      body.push(item);
+      continue;
+    }
+    if (item.type === "ExportNamedDeclaration" || item.type === "ExportDeclaration") {
+      collectExportedNames(item, globalIdentifiers);
+    }
+    body.push(item);
+  }
+  const moduleWithAssignments = [...body];
+  const identifiersToAssign = Array.from(globalIdentifiers).sort();
+  if (identifiersToAssign.length > 0) {
+    moduleWithAssignments.unshift(createGlobalDeclaration(identifiersToAssign));
+    moduleWithAssignments.push(...createGccAssignments(identifiersToAssign));
+  }
+  module2.body = moduleWithAssignments;
+  return module2;
+}
+function recordImportedSpecifiers(existingImports, declaration) {
+  const importedNames = existingImports.get(declaration.source.value) ?? new Set;
+  for (const specifier of declaration.specifiers) {
+    if (specifier.type === "ImportSpecifier") {
+      importedNames.add(specifier.local.value);
+    }
+  }
+  existingImports.set(declaration.source.value, importedNames);
+}
+function rewriteDefaultDeclaration(declaration, localName) {
+  return rewriteDefaultNode(declaration.decl, localName);
+}
+function rewriteDefaultExpression(declaration, localName) {
+  const constDeclaration = parseModuleItems(`const ${localName} = null;`)[0];
+  if (constDeclaration.type !== "VariableDeclaration") {
+    throw new Error("Failed to create default export declaration.");
+  }
+  constDeclaration.declarations[0].init = declaration.expression;
+  return [
+    constDeclaration,
+    parseModuleItems(`export default ${localName};`)[0]
+  ];
+}
+function rewriteDefaultNode(declaration, localName) {
+  if (declaration.type === "TsInterfaceDeclaration") {
+    return [parseModuleItems(`export default undefined;`)[0]];
+  }
+  const constDeclaration = parseModuleItems(`const ${localName} = null;`)[0];
+  if (constDeclaration.type !== "VariableDeclaration") {
+    throw new Error("Failed to create default export declaration.");
+  }
+  constDeclaration.declarations[0].init = declaration;
+  return [
+    constDeclaration,
+    parseModuleItems(`export default ${localName};`)[0]
+  ];
+}
+function createImportsForReExport(declaration, existingImports) {
+  if (!declaration.source) {
+    return [];
+  }
+  const importedNames = existingImports.get(declaration.source.value) ?? new Set;
+  const specifiers = [];
+  for (const specifier of declaration.specifiers) {
+    if (specifier.type !== "ExportSpecifier") {
+      continue;
+    }
+    const localName = getModuleExportName2(specifier.exported ?? specifier.orig);
+    if (importedNames.has(localName)) {
+      continue;
+    }
+    importedNames.add(localName);
+    const importName = getModuleExportName2(specifier.orig);
+    specifiers.push(importName === localName ? importName : `${importName} as ${localName}`);
+  }
+  existingImports.set(declaration.source.value, importedNames);
+  if (specifiers.length === 0) {
+    return [];
+  }
+  return parseModuleItems(`import { ${specifiers.join(", ")} } from ${JSON.stringify(declaration.source.value)};`);
+}
+function createImportsForExportAll(declaration, importerFile, existingImports) {
+  const source = declaration.source.value;
+  const importedNames = existingImports.get(source) ?? new Set;
+  const specifiers = Array.from(collectExportNamesFromModuleSource(source, importerFile)).filter((name) => !importedNames.has(name)).map((name) => {
+    importedNames.add(name);
+    return name;
+  });
+  existingImports.set(source, importedNames);
+  if (specifiers.length === 0) {
+    return [];
+  }
+  return parseModuleItems(`import { ${specifiers.join(", ")} } from ${JSON.stringify(source)};`);
+}
+function collectExportedNames(declaration, target) {
+  if (declaration.type === "ExportNamedDeclaration") {
+    for (const specifier of declaration.specifiers) {
+      if (specifier.type === "ExportSpecifier") {
+        target.add(getModuleExportName2(specifier.exported ?? specifier.orig));
       }
     }
-  };
-};
+    return;
+  }
+  if (declaration.declaration.type === "VariableDeclaration") {
+    for (const declarator of declaration.declaration.declarations) {
+      if (declarator.id.type === "Identifier") {
+        target.add(declarator.id.value);
+      }
+    }
+    return;
+  }
+  if (declaration.declaration.type === "FunctionDeclaration" || declaration.declaration.type === "ClassDeclaration") {
+    if (declaration.declaration.identifier) {
+      target.add(declaration.declaration.identifier.value);
+    }
+  }
+}
+function collectExportedNamesFromReExport(declaration, target) {
+  for (const specifier of declaration.specifiers) {
+    if (specifier.type === "ExportSpecifier") {
+      target.add(getModuleExportName2(specifier.exported ?? specifier.orig));
+    }
+  }
+}
+function collectExportNamesFromExportAll(declaration, importerFile, target) {
+  for (const name of collectExportNamesFromModuleSource(declaration.source.value, importerFile)) {
+    target.add(name);
+  }
+}
+function collectExportNamesFromModuleSource(source, importerFile) {
+  const modulePath = resolveModulePath(source, importerFile, import_path2.default.dirname(importerFile));
+  if (!modulePath) {
+    return new Set;
+  }
+  return collectExportNamesFromModule(modulePath, new Set);
+}
+function collectExportNamesFromModule(modulePath, seen) {
+  if (seen.has(modulePath)) {
+    return new Set;
+  }
+  seen.add(modulePath);
+  const module2 = parsedModuleCache.get(modulePath);
+  if (!module2) {
+    throw new Error(`AST not found for module ${modulePath}`);
+  }
+  const exports2 = new Set;
+  for (const item of module2.body) {
+    if (item.type === "ExportNamedDeclaration" && item.source) {
+      collectExportedNamesFromReExport(item, exports2);
+      continue;
+    }
+    if (item.type === "ExportAllDeclaration") {
+      const nestedPath = resolveModulePath(item.source.value, modulePath, import_path2.default.dirname(modulePath));
+      if (nestedPath) {
+        for (const exportName of collectExportNamesFromModule(nestedPath, seen)) {
+          exports2.add(exportName);
+        }
+      }
+      continue;
+    }
+    if (item.type === "ExportNamedDeclaration" || item.type === "ExportDeclaration") {
+      collectExportedNames(item, exports2);
+    }
+  }
+  return exports2;
+}
+function createGlobalDeclaration(identifiers) {
+  return parseModuleItems(`declare namespace globalThis { var ${GCC}: { ${identifiers.map((identifier) => `${identifier}: typeof ${identifier}`).join("; ")}; }; }`)[0];
+}
+function createGccAssignments(identifiers) {
+  return identifiers.flatMap((identifier) => parseModuleItems(`globalThis.${GCC}.${identifier} = ${identifier};`));
+}
+function getModuleExportName2(name) {
+  return name.type === "Identifier" ? name.value : name.value;
+}
+function parseModuleItems(code) {
+  return import_core2.parseSync(code, {
+    syntax: "typescript",
+    target: "es2022"
+  }).body;
+}
 
-// src/compiler/tsickleCompiler.ts
+// src/compiler/tsickle-compiler.ts
 var import_path4 = __toESM(require("path"));
 var import_typescript = __toESM(require("typescript"));
 
@@ -574,7 +678,7 @@ function normalize(path3) {
   return ts.resolvePath(path3);
 }
 
-// src/tsickle/cli_support.ts
+// src/tsickle/cli-support.ts
 function assertAbsolute(fileName) {
   if (!isAbsolute(fileName)) {
     throw new Error(`expected ${JSON.stringify(fileName)} to be absolute`);
@@ -597,10 +701,10 @@ function pathToModuleName(rootModulePath, context, fileName) {
 // src/tsickle/clutz.ts
 var ts5 = __toESM(require("typescript"));
 
-// src/tsickle/googmodule.ts
+// src/tsickle/goog-module.ts
 var ts3 = __toESM(require("typescript"));
 
-// src/tsickle/transformer_util.ts
+// src/tsickle/transformer-util.ts
 var ts2 = __toESM(require("typescript"));
 function hasModifierFlag(declaration, flag) {
   return (ts2.getCombinedModifierFlags(declaration) & flag) !== 0;
@@ -810,7 +914,7 @@ function getPreviousDeclaration(sym, thisDecl) {
   return null;
 }
 
-// src/tsickle/googmodule.ts
+// src/tsickle/goog-module.ts
 function jsPathToNamespace(host, context, diagnostics, importPath, getModuleSymbol) {
   const namespace = localJsPathToNamespace(host, context, diagnostics, importPath);
   if (namespace)
@@ -1023,8 +1127,8 @@ function rewriteCommaExpressions(expr) {
 function getAmbientModuleSymbol(typeChecker, moduleUrl) {
   let moduleSymbol = typeChecker.getSymbolAtLocation(moduleUrl);
   if (!moduleSymbol) {
-    const t3 = moduleUrl.text;
-    moduleSymbol = typeChecker.tryFindAmbientModuleWithoutAugmentations(t3);
+    const t = moduleUrl.text;
+    moduleSymbol = typeChecker.tryFindAmbientModuleWithoutAugmentations(t);
   }
   return moduleSymbol;
 }
@@ -1502,15 +1606,15 @@ function maybeAddModuleId(host, typeChecker, sourceFile, headerStmts) {
   headerStmts.push(modAssign);
 }
 
-// src/tsickle/type_translator.ts
+// src/tsickle/type-translator.ts
 var ts4 = __toESM(require("typescript"));
 
-// src/tsickle/annotator_host.ts
+// src/tsickle/annotator-host.ts
 function moduleNameAsIdentifier(host, fileName, context = "") {
   return host.pathToModuleName(context, fileName).replace(/\./g, "$");
 }
 
-// src/tsickle/type_translator.ts
+// src/tsickle/type-translator.ts
 function isValidClosurePropertyName(name) {
   return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name);
 }
@@ -1917,7 +2021,7 @@ class TypeTranslator {
       if (localTypeParameters && typeArgs.length > 0) {
         typeArgs = typeArgs.slice(0, localTypeParameters.length);
         this.seenTypes.push(referenceType);
-        const params = typeArgs.map((t3) => this.translate(t3));
+        const params = typeArgs.map((t) => this.translate(t));
         this.seenTypes.pop();
         typeStr += `<${params.join(", ")}>`;
       }
@@ -1932,9 +2036,9 @@ class TypeTranslator {
     return this.translateUnionMembers(type.types);
   }
   translateUnionMembers(types) {
-    const parts = new Set(types.map((t3) => this.translate(t3)));
+    const parts = new Set(types.map((t) => this.translate(t)));
     if (parts.size === 1)
-      return parts.values().next().value;
+      return parts.values().next().value ?? "?";
     return `(${Array.from(parts.values()).join("|")})`;
   }
   isAlwaysUnknownSymbol(symbol) {
@@ -2382,7 +2486,7 @@ function gatherNecessaryClutzImports(googmoduleHost, typeChecker, sf) {
   }
 }
 
-// src/tsickle/decorator_downlevel_transformer.ts
+// src/tsickle/decorator-downlevel-transformer.ts
 var ts8 = __toESM(require("typescript"));
 
 // src/tsickle/decorators.ts
@@ -2512,7 +2616,7 @@ var ONE_LINER_TAGS = new Set([
   "const",
   "enum"
 ]);
-function parse2(comment) {
+function parse(comment) {
   if (comment.kind !== ts6.SyntaxKind.MultiLineCommentTrivia)
     return null;
   if (comment.text[0] !== "*")
@@ -2737,7 +2841,13 @@ function merge(tags) {
   const type = types.size > 0 ? Array.from(types).join("|") : undefined;
   const isTemplateTag = tagName === "template";
   const text = texts.size > 0 ? Array.from(texts).join(isTemplateTag ? "," : " / ") : undefined;
-  const tag = { parameterName, tagName, text, type };
+  const tag = { parameterName, tagName };
+  if (text !== undefined) {
+    tag.text = text;
+  }
+  if (type !== undefined) {
+    tag.type = type;
+  }
   if (restParam) {
     tag.restParam = true;
   } else if (optional) {
@@ -2767,7 +2877,7 @@ class MutableJSDoc {
         if (i === this.sourceComment)
           continue;
         const comment2 = this.allComments[i];
-        const parsed = parse2(comment2);
+        const parsed = parse(comment2);
         if (!parsed)
           continue;
         comment2.text = toStringWithoutStartEnd(parsed.tags, BANNED_JSDOC_TAGS_IN_FREESTANDING_COMMENTS);
@@ -2820,7 +2930,7 @@ function parseJSDoc(node, diagnostics, sourceFile) {
     return [[], -1, []];
   for (let i = comments.length - 1;i >= 0; i--) {
     const comment = comments[i];
-    const parsed = parse2(comment);
+    const parsed = parse(comment);
     if (parsed) {
       if (diagnostics !== undefined && parsed.warnings) {
         const range = comment.originalRange || nodeCommentRange;
@@ -2941,9 +3051,9 @@ var TAGS_CONFLICTING_WITH_DECORATE = new Set(["template", "abstract"]);
 function sanitizeDecorateComments(comments) {
   const sanitized = [];
   for (const comment of comments) {
-    const parsedComment = parse2(comment);
+    const parsedComment = parse(comment);
     if (parsedComment && parsedComment.tags.length !== 0) {
-      const filteredTags = parsedComment.tags.filter((t3) => !TAGS_CONFLICTING_WITH_DECORATE.has(t3.tagName));
+      const filteredTags = parsedComment.tags.filter((t) => !TAGS_CONFLICTING_WITH_DECORATE.has(t.tagName));
       if (filteredTags.length !== 0) {
         sanitized.push(toSynthesizedComment(filteredTags));
       }
@@ -2980,7 +3090,7 @@ function transformDecoratorJsdoc() {
   };
 }
 
-// src/tsickle/decorator_downlevel_transformer.ts
+// src/tsickle/decorator-downlevel-transformer.ts
 function shouldLower(decorator, typeChecker) {
   for (const d of getDecoratorDeclarations(decorator, typeChecker)) {
     let commentNode = d;
@@ -3318,7 +3428,7 @@ function lines(...s) {
 `);
 }
 
-// src/tsickle/enum_transformer.ts
+// src/tsickle/enum-transformer.ts
 var ts9 = __toESM(require("typescript"));
 function isInUnsupportedNamespace(node) {
   let parent = ts9.getOriginalNode(node).parent;
@@ -3440,10 +3550,10 @@ function enumTransformer(host, typeChecker) {
 // src/tsickle/externs.ts
 var ts12 = __toESM(require("typescript"));
 
-// src/tsickle/jsdoc_transformer.ts
+// src/tsickle/jsdoc-transformer.ts
 var ts11 = __toESM(require("typescript"));
 
-// src/tsickle/module_type_translator.ts
+// src/tsickle/module-type-translator.ts
 var ts10 = __toESM(require("typescript"));
 function getDefinedModule(symbol) {
   while (symbol) {
@@ -3766,7 +3876,7 @@ class ModuleTypeTranslator {
       newDoc.push(merge(returnTags));
     }
     return {
-      parameterNames: newDoc.filter((t3) => t3.tagName === "param").map((t3) => t3.parameterName),
+      parameterNames: newDoc.filter((t) => t.tagName === "param").map((t) => t.parameterName),
       tags: newDoc,
       thisReturnType
     };
@@ -3901,7 +4011,7 @@ function isGlobalAugmentation(decl) {
   return false;
 }
 
-// src/tsickle/jsdoc_transformer.ts
+// src/tsickle/jsdoc-transformer.ts
 function addCommentOn(node, tags, escapeExtraTags, hasTrailingNewLine = true) {
   const comment = toSynthesizedComment(tags, escapeExtraTags, hasTrailingNewLine);
   const comments = ts11.getSyntheticLeadingComments(node) || [];
@@ -4087,7 +4197,7 @@ ${escapeForComment(prop.getText())}`);
     tags.push({ tagName: "protected" });
   } else if (flags & ts11.ModifierFlags.Private) {
     tags.push({ tagName: "private" });
-  } else if (!tags.find((t3) => t3.tagName === "export" || t3.tagName === "package")) {
+  } else if (!tags.find((t) => t.tagName === "export" || t.tagName === "package")) {
     tags.push({ tagName: "public" });
   }
   const declStmt = ts11.setSourceMapRange(ts11.factory.createExpressionStatement(ts11.factory.createPropertyAccessExpression(expr, name)), prop);
@@ -4212,7 +4322,7 @@ function jsdocTransformer(host, tsOptions, typeChecker, diagnostics) {
         const { tags, thisReturnType } = moduleTypeTranslator.getFunctionTypeJSDoc([fnDecl], extraTags);
         const isDownlevellingAsync = tsOptions.target !== undefined && tsOptions.target <= ts11.ScriptTarget.ES2018;
         const isFunction = fnDecl.kind === ts11.SyntaxKind.FunctionDeclaration;
-        const hasExistingThisTag = tags.some((t3) => t3.tagName === "this");
+        const hasExistingThisTag = tags.some((t) => t.tagName === "this");
         if (isDownlevellingAsync && isFunction && !hasExistingThisTag && containsAsync(fnDecl)) {
           tags.push({ tagName: "this", type: "*" });
         }
@@ -4492,7 +4602,7 @@ function jsdocTransformer(host, tsOptions, typeChecker, diagnostics) {
           exportDecl = ts11.factory.updateExportDeclaration(exportDecl, exportDecl.modifiers, isTypeOnlyExport, ts11.factory.createNamedExports(exportSpecifiers), exportDecl.moduleSpecifier, exportDecl.attributes);
         } else if (ts11.isNamedExports(exportDecl.exportClause)) {
           for (const exp of exportDecl.exportClause.elements) {
-            const exportedName = getIdentifierText(exp.name);
+            const exportedName = ts11.isIdentifier(exp.name) ? getIdentifierText(exp.name) : exp.name.text;
             typesToExport.push([
               exportedName,
               moduleTypeTranslator.mustGetSymbolAtLocation(exp.name)
@@ -5093,7 +5203,7 @@ ${typeName}.prototype.${name2};
       return currentCtors;
     }
     if (decl.heritageClauses) {
-      const baseSymbols = decl.heritageClauses.filter((h) => h.token === ts12.SyntaxKind.ExtendsKeyword).flatMap((h) => h.types).filter((t3) => t3.expression.kind === ts12.SyntaxKind.Identifier);
+      const baseSymbols = decl.heritageClauses.filter((h) => h.token === ts12.SyntaxKind.ExtendsKeyword).flatMap((h) => h.types).filter((t) => t.expression.kind === ts12.SyntaxKind.Identifier);
       for (const base of baseSymbols) {
         const sym = typeChecker.getSymbolAtLocation(base.expression);
         if (!sym || !sym.declarations)
@@ -5276,7 +5386,7 @@ ${typeName}.prototype.${name2};
   }
 }
 
-// src/tsickle/fileoverview_comment_transformer.ts
+// src/tsickle/fileoverview-comment-transformer.ts
 var ts13 = __toESM(require("typescript"));
 var FILEOVERVIEW_COMMENT_MARKERS = new Set([
   "fileoverview",
@@ -5286,7 +5396,7 @@ var FILEOVERVIEW_COMMENT_MARKERS = new Set([
   "pintomodule"
 ]);
 function augmentFileoverviewComments(options, source, tags, generateExtraSuppressions) {
-  let fileOverview = tags.find((t3) => t3.tagName === "fileoverview");
+  let fileOverview = tags.find((t) => t.tagName === "fileoverview");
   if (!fileOverview) {
     fileOverview = { tagName: "fileoverview", text: "added by tsickle" };
     tags.splice(0, 0, fileOverview);
@@ -5313,7 +5423,7 @@ ${createGeneratedFromComment(relative(options.rootDir, source.fileName))}`;
       text: "added by tsickle",
       type: s
     }));
-    const licenseTagIndex = tags.findIndex((t3) => t3.tagName === "license");
+    const licenseTagIndex = tags.findIndex((t) => t.tagName === "license");
     if (licenseTagIndex !== -1) {
       tags.splice(licenseTagIndex, 0, ...suppressTags);
     } else {
@@ -5325,8 +5435,8 @@ function transformFileoverviewCommentFactory(options, diagnostics, generateExtra
   return () => {
     function checkNoFileoverviewComments(context, comments, message) {
       for (const comment of comments) {
-        const parse3 = parse2(comment);
-        if (parse3 !== null && parse3.tags.some((t3) => FILEOVERVIEW_COMMENT_MARKERS.has(t3.tagName))) {
+        const parse2 = parse(comment);
+        if (parse2 !== null && parse2.tags.some((t) => FILEOVERVIEW_COMMENT_MARKERS.has(t.tagName))) {
           reportDiagnostic(diagnostics, context, message, comment.originalRange, ts13.DiagnosticCategory.Warning);
         }
       }
@@ -5370,8 +5480,8 @@ function transformFileoverviewCommentFactory(options, diagnostics, generateExtra
       let fileoverviewIdx = -1;
       let tags = [];
       for (let i = fileComments.length - 1;i >= 0; i--) {
-        const parsed = parse2(fileComments[i]);
-        if (parsed !== null && parsed.tags.some((t3) => FILEOVERVIEW_COMMENT_MARKERS.has(t3.tagName))) {
+        const parsed = parse(fileComments[i]);
+        if (parsed !== null && parsed.tags.some((t) => FILEOVERVIEW_COMMENT_MARKERS.has(t.tagName))) {
           fileoverviewIdx = i;
           tags = parsed.tags;
           break;
@@ -5388,7 +5498,7 @@ function transformFileoverviewCommentFactory(options, diagnostics, generateExtra
   };
 }
 
-// src/tsickle/modules_manifest.ts
+// src/tsickle/modules-manifest.ts
 class ModulesManifest {
   moduleToFileName = {};
   referencedModules = {};
@@ -5417,7 +5527,7 @@ class ModulesManifest {
   }
 }
 
-// src/tsickle/ns_transformer.ts
+// src/tsickle/ns-transformer.ts
 var ts14 = __toESM(require("typescript"));
 function namespaceTransformer(host, tsOptions, typeChecker, diagnostics) {
   return (context) => {
@@ -5656,7 +5766,7 @@ function namespaceTransformer(host, tsOptions, typeChecker, diagnostics) {
   };
 }
 
-// src/tsickle/ts_migration_exports_shim.ts
+// src/tsickle/ts-migration-exports-shim.ts
 var ts15 = __toESM(require("typescript"));
 
 // src/tsickle/summary.ts
@@ -5727,7 +5837,7 @@ class FileSummary {
   }
 }
 
-// src/tsickle/ts_migration_exports_shim.ts
+// src/tsickle/ts-migration-exports-shim.ts
 function createTsMigrationExportsShimTransformerFactory(typeChecker, host, manifest, tsickleDiagnostics, outputFileMap, fileSummaries) {
   return (context) => {
     return (src) => {
@@ -6197,27 +6307,9 @@ function skipTransformForSourceFileIfNeeded(host, delegateFactory) {
   };
 }
 
-// src/utils/fileUtils.ts
+// src/utils/file-utils.ts
 var import_fs2 = __toESM(require("fs"));
 var import_path3 = __toESM(require("path"));
-function usage() {
-  console.error(`Usage: gcc-ts-compiler [gcc-ts-compiler options]
-
-Example:
-  gcc-ts-bundler --src_dir='./src' --entry_point='./index.ts' --output_dir='./dist' --language_out=ECMASCRIPT_NEXT
-
-gcc-ts-compiler flags are:
-  --src_dir             The source directory
-  --entry_point         The entry point for the application
-  --output_dir          The output directory
-  --language_out        ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT
-  --compilation_level   WHITESPACE_ONLY | SIMPLE | ADVANCED
-  --preserve_cache      Whether to preserve the cache files for debugging
-  --verbose             Print diagnostics to the console
-  --fatal_warnings       Whether warnings should be fatal, causing tsickle to return a non-zero exit code
-  -h, --help            Show this help message
-`);
-}
 function getCommonParentDirectory(fileNames) {
   if (fileNames.length === 0)
     return "/";
@@ -6240,7 +6332,7 @@ async function ensureDirectoryExistence(filePath) {
   await import_fs2.default.promises.mkdir(dirName, { recursive: true });
 }
 
-// src/compiler/tsickleCompiler.ts
+// src/compiler/tsickle-compiler.ts
 var modulePrefix = "_gcc_";
 async function toClosureJS(options, fileNames, settings, writeFile) {
   const absoluteFileNames = fileNames.map((fileName) => import_path4.default.resolve(fileName));
@@ -6311,126 +6403,115 @@ async function toClosureJS(options, fileNames, settings, writeFile) {
   });
 }
 
-// src/settings.ts
+// src/entry/options.ts
 var import_minimist = __toESM(require("minimist"));
 var import_path5 = __toESM(require("path"));
-function loadSettingsFromArgs(args) {
-  const cwd = process.cwd();
-  const defaultSettings = {
-    compilationLevel: "ADVANCED",
-    entryPoints: [],
-    externs: [],
-    fatalWarnings: false,
-    js: [],
-    languageOut: "ECMASCRIPT_NEXT",
-    outputDir: import_path5.default.join(cwd, "./dist"),
-    preserveCache: false,
-    srcDir: "./src",
-    verbose: false
-  };
-  const parsedArgs = import_minimist.default(args);
-  const settings = { ...defaultSettings };
-  for (const [flag, value] of Object.entries(parsedArgs)) {
-    switch (flag) {
-      case "src_dir":
-        settings.srcDir = value;
-        break;
-      case "entry_point": {
-        const entryPoints = Array.isArray(value) ? value : [value];
-        for (const entryPoint of entryPoints) {
-          settings.entryPoints.push(import_path5.default.join(cwd, "./.closured/", entryPoint.replace(/\.ts$/, ".js")));
-        }
-        break;
-      }
-      case "output_dir":
-        settings.outputDir = import_path5.default.join(cwd, String(value));
-        break;
-      case "language_out":
-        settings.languageOut = String(value);
-        break;
-      case "compilation_level":
-        settings.compilationLevel = String(value);
-        break;
-      case "preserve_cache":
-        settings.preserveCache = true;
-        break;
-      case "verbose":
-        settings.verbose = true;
-        break;
-      case "fatal_warnings":
-        settings.fatalWarnings = true;
-        break;
-      case "h":
-      case "help":
-        usage();
-        process.exit(0);
-    }
+var DEFAULT_BUILD_OPTIONS = Object.freeze({
+  compilationLevel: "ADVANCED",
+  cwd: process.cwd(),
+  entryPoints: [],
+  externs: [],
+  fatalWarnings: false,
+  js: [],
+  languageOut: "ECMASCRIPT_NEXT",
+  outputDir: "./dist",
+  preserveCache: false,
+  srcDir: "./src",
+  verbose: false,
+  workspaceDir: undefined
+});
+function normalizeEntryPoints(entryPoints) {
+  if (!entryPoints) {
+    return [];
   }
-  return { settings };
+  return Array.isArray(entryPoints) ? entryPoints : [entryPoints];
+}
+function normalizeBuildOptions(options = {}) {
+  const cwd = import_path5.default.resolve(options.cwd ?? DEFAULT_BUILD_OPTIONS.cwd);
+  const srcDir = import_path5.default.resolve(cwd, options.srcDir ?? DEFAULT_BUILD_OPTIONS.srcDir);
+  const entryPoints = normalizeEntryPoints(options.entryPoints).map((entryPoint) => import_path5.default.isAbsolute(entryPoint) ? entryPoint : import_path5.default.resolve(srcDir, entryPoint));
+  return {
+    compilationLevel: options.compilationLevel ?? DEFAULT_BUILD_OPTIONS.compilationLevel,
+    compilerEntryPoints: entryPoints.map((entryPoint) => {
+      const relativePath = import_path5.default.relative(srcDir, entryPoint);
+      return `goog:_gcc_${relativePath.replace(/\.[^/.]+$/, "").replace(/[\\/]/g, ".")}`;
+    }),
+    cwd,
+    entryPoints,
+    externs: [...options.externs ?? DEFAULT_BUILD_OPTIONS.externs],
+    fatalWarnings: options.fatalWarnings ?? DEFAULT_BUILD_OPTIONS.fatalWarnings,
+    js: [...options.js ?? DEFAULT_BUILD_OPTIONS.js],
+    languageOut: options.languageOut ?? DEFAULT_BUILD_OPTIONS.languageOut,
+    outputDir: import_path5.default.resolve(cwd, options.outputDir ?? DEFAULT_BUILD_OPTIONS.outputDir),
+    preserveCache: options.preserveCache ?? DEFAULT_BUILD_OPTIONS.preserveCache,
+    srcDir,
+    verbose: options.verbose ?? DEFAULT_BUILD_OPTIONS.verbose
+  };
+}
+function parseCliArgs(args) {
+  const parsedArgs = import_minimist.default(args);
+  if (parsedArgs.h || parsedArgs.help) {
+    return { options: {}, showHelp: true };
+  }
+  return {
+    options: {
+      compilationLevel: parsedArgs.compilation_level ?? parsedArgs.compilationLevel,
+      entryPoints: parsedArgs.entry_point ?? parsedArgs.entryPoint,
+      fatalWarnings: Boolean(parsedArgs.fatal_warnings ?? parsedArgs.fatalWarnings),
+      languageOut: parsedArgs.language_out ?? parsedArgs.languageOut,
+      outputDir: parsedArgs.output_dir ?? parsedArgs.outputDir,
+      preserveCache: Boolean(parsedArgs.preserve_cache ?? parsedArgs.preserveCache),
+      srcDir: parsedArgs.src_dir ?? parsedArgs.srcDir,
+      verbose: Boolean(parsedArgs.verbose),
+      workspaceDir: parsedArgs.workspace_dir ?? parsedArgs.workspaceDir
+    },
+    showHelp: false
+  };
 }
 
-// src/utils/fileOperations.ts
+// src/utils/file-operations.ts
 var import_fs3 = __toESM(require("fs"));
-var import_path6 = __toESM(require("path"));
 async function copyDirectoryRecursive(src, dest) {
-  if (!await import_fs3.default.promises.access(dest).then(() => true).catch(() => false)) {
-    await import_fs3.default.promises.mkdir(dest, { recursive: true });
-  }
+  await import_fs3.default.promises.mkdir(dest, { recursive: true });
   const entries = await import_fs3.default.promises.readdir(src, { withFileTypes: true });
   await Promise.all(entries.map(async (entry) => {
-    const srcPath = import_path6.default.join(src, entry.name);
-    const destPath = import_path6.default.join(dest, entry.name);
+    const srcPath = `${src}/${entry.name}`;
+    const destPath = `${dest}/${entry.name}`;
     if (entry.isDirectory()) {
       await copyDirectoryRecursive(srcPath, destPath);
-    } else {
-      await import_fs3.default.promises.copyFile(srcPath, destPath);
+      return;
     }
+    await import_fs3.default.promises.copyFile(srcPath, destPath);
   }));
 }
 async function cleanDirectory(dir) {
-  if (!await import_fs3.default.promises.access(dir).then(() => true).catch(() => false)) {
-    return;
-  }
-  const entries = await import_fs3.default.promises.readdir(dir, { withFileTypes: true });
-  await Promise.all(entries.map(async (entry) => {
-    const fullPath = import_path6.default.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      await cleanDirectory(fullPath);
-      try {
-        await import_fs3.default.promises.rmdir(fullPath);
-      } catch (_) {}
-    } else {
-      await import_fs3.default.promises.unlink(fullPath);
-    }
-  }));
+  await import_fs3.default.promises.rm(dir, { force: true, recursive: true });
+  await import_fs3.default.promises.mkdir(dir, { recursive: true });
 }
 async function writeFileContent(filePath, contents) {
   await ensureDirectoryExistence(filePath);
   await import_fs3.default.promises.writeFile(filePath, contents, "utf-8");
 }
 async function cleanupDirectories(dirs, remove = true) {
-  await Promise.all(dirs.map(async (dir) => {
-    await cleanDirectory(dir);
-    if (remove) {
-      try {
-        await import_fs3.default.promises.rmdir(dir);
-      } catch (_) {}
-    }
-  }));
+  await Promise.all(dirs.map((dir) => remove ? import_fs3.default.promises.rm(dir, { force: true, recursive: true }) : cleanDirectory(dir)));
 }
 
-// src/utils/tsConfigLoader.ts
+// src/utils/ts-config-loader.ts
 var import_fs4 = __toESM(require("fs"));
-var import_path7 = __toESM(require("path"));
 var import_typescript2 = __toESM(require("typescript"));
-async function loadTscConfig(args) {
+async function loadTscConfig({
+  args = [],
+  configSearchDir,
+  outDir,
+  projectDir,
+  rootDir = "./"
+}) {
   const parsedCommandLine = import_typescript2.default.parseCommandLine(args);
   if (parsedCommandLine.errors.length > 0) {
     return { errors: parsedCommandLine.errors, fileNames: [], options: {} };
   }
   const tsFileArguments = parsedCommandLine.fileNames;
-  const projectDir = parsedCommandLine.options.project || process.cwd();
-  const possibleConfigFile = import_typescript2.default.findConfigFile(projectDir, (fileName) => import_typescript2.default.sys.fileExists(fileName));
+  const possibleConfigFile = import_typescript2.default.findConfigFile(configSearchDir ?? projectDir, (fileName) => import_typescript2.default.sys.fileExists(fileName));
   if (!possibleConfigFile) {
     return {
       errors: [
@@ -6452,19 +6533,17 @@ async function loadTscConfig(args) {
   if (result.error) {
     return { errors: [result.error], fileNames: [], options: {} };
   }
-  result.config.compilerOptions.rootDir = "./";
-  result.config.compilerOptions.outDir = import_path7.default.join(projectDir, "../.closured");
+  const projectFiles = await collectProjectFiles(projectDir);
+  result.config.compilerOptions.rootDir = rootDir;
+  result.config.compilerOptions.outDir = outDir;
   result.config.compilerOptions.module = "CommonJS";
   result.config.compilerOptions.moduleResolution = "Node";
+  result.config.compilerOptions.ignoreDeprecations = "6.0";
   result.config.compilerOptions.target = "ESNext";
   result.config.compilerOptions.skipLibCheck = true;
   result.config.exclude = [];
-  result.config.include = [
-    import_path7.default.join(projectDir, "*.ts"),
-    import_path7.default.join(projectDir, "*.js"),
-    import_path7.default.join(projectDir, "**/*.tsx"),
-    import_path7.default.join(projectDir, "**/*.jsx")
-  ];
+  result.config.files = projectFiles;
+  result.config.include = [];
   const configParseResult = import_typescript2.default.parseJsonConfigFileContent(result.config, import_typescript2.default.sys, projectDir, parsedCommandLine.options, possibleConfigFile);
   if (configParseResult.errors.length > 0) {
     return { errors: configParseResult.errors, fileNames: [], options: {} };
@@ -6492,6 +6571,31 @@ async function loadTscConfig(args) {
   }
   return { errors: [], fileNames, options: configParseResult.options };
 }
+async function collectProjectFiles(projectDir) {
+  const files = [];
+  const pendingDirs = [projectDir];
+  const allowedExtensions = new Set([".js", ".jsx", ".ts", ".tsx"]);
+  while (pendingDirs.length > 0) {
+    const currentDir = pendingDirs.pop();
+    const entries = await import_fs4.default.promises.readdir(currentDir, {
+      withFileTypes: true
+    });
+    for (const entry of entries) {
+      if (entry.name === "node_modules") {
+        continue;
+      }
+      const entryPath = import_typescript2.default.sys.resolvePath(`${currentDir}/${entry.name}`);
+      if (entry.isDirectory()) {
+        pendingDirs.push(entryPath);
+        continue;
+      }
+      if (allowedExtensions.has(entry.name.slice(entry.name.lastIndexOf(".")))) {
+        files.push(entryPath);
+      }
+    }
+  }
+  return files;
+}
 async function validateFiles(files) {
   const fileChecks = await Promise.all(files.map(async (file) => {
     try {
@@ -6507,72 +6611,187 @@ async function validateFiles(files) {
   }
 }
 
-// src/index.ts
+// src/entry/main.ts
+var __dirname = "/Users/Blueagle/Code/gcc-ts-bundler/src/entry";
 var PRE_COMPILED_DIR = ".pre-compiled";
-var gccDir = import_path8.default.resolve("./node_modules/gcc-ts-bundler");
-async function processTsFiles(config, srcDir, preCompiledDir, closuredDir, settings) {
+var CLOSURED_DIR = ".closured";
+var CLOSURE_EXTERNS_DIR = ".closure-externs";
+var bundledExternsCache;
+function stripExtension(filePath) {
+  return filePath.replace(/\.[^/.]+$/, "");
+}
+function getPackageRoot() {
+  let currentDir = __dirname;
+  while (true) {
+    const packageJsonPath = import_path6.default.join(currentDir, "package.json");
+    const closureExternsPath = import_path6.default.join(currentDir, "closure-externs");
+    if (import_fs5.default.existsSync(packageJsonPath) && import_fs5.default.existsSync(closureExternsPath)) {
+      return currentDir;
+    }
+    const parentDir = import_path6.default.dirname(currentDir);
+    if (parentDir === currentDir) {
+      throw new Error("Unable to resolve gcc-ts-bundler package root.");
+    }
+    currentDir = parentDir;
+  }
+}
+async function getBundledExterns(packageRoot) {
+  if (bundledExternsCache) {
+    return bundledExternsCache;
+  }
+  const closureExternsPath = import_path6.default.join(packageRoot, "closure-externs");
+  const files = await import_fs5.default.promises.readdir(closureExternsPath);
+  bundledExternsCache = files.map((file) => import_path6.default.join(closureExternsPath, file));
+  return bundledExternsCache;
+}
+async function collectJavaScriptFiles(dir) {
+  const files = [];
+  const pendingDirs = [dir];
+  while (pendingDirs.length > 0) {
+    const currentDir = pendingDirs.pop();
+    const entries = await import_fs5.default.promises.readdir(currentDir, {
+      withFileTypes: true
+    });
+    for (const entry of entries) {
+      const entryPath = import_path6.default.join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        pendingDirs.push(entryPath);
+        continue;
+      }
+      if (entry.name.endsWith(".js")) {
+        files.push(entryPath);
+      }
+    }
+  }
+  return files;
+}
+async function processTsFiles(config, srcDir, preCompiledDir, settings) {
+  const entryPointRelativePaths = new Set(settings.entryPoints.map((entryPoint) => stripExtension(import_path6.default.relative(srcDir, entryPoint))));
   await Promise.all(config.fileNames.map(async (file) => {
-    const relativePath = import_path8.default.relative(srcDir, file);
-    const preCompiledPath = import_path8.default.join(preCompiledDir, relativePath);
+    const relativePath = import_path6.default.relative(preCompiledDir, file);
+    const preCompiledPath = import_path6.default.join(preCompiledDir, relativePath);
     const contents = await import_fs5.default.promises.readFile(preCompiledPath, "utf-8");
-    const isEntryPoint = settings.entryPoints.some((entryPoint) => entryPoint.replace(/\.[^/.]+$/, "").endsWith(relativePath.split(PRE_COMPILED_DIR)[1].replace(/\.[^/.]+$/, "")));
-    const transformed = await customTransform2(contents, preCompiledPath, isEntryPoint);
-    const closuredPath = import_path8.default.join(closuredDir, relativePath);
-    await writeFileContent(closuredPath, transformed);
+    const isEntryPoint = entryPointRelativePaths.has(stripExtension(relativePath));
+    const transformed = await customTransform2(contents, preCompiledPath, isEntryPoint, preCompiledDir);
+    await writeFileContent(preCompiledPath, transformed);
   }));
 }
-async function main(args) {
-  const { settings } = loadSettingsFromArgs(args);
-  const cwd = process.cwd();
-  const srcDir = import_path8.default.join(cwd, settings.srcDir);
-  const preCompiledDir = import_path8.default.join(cwd, PRE_COMPILED_DIR);
-  const closuredDir = import_path8.default.join(cwd, "./.closured");
-  const closureExternsDir = import_path8.default.join(cwd, "./.closure-externs");
+async function build(options = {}) {
+  const settings = normalizeBuildOptions(options);
+  const packageRoot = getPackageRoot();
+  const explicitWorkspaceDir = options.workspaceDir ? import_path6.default.resolve(settings.cwd, options.workspaceDir) : undefined;
+  const workspaceDir = explicitWorkspaceDir ?? await import_fs5.default.promises.mkdtemp(import_path6.default.join(import_os.default.tmpdir(), "gcc-ts-bundler-"));
+  const preCompiledDir = import_path6.default.join(workspaceDir, PRE_COMPILED_DIR);
+  const closuredDir = import_path6.default.join(workspaceDir, CLOSURED_DIR);
+  const closureExternsDir = import_path6.default.join(workspaceDir, CLOSURE_EXTERNS_DIR);
+  const stagedEntryPoints = settings.entryPoints.map((entryPoint) => import_path6.default.join(closuredDir, import_path6.default.relative(settings.srcDir, entryPoint).replace(/\.[^/.]+$/, ".js")));
   try {
-    process.chdir(srcDir);
     await cleanupDirectories([preCompiledDir, closuredDir], false);
-    await ensureDirectoryExistence(preCompiledDir);
-    await copyDirectoryRecursive(srcDir, preCompiledDir);
-    process.chdir(preCompiledDir);
-    const config = await loadTscConfig([]);
+    await copyDirectoryRecursive(settings.srcDir, preCompiledDir);
+    const config = await loadTscConfig({
+      configSearchDir: settings.cwd,
+      outDir: closuredDir,
+      projectDir: preCompiledDir
+    });
     if (config.errors.length > 0) {
       console.error(import_typescript3.default.formatDiagnosticsWithColorAndContext(config.errors, import_typescript3.default.createCompilerHost(config.options)));
-      return 1;
+      return {
+        diagnostics: config.errors,
+        emitSkipped: true,
+        exitCode: 1,
+        options: settings,
+        outputFiles: [],
+        workspaceDir
+      };
     }
     if (config.options.module !== import_typescript3.default.ModuleKind.CommonJS) {
       console.error('tsickle converts TypeScript modules to Closure modules via CommonJS internally. Set tsconfig.json "module": "commonjs"');
-      return 1;
+      return {
+        diagnostics: [],
+        emitSkipped: true,
+        exitCode: 1,
+        options: settings,
+        outputFiles: [],
+        workspaceDir
+      };
     }
-    await processTsFiles(config, srcDir, preCompiledDir, closuredDir, settings);
+    await processTsFiles(config, settings.srcDir, preCompiledDir, settings);
     const result = await toClosureJS(config.options, config.fileNames, settings, (fileName, content) => {
       writeFileContent(fileName, content);
     });
     if (result.diagnostics.length > 0) {
       console.error(import_typescript3.default.formatDiagnosticsWithColorAndContext(result.diagnostics, import_typescript3.default.createCompilerHost(config.options)));
-      return 1;
+      return {
+        diagnostics: result.diagnostics,
+        emitSkipped: result.emitSkipped,
+        exitCode: 1,
+        options: settings,
+        outputFiles: [],
+        workspaceDir
+      };
     }
-    const modulesExterns = import_path8.default.join(closureExternsDir, "modules-externs.js");
+    const modulesExterns = import_path6.default.join(closureExternsDir, "modules-externs.js");
     await ensureDirectoryExistence(modulesExterns);
+    await import_fs5.default.promises.mkdir(settings.outputDir, { recursive: true });
     await import_fs5.default.promises.writeFile(modulesExterns, getGeneratedExterns(result.externs, config.options.rootDir || ""));
-    const closureExternsPath = import_path8.default.join(gccDir, "./closure-externs");
-    settings.externs.push(...import_fs5.default.readdirSync(closureExternsPath).map((file) => import_path8.default.join(closureExternsPath, file)));
-    settings.externs.push(modulesExterns);
-    settings.js.push(import_path8.default.join(gccDir, "./closure-lib/**.js"), import_path8.default.join(closuredDir, "**.js"));
+    const closureSettings = {
+      ...settings,
+      entryPoints: stagedEntryPoints,
+      externs: [
+        ...settings.externs,
+        ...await getBundledExterns(packageRoot),
+        modulesExterns
+      ],
+      js: [
+        ...settings.js,
+        ...await collectJavaScriptFiles(import_path6.default.join(packageRoot, "closure-lib")),
+        ...await collectJavaScriptFiles(closuredDir)
+      ]
+    };
     console.log("Building with Closure Compiler...");
-    const exitCode = await runClosureCompiler(settings);
+    const exitCode = await runClosureCompiler(closureSettings);
     if (exitCode !== 0) {
       console.error("Failed to build with Closure Compiler.");
     } else {
       console.log("Build succeeded.");
     }
-    return exitCode;
+    return {
+      diagnostics: result.diagnostics,
+      emitSkipped: result.emitSkipped,
+      exitCode,
+      options: settings,
+      outputFiles: settings.entryPoints.map((entryPoint) => import_path6.default.join(settings.outputDir, import_path6.default.basename(entryPoint))),
+      workspaceDir
+    };
   } catch (error) {
     console.error(error);
-    return 1;
+    return {
+      diagnostics: [],
+      emitSkipped: true,
+      exitCode: 1,
+      options: settings,
+      outputFiles: [],
+      workspaceDir
+    };
   } finally {
-    if (!settings.preserveCache) {
+    if (settings.preserveCache) {
+      console.log(`Preserved gcc-ts-bundler workspace at ${workspaceDir}`);
+    } else if (explicitWorkspaceDir) {
       await cleanupDirectories([preCompiledDir, closureExternsDir, closuredDir], true);
+    } else {
+      await import_fs5.default.promises.rm(workspaceDir, { force: true, recursive: true });
     }
   }
 }
-main(process.argv.slice(2)).then((exitCode) => process.exit(exitCode));
+async function runCli(args) {
+  const { options, showHelp } = parseCliArgs(args);
+  if (showHelp) {
+    return 0;
+  }
+  const result = await build(options);
+  return result.exitCode;
+}
+async function main(args) {
+  return runCli(args);
+}
+runCli(process.argv.slice(2)).then((exitCode) => process.exit(exitCode));

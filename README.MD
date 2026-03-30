@@ -1,4 +1,5 @@
 # GCC-TS-Bundler
+
 GCC-TS-Bundler is a unique tool that bundles TypeScript code using Google Closure Compiler and Tsickle. It stands out by leveraging Closure Compiler's advanced optimizations and dead code elimination, which are further enhanced by relying on TypeScript types. This tool is particularly notable for its ability to rename property names in objects and radically change the structure of your code, leading to significant performance improvements.
 
 Unlike other compilers, GCC-TS-Bundler integrates deeply with Closure Compiler to provide advanced optimizations that are not possible with standard TypeScript compilers. It uses Tsickle to convert TypeScript to Closure-compatible JavaScript, allowing for more aggressive optimizations. This results in smaller, faster, and more efficient code, making it an excellent choice for performance-critical applications.
@@ -18,6 +19,42 @@ Unlike other compilers, GCC-TS-Bundler integrates deeply with Closure Compiler t
 bun install gcc-ts-bundler
 ```
 
+## Standardized API
+
+The package now exposes a programmatic API in addition to the CLI:
+
+```ts
+import {
+  build,
+  DEFAULT_BUILD_OPTIONS,
+  normalizeBuildOptions,
+} from "gcc-ts-bundler";
+
+const result = await build({
+  entryPoints: ["./index.ts"],
+  outputDir: "./dist",
+  srcDir: "./src",
+});
+
+if (result.exitCode !== 0) {
+  process.exit(result.exitCode);
+}
+```
+
+Programmatic options use camelCase keys:
+
+- `srcDir`
+- `entryPoints`
+- `outputDir`
+- `languageOut`
+- `compilationLevel`
+- `preserveCache`
+- `fatalWarnings`
+- `verbose`
+- `cwd`
+
+The CLI continues to support the existing snake_case flags for compatibility.
+
 ### GCC-TS-Bundler Flags
 
 - `--src_dir`: The source directory.
@@ -33,7 +70,7 @@ bun install gcc-ts-bundler
 ### Example
 
 ```sh
-gcc-ts-bundler --src_dir='./src' --entry_point='./index.ts' --js_output_file='./dist/index.js'
+gcc-ts-bundler --src_dir='./src' --entry_point='./index.ts' --output_dir='./dist'
 ```
 
 ## License

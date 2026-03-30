@@ -13,7 +13,7 @@
 
 import * as ts from "typescript";
 
-import { AnnotatorHost } from "./annotator_host";
+import { AnnotatorHost } from "./annotator-host";
 import { getMutableJSDoc } from "./jsdoc";
 import {
   getIdentifierText,
@@ -22,7 +22,7 @@ import {
   isAmbient,
   markAsMergedDeclaration,
   reportDiagnostic,
-} from "./transformer_util";
+} from "./transformer-util";
 
 /**
  * Transforms declaration merging namespaces.
