@@ -1,5 +1,5 @@
-export { build, cleanCache } from "../api/build";
-export { DEFAULT_BUILD_OPTIONS } from "../api/types";
+export { build, cleanCache } from "./api/build";
+export { DEFAULT_BUILD_OPTIONS } from "./api/types";
 export type {
   BuildOptions,
   BuildResult,
@@ -10,5 +10,4 @@ export type {
   DiagnosticsOptions,
   DiagnosticsPreflight,
   LanguageOut,
-  NormalizedBuildOptions,
-} from "../api/types";
+} from "./api/types";

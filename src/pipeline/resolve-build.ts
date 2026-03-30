@@ -3,17 +3,26 @@ import path from "path";
 import ts from "typescript";
 import { fileURLToPath } from "url";
 
+import { BuildOptions, DEFAULT_BUILD_OPTIONS } from "../api/types";
+import { hashContent, hashJson } from "../cache/hash";
 import {
+  createCacheStore,
+  getDefaultPersistentCacheRoot,
+  readJsonIfExists,
+  writeJson,
+} from "../cache/store";
+import { collectTrackedFiles, trackedFilesMatch } from "../internal/file-state";
+import {
+  BuildContext,
   BuildEntry,
-  BuildOptions,
+  ChunkPlanChunk,
   NormalizedBuildOptions,
   ResolvedBuild,
-} from "../api/types";
-import { createCacheStore, readJsonIfExists, writeJson } from "../cache/store";
-import { hashContent, hashJson } from "../cache/hash";
+} from "../internal/types";
 import { resolveGraph } from "../native/load";
 
 interface ResolveMetadata {
+  chunkPlan: ChunkPlanChunk[];
   entryFiles: Array<{
     chunkName: string;
     exportNames: string[];
@@ -21,27 +30,40 @@ interface ResolveMetadata {
     outputName: string;
     sourceRelativePath: string;
   }>;
-  graph: Record<string, string[]>;
 }
 
 interface ResolveSnapshot {
   compilerOptionsHash: string;
   entryFiles: ResolveMetadata["entryFiles"];
-  externalInputHash: string;
-  fileHashes: Record<string, string>;
-  filePaths: string[];
   finalKey: string;
-  graph: Record<string, string[]>;
+  filePaths: string[];
   nativeEmitKey: string;
   optionsSignature: string;
   packageSignature: string;
   resolveKey: string;
-  trackedFiles: Record<string, { mtimeMs: number; size: number }>;
+  trackedFiles: Awaited<ReturnType<typeof collectTrackedFiles>>;
+}
+
+export async function createBuildContext(
+  options: NormalizedBuildOptions,
+): Promise<BuildContext> {
+  const packageRoot = getPackageRoot();
+  return {
+    options,
+    optionsSignature: getOptionsSignature(options),
+    packageRoot,
+    packageSignature: await getPackageSignature(packageRoot),
+    projectCacheDir: path.join(
+      path.resolve(options.cache.dir || getDefaultPersistentCacheRoot()),
+      hashContent(options.projectRoot),
+    ),
+  };
 }
 
 export async function resolveBuild(
-  options: NormalizedBuildOptions,
+  context: BuildContext,
 ): Promise<ResolvedBuild> {
+  const { options } = context;
   if (options.entries.length === 0) {
     throw new Error("At least one entry is required.");
   }
@@ -51,13 +73,6 @@ export async function resolveBuild(
     mode: options.cache.mode,
     projectRoot: options.projectRoot,
   });
-  const packageRoot = getPackageRoot();
-  const packageJsonRaw = await fs.promises.readFile(
-    path.join(packageRoot, "package.json"),
-    "utf-8",
-  );
-  const packageJson = JSON.parse(packageJsonRaw) as { version: string };
-  const packageSignature = await getPackageSignature(packageRoot);
   const sourceRoot = path.join(cacheStore.workspaceDir, "src");
   await ensureSourceSymlink(sourceRoot, options.srcDir);
 
@@ -66,7 +81,6 @@ export async function resolveBuild(
   const entryRelativePaths = options.entries.map((entry) =>
     path.relative(options.srcDir, entry),
   );
-  const optionsSignature = getOptionsSignature(options);
   const overlayEntries = options.entries.map((entry) =>
     path.join(sourceRoot, path.relative(options.srcDir, entry)),
   );
@@ -79,9 +93,9 @@ export async function resolveBuild(
     await readJsonIfExists<ResolveSnapshot>(resolveSnapshotPath);
   if (
     cachedSnapshot &&
-    cachedSnapshot.packageSignature === packageSignature &&
+    cachedSnapshot.packageSignature === context.packageSignature &&
     cachedSnapshot.compilerOptionsHash === compilerOptionsHash &&
-    cachedSnapshot.optionsSignature === optionsSignature &&
+    cachedSnapshot.optionsSignature === context.optionsSignature &&
     (await trackedFilesMatch(cachedSnapshot.trackedFiles))
   ) {
     const entryFiles = cachedSnapshot.entryFiles.map(
@@ -90,7 +104,6 @@ export async function resolveBuild(
         exportNames: entry.exportNames,
         hasDefaultExport: entry.hasDefaultExport,
         outputName: entry.outputName,
-        outputPath: path.join(options.outDir, entry.outputName),
         sourcePath: path.join(sourceRoot, entry.sourceRelativePath),
         sourceRelativePath: entry.sourceRelativePath,
       }),
@@ -98,11 +111,12 @@ export async function resolveBuild(
     const shimDir = path.join(cacheStore.workspaceDir, "entries");
 
     return {
-      cacheRoot: cacheStore.rootDir,
       cleanup: cacheStore.cleanup,
+      chunkPlan: await readChunkPlan(
+        cacheStore.projectCacheDir,
+        cachedSnapshot.resolveKey,
+      ),
       entryFiles,
-      externalInputHash: cachedSnapshot.externalInputHash,
-      fileHashes: cachedSnapshot.fileHashes,
       filePaths: cachedSnapshot.filePaths,
       finalCacheDir: path.join(
         cacheStore.projectCacheDir,
@@ -110,32 +124,21 @@ export async function resolveBuild(
         cachedSnapshot.finalKey,
       ),
       finalKey: cachedSnapshot.finalKey,
-      graph: fromRelativeGraph(cachedSnapshot.graph, cacheStore.workspaceDir),
-      isFinalCacheHit: false,
-      isNativeEmitCacheHit: false,
-      isResolveCacheHit: true,
-      options,
-      packageRoot,
-      packageVersion: packageJson.version,
-      projectCacheDir: cacheStore.projectCacheDir,
-      resolveKey: cachedSnapshot.resolveKey,
-      resolveMetadataPath: resolveSnapshotPath,
-      sharedChunkName: entryFiles.length > 1 ? "shared" : null,
-      shimDir,
-      shimFiles: entryFiles.map((entry) =>
-        path.join(shimDir, `${entry.chunkName}.ts`),
-      ),
-      sourceRoot,
-      tsConfigPath,
       nativeEmitCacheDir: path.join(
         cacheStore.projectCacheDir,
         "native-emit",
         cachedSnapshot.nativeEmitKey,
       ),
-      nativeEmitKey: cachedSnapshot.nativeEmitKey,
+      shimDir,
+      shimFiles: entryFiles.map((entry) =>
+        path.join(shimDir, `${entry.chunkName}.ts`),
+      ),
+      trackedFiles: cachedSnapshot.trackedFiles,
+      tsConfigPath,
       workspaceDir: cacheStore.workspaceDir,
     };
   }
+
   const graphResult = resolveGraph({
     entries: overlayEntries,
     srcDir: sourceRoot,
@@ -149,7 +152,7 @@ export async function resolveBuild(
     compilerOptionsHash,
     entries: entryRelativePaths,
     files: graphResult.fileHashes,
-    packageSignature,
+    packageSignature: context.packageSignature,
   });
   const resolveMetadataPath = path.join(
     cacheStore.projectCacheDir,
@@ -158,17 +161,44 @@ export async function resolveBuild(
   );
   let resolveMetadata =
     await readJsonIfExists<ResolveMetadata>(resolveMetadataPath);
-  const isResolveCacheHit = resolveMetadata !== null;
+
   if (!resolveMetadata) {
-    resolveMetadata = {
-      entryFiles: graphResult.entries.map((entry, index) => ({
+    const entryFiles = graphResult.entries.map(
+      (entry, index): BuildEntry => ({
         chunkName: sanitizeChunkName(outputNames[index]),
         exportNames: entry.exportNames,
         hasDefaultExport: entry.hasDefaultExport,
         outputName: outputNames[index],
+        sourcePath: entry.sourcePath,
         sourceRelativePath: path.relative(sourceRoot, entry.sourcePath),
+      }),
+    );
+    const shimDir = path.join(cacheStore.workspaceDir, "entries");
+    const shimFiles = entryFiles.map((entry) =>
+      path.join(shimDir, `${entry.chunkName}.ts`),
+    );
+    resolveMetadata = {
+      chunkPlan: buildChunkPlan({
+        entryFiles,
+        graph: {
+          ...graphResult.graph,
+          ...Object.fromEntries(
+            shimFiles.map((shimFile, index) => [
+              shimFile,
+              [entryFiles[index].sourcePath],
+            ]),
+          ),
+        },
+        shimFiles,
+        workspaceDir: cacheStore.workspaceDir,
+      }),
+      entryFiles: entryFiles.map((entry) => ({
+        chunkName: entry.chunkName,
+        exportNames: entry.exportNames,
+        hasDefaultExport: entry.hasDefaultExport,
+        outputName: entry.outputName,
+        sourceRelativePath: entry.sourceRelativePath,
       })),
-      graph: toRelativeGraph(graphResult.graph, cacheStore.workspaceDir),
     };
     await writeJson(resolveMetadataPath, resolveMetadata);
   }
@@ -179,83 +209,64 @@ export async function resolveBuild(
       exportNames: entry.exportNames,
       hasDefaultExport: entry.hasDefaultExport,
       outputName: entry.outputName,
-      outputPath: path.join(options.outDir, entry.outputName),
       sourcePath: path.join(sourceRoot, entry.sourceRelativePath),
       sourceRelativePath: entry.sourceRelativePath,
     }),
   );
   const shimDir = path.join(cacheStore.workspaceDir, "entries");
-  const externalInputHash = await hashExternalInputs([
-    ...options.externs,
-    ...options.js,
-  ]);
+  const shimFiles = entryFiles.map((entry) =>
+    path.join(shimDir, `${entry.chunkName}.ts`),
+  );
   const nativeEmitKey = hashJson({
     compilerOptionsHash,
     diagnostics: options.diagnostics,
-    packageSignature,
+    packageSignature: context.packageSignature,
     resolveKey,
   });
   const finalKey = hashJson({
     compilationLevel: options.compilationLevel,
-    externalInputHash,
+    externalInputHash: await hashExternalInputs([
+      ...options.externs,
+      ...options.js,
+    ]),
     languageOut: options.languageOut,
-    packageSignature,
-    nativeEmitKey,
+    packageSignature: context.packageSignature,
     resolveKey,
   });
   const trackedFiles = await collectTrackedFiles([
     ...graphResult.filePaths,
-    path.join(options.projectRoot, "tsconfig.json"),
+    tsConfigPath,
     ...options.externs,
     ...options.js,
   ]);
   await writeJson(resolveSnapshotPath, {
     compilerOptionsHash,
     entryFiles: resolveMetadata.entryFiles,
-    externalInputHash,
-    fileHashes: graphResult.fileHashes,
-    filePaths: graphResult.filePaths,
     finalKey,
-    graph: resolveMetadata.graph,
+    filePaths: graphResult.filePaths,
     nativeEmitKey,
-    optionsSignature,
-    packageSignature,
+    optionsSignature: context.optionsSignature,
+    packageSignature: context.packageSignature,
     resolveKey,
     trackedFiles,
   } satisfies ResolveSnapshot);
 
   return {
-    cacheRoot: cacheStore.rootDir,
     cleanup: cacheStore.cleanup,
+    chunkPlan: resolveMetadata.chunkPlan,
     entryFiles,
-    externalInputHash,
-    fileHashes: graphResult.fileHashes,
     filePaths: graphResult.filePaths,
     finalCacheDir: path.join(cacheStore.projectCacheDir, "final", finalKey),
     finalKey,
-    graph: fromRelativeGraph(resolveMetadata.graph, cacheStore.workspaceDir),
-    isFinalCacheHit: false,
-    isNativeEmitCacheHit: false,
-    isResolveCacheHit,
-    options,
-    packageRoot,
-    packageVersion: packageJson.version,
-    projectCacheDir: cacheStore.projectCacheDir,
-    resolveKey,
-    resolveMetadataPath,
-    sharedChunkName: entryFiles.length > 1 ? "shared" : null,
-    shimDir,
-    shimFiles: entryFiles.map((entry) =>
-      path.join(shimDir, `${entry.chunkName}.ts`),
-    ),
-    sourceRoot,
-    tsConfigPath,
     nativeEmitCacheDir: path.join(
       cacheStore.projectCacheDir,
       "native-emit",
       nativeEmitKey,
     ),
-    nativeEmitKey,
+    shimDir,
+    shimFiles,
+    trackedFiles,
+    tsConfigPath,
     workspaceDir: cacheStore.workspaceDir,
   };
 }
@@ -330,38 +341,7 @@ async function resolveTsConfigPath(projectRoot: string): Promise<string> {
 }
 
 async function hashTsConfig(configPath: string): Promise<string> {
-  const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
-  if (configFile.error) {
-    throw new Error(
-      ts.flattenDiagnosticMessageText(configFile.error.messageText, "\n"),
-    );
-  }
-
-  return hashContent(JSON.stringify(configFile.config));
-}
-
-function toRelativeGraph(
-  graph: Record<string, string[]>,
-  workspaceDir: string,
-): Record<string, string[]> {
-  return Object.fromEntries(
-    Object.entries(graph).map(([filePath, dependencies]) => [
-      path.relative(workspaceDir, filePath),
-      dependencies.map((dependency) => path.relative(workspaceDir, dependency)),
-    ]),
-  );
-}
-
-function fromRelativeGraph(
-  graph: Record<string, string[]>,
-  workspaceDir: string,
-): Record<string, string[]> {
-  return Object.fromEntries(
-    Object.entries(graph).map(([filePath, dependencies]) => [
-      path.join(workspaceDir, filePath),
-      dependencies.map((dependency) => path.join(workspaceDir, dependency)),
-    ]),
-  );
+  return hashContent(await fs.promises.readFile(configPath, "utf-8"));
 }
 
 async function hashExternalInputs(filePaths: string[]): Promise<string> {
@@ -376,42 +356,166 @@ async function hashExternalInputs(filePaths: string[]): Promise<string> {
   return hashJson(entries);
 }
 
-async function collectTrackedFiles(filePaths: string[]) {
-  const trackedEntries = await Promise.all(
-    [...new Set(filePaths)]
-      .sort((left, right) => left.localeCompare(right))
-      .map(async (filePath) => {
-        const stat = await fs.promises.stat(filePath);
-        return [
-          filePath,
-          {
-            mtimeMs: stat.mtimeMs,
-            size: stat.size,
-          },
-        ] as const;
-      }),
+async function readChunkPlan(projectCacheDir: string, resolveKey: string) {
+  const resolveMetadataPath = path.join(
+    projectCacheDir,
+    "resolve",
+    `${resolveKey}.json`,
   );
+  const metadata = await readJsonIfExists<ResolveMetadata>(resolveMetadataPath);
+  if (!metadata) {
+    throw new Error(`Missing resolve metadata for ${resolveKey}`);
+  }
 
-  return Object.fromEntries(trackedEntries);
+  return metadata.chunkPlan;
 }
 
-async function trackedFilesMatch(
-  trackedFiles: Record<string, { mtimeMs: number; size: number }>,
-) {
-  return (
-    await Promise.all(
-      Object.entries(trackedFiles).map(async ([filePath, expected]) => {
-        try {
-          const stat = await fs.promises.stat(filePath);
-          return (
-            stat.mtimeMs === expected.mtimeMs && stat.size === expected.size
-          );
-        } catch {
-          return false;
-        }
-      }),
-    )
-  ).every(Boolean);
+function buildChunkPlan({
+  entryFiles,
+  graph,
+  shimFiles,
+  workspaceDir,
+}: {
+  entryFiles: BuildEntry[];
+  graph: Record<string, string[]>;
+  shimFiles: string[];
+  workspaceDir: string;
+}): ChunkPlanChunk[] {
+  const shimToEntry = new Map(
+    shimFiles.map((shimFile, index) => [shimFile, entryFiles[index]]),
+  );
+  const reachability = new Map<string, Set<string>>();
+  const counts = new Map<string, number>();
+
+  for (const shimFile of shimFiles) {
+    const reachable = walkReachableFiles(shimFile, graph);
+    reachability.set(shimFile, reachable);
+    for (const filePath of reachable) {
+      counts.set(filePath, (counts.get(filePath) ?? 0) + 1);
+    }
+  }
+
+  const sharedFiles = new Set(
+    Array.from(counts.entries())
+      .filter(([, count]) => count > 1)
+      .map(([filePath]) => filePath),
+  );
+  const chunks: ChunkPlanChunk[] = [];
+
+  if (entryFiles.length === 1) {
+    const [onlyEntry] = entryFiles;
+    const [onlyShim] = shimFiles;
+    chunks.push({
+      dependencies: [],
+      files: toRelativeFiles(
+        topologicalSort(Array.from(reachability.get(onlyShim) ?? []), graph),
+        workspaceDir,
+      ),
+      name: stripExtension(onlyEntry.outputName),
+    });
+    return chunks;
+  }
+
+  if (sharedFiles.size > 0) {
+    chunks.push({
+      dependencies: [],
+      files: toRelativeFiles(
+        topologicalSort(Array.from(sharedFiles), graph),
+        workspaceDir,
+      ),
+      name: "shared",
+    });
+  }
+
+  for (const shimFile of shimFiles) {
+    const entry = shimToEntry.get(shimFile)!;
+    const reachable = reachability.get(shimFile) ?? new Set<string>();
+    const uniqueFiles = Array.from(reachable).filter(
+      (filePath) => !sharedFiles.has(filePath),
+    );
+    chunks.push({
+      dependencies: sharedFiles.size > 0 ? ["shared"] : [],
+      files: toRelativeFiles(topologicalSort(uniqueFiles, graph), workspaceDir),
+      name: stripExtension(entry.outputName),
+    });
+  }
+
+  return chunks;
+}
+
+function walkReachableFiles(
+  entryFile: string,
+  graph: Record<string, string[]>,
+): Set<string> {
+  const reachable = new Set<string>();
+  const pending = [entryFile];
+
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (reachable.has(current)) {
+      continue;
+    }
+
+    reachable.add(current);
+    for (const dependency of graph[current] ?? []) {
+      pending.push(dependency);
+    }
+  }
+
+  return reachable;
+}
+
+function topologicalSort(
+  files: string[],
+  graph: Record<string, string[]>,
+): string[] {
+  const fileSet = new Set(files);
+  const visited = new Set<string>();
+  const ordered: string[] = [];
+
+  function visit(filePath: string) {
+    if (visited.has(filePath)) {
+      return;
+    }
+
+    visited.add(filePath);
+    for (const dependency of graph[filePath] ?? []) {
+      if (fileSet.has(dependency)) {
+        visit(dependency);
+      }
+    }
+
+    ordered.push(filePath);
+  }
+
+  [...files].sort((left, right) => left.localeCompare(right)).forEach(visit);
+  return ordered;
+}
+
+function toRelativeFiles(files: string[], workspaceDir: string): string[] {
+  const seenEmittedPaths = new Set<string>();
+  const relativeFiles: string[] = [];
+
+  for (const filePath of files) {
+    if (filePath.endsWith(".d.ts")) {
+      continue;
+    }
+
+    const relativeFile = path.relative(workspaceDir, filePath);
+    const emittedRelativeFile = relativeFile.replace(/\.[^/.]+$/, ".js");
+    if (seenEmittedPaths.has(emittedRelativeFile)) {
+      continue;
+    }
+
+    seenEmittedPaths.add(emittedRelativeFile);
+    relativeFiles.push(relativeFile);
+  }
+
+  return relativeFiles;
+}
+
+function stripExtension(filePath: string) {
+  return filePath.replace(/\.[^/.]+$/, "");
 }
 
 export function getPackageRoot() {
@@ -493,21 +597,34 @@ export function normalizeBuildOptions(
   options: BuildOptions,
 ): NormalizedBuildOptions {
   const projectRoot = path.resolve(options.projectRoot ?? process.cwd());
-  const srcDir = path.resolve(projectRoot, options.srcDir ?? "src");
-  const outDir = path.resolve(projectRoot, options.outDir ?? "dist");
+  const srcDir = path.resolve(
+    projectRoot,
+    options.srcDir ?? (DEFAULT_BUILD_OPTIONS.srcDir || "src"),
+  );
+  const outDir = path.resolve(
+    projectRoot,
+    options.outDir ?? (DEFAULT_BUILD_OPTIONS.outDir || "dist"),
+  );
 
   return {
     cache: {
       dir: options.cache?.dir
         ? path.resolve(projectRoot, options.cache.dir)
-        : "",
-      mode: options.cache?.mode ?? "persistent",
+        : DEFAULT_BUILD_OPTIONS.cache.dir,
+      mode: options.cache?.mode ?? DEFAULT_BUILD_OPTIONS.cache.mode,
     },
-    compilationLevel: options.compilationLevel ?? "ADVANCED",
+    compilationLevel:
+      options.compilationLevel ?? DEFAULT_BUILD_OPTIONS.compilationLevel,
     diagnostics: {
-      fatalWarnings: options.diagnostics?.fatalWarnings ?? false,
-      preflight: options.diagnostics?.preflight ?? "errors-only",
-      verbose: options.diagnostics?.verbose ?? false,
+      fatalWarnings:
+        options.diagnostics?.fatalWarnings ??
+        DEFAULT_BUILD_OPTIONS.diagnostics.fatalWarnings,
+      preflight:
+        options.diagnostics?.preflight ??
+        DEFAULT_BUILD_OPTIONS.diagnostics.preflight,
+      verbose:
+        options.diagnostics?.verbose ??
+        DEFAULT_BUILD_OPTIONS.diagnostics.verbose,
     },
     entries: options.entries.map((entry) =>
       path.isAbsolute(entry) ? entry : path.resolve(srcDir, entry),
@@ -522,7 +639,7 @@ export function normalizeBuildOptions(
         ? filePath
         : path.resolve(projectRoot, filePath),
     ),
-    languageOut: options.languageOut ?? "ECMASCRIPT_NEXT",
+    languageOut: options.languageOut ?? DEFAULT_BUILD_OPTIONS.languageOut,
     outDir,
     outputNames: [...(options.outputNames ?? [])],
     projectRoot,

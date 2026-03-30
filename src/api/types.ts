@@ -32,67 +32,9 @@ export interface BuildOptions {
   srcDir?: string;
 }
 
-export interface NormalizedBuildOptions {
-  cache: Required<CacheOptions>;
-  compilationLevel: CompilationLevel;
-  diagnostics: Required<DiagnosticsOptions>;
-  entries: string[];
-  externs: string[];
-  js: string[];
-  languageOut: LanguageOut;
-  outDir: string;
-  outputNames: string[];
-  projectRoot: string;
-  srcDir: string;
-}
-
-export interface CliParseResult {
-  options: BuildOptions;
-  showHelp: boolean;
-}
-
 export interface CleanCacheOptions {
   cacheDir?: string;
   projectRoot?: string;
-}
-
-export interface BuildEntry {
-  chunkName: string;
-  exportNames: string[];
-  hasDefaultExport: boolean;
-  outputName: string;
-  outputPath: string;
-  sourcePath: string;
-  sourceRelativePath: string;
-}
-
-export interface ResolvedBuild {
-  cacheRoot: string;
-  cleanup(): Promise<void>;
-  entryFiles: BuildEntry[];
-  externalInputHash: string;
-  fileHashes: Record<string, string>;
-  filePaths: string[];
-  finalCacheDir: string;
-  finalKey: string;
-  graph: Record<string, string[]>;
-  isFinalCacheHit: boolean;
-  isNativeEmitCacheHit: boolean;
-  isResolveCacheHit: boolean;
-  options: NormalizedBuildOptions;
-  packageRoot: string;
-  packageVersion: string;
-  projectCacheDir: string;
-  resolveKey: string;
-  resolveMetadataPath: string;
-  sharedChunkName: null | string;
-  shimDir: string;
-  shimFiles: string[];
-  sourceRoot: string;
-  tsConfigPath: string;
-  nativeEmitCacheDir: string;
-  nativeEmitKey: string;
-  workspaceDir: string;
 }
 
 export interface BuildResult {
@@ -100,29 +42,26 @@ export interface BuildResult {
   diagnostics: unknown[];
   emitSkipped: boolean;
   exitCode: number;
-  options: NormalizedBuildOptions;
   outputFiles: string[];
-  workspaceDir: string;
 }
 
-export const DEFAULT_BUILD_OPTIONS: Readonly<NormalizedBuildOptions> =
-  Object.freeze({
-    cache: {
-      dir: "",
-      mode: "persistent" as CacheMode,
-    },
-    compilationLevel: "ADVANCED" as CompilationLevel,
-    diagnostics: {
-      fatalWarnings: false,
-      preflight: "errors-only" as DiagnosticsPreflight,
-      verbose: false,
-    },
-    entries: [],
-    externs: [],
-    js: [],
-    languageOut: "ECMASCRIPT_NEXT" as LanguageOut,
-    outDir: "",
-    outputNames: [],
-    projectRoot: "",
-    srcDir: "",
-  });
+export const DEFAULT_BUILD_OPTIONS = Object.freeze({
+  cache: {
+    dir: "",
+    mode: "persistent" as CacheMode,
+  },
+  compilationLevel: "ADVANCED" as CompilationLevel,
+  diagnostics: {
+    fatalWarnings: false,
+    preflight: "errors-only" as DiagnosticsPreflight,
+    verbose: false,
+  },
+  entries: [] as string[],
+  externs: [] as string[],
+  js: [] as string[],
+  languageOut: "ECMASCRIPT_NEXT" as LanguageOut,
+  outDir: "",
+  outputNames: [] as string[],
+  projectRoot: "",
+  srcDir: "",
+});

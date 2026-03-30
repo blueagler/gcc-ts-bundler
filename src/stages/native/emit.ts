@@ -2,7 +2,10 @@ import fs from "fs";
 import path from "path";
 import ts from "typescript";
 
-import { DiagnosticsPreflight, NormalizedBuildOptions } from "../../api/types";
+import { DiagnosticsPreflight } from "../../api/types";
+import { filesExist } from "../../internal/file-state";
+import { collectFileStates } from "../../native/load";
+import { NormalizedBuildOptions } from "../../internal/types";
 import { transpileSources } from "../../native/load";
 
 export interface NativeEmitStageResult {
@@ -38,10 +41,10 @@ export async function emitNativeStage({
   const cachedMetadata = await readMetadata(metadataPath);
   if (
     cachedMetadata &&
-    (await pathExists(cachedMetadata.externsPath)) &&
-    (await Promise.all(cachedMetadata.emittedFiles.map(pathExists))).every(
-      Boolean,
-    )
+    (await filesExist([
+      cachedMetadata.externsPath,
+      ...cachedMetadata.emittedFiles,
+    ]))
   ) {
     return {
       diagnostics: [],
@@ -115,6 +118,22 @@ function getPreflightDiagnostics({
     return [];
   }
 
+  const requiredStates = collectFileStates([tsConfigPath, ...fileNames]);
+  const missingFiles = requiredStates
+    .filter((state) => !state.exists)
+    .map((state) => state.filePath);
+  if (missingFiles.length > 0) {
+    return [
+      createSimpleDiagnostic(
+        `Missing required build input(s): ${missingFiles.join(", ")}`,
+      ),
+    ];
+  }
+
+  if (preflight !== "full") {
+    return [];
+  }
+
   const compilerOptions = loadCompilerOptions(tsConfigPath);
   const finalCompilerOptions: ts.CompilerOptions = {
     ...compilerOptions,
@@ -124,10 +143,6 @@ function getPreflightDiagnostics({
     skipLibCheck: true,
     target: ts.ScriptTarget.ESNext,
   };
-
-  if (preflight !== "full") {
-    return [];
-  }
 
   const compilerHost = ts.createCompilerHost(finalCompilerOptions);
   const program = ts.createProgram(
@@ -165,6 +180,17 @@ function loadCompilerOptions(configPath: string): ts.CompilerOptions {
   return parsedConfig.options;
 }
 
+function createSimpleDiagnostic(messageText: string): ts.Diagnostic {
+  return {
+    category: ts.DiagnosticCategory.Error,
+    code: 0,
+    file: undefined,
+    length: undefined,
+    messageText,
+    start: undefined,
+  };
+}
+
 async function readMetadata(
   metadataPath: string,
 ): Promise<NativeEmitMetadata | null> {
@@ -177,14 +203,5 @@ async function readMetadata(
     }
 
     throw error;
-  }
-}
-
-async function pathExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.promises.access(filePath);
-    return true;
-  } catch {
-    return false;
   }
 }

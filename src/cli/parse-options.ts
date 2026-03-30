@@ -1,6 +1,7 @@
 import minimist from "minimist";
 
-import { CliParseResult, DEFAULT_BUILD_OPTIONS } from "../api/types";
+import { DEFAULT_BUILD_OPTIONS } from "../api/types";
+import { CliParseResult } from "../internal/types";
 
 function asStringArray(value: string | string[] | undefined): string[] {
   if (!value) {

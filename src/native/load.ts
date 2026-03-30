@@ -9,18 +9,58 @@ interface NativeEntryExportMetadata {
   sourcePath: string;
 }
 
+interface NativeFileHashEntry {
+  filePath: string;
+  hash: string;
+}
+
+interface NativeDependencyGraphEntry {
+  dependencies: string[];
+  filePath: string;
+}
+
 interface NativeResolveGraphOutput {
   entries: NativeEntryExportMetadata[];
-  fileHashes: Record<string, string>;
+  fileHashes: NativeFileHashEntry[];
   filePaths: string[];
-  graph: Record<string, string[]>;
+  graph: NativeDependencyGraphEntry[];
+}
+
+export interface NativeFileStateEntry {
+  exists: boolean;
+  filePath: string;
+  mtimeMs: number;
+  size: number;
+}
+
+interface NativeShimEntry {
+  exportNames: string[];
+  hasDefaultExport: boolean;
+  importPath: string;
+  shimPath: string;
+}
+
+interface NativeTranspileOutput {
+  emittedFiles: string[];
+  externsPath: string;
 }
 
 interface NativeBinding {
-  resolveGraphJson(input: string): string;
+  collectFileStates(filePaths: string[]): NativeFileStateEntry[];
+  matchFileStates(expected: NativeFileStateEntry[]): boolean;
+  resolveGraph(
+    entries: string[],
+    srcDir: string,
+    workspaceDir: string,
+  ): NativeResolveGraphOutput;
   rewriteGccExports(code: string): string;
-  transpileSourcesJson(input: string): string;
-  writeEntryShimsJson(input: string): string;
+  transpileSources(
+    fileNames: string[],
+    outDir: string,
+    externsPath: string,
+    workspaceDir: string,
+  ): NativeTranspileOutput;
+  writeEntryShims(entries: NativeShimEntry[]): string[];
 }
 
 let cachedBinding: NativeBinding | null = null;
@@ -45,10 +85,22 @@ export function resolveGraph(input: {
   entries: string[];
   srcDir: string;
   workspaceDir: string;
-}): NativeResolveGraphOutput {
-  return JSON.parse(
-    loadBinding().resolveGraphJson(JSON.stringify(input)),
-  ) as NativeResolveGraphOutput;
+}) {
+  const result = loadBinding().resolveGraph(
+    input.entries,
+    input.srcDir,
+    input.workspaceDir,
+  );
+  return {
+    entries: result.entries,
+    fileHashes: Object.fromEntries(
+      result.fileHashes.map((entry) => [entry.filePath, entry.hash]),
+    ) as Record<string, string>,
+    filePaths: result.filePaths,
+    graph: Object.fromEntries(
+      result.graph.map((entry) => [entry.filePath, entry.dependencies]),
+    ) as Record<string, string[]>,
+  };
 }
 
 export function rewriteGccExports(code: string) {
@@ -61,12 +113,12 @@ export function transpileSources(input: {
   outDir: string;
   workspaceDir: string;
 }) {
-  return JSON.parse(
-    loadBinding().transpileSourcesJson(JSON.stringify(input)),
-  ) as {
-    emittedFiles: string[];
-    externsPath: string;
-  };
+  return loadBinding().transpileSources(
+    input.fileNames,
+    input.outDir,
+    input.externsPath,
+    input.workspaceDir,
+  );
 }
 
 export function writeEntryShims(input: {
@@ -77,7 +129,13 @@ export function writeEntryShims(input: {
     shimPath: string;
   }>;
 }) {
-  return JSON.parse(
-    loadBinding().writeEntryShimsJson(JSON.stringify(input)),
-  ) as string[];
+  return loadBinding().writeEntryShims(input.entries);
+}
+
+export function collectFileStates(filePaths: string[]) {
+  return loadBinding().collectFileStates(filePaths);
+}
+
+export function matchFileStates(expected: NativeFileStateEntry[]) {
+  return loadBinding().matchFileStates(expected);
 }

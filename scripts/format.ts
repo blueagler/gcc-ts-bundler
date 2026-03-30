@@ -6,9 +6,9 @@ import prettier from "prettier";
 const files = [
   "README.md",
   "eslint.config.ts",
-  "index.d.ts",
   "package.json",
   "tsconfig.json",
+  "tsconfig.types.json",
 ];
 
 async function main() {

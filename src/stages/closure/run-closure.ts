@@ -1,10 +1,11 @@
 import fs from "fs/promises";
+import path from "path";
 import * as closureCompilerPackage from "google-closure-compiler";
 // @ts-expect-error - package does not expose types for this internal helper.
 import { getNativeImagePath } from "google-closure-compiler/lib/utils.js";
-import path from "path";
 
-import { BuildEntry, NormalizedBuildOptions } from "../../api/types";
+import { copyOrLinkFiles } from "../../internal/file-state";
+import { ChunkPlanChunk, NormalizedBuildOptions } from "../../internal/types";
 import { rewriteGccExports } from "../../native/load";
 
 type ClosureCompilerClass = (typeof closureCompilerPackage)["compiler"] & {
@@ -24,11 +25,11 @@ type ClosureCompilerOptions = ConstructorParameters<ClosureCompilerClass>[0];
 interface ClosureChunk {
   dependencies: string[];
   files: string[];
-  isEntryChunk: boolean;
   name: string;
 }
 
 export interface ClosureStageResult {
+  cacheOutputFiles: string[];
   exitCode: number;
   outputFiles: string[];
 }
@@ -36,54 +37,46 @@ export interface ClosureStageResult {
 const closureLibFilesCache = new Map<string, Promise<string[]>>();
 
 export async function runClosureStage({
+  chunkPlan,
   emittedOutDir,
-  entryFiles,
   externPaths,
   finalCacheDir,
-  graph,
   options,
+  outDir,
   packageRoot,
-  shimFiles,
-  workspaceDir,
 }: {
+  chunkPlan: ChunkPlanChunk[];
   emittedOutDir: string;
-  entryFiles: BuildEntry[];
   externPaths: string[];
   finalCacheDir: string;
-  graph: Record<string, string[]>;
   options: NormalizedBuildOptions;
+  outDir: string;
   packageRoot: string;
-  shimFiles: string[];
-  workspaceDir: string;
 }): Promise<ClosureStageResult> {
   await fs.rm(finalCacheDir, { force: true, recursive: true });
   await fs.mkdir(finalCacheDir, { recursive: true });
 
   const rawDir = path.join(finalCacheDir, "raw");
-  const outputDir = path.join(finalCacheDir, "outputs");
+  const cacheOutputDir = path.join(finalCacheDir, "outputs");
   await fs.mkdir(rawDir, { recursive: true });
-  await fs.mkdir(outputDir, { recursive: true });
+  await fs.mkdir(cacheOutputDir, { recursive: true });
+  await fs.rm(outDir, { force: true, recursive: true });
+  await fs.mkdir(outDir, { recursive: true });
 
   const closureLibFiles = await collectClosureLibFiles(packageRoot);
-  const chunkPlan = buildChunkPlan({
-    entryFiles,
-    graph,
-    shimFiles,
-    workspaceDir,
-    emittedOutDir,
-  });
+  const resolvedChunks = resolveChunkPlan(chunkPlan, emittedOutDir);
 
   const exitCode =
-    chunkPlan.length === 1
+    resolvedChunks.length === 1
       ? await runSingleClosureCompilation({
           closureLibFiles,
-          entryChunk: chunkPlan[0],
+          entryChunk: resolvedChunks[0],
           externPaths,
           options,
-          rawOutputPath: path.join(rawDir, `${chunkPlan[0].name}.js`),
+          rawOutputPath: path.join(rawDir, `${resolvedChunks[0].name}.js`),
         })
       : await runChunkedClosureCompilation({
-          chunkPlan,
+          chunkPlan: resolvedChunks,
           closureLibFiles,
           externPaths,
           options,
@@ -91,14 +84,14 @@ export async function runClosureStage({
         });
 
   if (exitCode !== 0) {
-    return { exitCode, outputFiles: [] };
+    return { cacheOutputFiles: [], exitCode, outputFiles: [] };
   }
 
-  const rawOutputs = chunkPlan.map((chunk) =>
+  const rawOutputs = resolvedChunks.map((chunk) =>
     path.join(rawDir, `${chunk.name}.js`),
   );
-  const outputFiles = chunkPlan.map((chunk) =>
-    path.join(outputDir, `${chunk.name}.js`),
+  const outputFiles = resolvedChunks.map((chunk) =>
+    path.join(outDir, `${chunk.name}.js`),
   );
   await Promise.all(
     rawOutputs.map(async (rawFile, index) => {
@@ -108,7 +101,12 @@ export async function runClosureStage({
     }),
   );
 
-  return { exitCode: 0, outputFiles };
+  await copyOrLinkFiles(outputFiles, cacheOutputDir);
+  const cacheOutputFiles = outputFiles.map((outputFile) =>
+    path.join(cacheOutputDir, path.basename(outputFile)),
+  );
+
+  return { cacheOutputFiles, exitCode: 0, outputFiles };
 }
 
 async function runSingleClosureCompilation({
@@ -179,154 +177,17 @@ async function runChunkedClosureCompilation({
   });
 }
 
-function buildChunkPlan({
-  emittedOutDir,
-  entryFiles,
-  graph,
-  shimFiles,
-  workspaceDir,
-}: {
-  emittedOutDir: string;
-  entryFiles: BuildEntry[];
-  graph: Record<string, string[]>;
-  shimFiles: string[];
-  workspaceDir: string;
-}): ClosureChunk[] {
-  const shimToEntry = new Map(
-    shimFiles.map((shimFile, index) => [shimFile, entryFiles[index]]),
-  );
-  const reachability = new Map<string, Set<string>>();
-  const counts = new Map<string, number>();
-
-  for (const shimFile of shimFiles) {
-    const reachable = walkReachableFiles(shimFile, graph);
-    reachability.set(shimFile, reachable);
-    for (const filePath of reachable) {
-      counts.set(filePath, (counts.get(filePath) ?? 0) + 1);
-    }
-  }
-
-  const sharedFiles = new Set(
-    Array.from(counts.entries())
-      .filter(([, count]) => count > 1)
-      .map(([filePath]) => filePath),
-  );
-  const chunks: ClosureChunk[] = [];
-
-  if (entryFiles.length === 1) {
-    const [onlyEntry] = entryFiles;
-    const [onlyShim] = shimFiles;
-    chunks.push({
-      dependencies: [],
-      files: toEmittedPaths(
-        topologicalSort(Array.from(reachability.get(onlyShim) ?? []), graph),
-        emittedOutDir,
-        workspaceDir,
-      ),
-      isEntryChunk: true,
-      name: stripExtension(onlyEntry.outputName),
-    });
-    return chunks;
-  }
-
-  if (sharedFiles.size > 0) {
-    chunks.push({
-      dependencies: [],
-      files: toEmittedPaths(
-        topologicalSort(Array.from(sharedFiles), graph),
-        emittedOutDir,
-        workspaceDir,
-      ),
-      isEntryChunk: false,
-      name: "shared",
-    });
-  }
-
-  for (const shimFile of shimFiles) {
-    const entry = shimToEntry.get(shimFile)!;
-    const reachable = reachability.get(shimFile) ?? new Set<string>();
-    const uniqueFiles = Array.from(reachable).filter(
-      (filePath) => !sharedFiles.has(filePath),
-    );
-    chunks.push({
-      dependencies: sharedFiles.size > 0 ? ["shared"] : [],
-      files: toEmittedPaths(
-        topologicalSort(uniqueFiles, graph),
-        emittedOutDir,
-        workspaceDir,
-      ),
-      isEntryChunk: true,
-      name: stripExtension(entry.outputName),
-    });
-  }
-
-  return chunks;
-}
-
-function walkReachableFiles(
-  entryFile: string,
-  graph: Record<string, string[]>,
-): Set<string> {
-  const reachable = new Set<string>();
-  const pending = [entryFile];
-
-  while (pending.length > 0) {
-    const current = pending.pop()!;
-    if (reachable.has(current)) {
-      continue;
-    }
-
-    reachable.add(current);
-    for (const dependency of graph[current] ?? []) {
-      pending.push(dependency);
-    }
-  }
-
-  return reachable;
-}
-
-function topologicalSort(
-  files: string[],
-  graph: Record<string, string[]>,
-): string[] {
-  const fileSet = new Set(files);
-  const visited = new Set<string>();
-  const ordered: string[] = [];
-
-  function visit(filePath: string) {
-    if (visited.has(filePath)) {
-      return;
-    }
-
-    visited.add(filePath);
-    for (const dependency of graph[filePath] ?? []) {
-      if (fileSet.has(dependency)) {
-        visit(dependency);
-      }
-    }
-
-    ordered.push(filePath);
-  }
-
-  [...files].sort((left, right) => left.localeCompare(right)).forEach(visit);
-  return ordered;
-}
-
-function toEmittedPaths(
-  files: string[],
+function resolveChunkPlan(
+  chunkPlan: ChunkPlanChunk[],
   emittedOutDir: string,
-  workspaceDir: string,
-): string[] {
-  return files.map((filePath) =>
-    path.join(
-      emittedOutDir,
-      path.relative(workspaceDir, filePath).replace(/\.[^/.]+$/, ".js"),
+): ClosureChunk[] {
+  return chunkPlan.map((chunk) => ({
+    dependencies: chunk.dependencies,
+    files: chunk.files.map((filePath) =>
+      path.join(emittedOutDir, filePath.replace(/\.[^/.]+$/, ".js")),
     ),
-  );
-}
-
-function stripExtension(filePath: string) {
-  return filePath.replace(/\.[^/.]+$/, "");
+    name: chunk.name,
+  }));
 }
 
 function getDefaultString(value: unknown): string | undefined {
