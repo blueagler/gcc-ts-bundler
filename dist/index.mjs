@@ -6487,7 +6487,9 @@ async function rewriteClosureExports({
   let transformedCode = code;
   if (rewriteExports && code.includes("globalThis.GCC")) {
     const module = parseSync(code, SWC_PARSE_OPTIONS);
-    transformedCode = printSync(convertGccExportsToEsm(module)).code;
+    transformedCode = printSync(convertGccExportsToEsm(module), {
+      minify: true
+    }).code;
   }
   if (minifyOutput !== "swc") {
     return transformedCode;
