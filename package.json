@@ -43,8 +43,6 @@
     "closure"
   ],
   "dependencies": {
-    "@swc/core": "^1.15.21",
-    "@swc/types": "^0.1.26",
     "google-closure-compiler": "20260324.0.0",
     "minimist": "1.2.8",
     "typescript": "^6.0.2"

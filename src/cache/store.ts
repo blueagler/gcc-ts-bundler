@@ -3,7 +3,6 @@ import os from "os";
 import path from "path";
 
 import { CacheMode } from "../api/types";
-import { ensureDirectoryExistence } from "../utils/file-utils";
 import { hashContent } from "./hash";
 
 export interface CacheStore {
@@ -93,4 +92,18 @@ export async function writeJson(filePath: string, value: unknown) {
     JSON.stringify(value, null, 2),
     "utf-8",
   );
+}
+
+async function ensureDirectoryExistence(filePath: string): Promise<void> {
+  const dirName = path.dirname(filePath);
+  if (
+    await fs.promises
+      .access(dirName)
+      .then(() => true)
+      .catch(() => false)
+  ) {
+    return;
+  }
+
+  await fs.promises.mkdir(dirName, { recursive: true });
 }
