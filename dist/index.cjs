@@ -1,8 +1,8 @@
-#!/usr/bin/env node
 var __create = Object.create;
 var __getProtoOf = Object.getPrototypeOf;
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 function __accessProp(key) {
   return this[key];
@@ -29,6 +29,49 @@ var __toESM = (mod, isNodeMode, target) => {
     cache.set(mod, to);
   return to;
 };
+var __toCommonJS = (from) => {
+  var entry = (__moduleCache ??= new WeakMap).get(from), desc;
+  if (entry)
+    return entry;
+  entry = __defProp({}, "__esModule", { value: true });
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (var key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(entry, key))
+        __defProp(entry, key, {
+          get: __accessProp.bind(from, key),
+          enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable
+        });
+  }
+  __moduleCache.set(from, entry);
+  return entry;
+};
+var __moduleCache;
+var __returnValue = (v) => v;
+function __exportSetter(name, newValue) {
+  this[name] = __returnValue.bind(null, newValue);
+}
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, {
+      get: all[name],
+      enumerable: true,
+      configurable: true,
+      set: __exportSetter.bind(all, name)
+    });
+};
+
+// src/entry/api.ts
+var exports_api = {};
+__export(exports_api, {
+  runCli: () => runCli,
+  parseCliArgs: () => parseCliArgs,
+  normalizeBuildOptions: () => normalizeBuildOptions,
+  main: () => main,
+  loadSettingsFromArgs: () => loadSettingsFromArgs,
+  build: () => build,
+  DEFAULT_BUILD_OPTIONS: () => DEFAULT_BUILD_OPTIONS
+});
+module.exports = __toCommonJS(exports_api);
 
 // src/entry/main.ts
 var import_fs5 = __toESM(require("fs"));
@@ -6321,6 +6364,24 @@ function skipTransformForSourceFileIfNeeded(host, delegateFactory) {
 // src/utils/file-utils.ts
 var import_fs2 = __toESM(require("fs"));
 var import_path3 = __toESM(require("path"));
+function usage() {
+  console.error(`Usage: gcc-ts-compiler [gcc-ts-compiler options]
+
+Example:
+  gcc-ts-bundler --src_dir='./src' --entry_point='./index.ts' --output_dir='./dist' --language_out=ECMASCRIPT_NEXT
+
+gcc-ts-compiler flags are:
+  --src_dir             The source directory
+  --entry_point         The entry point for the application
+  --output_dir          The output directory
+  --language_out        ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT
+  --compilation_level   WHITESPACE_ONLY | SIMPLE | ADVANCED
+  --preserve_cache      Whether to preserve the cache files for debugging
+  --verbose             Print diagnostics to the console
+  --fatal_warnings       Whether warnings should be fatal, causing tsickle to return a non-zero exit code
+  -h, --help            Show this help message
+`);
+}
 function getCommonParentDirectory(fileNames) {
   if (fileNames.length === 0)
     return "/";
@@ -6478,6 +6539,14 @@ function parseCliArgs(args) {
     },
     showHelp: false
   };
+}
+function loadSettingsFromArgs(args) {
+  const { options, showHelp } = parseCliArgs(args);
+  if (showHelp) {
+    usage();
+    process.exit(0);
+  }
+  return { settings: normalizeBuildOptions(options) };
 }
 
 // src/utils/file-operations.ts
@@ -6802,6 +6871,6 @@ async function runCli(args) {
   const result = await build(options);
   return result.exitCode;
 }
-
-// src/entry/cli.ts
-runCli(process.argv.slice(2)).then((exitCode) => process.exit(exitCode));
+async function main(args) {
+  return runCli(args);
+}

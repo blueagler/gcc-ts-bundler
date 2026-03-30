@@ -286,11 +286,3 @@ export async function runCli(args: string[]): Promise<number> {
 export async function main(args: string[]): Promise<number> {
   return runCli(args);
 }
-
-if (typeof require === "function" && typeof module !== "undefined") {
-  if (require.main === module) {
-    void runCli(process.argv.slice(2)).then((exitCode) =>
-      process.exit(exitCode),
-    );
-  }
-}

@@ -1,50 +1,21 @@
-#!/usr/bin/env node
-var __create = Object.create;
-var __getProtoOf = Object.getPrototypeOf;
-var __defProp = Object.defineProperty;
-var __getOwnPropNames = Object.getOwnPropertyNames;
-var __hasOwnProp = Object.prototype.hasOwnProperty;
-function __accessProp(key) {
-  return this[key];
-}
-var __toESMCache_node;
-var __toESMCache_esm;
-var __toESM = (mod, isNodeMode, target) => {
-  var canCache = mod != null && typeof mod === "object";
-  if (canCache) {
-    var cache = isNodeMode ? __toESMCache_node ??= new WeakMap : __toESMCache_esm ??= new WeakMap;
-    var cached = cache.get(mod);
-    if (cached)
-      return cached;
-  }
-  target = mod != null ? __create(__getProtoOf(mod)) : {};
-  const to = isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target;
-  for (let key of __getOwnPropNames(mod))
-    if (!__hasOwnProp.call(to, key))
-      __defProp(to, key, {
-        get: __accessProp.bind(mod, key),
-        enumerable: true
-      });
-  if (canCache)
-    cache.set(mod, to);
-  return to;
-};
-
 // src/entry/main.ts
-var import_fs5 = __toESM(require("fs"));
-var import_os = __toESM(require("os"));
-var import_path6 = __toESM(require("path"));
-var import_typescript3 = __toESM(require("typescript"));
+import fs6 from "fs";
+import os from "os";
+import path6 from "path";
+import ts19 from "typescript";
 
 // src/compiler/closure-compiler.ts
-var import_promises = __toESM(require("fs/promises"));
-var closureCompilerPackage = __toESM(require("google-closure-compiler"));
-var import_utils = require("google-closure-compiler/lib/utils.js");
-var import_path = __toESM(require("path"));
+import fs from "fs/promises";
+import * as closureCompilerPackage from "google-closure-compiler";
+import { getNativeImagePath } from "google-closure-compiler/lib/utils.js";
+import path from "path";
 
 // src/compiler/post-compiler.ts
-var import_core = require("@swc/core");
-var import_uglify_js = require("uglify-js");
+import {
+  parseSync,
+  printSync
+} from "@swc/core";
+import { minify } from "uglify-js";
 var DEFAULT_EXPORT_IDENTIFIER = "__DEFAULT_EXPORT__";
 var GCC_IDENTIFIER = "GCC";
 var SWC_PARSE_OPTIONS = {
@@ -55,9 +26,9 @@ async function customTransform(code) {
   if (code.length === 0) {
     return code;
   }
-  const module2 = import_core.parseSync(code, SWC_PARSE_OPTIONS);
-  const transformedCode = import_core.printSync(convertGCCExportsToESM(module2)).code;
-  const minified = import_uglify_js.minify(transformedCode, {
+  const module = parseSync(code, SWC_PARSE_OPTIONS);
+  const transformedCode = printSync(convertGCCExportsToESM(module)).code;
+  const minified = minify(transformedCode, {
     compress: {
       hoist_vars: true,
       passes: 3,
@@ -72,13 +43,13 @@ async function customTransform(code) {
   }
   return minified.code;
 }
-function convertGCCExportsToESM(module2) {
+function convertGCCExportsToESM(module) {
   const body = [];
   const exportsMap = new Map;
   const processedExports = new Set;
   const existingExportNames = new Set;
   let hasDefaultExport = false;
-  for (const item of module2.body) {
+  for (const item of module.body) {
     if (item.type === "ExportNamedDeclaration") {
       for (const specifier of item.specifiers) {
         if (specifier.type !== "ExportSpecifier") {
@@ -92,7 +63,7 @@ function convertGCCExportsToESM(module2) {
       hasDefaultExport = true;
     }
   }
-  for (const item of module2.body) {
+  for (const item of module.body) {
     const gccExport = getGccExportAssignment(item);
     if (!gccExport) {
       body.push(item);
@@ -117,8 +88,8 @@ function convertGCCExportsToESM(module2) {
       body.push(createNamedExport(localName, exportName));
     }
   }
-  module2.body = body;
-  return module2;
+  module.body = body;
+  return module;
 }
 function getGccExportAssignment(item) {
   if (item.type !== "ExpressionStatement") {
@@ -160,8 +131,8 @@ function sanitizeIdentifier(name) {
   return name.replace(/[^\w$]/g, "_");
 }
 function parseModuleItem(code) {
-  const module2 = import_core.parseSync(code, SWC_PARSE_OPTIONS);
-  const [item] = module2.body;
+  const module = parseSync(code, SWC_PARSE_OPTIONS);
+  const [item] = module.body;
   if (!item) {
     throw new Error(`Failed to parse module item: ${code}`);
   }
@@ -198,7 +169,7 @@ function resolveClosureCompilerJarPath() {
   return jarPath;
 }
 function configureClosureCompilerInstance(instance) {
-  const nativeImagePath = import_utils.getNativeImagePath();
+  const nativeImagePath = getNativeImagePath();
   if (nativeImagePath) {
     instance.JAR_PATH = null;
     instance.javaPath = nativeImagePath;
@@ -219,7 +190,7 @@ function lockGCCAssignments(code) {
 async function prepareEntryPoints(entryPoints) {
   const reads = entryPoints.map(async (path2) => ({
     isLocked: false,
-    originalContent: await import_promises.default.readFile(path2, "utf-8"),
+    originalContent: await fs.readFile(path2, "utf-8"),
     path: path2
   }));
   return Promise.all(reads);
@@ -230,7 +201,7 @@ async function updateEntryPointStates(states, currentPath) {
     return shouldBeLocked !== state.isLocked;
   }).map(async (state) => {
     const content = state.path === currentPath ? unlockGCCAssignments(state.originalContent) : lockGCCAssignments(state.originalContent);
-    await import_promises.default.writeFile(state.path, content);
+    await fs.writeFile(state.path, content);
     state.isLocked = state.path !== currentPath;
   });
   await Promise.all(writes);
@@ -255,9 +226,9 @@ async function runClosureCompiler(settings) {
     entryPointStates = await prepareEntryPoints(settings.entryPoints);
     for (const [index, entryPoint] of settings.entryPoints.entries()) {
       const compilerEntryPoint = settings.compilerEntryPoints[index];
-      const baseName = import_path.default.basename(entryPoint);
-      const outputPath = import_path.default.join(settings.outputDir, baseName);
-      const tempPath = import_path.default.join(settings.outputDir, `${baseName}.tmp`);
+      const baseName = path.basename(entryPoint);
+      const outputPath = path.join(settings.outputDir, baseName);
+      const tempPath = path.join(settings.outputDir, `${baseName}.tmp`);
       try {
         await updateEntryPointStates(entryPointStates, entryPoint);
         await new Promise((resolve, reject) => {
@@ -271,10 +242,10 @@ async function runClosureCompiler(settings) {
               console.log(`Compilation of ${baseName} successful.`);
               if (stdOut)
                 console.log(stdOut);
-              import_promises.default.readFile(tempPath, "utf-8").then((compiledCode) => customTransform(compiledCode)).then((transformedCode) => {
+              fs.readFile(tempPath, "utf-8").then((compiledCode) => customTransform(compiledCode)).then((transformedCode) => {
                 const lockedCode = lockGCCAssignments(transformedCode);
-                return import_promises.default.writeFile(outputPath, lockedCode);
-              }).then(() => settings.preserveCache ? undefined : import_promises.default.unlink(tempPath).catch((error) => error.code === "ENOENT" ? undefined : Promise.reject(error))).then(() => resolve()).catch((error) => reject(new Error(`Failed to write file: ${error}`)));
+                return fs.writeFile(outputPath, lockedCode);
+              }).then(() => settings.preserveCache ? undefined : fs.unlink(tempPath).catch((error) => error.code === "ENOENT" ? undefined : Promise.reject(error))).then(() => resolve()).catch((error) => reject(new Error(`Failed to write file: ${error}`)));
             } else {
               console.error(`Compilation of ${baseName} failed.`);
               if (stdErr)
@@ -284,17 +255,17 @@ async function runClosureCompiler(settings) {
           });
         });
       } catch (error) {
-        await import_promises.default.unlink(tempPath).catch(() => {});
+        await fs.unlink(tempPath).catch(() => {});
         throw error;
       }
     }
-    const finalRestores = entryPointStates.filter((state) => state.isLocked).map((state) => import_promises.default.writeFile(state.path, state.originalContent));
+    const finalRestores = entryPointStates.filter((state) => state.isLocked).map((state) => fs.writeFile(state.path, state.originalContent));
     await Promise.all(finalRestores);
     return 0;
   } catch (error) {
     console.error("Compilation process encountered an error:", error);
     try {
-      await Promise.all(entryPointStates.map((state) => import_promises.default.writeFile(state.path, state.originalContent)));
+      await Promise.all(entryPointStates.map((state) => fs.writeFile(state.path, state.originalContent)));
     } catch (restoreError) {
       console.error("Failed to restore files:", restoreError);
     }
@@ -303,9 +274,12 @@ async function runClosureCompiler(settings) {
 }
 
 // src/compiler/pre-compiler.ts
-var import_core2 = require("@swc/core");
-var import_fs = require("fs");
-var import_path2 = __toESM(require("path"));
+import {
+  parseSync as parseSync2,
+  printSync as printSync2
+} from "@swc/core";
+import { existsSync, promises as fs2 } from "fs";
+import path2 from "path";
 var modulePathCache = new Map;
 var parsedModuleCache = new Map;
 var DEFAULT_EXPORT_IDENTIFIER2 = "__DEFAULT_EXPORT__";
@@ -324,23 +298,23 @@ async function customTransform2(code, filePath, isEntryPoint, projectRoot) {
     return code;
   }
   await preloadModules(filePath, projectRoot);
-  const module2 = import_core2.parseSync(code, getParseOptions(filePath));
-  const transformed = transformEntryModule(module2, filePath);
-  return import_core2.printSync(transformed).code;
+  const module = parseSync2(code, getParseOptions(filePath));
+  const transformed = transformEntryModule(module, filePath);
+  return printSync2(transformed).code;
 }
 async function getParsedModule(filePath) {
   const cachedModule = parsedModuleCache.get(filePath);
   if (cachedModule) {
     return cachedModule;
   }
-  const code = await import_fs.promises.readFile(filePath, "utf-8");
-  const module2 = import_core2.parseSync(code, getParseOptions(filePath));
-  parsedModuleCache.set(filePath, module2);
-  return module2;
+  const code = await fs2.readFile(filePath, "utf-8");
+  const module = parseSync2(code, getParseOptions(filePath));
+  parsedModuleCache.set(filePath, module);
+  return module;
 }
-function collectStaticDependencies(module2, importerFile, projectRoot) {
+function collectStaticDependencies(module, importerFile, projectRoot) {
   const dependencies = new Set;
-  for (const item of module2.body) {
+  for (const item of module.body) {
     if (item.type === "ImportDeclaration") {
       const resolvedPath = resolveModulePath(item.source.value, importerFile, projectRoot);
       if (resolvedPath) {
@@ -373,8 +347,8 @@ async function preloadModules(entryFilePath, projectRoot) {
       continue;
     }
     visitedFiles.add(currentFile);
-    const module2 = await getParsedModule(currentFile);
-    for (const dependency of collectStaticDependencies(module2, currentFile, projectRoot)) {
+    const module = await getParsedModule(currentFile);
+    for (const dependency of collectStaticDependencies(module, currentFile, projectRoot)) {
       if (!visitedFiles.has(dependency)) {
         pendingFiles.push(dependency);
       }
@@ -382,11 +356,11 @@ async function preloadModules(entryFilePath, projectRoot) {
   }
 }
 function resolveModulePath(source, importerFile, projectRoot) {
-  if (!source.startsWith(".") && !import_path2.default.isAbsolute(source)) {
+  if (!source.startsWith(".") && !path2.isAbsolute(source)) {
     return;
   }
-  const resolvedBasePath = import_path2.default.resolve(import_path2.default.dirname(importerFile), source);
-  if (!resolvedBasePath.startsWith(projectRoot + import_path2.default.sep)) {
+  const resolvedBasePath = path2.resolve(path2.dirname(importerFile), source);
+  if (!resolvedBasePath.startsWith(projectRoot + path2.sep)) {
     return;
   }
   if (modulePathCache.has(resolvedBasePath)) {
@@ -398,18 +372,18 @@ function resolveModulePath(source, importerFile, projectRoot) {
     candidates.push(`${resolvedBasePath}${ext}`);
   }
   for (const candidate of candidates) {
-    if (import_fs.existsSync(candidate)) {
+    if (existsSync(candidate)) {
       modulePathCache.set(resolvedBasePath, candidate);
       return candidate;
     }
   }
   throw new Error(`Module not found: ${source}`);
 }
-function transformEntryModule(module2, filePath) {
+function transformEntryModule(module, filePath) {
   const body = [];
   const globalIdentifiers = new Set;
   const existingImports = new Map;
-  for (const item of module2.body) {
+  for (const item of module.body) {
     if (item.type === "ImportDeclaration") {
       recordImportedSpecifiers(existingImports, item);
       body.push(item);
@@ -450,8 +424,8 @@ function transformEntryModule(module2, filePath) {
     moduleWithAssignments.unshift(createGlobalDeclaration(identifiersToAssign));
     moduleWithAssignments.push(...createGccAssignments(identifiersToAssign));
   }
-  module2.body = moduleWithAssignments;
-  return module2;
+  module.body = moduleWithAssignments;
+  return module;
 }
 function recordImportedSpecifiers(existingImports, declaration) {
   const importedNames = existingImports.get(declaration.source.value) ?? new Set;
@@ -563,7 +537,7 @@ function collectExportNamesFromExportAll(declaration, importerFile, target) {
   }
 }
 function collectExportNamesFromModuleSource(source, importerFile) {
-  const modulePath = resolveModulePath(source, importerFile, import_path2.default.dirname(importerFile));
+  const modulePath = resolveModulePath(source, importerFile, path2.dirname(importerFile));
   if (!modulePath) {
     return new Set;
   }
@@ -574,30 +548,30 @@ function collectExportNamesFromModule(modulePath, seen) {
     return new Set;
   }
   seen.add(modulePath);
-  const module2 = parsedModuleCache.get(modulePath);
-  if (!module2) {
+  const module = parsedModuleCache.get(modulePath);
+  if (!module) {
     throw new Error(`AST not found for module ${modulePath}`);
   }
-  const exports2 = new Set;
-  for (const item of module2.body) {
+  const exports = new Set;
+  for (const item of module.body) {
     if (item.type === "ExportNamedDeclaration" && item.source) {
-      collectExportedNamesFromReExport(item, exports2);
+      collectExportedNamesFromReExport(item, exports);
       continue;
     }
     if (item.type === "ExportAllDeclaration") {
-      const nestedPath = resolveModulePath(item.source.value, modulePath, import_path2.default.dirname(modulePath));
+      const nestedPath = resolveModulePath(item.source.value, modulePath, path2.dirname(modulePath));
       if (nestedPath) {
         for (const exportName of collectExportNamesFromModule(nestedPath, seen)) {
-          exports2.add(exportName);
+          exports.add(exportName);
         }
       }
       continue;
     }
     if (item.type === "ExportNamedDeclaration" || item.type === "ExportDeclaration") {
-      collectExportedNames(item, exports2);
+      collectExportedNames(item, exports);
     }
   }
-  return exports2;
+  return exports;
 }
 function createGlobalDeclaration(identifiers) {
   return parseModuleItems(`declare namespace globalThis { var ${GCC}: { ${identifiers.map((identifier) => `${identifier}: typeof ${identifier}`).join("; ")}; }; }`)[0];
@@ -609,21 +583,21 @@ function getModuleExportName2(name) {
   return name.type === "Identifier" ? name.value : name.value;
 }
 function parseModuleItems(code) {
-  return import_core2.parseSync(code, {
+  return parseSync2(code, {
     syntax: "typescript",
     target: "es2022"
   }).body;
 }
 
 // src/compiler/tsickle-compiler.ts
-var import_path4 = __toESM(require("path"));
-var import_typescript = __toESM(require("typescript"));
+import path4 from "path";
+import ts17 from "typescript";
 
 // src/tsickle/index.ts
-var ts16 = __toESM(require("typescript"));
+import * as ts16 from "typescript";
 
 // src/tsickle/path.ts
-var ts = __toESM(require("typescript"));
+import * as ts from "typescript";
 function isAbsolute(path3) {
   return ts.isRootedDiskPath(path3);
 }
@@ -661,13 +635,13 @@ function pathToModuleName(rootModulePath, context, fileName) {
 }
 
 // src/tsickle/clutz.ts
-var ts5 = __toESM(require("typescript"));
+import * as ts5 from "typescript";
 
 // src/tsickle/goog-module.ts
-var ts3 = __toESM(require("typescript"));
+import * as ts3 from "typescript";
 
 // src/tsickle/transformer-util.ts
-var ts2 = __toESM(require("typescript"));
+import * as ts2 from "typescript";
 function hasModifierFlag(declaration, flag) {
   return (ts2.getCombinedModifierFlags(declaration) & flag) !== 0;
 }
@@ -837,9 +811,9 @@ function isTsmesShorthandCall(n) {
 function isTsmesDeclareLegacyNamespaceCall(n) {
   return isGoogCallExpressionOf(n, "tsMigrationExportsShimDeclareLegacyNamespace");
 }
-function createGoogLoadedModulesRegistration(moduleId, exports2) {
+function createGoogLoadedModulesRegistration(moduleId, exports) {
   return ts2.factory.createExpressionStatement(ts2.factory.createAssignment(ts2.factory.createElementAccessExpression(ts2.factory.createPropertyAccessExpression(ts2.factory.createIdentifier("goog"), ts2.factory.createIdentifier("loadedModules_")), createSingleQuoteStringLiteral(moduleId)), ts2.factory.createObjectLiteralExpression([
-    ts2.factory.createPropertyAssignment("exports", exports2),
+    ts2.factory.createPropertyAssignment("exports", exports),
     ts2.factory.createPropertyAssignment("type", ts2.factory.createPropertyAccessExpression(ts2.factory.createPropertyAccessExpression(ts2.factory.createIdentifier("goog"), ts2.factory.createIdentifier("ModuleType")), ts2.factory.createIdentifier("GOOG"))),
     ts2.factory.createPropertyAssignment("moduleId", createSingleQuoteStringLiteral(moduleId))
   ])));
@@ -891,13 +865,13 @@ function localJsPathToNamespace(host, context, diagnostics, importPath) {
     return importPath.substring("goog:".length);
   }
   if (host.jsPathToModuleName) {
-    const module2 = host.jsPathToModuleName(importPath);
-    if (!module2)
+    const module = host.jsPathToModuleName(importPath);
+    if (!module)
       return;
-    if (module2.multipleProvides) {
+    if (module.multipleProvides) {
       reportMultipleProvidesError(context, diagnostics, importPath);
     }
-    return module2.name;
+    return module.name;
   }
   return;
 }
@@ -1569,7 +1543,7 @@ function maybeAddModuleId(host, typeChecker, sourceFile, headerStmts) {
 }
 
 // src/tsickle/type-translator.ts
-var ts4 = __toESM(require("typescript"));
+import * as ts4 from "typescript";
 
 // src/tsickle/annotator-host.ts
 function moduleNameAsIdentifier(host, fileName, context = "") {
@@ -2498,13 +2472,13 @@ function gatherNecessaryClutzImports(googmoduleHost, typeChecker, sf) {
 }
 
 // src/tsickle/decorator-downlevel-transformer.ts
-var ts8 = __toESM(require("typescript"));
+import * as ts8 from "typescript";
 
 // src/tsickle/decorators.ts
-var ts7 = __toESM(require("typescript"));
+import * as ts7 from "typescript";
 
 // src/tsickle/jsdoc.ts
-var ts6 = __toESM(require("typescript"));
+import * as ts6 from "typescript";
 var CLOSURE_ALLOWED_JSDOC_TAGS_OUTPUT = new Set([
   "abstract",
   "alternateMessageId",
@@ -3440,7 +3414,7 @@ function lines(...s) {
 }
 
 // src/tsickle/enum-transformer.ts
-var ts9 = __toESM(require("typescript"));
+import * as ts9 from "typescript";
 function isInUnsupportedNamespace(node) {
   let parent = ts9.getOriginalNode(node).parent;
   while (parent) {
@@ -3559,13 +3533,13 @@ function enumTransformer(host, typeChecker) {
 }
 
 // src/tsickle/externs.ts
-var ts12 = __toESM(require("typescript"));
+import * as ts12 from "typescript";
 
 // src/tsickle/jsdoc-transformer.ts
-var ts11 = __toESM(require("typescript"));
+import * as ts11 from "typescript";
 
 // src/tsickle/module-type-translator.ts
-var ts10 = __toESM(require("typescript"));
+import * as ts10 from "typescript";
 function getDefinedModule(symbol) {
   while (symbol) {
     if (symbol.flags & ts10.SymbolFlags.Module) {
@@ -3720,7 +3694,7 @@ class ModuleTypeTranslator {
     if (!clutzDecl)
       return;
     const clutzDts = clutzDecl.getSourceFile();
-    const clutzModule = this.typeChecker.getSymbolsInScope(clutzDts, ts10.SymbolFlags.Module).find((module2) => module2.getName().startsWith('"goog:') && module2.valueDeclaration?.getSourceFile() === clutzDts && this.typeChecker.getExportsOfModule(module2).some((exported) => {
+    const clutzModule = this.typeChecker.getSymbolsInScope(clutzDts, ts10.SymbolFlags.Module).find((module) => module.getName().startsWith('"goog:') && module.valueDeclaration?.getSourceFile() === clutzDts && this.typeChecker.getExportsOfModule(module).some((exported) => {
       if (exported.flags & ts10.SymbolFlags.Alias) {
         exported = this.typeChecker.getAliasedSymbol(exported);
       }
@@ -5398,7 +5372,7 @@ ${typeName}.prototype.${name2};
 }
 
 // src/tsickle/fileoverview-comment-transformer.ts
-var ts13 = __toESM(require("typescript"));
+import * as ts13 from "typescript";
 var FILEOVERVIEW_COMMENT_MARKERS = new Set([
   "fileoverview",
   "externs",
@@ -5517,8 +5491,8 @@ class ModulesManifest {
     Object.assign(this.moduleToFileName, other.moduleToFileName);
     Object.assign(this.referencedModules, other.referencedModules);
   }
-  addModule(fileName, module2) {
-    this.moduleToFileName[module2] = fileName;
+  addModule(fileName, module) {
+    this.moduleToFileName[module] = fileName;
     this.referencedModules[fileName] = [];
   }
   addReferencedModule(fileName, resolvedModule) {
@@ -5527,8 +5501,8 @@ class ModulesManifest {
   get fileNames() {
     return Object.keys(this.referencedModules);
   }
-  getFileNameFromModule(module2) {
-    return this.moduleToFileName[module2];
+  getFileNameFromModule(module) {
+    return this.moduleToFileName[module];
   }
   getReferencedModules(fileName) {
     return this.referencedModules[fileName];
@@ -5539,7 +5513,7 @@ class ModulesManifest {
 }
 
 // src/tsickle/ns-transformer.ts
-var ts14 = __toESM(require("typescript"));
+import * as ts14 from "typescript";
 function namespaceTransformer(host, tsOptions, typeChecker, diagnostics) {
   return (context) => {
     return (sourceFile) => {
@@ -5778,7 +5752,7 @@ function namespaceTransformer(host, tsOptions, typeChecker, diagnostics) {
 }
 
 // src/tsickle/ts-migration-exports-shim.ts
-var ts15 = __toESM(require("typescript"));
+import * as ts15 from "typescript";
 
 // src/tsickle/summary.ts
 class FileSummary {
@@ -6122,8 +6096,8 @@ class Generator {
     const mainModuleRequire = `var mainModule = goog.require('${this.srcIds.googModuleId}');`;
     let exportsAssignment;
     if (this.tsmesBreakdown.googExports instanceof Map) {
-      const exports2 = Array.from(this.tsmesBreakdown.googExports).map(([k, v]) => `exports.${k} = mainModule.${v};`);
-      exportsAssignment = lines2(...exports2);
+      const exports = Array.from(this.tsmesBreakdown.googExports).map(([k, v]) => `exports.${k} = mainModule.${v};`);
+      exportsAssignment = lines2(...exports);
     } else {
       exportsAssignment = `exports = mainModule.${this.tsmesBreakdown.googExports};`;
     }
@@ -6319,12 +6293,30 @@ function skipTransformForSourceFileIfNeeded(host, delegateFactory) {
 }
 
 // src/utils/file-utils.ts
-var import_fs2 = __toESM(require("fs"));
-var import_path3 = __toESM(require("path"));
+import fs3 from "fs";
+import path3 from "path";
+function usage() {
+  console.error(`Usage: gcc-ts-compiler [gcc-ts-compiler options]
+
+Example:
+  gcc-ts-bundler --src_dir='./src' --entry_point='./index.ts' --output_dir='./dist' --language_out=ECMASCRIPT_NEXT
+
+gcc-ts-compiler flags are:
+  --src_dir             The source directory
+  --entry_point         The entry point for the application
+  --output_dir          The output directory
+  --language_out        ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT
+  --compilation_level   WHITESPACE_ONLY | SIMPLE | ADVANCED
+  --preserve_cache      Whether to preserve the cache files for debugging
+  --verbose             Print diagnostics to the console
+  --fatal_warnings       Whether warnings should be fatal, causing tsickle to return a non-zero exit code
+  -h, --help            Show this help message
+`);
+}
 function getCommonParentDirectory(fileNames) {
   if (fileNames.length === 0)
     return "/";
-  const commonPath = fileNames.map((fileName) => fileName.split(import_path3.default.sep)).reduce((commonParts, pathParts) => {
+  const commonPath = fileNames.map((fileName) => fileName.split(path3.sep)).reduce((commonParts, pathParts) => {
     const minLength = Math.min(commonParts.length, pathParts.length);
     const newCommonParts = [];
     for (let i = 0;i < minLength; i++) {
@@ -6334,21 +6326,21 @@ function getCommonParentDirectory(fileNames) {
     }
     return newCommonParts;
   });
-  return commonPath.length > 0 ? commonPath.join(import_path3.default.sep) : "/";
+  return commonPath.length > 0 ? commonPath.join(path3.sep) : "/";
 }
 async function ensureDirectoryExistence(filePath) {
-  const dirName = import_path3.default.dirname(filePath);
-  if (await import_fs2.default.promises.access(dirName).then(() => true).catch(() => false))
+  const dirName = path3.dirname(filePath);
+  if (await fs3.promises.access(dirName).then(() => true).catch(() => false))
     return;
-  await import_fs2.default.promises.mkdir(dirName, { recursive: true });
+  await fs3.promises.mkdir(dirName, { recursive: true });
 }
 
 // src/compiler/tsickle-compiler.ts
 var modulePrefix = "_gcc_";
 async function toClosureJS(options, fileNames, settings, writeFile) {
-  const absoluteFileNames = fileNames.map((fileName) => import_path4.default.resolve(fileName));
-  const compilerHost = import_typescript.default.createCompilerHost(options);
-  const program = import_typescript.default.createProgram(absoluteFileNames, options, compilerHost);
+  const absoluteFileNames = fileNames.map((fileName) => path4.resolve(fileName));
+  const compilerHost = ts17.createCompilerHost(options);
+  const program = ts17.createProgram(absoluteFileNames, options, compilerHost);
   const rootModulePath = options.rootDir || getCommonParentDirectory(absoluteFileNames);
   const filesToProcess = new Set(absoluteFileNames);
   const writePromises = [];
@@ -6366,16 +6358,16 @@ async function toClosureJS(options, fileNames, settings, writeFile) {
   };
   const transformerHost = {
     addDtsClutzAliases: false,
-    fileNameToModuleId: (fileName) => modulePrefix + import_path4.default.relative(rootModulePath, fileName),
+    fileNameToModuleId: (fileName) => modulePrefix + path4.relative(rootModulePath, fileName),
     generateExtraSuppressions: true,
     generateSummary: false,
     generateTsMigrationExportsShim: false,
     googmodule: true,
     logWarning: (warning) => {
       if (settings.verbose) {
-        console.error(import_typescript.default.formatDiagnosticsWithColorAndContext([warning], compilerHost));
+        console.error(ts17.formatDiagnosticsWithColorAndContext([warning], compilerHost));
       } else {
-        console.error(import_typescript.default.flattenDiagnosticMessageText(warning.messageText, `
+        console.error(ts17.flattenDiagnosticMessageText(warning.messageText, `
 `));
       }
     },
@@ -6384,7 +6376,7 @@ async function toClosureJS(options, fileNames, settings, writeFile) {
     provideExternalModuleDtsNamespace: true,
     rootDirsRelative: (fileName) => fileName,
     shouldIgnoreWarningsForPath: () => !settings.fatalWarnings,
-    shouldSkipTsickleProcessing: (fileName) => !filesToProcess.has(import_path4.default.resolve(fileName)),
+    shouldSkipTsickleProcessing: (fileName) => !filesToProcess.has(path4.resolve(fileName)),
     transformDecorators: true,
     transformDynamicImport: "closure",
     transformTypesToClosure: true,
@@ -6392,7 +6384,7 @@ async function toClosureJS(options, fileNames, settings, writeFile) {
     untyped: false,
     useDeclarationMergingTransformation: true
   };
-  const diagnostics = import_typescript.default.getPreEmitDiagnostics(program);
+  const diagnostics = ts17.getPreEmitDiagnostics(program);
   if (diagnostics.length > 0) {
     return {
       diagnostics,
@@ -6415,8 +6407,8 @@ async function toClosureJS(options, fileNames, settings, writeFile) {
 }
 
 // src/entry/options.ts
-var import_minimist = __toESM(require("minimist"));
-var import_path5 = __toESM(require("path"));
+import minimist from "minimist";
+import path5 from "path";
 var DEFAULT_BUILD_OPTIONS = Object.freeze({
   compilationLevel: "ADVANCED",
   cwd: process.cwd(),
@@ -6438,13 +6430,13 @@ function normalizeEntryPoints(entryPoints) {
   return Array.isArray(entryPoints) ? entryPoints : [entryPoints];
 }
 function normalizeBuildOptions(options = {}) {
-  const cwd = import_path5.default.resolve(options.cwd ?? DEFAULT_BUILD_OPTIONS.cwd);
-  const srcDir = import_path5.default.resolve(cwd, options.srcDir ?? DEFAULT_BUILD_OPTIONS.srcDir);
-  const entryPoints = normalizeEntryPoints(options.entryPoints).map((entryPoint) => import_path5.default.isAbsolute(entryPoint) ? entryPoint : import_path5.default.resolve(srcDir, entryPoint));
+  const cwd = path5.resolve(options.cwd ?? DEFAULT_BUILD_OPTIONS.cwd);
+  const srcDir = path5.resolve(cwd, options.srcDir ?? DEFAULT_BUILD_OPTIONS.srcDir);
+  const entryPoints = normalizeEntryPoints(options.entryPoints).map((entryPoint) => path5.isAbsolute(entryPoint) ? entryPoint : path5.resolve(srcDir, entryPoint));
   return {
     compilationLevel: options.compilationLevel ?? DEFAULT_BUILD_OPTIONS.compilationLevel,
     compilerEntryPoints: entryPoints.map((entryPoint) => {
-      const relativePath = import_path5.default.relative(srcDir, entryPoint);
+      const relativePath = path5.relative(srcDir, entryPoint);
       return `goog:_gcc_${relativePath.replace(/\.[^/.]+$/, "").replace(/[\\/]/g, ".")}`;
     }),
     cwd,
@@ -6453,14 +6445,14 @@ function normalizeBuildOptions(options = {}) {
     fatalWarnings: options.fatalWarnings ?? DEFAULT_BUILD_OPTIONS.fatalWarnings,
     js: [...options.js ?? DEFAULT_BUILD_OPTIONS.js],
     languageOut: options.languageOut ?? DEFAULT_BUILD_OPTIONS.languageOut,
-    outputDir: import_path5.default.resolve(cwd, options.outputDir ?? DEFAULT_BUILD_OPTIONS.outputDir),
+    outputDir: path5.resolve(cwd, options.outputDir ?? DEFAULT_BUILD_OPTIONS.outputDir),
     preserveCache: options.preserveCache ?? DEFAULT_BUILD_OPTIONS.preserveCache,
     srcDir,
     verbose: options.verbose ?? DEFAULT_BUILD_OPTIONS.verbose
   };
 }
 function parseCliArgs(args) {
-  const parsedArgs = import_minimist.default(args);
+  const parsedArgs = minimist(args);
   if (parsedArgs.h || parsedArgs.help) {
     return { options: {}, showHelp: true };
   }
@@ -6479,12 +6471,20 @@ function parseCliArgs(args) {
     showHelp: false
   };
 }
+function loadSettingsFromArgs(args) {
+  const { options, showHelp } = parseCliArgs(args);
+  if (showHelp) {
+    usage();
+    process.exit(0);
+  }
+  return { settings: normalizeBuildOptions(options) };
+}
 
 // src/utils/file-operations.ts
-var import_fs3 = __toESM(require("fs"));
+import fs4 from "fs";
 async function copyDirectoryRecursive(src, dest) {
-  await import_fs3.default.promises.mkdir(dest, { recursive: true });
-  const entries = await import_fs3.default.promises.readdir(src, { withFileTypes: true });
+  await fs4.promises.mkdir(dest, { recursive: true });
+  const entries = await fs4.promises.readdir(src, { withFileTypes: true });
   await Promise.all(entries.map(async (entry) => {
     const srcPath = `${src}/${entry.name}`;
     const destPath = `${dest}/${entry.name}`;
@@ -6492,24 +6492,24 @@ async function copyDirectoryRecursive(src, dest) {
       await copyDirectoryRecursive(srcPath, destPath);
       return;
     }
-    await import_fs3.default.promises.copyFile(srcPath, destPath);
+    await fs4.promises.copyFile(srcPath, destPath);
   }));
 }
 async function cleanDirectory(dir) {
-  await import_fs3.default.promises.rm(dir, { force: true, recursive: true });
-  await import_fs3.default.promises.mkdir(dir, { recursive: true });
+  await fs4.promises.rm(dir, { force: true, recursive: true });
+  await fs4.promises.mkdir(dir, { recursive: true });
 }
 async function writeFileContent(filePath, contents) {
   await ensureDirectoryExistence(filePath);
-  await import_fs3.default.promises.writeFile(filePath, contents, "utf-8");
+  await fs4.promises.writeFile(filePath, contents, "utf-8");
 }
 async function cleanupDirectories(dirs, remove = true) {
-  await Promise.all(dirs.map((dir) => remove ? import_fs3.default.promises.rm(dir, { force: true, recursive: true }) : cleanDirectory(dir)));
+  await Promise.all(dirs.map((dir) => remove ? fs4.promises.rm(dir, { force: true, recursive: true }) : cleanDirectory(dir)));
 }
 
 // src/utils/ts-config-loader.ts
-var import_fs4 = __toESM(require("fs"));
-var import_typescript2 = __toESM(require("typescript"));
+import fs5 from "fs";
+import ts18 from "typescript";
 async function loadTscConfig({
   args = [],
   configSearchDir,
@@ -6517,17 +6517,17 @@ async function loadTscConfig({
   projectDir,
   rootDir = "./"
 }) {
-  const parsedCommandLine = import_typescript2.default.parseCommandLine(args);
+  const parsedCommandLine = ts18.parseCommandLine(args);
   if (parsedCommandLine.errors.length > 0) {
     return { errors: parsedCommandLine.errors, fileNames: [], options: {} };
   }
   const tsFileArguments = parsedCommandLine.fileNames;
-  const possibleConfigFile = import_typescript2.default.findConfigFile(configSearchDir ?? projectDir, (fileName) => import_typescript2.default.sys.fileExists(fileName));
+  const possibleConfigFile = ts18.findConfigFile(configSearchDir ?? projectDir, (fileName) => ts18.sys.fileExists(fileName));
   if (!possibleConfigFile) {
     return {
       errors: [
         {
-          category: import_typescript2.default.DiagnosticCategory.Error,
+          category: ts18.DiagnosticCategory.Error,
           code: 0,
           file: undefined,
           length: undefined,
@@ -6539,8 +6539,8 @@ async function loadTscConfig({
       options: {}
     };
   }
-  const configFileText = import_fs4.default.readFileSync(possibleConfigFile, "utf-8");
-  const result = import_typescript2.default.parseConfigFileTextToJson(possibleConfigFile, configFileText);
+  const configFileText = fs5.readFileSync(possibleConfigFile, "utf-8");
+  const result = ts18.parseConfigFileTextToJson(possibleConfigFile, configFileText);
   if (result.error) {
     return { errors: [result.error], fileNames: [], options: {} };
   }
@@ -6555,7 +6555,7 @@ async function loadTscConfig({
   result.config.exclude = [];
   result.config.files = projectFiles;
   result.config.include = [];
-  const configParseResult = import_typescript2.default.parseJsonConfigFileContent(result.config, import_typescript2.default.sys, projectDir, parsedCommandLine.options, possibleConfigFile);
+  const configParseResult = ts18.parseJsonConfigFileContent(result.config, ts18.sys, projectDir, parsedCommandLine.options, possibleConfigFile);
   if (configParseResult.errors.length > 0) {
     return { errors: configParseResult.errors, fileNames: [], options: {} };
   }
@@ -6567,7 +6567,7 @@ async function loadTscConfig({
       return {
         errors: [
           {
-            category: import_typescript2.default.DiagnosticCategory.Error,
+            category: ts18.DiagnosticCategory.Error,
             code: 0,
             file: undefined,
             length: undefined,
@@ -6588,14 +6588,14 @@ async function collectProjectFiles(projectDir) {
   const allowedExtensions = new Set([".js", ".jsx", ".ts", ".tsx"]);
   while (pendingDirs.length > 0) {
     const currentDir = pendingDirs.pop();
-    const entries = await import_fs4.default.promises.readdir(currentDir, {
+    const entries = await fs5.promises.readdir(currentDir, {
       withFileTypes: true
     });
     for (const entry of entries) {
       if (entry.name === "node_modules") {
         continue;
       }
-      const entryPath = import_typescript2.default.sys.resolvePath(`${currentDir}/${entry.name}`);
+      const entryPath = ts18.sys.resolvePath(`${currentDir}/${entry.name}`);
       if (entry.isDirectory()) {
         pendingDirs.push(entryPath);
         continue;
@@ -6610,7 +6610,7 @@ async function collectProjectFiles(projectDir) {
 async function validateFiles(files) {
   const fileChecks = await Promise.all(files.map(async (file) => {
     try {
-      await import_fs4.default.promises.access(file);
+      await fs5.promises.access(file);
       return { exists: true, file };
     } catch {
       return { exists: false, file };
@@ -6634,12 +6634,12 @@ function stripExtension(filePath) {
 function getPackageRoot() {
   let currentDir = __dirname;
   while (true) {
-    const packageJsonPath = import_path6.default.join(currentDir, "package.json");
-    const closureExternsPath = import_path6.default.join(currentDir, "closure-externs");
-    if (import_fs5.default.existsSync(packageJsonPath) && import_fs5.default.existsSync(closureExternsPath)) {
+    const packageJsonPath = path6.join(currentDir, "package.json");
+    const closureExternsPath = path6.join(currentDir, "closure-externs");
+    if (fs6.existsSync(packageJsonPath) && fs6.existsSync(closureExternsPath)) {
       return currentDir;
     }
-    const parentDir = import_path6.default.dirname(currentDir);
+    const parentDir = path6.dirname(currentDir);
     if (parentDir === currentDir) {
       throw new Error("Unable to resolve gcc-ts-bundler package root.");
     }
@@ -6650,9 +6650,9 @@ async function getBundledExterns(packageRoot) {
   if (bundledExternsCache) {
     return bundledExternsCache;
   }
-  const closureExternsPath = import_path6.default.join(packageRoot, "closure-externs");
-  const files = await import_fs5.default.promises.readdir(closureExternsPath);
-  bundledExternsCache = files.map((file) => import_path6.default.join(closureExternsPath, file));
+  const closureExternsPath = path6.join(packageRoot, "closure-externs");
+  const files = await fs6.promises.readdir(closureExternsPath);
+  bundledExternsCache = files.map((file) => path6.join(closureExternsPath, file));
   return bundledExternsCache;
 }
 async function collectJavaScriptFiles(dir) {
@@ -6660,11 +6660,11 @@ async function collectJavaScriptFiles(dir) {
   const pendingDirs = [dir];
   while (pendingDirs.length > 0) {
     const currentDir = pendingDirs.pop();
-    const entries = await import_fs5.default.promises.readdir(currentDir, {
+    const entries = await fs6.promises.readdir(currentDir, {
       withFileTypes: true
     });
     for (const entry of entries) {
-      const entryPath = import_path6.default.join(currentDir, entry.name);
+      const entryPath = path6.join(currentDir, entry.name);
       if (entry.isDirectory()) {
         pendingDirs.push(entryPath);
         continue;
@@ -6677,11 +6677,11 @@ async function collectJavaScriptFiles(dir) {
   return files;
 }
 async function processTsFiles(config, srcDir, preCompiledDir, settings) {
-  const entryPointRelativePaths = new Set(settings.entryPoints.map((entryPoint) => stripExtension(import_path6.default.relative(srcDir, entryPoint))));
+  const entryPointRelativePaths = new Set(settings.entryPoints.map((entryPoint) => stripExtension(path6.relative(srcDir, entryPoint))));
   await Promise.all(config.fileNames.map(async (file) => {
-    const relativePath = import_path6.default.relative(preCompiledDir, file);
-    const preCompiledPath = import_path6.default.join(preCompiledDir, relativePath);
-    const contents = await import_fs5.default.promises.readFile(preCompiledPath, "utf-8");
+    const relativePath = path6.relative(preCompiledDir, file);
+    const preCompiledPath = path6.join(preCompiledDir, relativePath);
+    const contents = await fs6.promises.readFile(preCompiledPath, "utf-8");
     const isEntryPoint = entryPointRelativePaths.has(stripExtension(relativePath));
     const transformed = await customTransform2(contents, preCompiledPath, isEntryPoint, preCompiledDir);
     await writeFileContent(preCompiledPath, transformed);
@@ -6690,12 +6690,12 @@ async function processTsFiles(config, srcDir, preCompiledDir, settings) {
 async function build(options = {}) {
   const settings = normalizeBuildOptions(options);
   const packageRoot = getPackageRoot();
-  const explicitWorkspaceDir = options.workspaceDir ? import_path6.default.resolve(settings.cwd, options.workspaceDir) : undefined;
-  const workspaceDir = explicitWorkspaceDir ?? await import_fs5.default.promises.mkdtemp(import_path6.default.join(import_os.default.tmpdir(), "gcc-ts-bundler-"));
-  const preCompiledDir = import_path6.default.join(workspaceDir, PRE_COMPILED_DIR);
-  const closuredDir = import_path6.default.join(workspaceDir, CLOSURED_DIR);
-  const closureExternsDir = import_path6.default.join(workspaceDir, CLOSURE_EXTERNS_DIR);
-  const stagedEntryPoints = settings.entryPoints.map((entryPoint) => import_path6.default.join(closuredDir, import_path6.default.relative(settings.srcDir, entryPoint).replace(/\.[^/.]+$/, ".js")));
+  const explicitWorkspaceDir = options.workspaceDir ? path6.resolve(settings.cwd, options.workspaceDir) : undefined;
+  const workspaceDir = explicitWorkspaceDir ?? await fs6.promises.mkdtemp(path6.join(os.tmpdir(), "gcc-ts-bundler-"));
+  const preCompiledDir = path6.join(workspaceDir, PRE_COMPILED_DIR);
+  const closuredDir = path6.join(workspaceDir, CLOSURED_DIR);
+  const closureExternsDir = path6.join(workspaceDir, CLOSURE_EXTERNS_DIR);
+  const stagedEntryPoints = settings.entryPoints.map((entryPoint) => path6.join(closuredDir, path6.relative(settings.srcDir, entryPoint).replace(/\.[^/.]+$/, ".js")));
   try {
     await cleanupDirectories([preCompiledDir, closuredDir], false);
     await copyDirectoryRecursive(settings.srcDir, preCompiledDir);
@@ -6705,7 +6705,7 @@ async function build(options = {}) {
       projectDir: preCompiledDir
     });
     if (config.errors.length > 0) {
-      console.error(import_typescript3.default.formatDiagnosticsWithColorAndContext(config.errors, import_typescript3.default.createCompilerHost(config.options)));
+      console.error(ts19.formatDiagnosticsWithColorAndContext(config.errors, ts19.createCompilerHost(config.options)));
       return {
         diagnostics: config.errors,
         emitSkipped: true,
@@ -6715,7 +6715,7 @@ async function build(options = {}) {
         workspaceDir
       };
     }
-    if (config.options.module !== import_typescript3.default.ModuleKind.CommonJS) {
+    if (config.options.module !== ts19.ModuleKind.CommonJS) {
       console.error('tsickle converts TypeScript modules to Closure modules via CommonJS internally. Set tsconfig.json "module": "commonjs"');
       return {
         diagnostics: [],
@@ -6731,7 +6731,7 @@ async function build(options = {}) {
       writeFileContent(fileName, content);
     });
     if (result.diagnostics.length > 0) {
-      console.error(import_typescript3.default.formatDiagnosticsWithColorAndContext(result.diagnostics, import_typescript3.default.createCompilerHost(config.options)));
+      console.error(ts19.formatDiagnosticsWithColorAndContext(result.diagnostics, ts19.createCompilerHost(config.options)));
       return {
         diagnostics: result.diagnostics,
         emitSkipped: result.emitSkipped,
@@ -6741,10 +6741,10 @@ async function build(options = {}) {
         workspaceDir
       };
     }
-    const modulesExterns = import_path6.default.join(closureExternsDir, "modules-externs.js");
+    const modulesExterns = path6.join(closureExternsDir, "modules-externs.js");
     await ensureDirectoryExistence(modulesExterns);
-    await import_fs5.default.promises.mkdir(settings.outputDir, { recursive: true });
-    await import_fs5.default.promises.writeFile(modulesExterns, getGeneratedExterns(result.externs, config.options.rootDir || ""));
+    await fs6.promises.mkdir(settings.outputDir, { recursive: true });
+    await fs6.promises.writeFile(modulesExterns, getGeneratedExterns(result.externs, config.options.rootDir || ""));
     const closureSettings = {
       ...settings,
       entryPoints: stagedEntryPoints,
@@ -6755,7 +6755,7 @@ async function build(options = {}) {
       ],
       js: [
         ...settings.js,
-        ...await collectJavaScriptFiles(import_path6.default.join(packageRoot, "closure-lib")),
+        ...await collectJavaScriptFiles(path6.join(packageRoot, "closure-lib")),
         ...await collectJavaScriptFiles(closuredDir)
       ]
     };
@@ -6771,7 +6771,7 @@ async function build(options = {}) {
       emitSkipped: result.emitSkipped,
       exitCode,
       options: settings,
-      outputFiles: settings.entryPoints.map((entryPoint) => import_path6.default.join(settings.outputDir, import_path6.default.basename(entryPoint))),
+      outputFiles: settings.entryPoints.map((entryPoint) => path6.join(settings.outputDir, path6.basename(entryPoint))),
       workspaceDir
     };
   } catch (error) {
@@ -6790,7 +6790,7 @@ async function build(options = {}) {
     } else if (explicitWorkspaceDir) {
       await cleanupDirectories([preCompiledDir, closureExternsDir, closuredDir], true);
     } else {
-      await import_fs5.default.promises.rm(workspaceDir, { force: true, recursive: true });
+      await fs6.promises.rm(workspaceDir, { force: true, recursive: true });
     }
   }
 }
@@ -6802,6 +6802,15 @@ async function runCli(args) {
   const result = await build(options);
   return result.exitCode;
 }
-
-// src/entry/cli.ts
-runCli(process.argv.slice(2)).then((exitCode) => process.exit(exitCode));
+async function main(args) {
+  return runCli(args);
+}
+export {
+  runCli,
+  parseCliArgs,
+  normalizeBuildOptions,
+  main,
+  loadSettingsFromArgs,
+  build,
+  DEFAULT_BUILD_OPTIONS
+};
