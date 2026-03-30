@@ -69,7 +69,6 @@ export interface BuildEntry {
 export interface ResolvedBuild {
   cacheRoot: string;
   cleanup(): Promise<void>;
-  compilerOptions: Record<string, unknown>;
   entryFiles: BuildEntry[];
   externalInputHash: string;
   fileHashes: Record<string, string>;

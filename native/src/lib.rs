@@ -5,6 +5,7 @@ use std::sync::{Mutex, OnceLock};
 
 use napi::Result;
 use napi_derive::napi;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use swc_core::common::{sync::Lrc, FileName, Globals, Mark, SourceMap, GLOBALS};
@@ -204,26 +205,37 @@ pub fn transpile_sources_json(input: String) -> Result<String> {
         fs::write(&input.externs_path, "")
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
 
-        let mut emitted_files = Vec::new();
-        for file_name in input.file_names {
-            let file_path = PathBuf::from(&file_name);
-            if file_path.to_string_lossy().ends_with(".d.ts") {
-                continue;
-            }
+        let workspace_dir = PathBuf::from(&input.workspace_dir);
+        let out_dir = PathBuf::from(&input.out_dir);
+        let emitted_outputs = input
+            .file_names
+            .par_iter()
+            .filter(|file_name| !file_name.ends_with(".d.ts"))
+            .map(|file_name| {
+                let file_path = PathBuf::from(file_name);
+                let relative_path = file_path
+                    .strip_prefix(&workspace_dir)
+                    .unwrap_or(&file_path);
+                let output_path = out_dir.join(relative_path).with_extension("js");
 
-            let module = get_or_parse_cached_module(&file_path)
-                .map_err(|error| napi::Error::from_reason(error))?;
-            let relative_path = file_path
-                .strip_prefix(Path::new(&input.workspace_dir))
-                .unwrap_or(&file_path);
-            let output_path = Path::new(&input.out_dir).join(relative_path).with_extension("js");
-            let program = transform_program(module)
-                .map_err(|error| napi::Error::from_reason(error))?;
+                let code = GLOBALS.set(&Globals::new(), || {
+                    let module = get_or_parse_cached_module(&file_path)?;
+                    let program = transform_program(module)?;
+                    print_program(&program)
+                })?;
+
+                Ok::<_, String>((output_path, code))
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(napi::Error::from_reason)?;
+
+        let mut emitted_files = Vec::with_capacity(emitted_outputs.len());
+        for (output_path, code) in emitted_outputs {
             if let Some(parent) = output_path.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
             }
-            fs::write(&output_path, print_program(&program).map_err(napi::Error::from_reason)?)
+            fs::write(&output_path, code)
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?;
             emitted_files.push(output_path.to_string_lossy().to_string());
         }

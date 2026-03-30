@@ -1,6 +1,5 @@
 import fs from "fs";
 import path from "path";
-import ts from "typescript";
 
 import { BuildOptions, BuildResult, CleanCacheOptions } from "../api/types";
 import {
@@ -130,10 +129,10 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     );
     const nativeEmitResult = await emitNativeStage({
       cacheDir: resolved.nativeEmitCacheDir,
-      compilerOptions: resolved.compilerOptions as ts.CompilerOptions,
       fileNames: [...resolved.filePaths, ...resolved.shimFiles],
       metadataPath: nativeEmitMetadataPath,
       options: normalizedOptions,
+      tsConfigPath: resolved.tsConfigPath,
       workspaceDir: resolved.workspaceDir,
     });
     if (

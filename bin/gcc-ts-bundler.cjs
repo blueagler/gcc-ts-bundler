@@ -283,8 +283,8 @@ async function resolveBuild(options) {
   const packageSignature = await getPackageSignature(packageRoot);
   const sourceRoot = import_path2.default.join(cacheStore.workspaceDir, "src");
   await ensureSourceSymlink(sourceRoot, options.srcDir);
-  const compilerOptions = await loadCompilerOptions(options.projectRoot);
-  const compilerOptionsHash = hashJson(compilerOptions);
+  const tsConfigPath = await resolveTsConfigPath(options.projectRoot);
+  const compilerOptionsHash = await hashTsConfig(tsConfigPath);
   const entryRelativePaths = options.entries.map((entry) => import_path2.default.relative(options.srcDir, entry));
   const optionsSignature = getOptionsSignature(options);
   const overlayEntries = options.entries.map((entry) => import_path2.default.join(sourceRoot, import_path2.default.relative(options.srcDir, entry)));
@@ -304,7 +304,6 @@ async function resolveBuild(options) {
     return {
       cacheRoot: cacheStore.rootDir,
       cleanup: cacheStore.cleanup,
-      compilerOptions,
       entryFiles: entryFiles2,
       externalInputHash: cachedSnapshot.externalInputHash,
       fileHashes: cachedSnapshot.fileHashes,
@@ -325,7 +324,7 @@ async function resolveBuild(options) {
       shimDir: shimDir2,
       shimFiles: entryFiles2.map((entry) => import_path2.default.join(shimDir2, `${entry.chunkName}.ts`)),
       sourceRoot,
-      tsConfigPath: import_path2.default.join(options.projectRoot, "tsconfig.json"),
+      tsConfigPath,
       nativeEmitCacheDir: import_path2.default.join(cacheStore.projectCacheDir, "native-emit", cachedSnapshot.nativeEmitKey),
       nativeEmitKey: cachedSnapshot.nativeEmitKey,
       workspaceDir: cacheStore.workspaceDir
@@ -410,7 +409,6 @@ async function resolveBuild(options) {
   return {
     cacheRoot: cacheStore.rootDir,
     cleanup: cacheStore.cleanup,
-    compilerOptions,
     entryFiles,
     externalInputHash,
     fileHashes: graphResult.fileHashes,
@@ -431,7 +429,7 @@ async function resolveBuild(options) {
     shimDir,
     shimFiles: entryFiles.map((entry) => import_path2.default.join(shimDir, `${entry.chunkName}.ts`)),
     sourceRoot,
-    tsConfigPath: import_path2.default.join(options.projectRoot, "tsconfig.json"),
+    tsConfigPath,
     nativeEmitCacheDir: import_path2.default.join(cacheStore.projectCacheDir, "native-emit", nativeEmitKey),
     nativeEmitKey,
     workspaceDir: cacheStore.workspaceDir
@@ -475,21 +473,20 @@ async function ensureSourceSymlink(linkPath, targetPath) {
   await import_fs3.default.promises.mkdir(import_path2.default.dirname(linkPath), { recursive: true });
   await import_fs3.default.promises.symlink(targetPath, linkPath, process.platform === "win32" ? "junction" : "dir");
 }
-async function loadCompilerOptions(projectRoot) {
+async function resolveTsConfigPath(projectRoot) {
   const configPath = import_typescript.default.findConfigFile(projectRoot, import_typescript.default.sys.fileExists, "tsconfig.json");
   if (!configPath) {
     throw new Error(`Cannot find tsconfig.json in ${projectRoot}`);
   }
+  return configPath;
+}
+async function hashTsConfig(configPath) {
   const configFile = import_typescript.default.readConfigFile(configPath, import_typescript.default.sys.readFile);
   if (configFile.error) {
     throw new Error(import_typescript.default.flattenDiagnosticMessageText(configFile.error.messageText, `
 `));
   }
-  const parsedConfig = import_typescript.default.parseJsonConfigFileContent(configFile.config, import_typescript.default.sys, projectRoot, {}, configPath);
-  if (parsedConfig.errors.length > 0) {
-    throw new Error(import_typescript.default.formatDiagnosticsWithColorAndContext(parsedConfig.errors, import_typescript.default.createCompilerHost({})));
-  }
-  return parsedConfig.options;
+  return hashContent(JSON.stringify(configFile.config));
 }
 function toRelativeGraph(graph, workspaceDir) {
   return Object.fromEntries(Object.entries(graph).map(([filePath, dependencies]) => [
@@ -623,10 +620,10 @@ var import_path3 = __toESM(require("path"));
 var import_typescript2 = __toESM(require("typescript"));
 async function emitNativeStage({
   cacheDir,
-  compilerOptions,
   fileNames,
   metadataPath,
   options,
+  tsConfigPath,
   workspaceDir
 }) {
   const outDir = import_path3.default.join(cacheDir, "out");
@@ -644,9 +641,9 @@ async function emitNativeStage({
   await import_fs4.default.promises.rm(outDir, { force: true, recursive: true });
   await import_fs4.default.promises.mkdir(outDir, { recursive: true });
   const diagnostics = getPreflightDiagnostics({
-    compilerOptions,
     fileNames,
     preflight: options.diagnostics.preflight,
+    tsConfigPath,
     workspaceDir
   });
   if (diagnostics.length > 0) {
@@ -677,14 +674,15 @@ async function emitNativeStage({
   };
 }
 function getPreflightDiagnostics({
-  compilerOptions,
   fileNames,
   preflight,
+  tsConfigPath,
   workspaceDir
 }) {
   if (preflight === "off") {
     return [];
   }
+  const compilerOptions = loadCompilerOptions(tsConfigPath);
   const finalCompilerOptions = {
     ...compilerOptions,
     ignoreDeprecations: "6.0",
@@ -699,6 +697,18 @@ function getPreflightDiagnostics({
   const compilerHost = import_typescript2.default.createCompilerHost(finalCompilerOptions);
   const program = import_typescript2.default.createProgram(fileNames, finalCompilerOptions, compilerHost);
   return [...import_typescript2.default.getPreEmitDiagnostics(program)];
+}
+function loadCompilerOptions(configPath) {
+  const configFile = import_typescript2.default.readConfigFile(configPath, import_typescript2.default.sys.readFile);
+  if (configFile.error) {
+    throw new Error(import_typescript2.default.flattenDiagnosticMessageText(configFile.error.messageText, `
+`));
+  }
+  const parsedConfig = import_typescript2.default.parseJsonConfigFileContent(configFile.config, import_typescript2.default.sys, import_path3.default.dirname(configPath), {}, configPath);
+  if (parsedConfig.errors.length > 0) {
+    throw new Error(import_typescript2.default.formatDiagnosticsWithColorAndContext(parsedConfig.errors, import_typescript2.default.createCompilerHost({})));
+  }
+  return parsedConfig.options;
 }
 async function readMetadata(metadataPath) {
   try {
@@ -1043,10 +1053,10 @@ async function build(options) {
     const nativeEmitMetadataPath = import_path5.default.join(resolved.nativeEmitCacheDir, "meta.json");
     const nativeEmitResult = await emitNativeStage({
       cacheDir: resolved.nativeEmitCacheDir,
-      compilerOptions: resolved.compilerOptions,
       fileNames: [...resolved.filePaths, ...resolved.shimFiles],
       metadataPath: nativeEmitMetadataPath,
       options: normalizedOptions,
+      tsConfigPath: resolved.tsConfigPath,
       workspaceDir: resolved.workspaceDir
     });
     if (nativeEmitResult.diagnostics.length > 0 || nativeEmitResult.emitSkipped) {

@@ -20,17 +20,17 @@ interface NativeEmitMetadata {
 
 export async function emitNativeStage({
   cacheDir,
-  compilerOptions,
   fileNames,
   metadataPath,
   options,
+  tsConfigPath,
   workspaceDir,
 }: {
   cacheDir: string;
-  compilerOptions: ts.CompilerOptions;
   fileNames: string[];
   metadataPath: string;
   options: NormalizedBuildOptions;
+  tsConfigPath: string;
   workspaceDir: string;
 }): Promise<NativeEmitStageResult> {
   const outDir = path.join(cacheDir, "out");
@@ -56,9 +56,9 @@ export async function emitNativeStage({
   await fs.promises.mkdir(outDir, { recursive: true });
 
   const diagnostics = getPreflightDiagnostics({
-    compilerOptions,
     fileNames,
     preflight: options.diagnostics.preflight,
+    tsConfigPath,
     workspaceDir,
   });
   if (diagnostics.length > 0) {
@@ -101,20 +101,21 @@ export async function emitNativeStage({
 }
 
 function getPreflightDiagnostics({
-  compilerOptions,
   fileNames,
   preflight,
+  tsConfigPath,
   workspaceDir,
 }: {
-  compilerOptions: ts.CompilerOptions;
   fileNames: string[];
   preflight: DiagnosticsPreflight;
+  tsConfigPath: string;
   workspaceDir: string;
 }): ts.Diagnostic[] {
   if (preflight === "off") {
     return [];
   }
 
+  const compilerOptions = loadCompilerOptions(tsConfigPath);
   const finalCompilerOptions: ts.CompilerOptions = {
     ...compilerOptions,
     ignoreDeprecations: "6.0",
@@ -135,6 +136,33 @@ function getPreflightDiagnostics({
     compilerHost,
   );
   return [...ts.getPreEmitDiagnostics(program)];
+}
+
+function loadCompilerOptions(configPath: string): ts.CompilerOptions {
+  const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
+  if (configFile.error) {
+    throw new Error(
+      ts.flattenDiagnosticMessageText(configFile.error.messageText, "\n"),
+    );
+  }
+
+  const parsedConfig = ts.parseJsonConfigFileContent(
+    configFile.config,
+    ts.sys,
+    path.dirname(configPath),
+    {},
+    configPath,
+  );
+  if (parsedConfig.errors.length > 0) {
+    throw new Error(
+      ts.formatDiagnosticsWithColorAndContext(
+        parsedConfig.errors,
+        ts.createCompilerHost({}),
+      ),
+    );
+  }
+
+  return parsedConfig.options;
 }
 
 async function readMetadata(

@@ -61,8 +61,8 @@ export async function resolveBuild(
   const sourceRoot = path.join(cacheStore.workspaceDir, "src");
   await ensureSourceSymlink(sourceRoot, options.srcDir);
 
-  const compilerOptions = await loadCompilerOptions(options.projectRoot);
-  const compilerOptionsHash = hashJson(compilerOptions);
+  const tsConfigPath = await resolveTsConfigPath(options.projectRoot);
+  const compilerOptionsHash = await hashTsConfig(tsConfigPath);
   const entryRelativePaths = options.entries.map((entry) =>
     path.relative(options.srcDir, entry),
   );
@@ -100,7 +100,6 @@ export async function resolveBuild(
     return {
       cacheRoot: cacheStore.rootDir,
       cleanup: cacheStore.cleanup,
-      compilerOptions,
       entryFiles,
       externalInputHash: cachedSnapshot.externalInputHash,
       fileHashes: cachedSnapshot.fileHashes,
@@ -127,7 +126,7 @@ export async function resolveBuild(
         path.join(shimDir, `${entry.chunkName}.ts`),
       ),
       sourceRoot,
-      tsConfigPath: path.join(options.projectRoot, "tsconfig.json"),
+      tsConfigPath,
       nativeEmitCacheDir: path.join(
         cacheStore.projectCacheDir,
         "native-emit",
@@ -228,7 +227,6 @@ export async function resolveBuild(
   return {
     cacheRoot: cacheStore.rootDir,
     cleanup: cacheStore.cleanup,
-    compilerOptions,
     entryFiles,
     externalInputHash,
     fileHashes: graphResult.fileHashes,
@@ -251,7 +249,7 @@ export async function resolveBuild(
       path.join(shimDir, `${entry.chunkName}.ts`),
     ),
     sourceRoot,
-    tsConfigPath: path.join(options.projectRoot, "tsconfig.json"),
+    tsConfigPath,
     nativeEmitCacheDir: path.join(
       cacheStore.projectCacheDir,
       "native-emit",
@@ -318,9 +316,7 @@ async function ensureSourceSymlink(linkPath: string, targetPath: string) {
   );
 }
 
-async function loadCompilerOptions(
-  projectRoot: string,
-): Promise<ts.CompilerOptions> {
+async function resolveTsConfigPath(projectRoot: string): Promise<string> {
   const configPath = ts.findConfigFile(
     projectRoot,
     ts.sys.fileExists,
@@ -330,6 +326,10 @@ async function loadCompilerOptions(
     throw new Error(`Cannot find tsconfig.json in ${projectRoot}`);
   }
 
+  return configPath;
+}
+
+async function hashTsConfig(configPath: string): Promise<string> {
   const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
   if (configFile.error) {
     throw new Error(
@@ -337,23 +337,7 @@ async function loadCompilerOptions(
     );
   }
 
-  const parsedConfig = ts.parseJsonConfigFileContent(
-    configFile.config,
-    ts.sys,
-    projectRoot,
-    {},
-    configPath,
-  );
-  if (parsedConfig.errors.length > 0) {
-    throw new Error(
-      ts.formatDiagnosticsWithColorAndContext(
-        parsedConfig.errors,
-        ts.createCompilerHost({}),
-      ),
-    );
-  }
-
-  return parsedConfig.options;
+  return hashContent(JSON.stringify(configFile.config));
 }
 
 function toRelativeGraph(
