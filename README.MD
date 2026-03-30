@@ -19,58 +19,82 @@ Unlike other compilers, GCC-TS-Bundler integrates deeply with Closure Compiler t
 bun install gcc-ts-bundler
 ```
 
-## Standardized API
+## vNext API
 
-The package now exposes a programmatic API in addition to the CLI:
+The package now exposes a stage-based programmatic API in addition to the CLI:
 
 ```ts
 import {
   build,
-  DEFAULT_BUILD_OPTIONS,
+  cleanCache,
   normalizeBuildOptions,
+  resolveBuild,
 } from "gcc-ts-bundler";
 
 const result = await build({
-  entryPoints: ["./index.ts"],
-  outputDir: "./dist",
+  entries: ["./index.ts"],
+  outDir: "./dist",
+  projectRoot: process.cwd(),
   srcDir: "./src",
 });
 
 if (result.exitCode !== 0) {
   process.exit(result.exitCode);
 }
+
+const resolved = await resolveBuild(
+  normalizeBuildOptions({
+    entries: ["./index.ts"],
+  }),
+);
+
+await cleanCache({ projectRoot: process.cwd() });
 ```
 
-Programmatic options use camelCase keys:
+Programmatic options use the vNext shape:
 
+- `projectRoot`
 - `srcDir`
-- `entryPoints`
-- `outputDir`
+- `entries`
+- `outDir`
 - `languageOut`
 - `compilationLevel`
-- `preserveCache`
-- `fatalWarnings`
-- `verbose`
-- `cwd`
+- `cache`
+- `diagnostics`
+- `postProcess`
+- `externs`
+- `js`
 
-The CLI continues to support the existing snake_case flags for compatibility.
+Defaults:
+
+- `cache.mode = "persistent"`
+- persistent cache lives outside the user project
+- `diagnostics.preflight = "errors-only"`
+- `postProcess.rewriteExports = true`
+- `postProcess.minify = false`
+
+The CLI now prefers kebab-case flags and still accepts the old snake_case aliases for one transition release.
 
 ### GCC-TS-Bundler Flags
 
-- `--src_dir`: The source directory.
-- `--entry_point`: The entry point for the application. (if it is a relative path, it will be resolved from the `--src_dir` directory)
-- `--output_dir`: The output file for the generated JS.
-- `--language_out`: ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT.
-- `--compilation_level`: WHITESPACE_ONLY | SIMPLE | ADVANCED.
-- `--preserve_cache`: Whether to preserve the cache files for debugging
-- `--fatal_warnings`: Whether warnings should be fatal, causing tsickle to return a non-zero exit code.
+- `--project-root`: Project root used to resolve tsconfig.json and relative paths
+- `--src-dir`: The source directory
+- `--entry`: Entry file relative to `--src-dir`. May be repeated
+- `--out-dir`: Output directory for generated JS
+- `--language-out`: ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT
+- `--compilation-level`: WHITESPACE_ONLY | SIMPLE | ADVANCED
+- `--cache-mode`: `off | temp | persistent`
+- `--cache-dir`: Explicit cache directory
+- `--preflight`: `off | errors-only | full`
+- `--post-minify`: `false | swc`
+- `--fatal-warnings`: Whether warnings should be fatal, causing tsickle to return a non-zero exit code
 - `--verbose`: Print diagnostics to the console.
 - `-h, --help`: Show this help message.
 
 ### Example
 
 ```sh
-gcc-ts-bundler --src_dir='./src' --entry_point='./index.ts' --output_dir='./dist'
+gcc-ts-bundler --project-root=. --src-dir='./src' --entry='./index.ts' --out-dir='./dist'
 ```
 
 ## License
