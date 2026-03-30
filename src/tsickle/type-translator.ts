@@ -479,8 +479,20 @@ export class TypeTranslator {
             return this.signatureToClosure(sig);
           }
         }
-        this.warn("unhandled anonymous type with multiple call signatures");
-        return "?";
+        const translatedSignatures = sigs
+          .map((sig) => {
+            try {
+              return this.signatureToClosure(sig);
+            } catch {
+              return undefined;
+            }
+          })
+          .filter((signature): signature is string => signature !== undefined);
+        const uniqueSignatures = new Set(translatedSignatures);
+        if (uniqueSignatures.size === 1) {
+          return uniqueSignatures.values().next().value!;
+        }
+        return "function(...*): ?";
       }
 
       // Gather up all the named fields and whether the object is also callable.
@@ -675,6 +687,11 @@ export class TypeTranslator {
   private translateObject(type: ts.ObjectType): string {
     if (type.symbol && this.isAlwaysUnknownSymbol(type.symbol)) return "?";
 
+    const translatedBuiltinAlias = this.translateBuiltinUtilityAlias(type);
+    if (translatedBuiltinAlias) {
+      return translatedBuiltinAlias;
+    }
+
     // NOTE: objectFlags is an enum, but a given type can have multiple flags.
     // Array<string> is both ts.ObjectFlags.Reference and ts.ObjectFlags.Interface.
 
@@ -802,6 +819,66 @@ export class TypeTranslator {
     */
     this.warn(`unhandled type ${typeToDebugString(type)}`);
     return "?";
+  }
+
+  private translateBuiltinUtilityAlias(type: ts.Type): string | undefined {
+    const aliasSymbol = type.aliasSymbol;
+    if (
+      !aliasSymbol ||
+      !isDeclaredInBuiltinLibDTS(aliasSymbol.declarations?.[0]) ||
+      !type.aliasTypeArguments
+    ) {
+      return undefined;
+    }
+
+    switch (aliasSymbol.escapedName.toString()) {
+      case "Partial":
+      case "Pick":
+      case "Omit":
+      case "Readonly":
+      case "Required":
+        return this.translate(type.aliasTypeArguments[0]);
+      case "Record":
+        return this.translateRecordAlias(type.aliasTypeArguments);
+      default:
+        return undefined;
+    }
+  }
+
+  private translateRecordAlias(
+    typeArguments: readonly ts.Type[],
+  ): string | undefined {
+    if (typeArguments.length < 2) {
+      return undefined;
+    }
+
+    return `!Object<${this.translateRecordKeyType(typeArguments[0])},${this.translate(
+      typeArguments[1],
+    )}>`;
+  }
+
+  private translateRecordKeyType(type: ts.Type): string {
+    if (type.flags & ts.TypeFlags.Union) {
+      const unionType = type as ts.UnionType;
+      const memberKeyTypes = new Set(
+        unionType.types.map((member) => this.translateRecordKeyType(member)),
+      );
+      return memberKeyTypes.size === 1
+        ? memberKeyTypes.values().next().value!
+        : "string";
+    }
+
+    if (
+      type.flags &
+      (ts.TypeFlags.Number |
+        ts.TypeFlags.NumberLiteral |
+        ts.TypeFlags.Enum |
+        ts.TypeFlags.EnumLiteral)
+    ) {
+      return "number";
+    }
+
+    return "string";
   }
 
   private translateUnion(type: ts.UnionType): string {

@@ -35,12 +35,14 @@ export async function toClosureJS(
     writePromises.push(writePromise);
   };
   const transformerHost: tsickle.TsickleHost = {
-    addDtsClutzAliases: true,
+    // This bundler never consumes declaration output, so skip d.ts alias work.
+    addDtsClutzAliases: false,
     fileNameToModuleId: (fileName) =>
       modulePrefix + path.relative(rootModulePath, fileName),
     generateExtraSuppressions: true,
-    generateSummary: true,
-    generateTsMigrationExportsShim: true,
+    // Summaries and ts-migration shim metadata are unused in this pipeline.
+    generateSummary: false,
+    generateTsMigrationExportsShim: false,
     googmodule: true,
     logWarning: (warning) => {
       if (settings.verbose) {

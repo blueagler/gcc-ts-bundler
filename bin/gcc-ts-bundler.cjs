@@ -1868,8 +1868,18 @@ class TypeTranslator {
             return this.signatureToClosure(sig);
           }
         }
-        this.warn("unhandled anonymous type with multiple call signatures");
-        return "?";
+        const translatedSignatures = sigs.map((sig) => {
+          try {
+            return this.signatureToClosure(sig);
+          } catch {
+            return;
+          }
+        }).filter((signature) => signature !== undefined);
+        const uniqueSignatures = new Set(translatedSignatures);
+        if (uniqueSignatures.size === 1) {
+          return uniqueSignatures.values().next().value;
+        }
+        return "function(...*): ?";
       }
       let callable = false;
       let indexable = false;
@@ -1971,6 +1981,10 @@ class TypeTranslator {
   translateObject(type) {
     if (type.symbol && this.isAlwaysUnknownSymbol(type.symbol))
       return "?";
+    const translatedBuiltinAlias = this.translateBuiltinUtilityAlias(type);
+    if (translatedBuiltinAlias) {
+      return translatedBuiltinAlias;
+    }
     if (type.objectFlags & ts4.ObjectFlags.Class) {
       if (!type.symbol) {
         this.warn("class has no symbol");
@@ -2031,6 +2045,41 @@ class TypeTranslator {
     }
     this.warn(`unhandled type ${typeToDebugString(type)}`);
     return "?";
+  }
+  translateBuiltinUtilityAlias(type) {
+    const aliasSymbol = type.aliasSymbol;
+    if (!aliasSymbol || !isDeclaredInBuiltinLibDTS(aliasSymbol.declarations?.[0]) || !type.aliasTypeArguments) {
+      return;
+    }
+    switch (aliasSymbol.escapedName.toString()) {
+      case "Partial":
+      case "Pick":
+      case "Omit":
+      case "Readonly":
+      case "Required":
+        return this.translate(type.aliasTypeArguments[0]);
+      case "Record":
+        return this.translateRecordAlias(type.aliasTypeArguments);
+      default:
+        return;
+    }
+  }
+  translateRecordAlias(typeArguments) {
+    if (typeArguments.length < 2) {
+      return;
+    }
+    return `!Object<${this.translateRecordKeyType(typeArguments[0])},${this.translate(typeArguments[1])}>`;
+  }
+  translateRecordKeyType(type) {
+    if (type.flags & ts4.TypeFlags.Union) {
+      const unionType = type;
+      const memberKeyTypes = new Set(unionType.types.map((member) => this.translateRecordKeyType(member)));
+      return memberKeyTypes.size === 1 ? memberKeyTypes.values().next().value : "string";
+    }
+    if (type.flags & (ts4.TypeFlags.Number | ts4.TypeFlags.NumberLiteral | ts4.TypeFlags.Enum | ts4.TypeFlags.EnumLiteral)) {
+      return "number";
+    }
+    return "string";
   }
   translateUnion(type) {
     return this.translateUnionMembers(type.types);
@@ -6354,11 +6403,11 @@ async function toClosureJS(options, fileNames, settings, writeFile) {
     writePromises.push(writePromise);
   };
   const transformerHost = {
-    addDtsClutzAliases: true,
+    addDtsClutzAliases: false,
     fileNameToModuleId: (fileName) => modulePrefix + import_path4.default.relative(rootModulePath, fileName),
     generateExtraSuppressions: true,
-    generateSummary: true,
-    generateTsMigrationExportsShim: true,
+    generateSummary: false,
+    generateTsMigrationExportsShim: false,
     googmodule: true,
     logWarning: (warning) => {
       if (settings.verbose) {
