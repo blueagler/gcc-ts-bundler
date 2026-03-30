@@ -1,14 +1,27 @@
-export { build, main, runCli } from "./main";
 export {
-  DEFAULT_BUILD_OPTIONS,
-  loadSettingsFromArgs,
+  build,
+  cleanCache,
+  main,
   normalizeBuildOptions,
-  parseCliArgs,
-} from "./options";
-export type { BuildResult } from "./main";
+  resolveBuild,
+  runCli,
+} from "../api/build";
+export { parseCliArgs } from "../cli/parse-options";
+export { DEFAULT_BUILD_OPTIONS } from "../api/types";
 export type {
+  BuildEntry,
   BuildOptions,
+  BuildResult,
+  CacheMode,
+  CacheOptions,
+  CleanCacheOptions,
   CliParseResult,
+  CompilationLevel,
+  DiagnosticsOptions,
+  DiagnosticsPreflight,
+  LanguageOut,
   NormalizedBuildOptions,
-  Settings,
-} from "./options";
+  PostProcessMinify,
+  PostProcessOptions,
+  ResolvedBuild,
+} from "../api/types";

@@ -25,7 +25,6 @@
     "@types/google-closure-compiler": "^20231112.0.0",
     "@types/minimist": "^1.2.5",
     "@types/node": "^25.5.0",
-    "@types/uglify-js": "^3.17.5",
     "eslint-plugin-perfectionist": "^5.7.0",
     "prettier": "^4.0.0-alpha.13",
     "typescript-eslint": "^8.57.3-alpha.3"
@@ -44,8 +43,7 @@
     "@swc/types": "^0.1.26",
     "google-closure-compiler": "20260324.0.0",
     "minimist": "1.2.8",
-    "typescript": "^6.0.2",
-    "uglify-js": "3.19.3"
+    "typescript": "^6.0.2"
   },
   "files": [
     "bin",

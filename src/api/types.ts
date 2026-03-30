@@ -52,14 +52,14 @@ export interface NormalizedBuildOptions {
   srcDir: string;
 }
 
-export interface CleanCacheOptions {
-  cacheDir?: string;
-  projectRoot?: string;
-}
-
 export interface CliParseResult {
   options: BuildOptions;
   showHelp: boolean;
+}
+
+export interface CleanCacheOptions {
+  cacheDir?: string;
+  projectRoot?: string;
 }
 
 export interface BuildEntry {
@@ -92,7 +92,7 @@ export interface ResolvedBuild {
   projectCacheDir: string;
   resolveKey: string;
   resolveMetadataPath: string;
-  sharedChunkName: string | null;
+  sharedChunkName: null | string;
   shimDir: string;
   shimFiles: string[];
   sourceRoot: string;
@@ -112,16 +112,27 @@ export interface BuildResult {
   workspaceDir: string;
 }
 
-export declare const DEFAULT_BUILD_OPTIONS: Readonly<NormalizedBuildOptions>;
-
-export declare function build(options: BuildOptions): Promise<BuildResult>;
-export declare function cleanCache(options?: CleanCacheOptions): Promise<void>;
-export declare function main(args: string[]): Promise<number>;
-export declare function normalizeBuildOptions(
-  options: BuildOptions,
-): NormalizedBuildOptions;
-export declare function parseCliArgs(args: string[]): CliParseResult;
-export declare function resolveBuild(
-  options: NormalizedBuildOptions,
-): Promise<ResolvedBuild>;
-export declare function runCli(args: string[]): Promise<number>;
+export const DEFAULT_BUILD_OPTIONS: Readonly<NormalizedBuildOptions> =
+  Object.freeze({
+    cache: {
+      dir: "",
+      mode: "persistent" as CacheMode,
+    },
+    compilationLevel: "ADVANCED" as CompilationLevel,
+    diagnostics: {
+      fatalWarnings: false,
+      preflight: "errors-only" as DiagnosticsPreflight,
+      verbose: false,
+    },
+    entries: [],
+    externs: [],
+    js: [],
+    languageOut: "ECMASCRIPT_NEXT" as LanguageOut,
+    outDir: "",
+    postProcess: {
+      minify: false as PostProcessMinify,
+      rewriteExports: true,
+    },
+    projectRoot: "",
+    srcDir: "",
+  });

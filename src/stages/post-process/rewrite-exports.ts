@@ -1,4 +1,5 @@
 import {
+  minify,
   parseSync,
   printSync,
   type AssignmentExpression,
@@ -8,7 +9,8 @@ import {
   type Module,
   type ModuleItem,
 } from "@swc/core";
-import { minify } from "uglify-js";
+
+import { PostProcessMinify } from "../../api/types";
 
 const DEFAULT_EXPORT_IDENTIFIER = "__DEFAULT_EXPORT__";
 const GCC_IDENTIFIER = "GCC";
@@ -17,30 +19,43 @@ const SWC_PARSE_OPTIONS = {
   target: "es2022",
 } as const;
 
-export async function customTransform(code: string): Promise<string> {
+export async function rewriteClosureExports({
+  code,
+  minifyOutput,
+  rewriteExports,
+}: {
+  code: string;
+  minifyOutput: PostProcessMinify;
+  rewriteExports: boolean;
+}): Promise<string> {
   if (code.length === 0) {
     return code;
   }
 
-  const module = parseSync(code, SWC_PARSE_OPTIONS);
-  const transformedCode = printSync(convertGCCExportsToESM(module)).code;
-  const minified = minify(transformedCode, {
-    compress: {
-      hoist_vars: true,
-      passes: 3,
-      pure_getters: true,
-      toplevel: true,
-      unsafe: true,
-    },
+  let transformedCode = code;
+  if (rewriteExports && code.includes("globalThis.GCC")) {
+    const module = parseSync(code, SWC_PARSE_OPTIONS);
+    transformedCode = printSync(convertGccExportsToEsm(module)).code;
+  }
+
+  if (minifyOutput !== "swc") {
+    return transformedCode;
+  }
+
+  const result = await minify(transformedCode, {
+    compress: true,
+    mangle: true,
     module: true,
   });
-  if (minified.error) {
-    throw new Error(`UglifyJS minify failed: ${minified.error.message}`);
+
+  if (!result.code) {
+    throw new Error("SWC minify produced no output.");
   }
-  return minified.code;
+
+  return result.code;
 }
 
-function convertGCCExportsToESM(module: Module): Module {
+function convertGccExportsToEsm(module: Module): Module {
   const body: ModuleItem[] = [];
   const exportsMap = new Map<string, string>();
   const processedExports = new Set<string>();
