@@ -7026,9 +7026,7 @@ async function pathExists2(filePath) {
 }
 
 // src/api/build.ts
-async function build2(options) {
-  return build(options);
-}
+var build2 = (options) => build(options);
 async function runCli(args) {
   const { options, showHelp } = parseCliArgs(args);
   if (showHelp) {
@@ -7041,16 +7039,13 @@ async function runCli(args) {
 async function main(args) {
   return runCli(args);
 }
-async function cleanCache2(options = {}) {
-  return cleanCache(options);
-}
 export {
   runCli,
   resolveBuild,
   parseCliArgs,
   normalizeBuildOptions,
   main,
-  cleanCache2 as cleanCache,
+  cleanCache,
   build2 as build,
   DEFAULT_BUILD_OPTIONS
 };

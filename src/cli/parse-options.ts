@@ -1,12 +1,6 @@
 import minimist from "minimist";
-import path from "path";
 
-import {
-  BuildOptions,
-  CliParseResult,
-  DEFAULT_BUILD_OPTIONS,
-  NormalizedBuildOptions,
-} from "../api/types";
+import { CliParseResult, DEFAULT_BUILD_OPTIONS } from "../api/types";
 
 function asStringArray(value: string | string[] | undefined): string[] {
   if (!value) {
@@ -14,56 +8,6 @@ function asStringArray(value: string | string[] | undefined): string[] {
   }
 
   return Array.isArray(value) ? value : [value];
-}
-
-export function normalizeBuildOptions(
-  options: BuildOptions,
-): NormalizedBuildOptions {
-  const projectRoot = path.resolve(options.projectRoot ?? process.cwd());
-  const srcDir = path.resolve(projectRoot, options.srcDir ?? "src");
-  const outDir = path.resolve(projectRoot, options.outDir ?? "dist");
-
-  return {
-    cache: {
-      dir: options.cache?.dir
-        ? path.resolve(projectRoot, options.cache.dir)
-        : DEFAULT_BUILD_OPTIONS.cache.dir,
-      mode: options.cache?.mode ?? DEFAULT_BUILD_OPTIONS.cache.mode,
-    },
-    compilationLevel:
-      options.compilationLevel ?? DEFAULT_BUILD_OPTIONS.compilationLevel,
-    diagnostics: {
-      fatalWarnings:
-        options.diagnostics?.fatalWarnings ??
-        DEFAULT_BUILD_OPTIONS.diagnostics.fatalWarnings,
-      preflight:
-        options.diagnostics?.preflight ??
-        DEFAULT_BUILD_OPTIONS.diagnostics.preflight,
-      verbose:
-        options.diagnostics?.verbose ??
-        DEFAULT_BUILD_OPTIONS.diagnostics.verbose,
-    },
-    entries: options.entries.map((entry) =>
-      path.isAbsolute(entry) ? entry : path.resolve(srcDir, entry),
-    ),
-    externs: [...(options.externs ?? [])].map((entry) =>
-      path.isAbsolute(entry) ? entry : path.resolve(projectRoot, entry),
-    ),
-    js: [...(options.js ?? [])].map((entry) =>
-      path.isAbsolute(entry) ? entry : path.resolve(projectRoot, entry),
-    ),
-    languageOut: options.languageOut ?? DEFAULT_BUILD_OPTIONS.languageOut,
-    outDir,
-    postProcess: {
-      minify:
-        options.postProcess?.minify ?? DEFAULT_BUILD_OPTIONS.postProcess.minify,
-      rewriteExports:
-        options.postProcess?.rewriteExports ??
-        DEFAULT_BUILD_OPTIONS.postProcess.rewriteExports,
-    },
-    projectRoot,
-    srcDir,
-  };
 }
 
 export function parseCliArgs(args: string[]): CliParseResult {

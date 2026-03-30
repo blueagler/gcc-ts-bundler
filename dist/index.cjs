@@ -68,7 +68,7 @@ __export(exports_api, {
   parseCliArgs: () => parseCliArgs,
   normalizeBuildOptions: () => normalizeBuildOptions,
   main: () => main,
-  cleanCache: () => cleanCache2,
+  cleanCache: () => cleanCache,
   build: () => build2,
   DEFAULT_BUILD_OPTIONS: () => DEFAULT_BUILD_OPTIONS
 });
@@ -7098,9 +7098,7 @@ async function pathExists2(filePath) {
 }
 
 // src/api/build.ts
-async function build2(options) {
-  return build(options);
-}
+var build2 = (options) => build(options);
 async function runCli(args) {
   const { options, showHelp } = parseCliArgs(args);
   if (showHelp) {
@@ -7112,7 +7110,4 @@ async function runCli(args) {
 }
 async function main(args) {
   return runCli(args);
-}
-async function cleanCache2(options = {}) {
-  return cleanCache(options);
 }
