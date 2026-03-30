@@ -11,6 +11,7 @@ import {
 } from "../api/types";
 import { createCacheStore, readJsonIfExists, writeJson } from "../cache/store";
 import { hashContent, hashJson } from "../cache/hash";
+import { resolveGraph } from "../native/load";
 
 interface ResolveMetadata {
   entryFiles: Array<{
@@ -42,8 +43,9 @@ export async function resolveBuild(
   );
   const packageJson = JSON.parse(packageJsonRaw) as { version: string };
   const runtimeSignature = await readRuntimeSignature(packageRoot);
+  const nativeSignature = await readNativeSignature(packageRoot);
   const packageSignature = hashContent(
-    `${packageJsonRaw}\n${runtimeSignature}`,
+    `${packageJsonRaw}\n${runtimeSignature}\n${nativeSignature}`,
   );
   const sourceRoot = path.join(cacheStore.workspaceDir, "src");
   await ensureSourceSymlink(sourceRoot, options.srcDir);
@@ -52,9 +54,9 @@ export async function resolveBuild(
   const overlayEntries = options.entries.map((entry) =>
     path.join(sourceRoot, path.relative(options.srcDir, entry)),
   );
-  const graphResult = await buildSourceGraph({
-    compilerOptions,
+  const graphResult = resolveGraph({
     entries: overlayEntries,
+    srcDir: sourceRoot,
     workspaceDir: cacheStore.workspaceDir,
   });
   const outputNames = resolveOutputNames(
@@ -77,18 +79,13 @@ export async function resolveBuild(
     await readJsonIfExists<ResolveMetadata>(resolveMetadataPath);
   const isResolveCacheHit = resolveMetadata !== null;
   if (!resolveMetadata) {
-    const exportMetadata = analyzeEntryExports({
-      compilerOptions,
-      entries: overlayEntries,
-      files: graphResult.filePaths,
-    });
     resolveMetadata = {
-      entryFiles: overlayEntries.map((entry, index) => ({
+      entryFiles: graphResult.entries.map((entry, index) => ({
         chunkName: sanitizeChunkName(outputNames[index]),
-        exportNames: exportMetadata[index].exportNames,
-        hasDefaultExport: exportMetadata[index].hasDefaultExport,
+        exportNames: entry.exportNames,
+        hasDefaultExport: entry.hasDefaultExport,
         outputName: outputNames[index],
-        sourceRelativePath: path.relative(sourceRoot, entry),
+        sourceRelativePath: path.relative(sourceRoot, entry.sourcePath),
       })),
       graph: toRelativeGraph(graphResult.graph, cacheStore.workspaceDir),
     };
@@ -111,7 +108,7 @@ export async function resolveBuild(
     ...options.externs,
     ...options.js,
   ]);
-  const tsickleKey = hashJson({
+  const nativeEmitKey = hashJson({
     compilerOptions,
     diagnostics: options.diagnostics,
     packageSignature,
@@ -122,9 +119,8 @@ export async function resolveBuild(
     externalInputHash,
     languageOut: options.languageOut,
     packageSignature,
-    postProcess: options.postProcess,
+    nativeEmitKey,
     resolveKey,
-    tsickleKey,
   });
 
   return {
@@ -139,8 +135,8 @@ export async function resolveBuild(
     finalKey,
     graph: fromRelativeGraph(resolveMetadata.graph, cacheStore.workspaceDir),
     isFinalCacheHit: false,
+    isNativeEmitCacheHit: false,
     isResolveCacheHit,
-    isTsickleCacheHit: false,
     options,
     packageRoot,
     packageVersion: packageJson.version,
@@ -154,142 +150,14 @@ export async function resolveBuild(
     ),
     sourceRoot,
     tsConfigPath: path.join(options.projectRoot, "tsconfig.json"),
-    tsickleCacheDir: path.join(
+    nativeEmitCacheDir: path.join(
       cacheStore.projectCacheDir,
-      "tsickle",
-      tsickleKey,
+      "native-emit",
+      nativeEmitKey,
     ),
-    tsickleKey,
+    nativeEmitKey,
     workspaceDir: cacheStore.workspaceDir,
   };
-}
-
-async function buildSourceGraph({
-  compilerOptions,
-  entries,
-  workspaceDir,
-}: {
-  compilerOptions: ts.CompilerOptions;
-  entries: string[];
-  workspaceDir: string;
-}): Promise<{
-  fileHashes: Record<string, string>;
-  filePaths: string[];
-  graph: Record<string, string[]>;
-}> {
-  const fileHashes: Record<string, string> = {};
-  const graph: Record<string, string[]> = {};
-  const fileContents = new Map<string, string>();
-  const visited = new Set<string>();
-  const pending = [...entries];
-
-  while (pending.length > 0) {
-    const currentFile = pending.pop()!;
-    if (visited.has(currentFile)) {
-      continue;
-    }
-
-    visited.add(currentFile);
-    const contents = await fs.promises.readFile(currentFile, "utf-8");
-    fileContents.set(currentFile, contents);
-    fileHashes[path.relative(workspaceDir, currentFile)] =
-      hashContent(contents);
-    const preProcessed = ts.preProcessFile(contents, true, true);
-    const dependencies = new Set<string>();
-    const referencedPaths = [
-      ...preProcessed.importedFiles.map((item) => item.fileName),
-      ...preProcessed.referencedFiles.map((item) => item.fileName),
-    ];
-
-    for (const dependency of referencedPaths) {
-      const resolved = ts.resolveModuleName(
-        dependency,
-        currentFile,
-        compilerOptions,
-        ts.sys,
-      ).resolvedModule?.resolvedFileName;
-      if (!resolved) {
-        continue;
-      }
-      if (!resolved.startsWith(`${workspaceDir}${path.sep}`)) {
-        continue;
-      }
-      if (resolved.includes(`${path.sep}node_modules${path.sep}`)) {
-        continue;
-      }
-
-      dependencies.add(resolved);
-      pending.push(resolved);
-    }
-
-    graph[currentFile] = [...dependencies].sort((left, right) =>
-      left.localeCompare(right),
-    );
-  }
-
-  const filePaths = [...visited].sort((left, right) =>
-    left.localeCompare(right),
-  );
-  return {
-    fileHashes,
-    filePaths,
-    graph,
-  };
-}
-
-function analyzeEntryExports({
-  compilerOptions,
-  entries,
-  files,
-}: {
-  compilerOptions: ts.CompilerOptions;
-  entries: string[];
-  files: string[];
-}): Array<{ exportNames: string[]; hasDefaultExport: boolean }> {
-  const program = ts.createProgram(files, compilerOptions);
-  const checker = program.getTypeChecker();
-
-  return entries.map((entry) => {
-    const sourceFile = program.getSourceFile(entry);
-    const moduleSymbol = sourceFile
-      ? checker.getSymbolAtLocation(sourceFile)
-      : undefined;
-    if (!moduleSymbol) {
-      return { exportNames: [], hasDefaultExport: false };
-    }
-
-    const exportNames: string[] = [];
-    let hasDefaultExport = false;
-    for (const exportSymbol of checker.getExportsOfModule(moduleSymbol)) {
-      const runtimeSymbol = resolveRuntimeSymbol(checker, exportSymbol);
-      if (!runtimeSymbol || !(runtimeSymbol.flags & ts.SymbolFlags.Value)) {
-        continue;
-      }
-
-      if (exportSymbol.name === "default") {
-        hasDefaultExport = true;
-        continue;
-      }
-
-      exportNames.push(exportSymbol.name);
-    }
-
-    exportNames.sort((left, right) => left.localeCompare(right));
-    return { exportNames, hasDefaultExport };
-  });
-}
-
-function resolveRuntimeSymbol(
-  checker: ts.TypeChecker,
-  symbol: ts.Symbol,
-): ts.Symbol | null {
-  try {
-    return symbol.flags & ts.SymbolFlags.Alias
-      ? checker.getAliasedSymbol(symbol)
-      : symbol;
-  } catch {
-    return null;
-  }
 }
 
 function resolveOutputNames(entryPaths: string[]): string[] {
@@ -426,6 +294,17 @@ async function readRuntimeSignature(packageRoot: string) {
   }
 }
 
+async function readNativeSignature(packageRoot: string) {
+  try {
+    const contents = await fs.promises.readFile(
+      path.join(packageRoot, "native", "index.node"),
+    );
+    return hashContent(contents.toString("base64"));
+  } catch {
+    return "";
+  }
+}
+
 export function normalizeBuildOptions(
   options: BuildOptions,
 ): NormalizedBuildOptions {
@@ -461,10 +340,6 @@ export function normalizeBuildOptions(
     ),
     languageOut: options.languageOut ?? "ECMASCRIPT_NEXT",
     outDir,
-    postProcess: {
-      minify: options.postProcess?.minify ?? false,
-      rewriteExports: options.postProcess?.rewriteExports ?? true,
-    },
     projectRoot,
     srcDir,
   };

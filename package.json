@@ -1,7 +1,7 @@
 {
   "name": "gcc-ts-bundler",
   "version": "0.1.8",
-  "description": "A TypeScript bundler that uses Google Closure Compiler and Tsickle to bundle TypeScript code.",
+  "description": "A TypeScript bundler that uses a native Rust front-end with Google Closure Compiler for aggressive optimization.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
@@ -15,6 +15,9 @@
       "import": "./dist/index.mjs",
       "require": "./dist/index.cjs",
       "default": "./dist/index.mjs"
+    },
+    "./native": {
+      "default": "./native/index.node"
     }
   },
   "devDependencies": {
@@ -30,7 +33,8 @@
     "typescript-eslint": "^8.57.3-alpha.3"
   },
   "scripts": {
-    "build": "bun build ./src/entry/cli.ts --outdir ./bin --format cjs --packages external --banner \"#!/usr/bin/env node\" --entry-naming \"gcc-ts-bundler.cjs\" --target node && bun build ./src/entry/api.ts --outdir ./dist --format esm --packages external --entry-naming \"index.mjs\" --target node && bun build ./src/entry/api.ts --outdir ./dist --format cjs --packages external --entry-naming \"index.cjs\" --target node && cp ./index.d.ts ./dist/index.d.ts",
+    "build:native": "node ./scripts/build-native.mjs",
+    "build": "bun run build:native && bun build ./src/entry/cli.ts --outdir ./bin --format cjs --packages external --banner \"#!/usr/bin/env node\" --entry-naming \"gcc-ts-bundler.cjs\" --target node && bun build ./src/entry/api.ts --outdir ./dist --format esm --packages external --entry-naming \"index.mjs\" --target node && bun build ./src/entry/api.ts --outdir ./dist --format cjs --packages external --entry-naming \"index.cjs\" --target node && cp ./index.d.ts ./dist/index.d.ts",
     "lint": "bun --bun tsc --noEmit && bun --bun ./scripts/format.ts && bun --bun eslint -c eslint.config.ts \"src/**/*.ts\" --fix",
     "publish": "bun publish"
   },
@@ -48,6 +52,7 @@
   "files": [
     "bin",
     "dist",
+    "native/index.node",
     "closure-externs",
     "closure-lib",
     "README.md"

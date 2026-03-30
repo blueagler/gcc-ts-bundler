@@ -6,7 +6,6 @@ export type LanguageOut =
   | "ECMASCRIPT_NEXT";
 export type CacheMode = "off" | "temp" | "persistent";
 export type DiagnosticsPreflight = "off" | "errors-only" | "full";
-export type PostProcessMinify = false | "swc";
 
 export interface CacheOptions {
   dir?: string;
@@ -19,11 +18,6 @@ export interface DiagnosticsOptions {
   verbose?: boolean;
 }
 
-export interface PostProcessOptions {
-  minify?: PostProcessMinify;
-  rewriteExports?: boolean;
-}
-
 export interface BuildOptions {
   cache?: CacheOptions;
   compilationLevel?: CompilationLevel;
@@ -33,7 +27,6 @@ export interface BuildOptions {
   js?: string[];
   languageOut?: LanguageOut;
   outDir?: string;
-  postProcess?: PostProcessOptions;
   projectRoot?: string;
   srcDir?: string;
 }
@@ -47,7 +40,6 @@ export interface NormalizedBuildOptions {
   js: string[];
   languageOut: LanguageOut;
   outDir: string;
-  postProcess: Required<PostProcessOptions>;
   projectRoot: string;
   srcDir: string;
 }
@@ -84,8 +76,8 @@ export interface ResolvedBuild {
   finalKey: string;
   graph: Record<string, string[]>;
   isFinalCacheHit: boolean;
+  isNativeEmitCacheHit: boolean;
   isResolveCacheHit: boolean;
-  isTsickleCacheHit: boolean;
   options: NormalizedBuildOptions;
   packageRoot: string;
   packageVersion: string;
@@ -97,8 +89,8 @@ export interface ResolvedBuild {
   shimFiles: string[];
   sourceRoot: string;
   tsConfigPath: string;
-  tsickleCacheDir: string;
-  tsickleKey: string;
+  nativeEmitCacheDir: string;
+  nativeEmitKey: string;
   workspaceDir: string;
 }
 
@@ -129,10 +121,6 @@ export const DEFAULT_BUILD_OPTIONS: Readonly<NormalizedBuildOptions> =
     js: [],
     languageOut: "ECMASCRIPT_NEXT" as LanguageOut,
     outDir: "",
-    postProcess: {
-      minify: false as PostProcessMinify,
-      rewriteExports: true,
-    },
     projectRoot: "",
     srcDir: "",
   });

@@ -5,7 +5,7 @@ import { getNativeImagePath } from "google-closure-compiler/lib/utils.js";
 import path from "path";
 
 import { BuildEntry, NormalizedBuildOptions } from "../../api/types";
-import { rewriteClosureExports } from "../post-process/rewrite-exports";
+import { rewriteGccExports } from "../../native/load";
 
 type ClosureCompilerClass = (typeof closureCompilerPackage)["compiler"] & {
   JAR_PATH?: unknown;
@@ -93,11 +93,7 @@ export async function runClosureStage({
   await Promise.all(
     rawOutputs.map(async (rawFile) => {
       const contents = await fs.readFile(rawFile, "utf-8");
-      const transformed = await rewriteClosureExports({
-        code: contents,
-        minifyOutput: options.postProcess.minify,
-        rewriteExports: options.postProcess.rewriteExports,
-      });
+      const transformed = rewriteGccExports(contents);
       await fs.writeFile(
         path.join(outputDir, path.basename(rawFile)),
         transformed,
@@ -131,7 +127,6 @@ async function runSingleClosureCompilation({
     languageIn: "UNSTABLE",
     languageOut: options.languageOut,
     moduleResolution: "NODE",
-    processCommonJsModules: true,
     rewritePolyfills: false,
     warningLevel: options.diagnostics.verbose ? "VERBOSE" : "QUIET",
   });
@@ -172,7 +167,6 @@ async function runChunkedClosureCompilation({
     languageIn: "UNSTABLE",
     languageOut: options.languageOut,
     moduleResolution: "NODE",
-    processCommonJsModules: true,
     rewritePolyfills: false,
     warningLevel: options.diagnostics.verbose ? "VERBOSE" : "QUIET",
   });

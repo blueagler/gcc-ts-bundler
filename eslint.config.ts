@@ -48,7 +48,7 @@ export default tseslint.config([
       ".vscode",
       "*.js",
       "closure-*",
-      "src/tsickle/*.ts",
+      "src/tsickle",
     ],
   },
 ]);

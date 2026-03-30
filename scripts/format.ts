@@ -4,7 +4,7 @@ import path from "path";
 import prettier from "prettier";
 
 const files = [
-  "README.MD",
+  "README.md",
   "eslint.config.ts",
   "index.d.ts",
   "package.json",

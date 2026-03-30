@@ -10,9 +10,9 @@ import {
 } from "../cache/store";
 import { hashContent } from "../cache/hash";
 import { normalizeBuildOptions, resolveBuild } from "./resolve-build";
-import { writeEntryShims } from "../stages/pre-compile/entry-shims";
-import { emitTsickleStage } from "../stages/tsickle/emit";
+import { emitNativeStage } from "../stages/native/emit";
 import { runClosureStage } from "../stages/closure/run-closure";
+import { writeEntryShims } from "../native/load";
 
 interface FinalCacheMetadata {
   outputFiles: string[];
@@ -45,27 +45,39 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       };
     }
 
-    await writeEntryShims({
-      entries: resolved.entryFiles,
-      shimDir: resolved.shimDir,
+    writeEntryShims({
+      entries: resolved.entryFiles.map((entry) => ({
+        exportNames: entry.exportNames,
+        hasDefaultExport: entry.hasDefaultExport,
+        importPath: toImportPath(
+          path.relative(
+            path.dirname(path.join(resolved.shimDir, `${entry.chunkName}.ts`)),
+            entry.sourcePath,
+          ),
+        ),
+        shimPath: path.join(resolved.shimDir, `${entry.chunkName}.ts`),
+      })),
     });
 
-    const tsickleMetadataPath = path.join(
-      resolved.tsickleCacheDir,
+    const nativeEmitMetadataPath = path.join(
+      resolved.nativeEmitCacheDir,
       "meta.json",
     );
-    const tsickleResult = await emitTsickleStage({
-      cacheDir: resolved.tsickleCacheDir,
+    const nativeEmitResult = await emitNativeStage({
+      cacheDir: resolved.nativeEmitCacheDir,
       compilerOptions: resolved.compilerOptions as ts.CompilerOptions,
       fileNames: [...resolved.filePaths, ...resolved.shimFiles],
-      metadataPath: tsickleMetadataPath,
+      metadataPath: nativeEmitMetadataPath,
       options: normalizedOptions,
       workspaceDir: resolved.workspaceDir,
     });
-    if (tsickleResult.diagnostics.length > 0 || tsickleResult.emitSkipped) {
+    if (
+      nativeEmitResult.diagnostics.length > 0 ||
+      nativeEmitResult.emitSkipped
+    ) {
       return {
         cacheHit: false,
-        diagnostics: tsickleResult.diagnostics,
+        diagnostics: nativeEmitResult.diagnostics,
         emitSkipped: true,
         exitCode: 1,
         options: normalizedOptions,
@@ -76,12 +88,12 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 
     const bundledExterns = await collectBundledExterns(resolved.packageRoot);
     const exitCode = await runClosureStage({
-      emittedOutDir: tsickleResult.outDir,
+      emittedOutDir: nativeEmitResult.outDir,
       entryFiles: resolved.entryFiles,
       externPaths: [
         ...normalizedOptions.externs,
         ...bundledExterns,
-        tsickleResult.externsPath,
+        nativeEmitResult.externsPath,
       ],
       finalCacheDir: resolved.finalCacheDir,
       graph: {
@@ -197,6 +209,11 @@ async function publishOutputs(outputFiles: string[], outDir: string) {
       ),
     ),
   );
+}
+
+function toImportPath(relativePath: string): string {
+  const normalized = relativePath.replace(/\\/g, "/").replace(/\.[^/.]+$/, "");
+  return normalized.startsWith(".") ? normalized : `./${normalized}`;
 }
 
 async function pathExists(filePath: string): Promise<boolean> {

@@ -1,10 +1,15 @@
 export function usage() {
-  console.error(`Usage: gcc-ts-bundler [options]
+  console.error(`Usage: gcc-ts-bundler <command> [options]
 
 Example:
-  gcc-ts-bundler --project-root=. --src-dir=./src --entry=./index.ts --out-dir=./dist
+  gcc-ts-bundler build --project-root=. --src-dir=./src --entry=./index.ts --out-dir=./dist
+  gcc-ts-bundler clean-cache --project-root=.
 
-Primary flags:
+Commands:
+  build               Build the requested entries
+  clean-cache         Remove the persistent cache for a project root
+
+Build flags:
   --project-root        Project root used to resolve tsconfig.json and relative paths
   --src-dir             Source directory containing the entry files
   --entry               Entry file relative to --src-dir. May be provided multiple times
@@ -14,10 +19,8 @@ Primary flags:
   --cache-mode          off | temp | persistent
   --cache-dir           Explicit cache directory
   --preflight           off | errors-only | full
-  --post-minify         false | swc
-  --no-rewrite-exports  Disable SWC export rewriting
   --verbose             Print verbose diagnostics
-  --fatal-warnings      Treat tsickle warnings as fatal
+  --fatal-warnings      Treat typed transpile warnings as fatal
   -h, --help            Show this help message
 
 Deprecated aliases still accepted for one transition release:

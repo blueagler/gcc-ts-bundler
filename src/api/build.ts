@@ -2,13 +2,33 @@ import { BuildOptions, BuildResult } from "./types";
 import { usage } from "../cli/usage";
 import { parseCliArgs } from "../cli/parse-options";
 import { build as runBuild, cleanCache } from "../pipeline/build-pipeline";
-import { normalizeBuildOptions, resolveBuild } from "../pipeline/resolve-build";
-export { cleanCache, normalizeBuildOptions, resolveBuild };
+export { cleanCache };
 export const build = (options: BuildOptions): Promise<BuildResult> =>
   runBuild(options);
 
 export async function runCli(args: string[]): Promise<number> {
-  const { options, showHelp } = parseCliArgs(args);
+  const [firstArg, ...restArgs] = args;
+  if (!firstArg || firstArg === "-h" || firstArg === "--help") {
+    usage();
+    return 0;
+  }
+
+  if (firstArg === "clean-cache") {
+    const { options, showHelp } = parseCliArgs(restArgs);
+    if (showHelp) {
+      usage();
+      return 0;
+    }
+
+    await cleanCache({
+      cacheDir: options.cache?.dir,
+      projectRoot: options.projectRoot,
+    });
+    return 0;
+  }
+
+  const buildArgs = firstArg === "build" ? restArgs : args;
+  const { options, showHelp } = parseCliArgs(buildArgs);
   if (showHelp) {
     usage();
     return 0;

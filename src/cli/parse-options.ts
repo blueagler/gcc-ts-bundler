@@ -15,7 +15,7 @@ export function parseCliArgs(args: string[]): CliParseResult {
     alias: {
       h: "help",
     },
-    boolean: ["fatal-warnings", "help", "no-rewrite-exports", "verbose"],
+    boolean: ["fatal-warnings", "help", "verbose"],
     string: [
       "cache-dir",
       "cache-mode",
@@ -24,7 +24,6 @@ export function parseCliArgs(args: string[]): CliParseResult {
       "entry-point",
       "language-out",
       "out-dir",
-      "post-minify",
       "preflight",
       "project-root",
       "src-dir",
@@ -71,10 +70,6 @@ export function parseCliArgs(args: string[]): CliParseResult {
         parsedArgs.languageOut,
       outDir:
         parsedArgs["out-dir"] ?? parsedArgs.output_dir ?? parsedArgs.outputDir,
-      postProcess: {
-        minify: parsedArgs["post-minify"] === "swc" ? "swc" : false,
-        rewriteExports: !parsedArgs["no-rewrite-exports"],
-      },
       projectRoot: parsedArgs["project-root"] ?? parsedArgs.project_root,
       srcDir: parsedArgs["src-dir"] ?? parsedArgs.src_dir ?? parsedArgs.srcDir,
     },
