@@ -6843,4 +6843,8 @@ async function runCli(args) {
 async function main(args) {
   return runCli(args);
 }
-runCli(process.argv.slice(2)).then((exitCode) => process.exit(exitCode));
+if (typeof module_main !== "undefined") {
+  if (require.main == module) {
+    runCli(process.argv.slice(2)).then((exitCode) => process.exit(exitCode));
+  }
+}

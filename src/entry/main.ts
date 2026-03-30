@@ -45,10 +45,7 @@ function getPackageRoot(): string {
   while (true) {
     const packageJsonPath = path.join(currentDir, "package.json");
     const closureExternsPath = path.join(currentDir, "closure-externs");
-    if (
-      fs.existsSync(packageJsonPath) &&
-      fs.existsSync(closureExternsPath)
-    ) {
+    if (fs.existsSync(packageJsonPath) && fs.existsSync(closureExternsPath)) {
       return currentDir;
     }
 
@@ -290,4 +287,10 @@ export async function main(args: string[]): Promise<number> {
   return runCli(args);
 }
 
-void runCli(process.argv.slice(2)).then((exitCode) => process.exit(exitCode));
+if (typeof require === "function" && typeof module !== "undefined") {
+  if (require.main === module) {
+    void runCli(process.argv.slice(2)).then((exitCode) =>
+      process.exit(exitCode),
+    );
+  }
+}

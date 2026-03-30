@@ -9,7 +9,10 @@
     "gcc-ts-bundler": "./bin/gcc-ts-bundler.cjs"
   },
   "exports": {
-    ".": "./bin/gcc-ts-bundler.cjs"
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./bin/gcc-ts-bundler.cjs"
+    }
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
