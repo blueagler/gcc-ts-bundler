@@ -27,6 +27,7 @@ export interface BuildOptions {
   js?: string[];
   languageOut?: LanguageOut;
   outDir?: string;
+  outputNames?: string[];
   projectRoot?: string;
   srcDir?: string;
 }
@@ -40,6 +41,7 @@ export interface NormalizedBuildOptions {
   js: string[];
   languageOut: LanguageOut;
   outDir: string;
+  outputNames: string[];
   projectRoot: string;
   srcDir: string;
 }

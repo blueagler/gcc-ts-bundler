@@ -24,6 +24,21 @@ interface ResolveMetadata {
   graph: Record<string, string[]>;
 }
 
+interface ResolveSnapshot {
+  compilerOptionsHash: string;
+  entryFiles: ResolveMetadata["entryFiles"];
+  externalInputHash: string;
+  fileHashes: Record<string, string>;
+  filePaths: string[];
+  finalKey: string;
+  graph: Record<string, string[]>;
+  nativeEmitKey: string;
+  optionsSignature: string;
+  packageSignature: string;
+  resolveKey: string;
+  trackedFiles: Record<string, { mtimeMs: number; size: number }>;
+}
+
 export async function resolveBuild(
   options: NormalizedBuildOptions,
 ): Promise<ResolvedBuild> {
@@ -42,31 +57,98 @@ export async function resolveBuild(
     "utf-8",
   );
   const packageJson = JSON.parse(packageJsonRaw) as { version: string };
-  const runtimeSignature = await readRuntimeSignature(packageRoot);
-  const nativeSignature = await readNativeSignature(packageRoot);
-  const packageSignature = hashContent(
-    `${packageJsonRaw}\n${runtimeSignature}\n${nativeSignature}`,
-  );
+  const packageSignature = await getPackageSignature(packageRoot);
   const sourceRoot = path.join(cacheStore.workspaceDir, "src");
   await ensureSourceSymlink(sourceRoot, options.srcDir);
 
   const compilerOptions = await loadCompilerOptions(options.projectRoot);
+  const compilerOptionsHash = hashJson(compilerOptions);
+  const entryRelativePaths = options.entries.map((entry) =>
+    path.relative(options.srcDir, entry),
+  );
+  const optionsSignature = getOptionsSignature(options);
   const overlayEntries = options.entries.map((entry) =>
     path.join(sourceRoot, path.relative(options.srcDir, entry)),
   );
+  const resolveSnapshotPath = path.join(
+    cacheStore.projectCacheDir,
+    "resolve",
+    "latest.json",
+  );
+  const cachedSnapshot =
+    await readJsonIfExists<ResolveSnapshot>(resolveSnapshotPath);
+  if (
+    cachedSnapshot &&
+    cachedSnapshot.packageSignature === packageSignature &&
+    cachedSnapshot.compilerOptionsHash === compilerOptionsHash &&
+    cachedSnapshot.optionsSignature === optionsSignature &&
+    (await trackedFilesMatch(cachedSnapshot.trackedFiles))
+  ) {
+    const entryFiles = cachedSnapshot.entryFiles.map(
+      (entry): BuildEntry => ({
+        chunkName: entry.chunkName,
+        exportNames: entry.exportNames,
+        hasDefaultExport: entry.hasDefaultExport,
+        outputName: entry.outputName,
+        outputPath: path.join(options.outDir, entry.outputName),
+        sourcePath: path.join(sourceRoot, entry.sourceRelativePath),
+        sourceRelativePath: entry.sourceRelativePath,
+      }),
+    );
+    const shimDir = path.join(cacheStore.workspaceDir, "entries");
+
+    return {
+      cacheRoot: cacheStore.rootDir,
+      cleanup: cacheStore.cleanup,
+      compilerOptions,
+      entryFiles,
+      externalInputHash: cachedSnapshot.externalInputHash,
+      fileHashes: cachedSnapshot.fileHashes,
+      filePaths: cachedSnapshot.filePaths,
+      finalCacheDir: path.join(
+        cacheStore.projectCacheDir,
+        "final",
+        cachedSnapshot.finalKey,
+      ),
+      finalKey: cachedSnapshot.finalKey,
+      graph: fromRelativeGraph(cachedSnapshot.graph, cacheStore.workspaceDir),
+      isFinalCacheHit: false,
+      isNativeEmitCacheHit: false,
+      isResolveCacheHit: true,
+      options,
+      packageRoot,
+      packageVersion: packageJson.version,
+      projectCacheDir: cacheStore.projectCacheDir,
+      resolveKey: cachedSnapshot.resolveKey,
+      resolveMetadataPath: resolveSnapshotPath,
+      sharedChunkName: entryFiles.length > 1 ? "shared" : null,
+      shimDir,
+      shimFiles: entryFiles.map((entry) =>
+        path.join(shimDir, `${entry.chunkName}.ts`),
+      ),
+      sourceRoot,
+      tsConfigPath: path.join(options.projectRoot, "tsconfig.json"),
+      nativeEmitCacheDir: path.join(
+        cacheStore.projectCacheDir,
+        "native-emit",
+        cachedSnapshot.nativeEmitKey,
+      ),
+      nativeEmitKey: cachedSnapshot.nativeEmitKey,
+      workspaceDir: cacheStore.workspaceDir,
+    };
+  }
   const graphResult = resolveGraph({
     entries: overlayEntries,
     srcDir: sourceRoot,
     workspaceDir: cacheStore.workspaceDir,
   });
   const outputNames = resolveOutputNames(
-    options.entries.map((entry) => path.relative(options.srcDir, entry)),
+    entryRelativePaths,
+    options.outputNames,
   );
   const resolveKey = hashJson({
-    compilerOptions,
-    entries: options.entries.map((entry) =>
-      path.relative(options.srcDir, entry),
-    ),
+    compilerOptionsHash,
+    entries: entryRelativePaths,
     files: graphResult.fileHashes,
     packageSignature,
   });
@@ -109,7 +191,7 @@ export async function resolveBuild(
     ...options.js,
   ]);
   const nativeEmitKey = hashJson({
-    compilerOptions,
+    compilerOptionsHash,
     diagnostics: options.diagnostics,
     packageSignature,
     resolveKey,
@@ -122,6 +204,26 @@ export async function resolveBuild(
     nativeEmitKey,
     resolveKey,
   });
+  const trackedFiles = await collectTrackedFiles([
+    ...graphResult.filePaths,
+    path.join(options.projectRoot, "tsconfig.json"),
+    ...options.externs,
+    ...options.js,
+  ]);
+  await writeJson(resolveSnapshotPath, {
+    compilerOptionsHash,
+    entryFiles: resolveMetadata.entryFiles,
+    externalInputHash,
+    fileHashes: graphResult.fileHashes,
+    filePaths: graphResult.filePaths,
+    finalKey,
+    graph: resolveMetadata.graph,
+    nativeEmitKey,
+    optionsSignature,
+    packageSignature,
+    resolveKey,
+    trackedFiles,
+  } satisfies ResolveSnapshot);
 
   return {
     cacheRoot: cacheStore.rootDir,
@@ -160,7 +262,18 @@ export async function resolveBuild(
   };
 }
 
-function resolveOutputNames(entryPaths: string[]): string[] {
+function resolveOutputNames(
+  entryPaths: string[],
+  outputNames: string[],
+): string[] {
+  if (outputNames.length > 0) {
+    if (outputNames.length !== entryPaths.length) {
+      throw new Error("outputNames length must match entries length.");
+    }
+
+    return outputNames;
+  }
+
   const basenameCounts = new Map<string, number>();
   const basenames = entryPaths.map((entryPath) =>
     path.basename(entryPath).replace(/\.[^/.]+$/, ".js"),
@@ -279,16 +392,57 @@ async function hashExternalInputs(filePaths: string[]): Promise<string> {
   return hashJson(entries);
 }
 
-function getPackageRoot() {
+async function collectTrackedFiles(filePaths: string[]) {
+  const trackedEntries = await Promise.all(
+    [...new Set(filePaths)]
+      .sort((left, right) => left.localeCompare(right))
+      .map(async (filePath) => {
+        const stat = await fs.promises.stat(filePath);
+        return [
+          filePath,
+          {
+            mtimeMs: stat.mtimeMs,
+            size: stat.size,
+          },
+        ] as const;
+      }),
+  );
+
+  return Object.fromEntries(trackedEntries);
+}
+
+async function trackedFilesMatch(
+  trackedFiles: Record<string, { mtimeMs: number; size: number }>,
+) {
+  return (
+    await Promise.all(
+      Object.entries(trackedFiles).map(async ([filePath, expected]) => {
+        try {
+          const stat = await fs.promises.stat(filePath);
+          return (
+            stat.mtimeMs === expected.mtimeMs && stat.size === expected.size
+          );
+        } catch {
+          return false;
+        }
+      }),
+    )
+  ).every(Boolean);
+}
+
+export function getPackageRoot() {
   return path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 }
 
 async function readRuntimeSignature(packageRoot: string) {
   try {
-    return await fs.promises.readFile(
+    const stat = await fs.promises.stat(
       path.join(packageRoot, "dist", "index.mjs"),
-      "utf-8",
     );
+    return JSON.stringify({
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+    });
   } catch {
     return "";
   }
@@ -296,13 +450,59 @@ async function readRuntimeSignature(packageRoot: string) {
 
 async function readNativeSignature(packageRoot: string) {
   try {
-    const contents = await fs.promises.readFile(
+    const stat = await fs.promises.stat(
       path.join(packageRoot, "native", "index.node"),
     );
-    return hashContent(contents.toString("base64"));
+    return JSON.stringify({
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+    });
   } catch {
     return "";
   }
+}
+
+let packageSignaturePromise: Promise<string> | null = null;
+
+export async function getPackageSignature(packageRoot = getPackageRoot()) {
+  if (!packageSignaturePromise) {
+    packageSignaturePromise = (async () => {
+      const packageJsonStat = await fs.promises.stat(
+        path.join(packageRoot, "package.json"),
+      );
+      const runtimeSignature = await readRuntimeSignature(packageRoot);
+      const nativeSignature = await readNativeSignature(packageRoot);
+      return hashContent(
+        JSON.stringify({
+          nativeSignature,
+          packageJson: {
+            mtimeMs: packageJsonStat.mtimeMs,
+            size: packageJsonStat.size,
+          },
+          runtimeSignature,
+        }),
+      );
+    })();
+  }
+
+  return packageSignaturePromise;
+}
+
+export function getOptionsSignature(options: NormalizedBuildOptions) {
+  return hashJson({
+    compilationLevel: options.compilationLevel,
+    diagnostics: options.diagnostics,
+    entries: options.entries.map((entry) =>
+      path.relative(options.srcDir, entry),
+    ),
+    externs: [...options.externs].sort(),
+    js: [...options.js].sort(),
+    languageOut: options.languageOut,
+    outDir: options.outDir,
+    outputNames: [...options.outputNames],
+    projectRoot: options.projectRoot,
+    srcDir: options.srcDir,
+  });
 }
 
 export function normalizeBuildOptions(
@@ -340,6 +540,7 @@ export function normalizeBuildOptions(
     ),
     languageOut: options.languageOut ?? "ECMASCRIPT_NEXT",
     outDir,
+    outputNames: [...(options.outputNames ?? [])],
     projectRoot,
     srcDir,
   };

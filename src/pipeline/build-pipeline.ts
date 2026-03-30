@@ -9,7 +9,12 @@ import {
   writeJson,
 } from "../cache/store";
 import { hashContent } from "../cache/hash";
-import { normalizeBuildOptions, resolveBuild } from "./resolve-build";
+import {
+  getOptionsSignature,
+  getPackageSignature,
+  normalizeBuildOptions,
+  resolveBuild,
+} from "./resolve-build";
 import { emitNativeStage } from "../stages/native/emit";
 import { runClosureStage } from "../stages/closure/run-closure";
 import { writeEntryShims } from "../native/load";
@@ -18,8 +23,68 @@ interface FinalCacheMetadata {
   outputFiles: string[];
 }
 
+interface FinalFastSnapshot {
+  finalKey: string;
+  optionsSignature: string;
+  packageSignature: string;
+  trackedFiles: Record<string, { mtimeMs: number; size: number }>;
+}
+
+let bundledExternsCache: Promise<string[]> | null = null;
+
 export async function build(options: BuildOptions): Promise<BuildResult> {
   const normalizedOptions = normalizeBuildOptions(options);
+  const projectCacheDir = path.join(
+    path.resolve(
+      normalizedOptions.cache.dir || getDefaultPersistentCacheRoot(),
+    ),
+    hashContent(normalizedOptions.projectRoot),
+  );
+  if (normalizedOptions.cache.mode === "persistent") {
+    const fastSnapshot = await readJsonIfExists<FinalFastSnapshot>(
+      path.join(projectCacheDir, "final-fast.json"),
+    );
+    if (
+      fastSnapshot &&
+      fastSnapshot.optionsSignature ===
+        getOptionsSignature(normalizedOptions) &&
+      fastSnapshot.packageSignature === (await getPackageSignature())
+    ) {
+      const trackedFilesValid = await trackedFilesMatch(
+        fastSnapshot.trackedFiles,
+      );
+      if (trackedFilesValid) {
+        const finalMetadata = await readJsonIfExists<FinalCacheMetadata>(
+          path.join(
+            projectCacheDir,
+            "final",
+            fastSnapshot.finalKey,
+            "meta.json",
+          ),
+        );
+        if (
+          finalMetadata &&
+          (await Promise.all(finalMetadata.outputFiles.map(pathExists))).every(
+            Boolean,
+          )
+        ) {
+          await publishOutputs(
+            finalMetadata.outputFiles,
+            normalizedOptions.outDir,
+          );
+          return {
+            cacheHit: true,
+            diagnostics: [],
+            emitSkipped: false,
+            exitCode: 0,
+            options: normalizedOptions,
+            outputFiles: finalMetadata.outputFiles,
+            workspaceDir: path.join(projectCacheDir, "workspace"),
+          };
+        }
+      }
+    }
+  }
   const resolved = await resolveBuild(normalizedOptions);
 
   try {
@@ -87,7 +152,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     }
 
     const bundledExterns = await collectBundledExterns(resolved.packageRoot);
-    const exitCode = await runClosureStage({
+    const closureResult = await runClosureStage({
       emittedOutDir: nativeEmitResult.outDir,
       entryFiles: resolved.entryFiles,
       externPaths: [
@@ -110,24 +175,33 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       shimFiles: resolved.shimFiles,
       workspaceDir: resolved.workspaceDir,
     });
-    if (exitCode !== 0) {
+    if (closureResult.exitCode !== 0) {
       return {
         cacheHit: false,
         diagnostics: [],
         emitSkipped: true,
-        exitCode,
+        exitCode: closureResult.exitCode,
         options: normalizedOptions,
         outputFiles: [],
         workspaceDir: resolved.workspaceDir,
       };
     }
 
-    const finalOutputFiles = await collectJavaScriptFiles(
-      path.join(resolved.finalCacheDir, "outputs"),
-    );
+    const finalOutputFiles = closureResult.outputFiles;
     await writeJson(finalMetadataPath, {
       outputFiles: finalOutputFiles,
     } satisfies FinalCacheMetadata);
+    await writeJson(path.join(projectCacheDir, "final-fast.json"), {
+      finalKey: resolved.finalKey,
+      optionsSignature: getOptionsSignature(normalizedOptions),
+      packageSignature: await getPackageSignature(),
+      trackedFiles: await collectTrackedFiles([
+        ...resolved.filePaths,
+        resolved.tsConfigPath,
+        ...normalizedOptions.externs,
+        ...normalizedOptions.js,
+      ]),
+    } satisfies FinalFastSnapshot);
     await publishOutputs(finalOutputFiles, normalizedOptions.outDir);
 
     return {
@@ -165,40 +239,24 @@ export async function cleanCache(options: CleanCacheOptions = {}) {
 }
 
 async function collectBundledExterns(packageRoot: string) {
-  const closureExternsPath = path.join(packageRoot, "closure-externs");
-  const entries = await fs.promises.readdir(closureExternsPath);
-  return entries
-    .map((entry) => path.join(closureExternsPath, entry))
-    .sort((left, right) => left.localeCompare(right));
-}
-
-async function collectJavaScriptFiles(dir: string): Promise<string[]> {
-  const files: string[] = [];
-  const pending = [dir];
-
-  while (pending.length > 0) {
-    const currentDir = pending.pop()!;
-    const entries = await fs.promises.readdir(currentDir, {
-      withFileTypes: true,
-    });
-    for (const entry of entries) {
-      const entryPath = path.join(currentDir, entry.name);
-      if (entry.isDirectory()) {
-        pending.push(entryPath);
-        continue;
-      }
-
-      if (entry.name.endsWith(".js")) {
-        files.push(entryPath);
-      }
-    }
+  if (!bundledExternsCache) {
+    bundledExternsCache = (async () => {
+      const closureExternsPath = path.join(packageRoot, "closure-externs");
+      const entries = await fs.promises.readdir(closureExternsPath);
+      return entries
+        .map((entry) => path.join(closureExternsPath, entry))
+        .sort((left, right) => left.localeCompare(right));
+    })();
   }
 
-  files.sort((left, right) => left.localeCompare(right));
-  return files;
+  return bundledExternsCache;
 }
 
 async function publishOutputs(outputFiles: string[], outDir: string) {
+  if (await publishedOutputsMatch(outputFiles, outDir)) {
+    return;
+  }
+
   await fs.promises.rm(outDir, { force: true, recursive: true });
   await fs.promises.mkdir(outDir, { recursive: true });
   await Promise.all(
@@ -209,6 +267,37 @@ async function publishOutputs(outputFiles: string[], outDir: string) {
       ),
     ),
   );
+}
+
+async function publishedOutputsMatch(outputFiles: string[], outDir: string) {
+  try {
+    const outEntries = (await fs.promises.readdir(outDir)).sort();
+    const expectedEntries = outputFiles
+      .map((outputFile) => path.basename(outputFile))
+      .sort();
+
+    if (
+      outEntries.length !== expectedEntries.length ||
+      outEntries.some((entry, index) => entry !== expectedEntries[index])
+    ) {
+      return false;
+    }
+
+    return (
+      await Promise.all(
+        outputFiles.map(async (outputFile) => {
+          const destinationFile = path.join(outDir, path.basename(outputFile));
+          const [sourceStat, destinationStat] = await Promise.all([
+            fs.promises.stat(outputFile),
+            fs.promises.stat(destinationFile),
+          ]);
+          return sourceStat.size === destinationStat.size;
+        }),
+      )
+    ).every(Boolean);
+  } catch {
+    return false;
+  }
 }
 
 function toImportPath(relativePath: string): string {
@@ -223,4 +312,42 @@ async function pathExists(filePath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function collectTrackedFiles(filePaths: string[]) {
+  const trackedEntries = await Promise.all(
+    [...new Set(filePaths)]
+      .sort((left, right) => left.localeCompare(right))
+      .map(async (filePath) => {
+        const stat = await fs.promises.stat(filePath);
+        return [
+          filePath,
+          {
+            mtimeMs: stat.mtimeMs,
+            size: stat.size,
+          },
+        ] as const;
+      }),
+  );
+
+  return Object.fromEntries(trackedEntries);
+}
+
+async function trackedFilesMatch(
+  trackedFiles: Record<string, { mtimeMs: number; size: number }>,
+) {
+  return (
+    await Promise.all(
+      Object.entries(trackedFiles).map(async ([filePath, expected]) => {
+        try {
+          const stat = await fs.promises.stat(filePath);
+          return (
+            stat.mtimeMs === expected.mtimeMs && stat.size === expected.size
+          );
+        } catch {
+          return false;
+        }
+      }),
+    )
+  ).every(Boolean);
 }

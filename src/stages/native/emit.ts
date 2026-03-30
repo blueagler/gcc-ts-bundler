@@ -55,26 +55,12 @@ export async function emitNativeStage({
   await fs.promises.rm(outDir, { force: true, recursive: true });
   await fs.promises.mkdir(outDir, { recursive: true });
 
-  const finalCompilerOptions: ts.CompilerOptions = {
-    ...compilerOptions,
-    ignoreDeprecations: "6.0",
-    moduleResolution: ts.ModuleResolutionKind.Bundler,
-    outDir,
-    rootDir: workspaceDir,
-    skipLibCheck: true,
-    target: ts.ScriptTarget.ESNext,
-  };
-
-  const compilerHost = ts.createCompilerHost(finalCompilerOptions);
-  const program = ts.createProgram(
+  const diagnostics = getPreflightDiagnostics({
+    compilerOptions,
     fileNames,
-    finalCompilerOptions,
-    compilerHost,
-  );
-  const diagnostics = getPreflightDiagnostics(
-    program,
-    options.diagnostics.preflight,
-  );
+    preflight: options.diagnostics.preflight,
+    workspaceDir,
+  });
   if (diagnostics.length > 0) {
     return {
       diagnostics,
@@ -114,22 +100,41 @@ export async function emitNativeStage({
   };
 }
 
-function getPreflightDiagnostics(
-  program: ts.Program,
-  preflight: DiagnosticsPreflight,
-): ts.Diagnostic[] {
+function getPreflightDiagnostics({
+  compilerOptions,
+  fileNames,
+  preflight,
+  workspaceDir,
+}: {
+  compilerOptions: ts.CompilerOptions;
+  fileNames: string[];
+  preflight: DiagnosticsPreflight;
+  workspaceDir: string;
+}): ts.Diagnostic[] {
   if (preflight === "off") {
     return [];
   }
 
-  if (preflight === "full") {
-    return [...ts.getPreEmitDiagnostics(program)];
+  const finalCompilerOptions: ts.CompilerOptions = {
+    ...compilerOptions,
+    ignoreDeprecations: "6.0",
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    rootDir: workspaceDir,
+    skipLibCheck: true,
+    target: ts.ScriptTarget.ESNext,
+  };
+
+  if (preflight !== "full") {
+    return [];
   }
 
-  return [
-    ...program.getOptionsDiagnostics(),
-    ...program.getGlobalDiagnostics(),
-  ];
+  const compilerHost = ts.createCompilerHost(finalCompilerOptions);
+  const program = ts.createProgram(
+    fileNames,
+    finalCompilerOptions,
+    compilerHost,
+  );
+  return [...ts.getPreEmitDiagnostics(program)];
 }
 
 async function readMetadata(

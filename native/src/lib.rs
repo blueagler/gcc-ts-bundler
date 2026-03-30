@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use napi::Result;
 use napi_derive::napi;
@@ -70,6 +71,15 @@ struct TranspileOutput {
     externs_path: String,
 }
 
+#[derive(Clone)]
+struct CachedModule {
+    file_len: u64,
+    modified_at_millis: u128,
+    module: Module,
+}
+
+static MODULE_CACHE: OnceLock<Mutex<HashMap<String, CachedModule>>> = OnceLock::new();
+
 #[napi]
 pub fn resolve_graph_json(input: String) -> Result<String> {
     with_globals(|| {
@@ -97,7 +107,7 @@ pub fn resolve_graph_json(input: String) -> Result<String> {
             let relative = path_relative_to(&current_file, &workspace_dir);
             file_hashes.insert(relative, hash_content(&contents));
 
-            let module = parse_module(&current_file, &contents)
+            let module = parse_and_cache_module(&current_file, &contents)
                 .map_err(|error| napi::Error::from_reason(error))?;
             let dependencies = extract_dependencies(&module)
                 .into_iter()
@@ -201,9 +211,7 @@ pub fn transpile_sources_json(input: String) -> Result<String> {
                 continue;
             }
 
-            let source = fs::read_to_string(&file_path)
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-            let module = parse_module(&file_path, &source)
+            let module = get_or_parse_cached_module(&file_path)
                 .map_err(|error| napi::Error::from_reason(error))?;
             let relative_path = file_path
                 .strip_prefix(Path::new(&input.workspace_dir))
@@ -234,6 +242,10 @@ pub fn rewrite_gcc_exports(code: String) -> Result<String> {
     with_globals(|| {
         if !code.contains("globalThis.GCC") && !code.contains("globalThis[\"GCC\"]") {
             return Ok(code);
+        }
+
+        if let Some(rewritten) = rewrite_gcc_exports_fast(&code) {
+            return Ok(rewritten);
         }
 
         let mut module = parse_module(&PathBuf::from("bundle.js"), &code)
@@ -318,11 +330,10 @@ fn collect_exports(
         return Ok(existing.clone());
     }
 
-    let contents = fs::read_to_string(file_path).map_err(|error| error.to_string())?;
     let module = if let Some(existing) = module_cache.get(file_path) {
         existing.clone()
     } else {
-        let parsed = parse_module(file_path, &contents)?;
+        let parsed = get_or_parse_cached_module(file_path)?;
         module_cache.insert(file_path.clone(), parsed.clone());
         parsed
     };
@@ -543,6 +554,58 @@ fn parse_module(file_path: &PathBuf, source: &str) -> std::result::Result<Module
         .map_err(|error| format!("{}: {}", file_path.to_string_lossy(), error.kind().msg()))
 }
 
+fn parse_and_cache_module(
+    file_path: &PathBuf,
+    source: &str,
+) -> std::result::Result<Module, String> {
+    let module = parse_module(file_path, source)?;
+    let metadata = fs::metadata(file_path).map_err(|error| error.to_string())?;
+    let modified_at = metadata
+        .modified()
+        .map_err(|error| error.to_string())?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis();
+    let cache = MODULE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    cache
+        .lock()
+        .map_err(|_| "module cache mutex poisoned".to_string())?
+        .insert(
+            file_path.to_string_lossy().to_string(),
+            CachedModule {
+                file_len: metadata.len(),
+                modified_at_millis: modified_at,
+                module: module.clone(),
+            },
+        );
+    Ok(module)
+}
+
+fn get_or_parse_cached_module(file_path: &PathBuf) -> std::result::Result<Module, String> {
+    let metadata = fs::metadata(file_path).map_err(|error| error.to_string())?;
+    let modified_at = metadata
+        .modified()
+        .map_err(|error| error.to_string())?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis();
+    let key = file_path.to_string_lossy().to_string();
+    if let Some(cache) = MODULE_CACHE.get() {
+        if let Ok(cache_guard) = cache.lock() {
+            if let Some(cached) = cache_guard.get(&key) {
+                if cached.file_len == metadata.len()
+                    && cached.modified_at_millis == modified_at
+                {
+                    return Ok(cached.module.clone());
+                }
+            }
+        }
+    }
+
+    let source = fs::read_to_string(file_path).map_err(|error| error.to_string())?;
+    parse_and_cache_module(file_path, &source)
+}
+
 fn transform_program(module: Module) -> std::result::Result<Program, String> {
     let unresolved_mark = Mark::new();
     let top_level_mark = Mark::new();
@@ -689,6 +752,133 @@ where
     F: FnOnce() -> Result<String>,
 {
     GLOBALS.set(&Globals::new(), callback)
+}
+
+fn rewrite_gcc_exports_fast(code: &str) -> Option<String> {
+    let init_statements = [
+        "globalThis.GCC=globalThis.GCC||{};",
+        "globalThis[\"GCC\"]=globalThis[\"GCC\"]||{};",
+    ];
+    let (start_index, init_statement) = init_statements
+        .iter()
+        .filter_map(|candidate| code.rfind(candidate).map(|index| (index, *candidate)))
+        .max_by_key(|(index, _)| *index)?;
+    let tail = &code[start_index..];
+    let statements = split_top_level_statements(tail)?;
+    if statements.first().copied()? != init_statement {
+        return None;
+    }
+
+    let mut rewritten = String::with_capacity(code.len() + 128);
+    rewritten.push_str(&code[..start_index]);
+    rewritten.push_str(init_statement);
+
+    for statement in statements.iter().skip(1) {
+        let (export_name, expression) = parse_gcc_assignment(statement)?;
+        if export_name == "__DEFAULT_EXPORT__" {
+            rewritten.push_str("const __gcc_default_export__=");
+            rewritten.push_str(expression);
+            rewritten.push_str(";export default __gcc_default_export__;");
+            continue;
+        }
+
+        if !is_valid_identifier(export_name) {
+            return None;
+        }
+
+        let local_name = format!("__gcc_export_{}", sanitize_identifier(export_name));
+        rewritten.push_str("const ");
+        rewritten.push_str(&local_name);
+        rewritten.push('=');
+        rewritten.push_str(expression);
+        rewritten.push_str(";export{");
+        rewritten.push_str(&local_name);
+        rewritten.push_str(" as ");
+        rewritten.push_str(export_name);
+        rewritten.push_str("};");
+    }
+
+    Some(rewritten)
+}
+
+fn split_top_level_statements(input: &str) -> Option<Vec<&str>> {
+    let mut statements = Vec::new();
+    let mut start_index = 0usize;
+    let mut brace_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut in_string: Option<char> = None;
+    let mut escaped = false;
+
+    for (index, character) in input.char_indices() {
+        if let Some(quote) = in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+
+            if character == '\\' {
+                escaped = true;
+                continue;
+            }
+
+            if character == quote {
+                in_string = None;
+            }
+            continue;
+        }
+
+        match character {
+            '"' | '\'' => in_string = Some(character),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.checked_sub(1)?,
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.checked_sub(1)?,
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.checked_sub(1)?,
+            ';' if brace_depth == 0 && bracket_depth == 0 && paren_depth == 0 => {
+                let statement = input[start_index..=index].trim();
+                if !statement.is_empty() {
+                    statements.push(statement);
+                }
+                start_index = index + 1;
+            }
+            _ => {}
+        }
+    }
+
+    if input[start_index..].trim().is_empty() {
+        Some(statements)
+    } else {
+        None
+    }
+}
+
+fn parse_gcc_assignment(statement: &str) -> Option<(&str, &str)> {
+    const PREFIXES: [&str; 4] = [
+        "globalThis.GCC.",
+        "globalThis.GCC[\"",
+        "globalThis[\"GCC\"].",
+        "globalThis[\"GCC\"][\"",
+    ];
+
+    for prefix in PREFIXES {
+        if let Some(rest) = statement.strip_prefix(prefix) {
+            if prefix.ends_with(".") {
+                let assignment_index = rest.find('=')?;
+                let export_name = &rest[..assignment_index];
+                let expression = rest[assignment_index + 1..].strip_suffix(';')?;
+                return Some((export_name, expression));
+            }
+
+            let quote_end = rest.find("\"]=").or_else(|| rest.find("']="))?;
+            let export_name = &rest[..quote_end];
+            let expression = rest[quote_end + 3..].strip_suffix(';')?;
+            return Some((export_name, expression));
+        }
+    }
+
+    None
 }
 
 fn path_relative_to(path: &Path, root: &Path) -> String {

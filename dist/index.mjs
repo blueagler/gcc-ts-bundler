@@ -18,6 +18,7 @@ var DEFAULT_BUILD_OPTIONS = Object.freeze({
   js: [],
   languageOut: "ECMASCRIPT_NEXT",
   outDir: "",
+  outputNames: [],
   projectRoot: "",
   srcDir: ""
 });
@@ -161,24 +162,66 @@ async function resolveBuild(options) {
   const packageRoot = getPackageRoot();
   const packageJsonRaw = await fs3.promises.readFile(path2.join(packageRoot, "package.json"), "utf-8");
   const packageJson = JSON.parse(packageJsonRaw);
-  const runtimeSignature = await readRuntimeSignature(packageRoot);
-  const nativeSignature = await readNativeSignature(packageRoot);
-  const packageSignature = hashContent(`${packageJsonRaw}
-${runtimeSignature}
-${nativeSignature}`);
+  const packageSignature = await getPackageSignature(packageRoot);
   const sourceRoot = path2.join(cacheStore.workspaceDir, "src");
   await ensureSourceSymlink(sourceRoot, options.srcDir);
   const compilerOptions = await loadCompilerOptions(options.projectRoot);
+  const compilerOptionsHash = hashJson(compilerOptions);
+  const entryRelativePaths = options.entries.map((entry) => path2.relative(options.srcDir, entry));
+  const optionsSignature = getOptionsSignature(options);
   const overlayEntries = options.entries.map((entry) => path2.join(sourceRoot, path2.relative(options.srcDir, entry)));
+  const resolveSnapshotPath = path2.join(cacheStore.projectCacheDir, "resolve", "latest.json");
+  const cachedSnapshot = await readJsonIfExists(resolveSnapshotPath);
+  if (cachedSnapshot && cachedSnapshot.packageSignature === packageSignature && cachedSnapshot.compilerOptionsHash === compilerOptionsHash && cachedSnapshot.optionsSignature === optionsSignature && await trackedFilesMatch(cachedSnapshot.trackedFiles)) {
+    const entryFiles2 = cachedSnapshot.entryFiles.map((entry) => ({
+      chunkName: entry.chunkName,
+      exportNames: entry.exportNames,
+      hasDefaultExport: entry.hasDefaultExport,
+      outputName: entry.outputName,
+      outputPath: path2.join(options.outDir, entry.outputName),
+      sourcePath: path2.join(sourceRoot, entry.sourceRelativePath),
+      sourceRelativePath: entry.sourceRelativePath
+    }));
+    const shimDir2 = path2.join(cacheStore.workspaceDir, "entries");
+    return {
+      cacheRoot: cacheStore.rootDir,
+      cleanup: cacheStore.cleanup,
+      compilerOptions,
+      entryFiles: entryFiles2,
+      externalInputHash: cachedSnapshot.externalInputHash,
+      fileHashes: cachedSnapshot.fileHashes,
+      filePaths: cachedSnapshot.filePaths,
+      finalCacheDir: path2.join(cacheStore.projectCacheDir, "final", cachedSnapshot.finalKey),
+      finalKey: cachedSnapshot.finalKey,
+      graph: fromRelativeGraph(cachedSnapshot.graph, cacheStore.workspaceDir),
+      isFinalCacheHit: false,
+      isNativeEmitCacheHit: false,
+      isResolveCacheHit: true,
+      options,
+      packageRoot,
+      packageVersion: packageJson.version,
+      projectCacheDir: cacheStore.projectCacheDir,
+      resolveKey: cachedSnapshot.resolveKey,
+      resolveMetadataPath: resolveSnapshotPath,
+      sharedChunkName: entryFiles2.length > 1 ? "shared" : null,
+      shimDir: shimDir2,
+      shimFiles: entryFiles2.map((entry) => path2.join(shimDir2, `${entry.chunkName}.ts`)),
+      sourceRoot,
+      tsConfigPath: path2.join(options.projectRoot, "tsconfig.json"),
+      nativeEmitCacheDir: path2.join(cacheStore.projectCacheDir, "native-emit", cachedSnapshot.nativeEmitKey),
+      nativeEmitKey: cachedSnapshot.nativeEmitKey,
+      workspaceDir: cacheStore.workspaceDir
+    };
+  }
   const graphResult = resolveGraph({
     entries: overlayEntries,
     srcDir: sourceRoot,
     workspaceDir: cacheStore.workspaceDir
   });
-  const outputNames = resolveOutputNames(options.entries.map((entry) => path2.relative(options.srcDir, entry)));
+  const outputNames = resolveOutputNames(entryRelativePaths, options.outputNames);
   const resolveKey = hashJson({
-    compilerOptions,
-    entries: options.entries.map((entry) => path2.relative(options.srcDir, entry)),
+    compilerOptionsHash,
+    entries: entryRelativePaths,
     files: graphResult.fileHashes,
     packageSignature
   });
@@ -213,7 +256,7 @@ ${nativeSignature}`);
     ...options.js
   ]);
   const nativeEmitKey = hashJson({
-    compilerOptions,
+    compilerOptionsHash,
     diagnostics: options.diagnostics,
     packageSignature,
     resolveKey
@@ -225,6 +268,26 @@ ${nativeSignature}`);
     packageSignature,
     nativeEmitKey,
     resolveKey
+  });
+  const trackedFiles = await collectTrackedFiles([
+    ...graphResult.filePaths,
+    path2.join(options.projectRoot, "tsconfig.json"),
+    ...options.externs,
+    ...options.js
+  ]);
+  await writeJson(resolveSnapshotPath, {
+    compilerOptionsHash,
+    entryFiles: resolveMetadata.entryFiles,
+    externalInputHash,
+    fileHashes: graphResult.fileHashes,
+    filePaths: graphResult.filePaths,
+    finalKey,
+    graph: resolveMetadata.graph,
+    nativeEmitKey,
+    optionsSignature,
+    packageSignature,
+    resolveKey,
+    trackedFiles
   });
   return {
     cacheRoot: cacheStore.rootDir,
@@ -256,7 +319,13 @@ ${nativeSignature}`);
     workspaceDir: cacheStore.workspaceDir
   };
 }
-function resolveOutputNames(entryPaths) {
+function resolveOutputNames(entryPaths, outputNames) {
+  if (outputNames.length > 0) {
+    if (outputNames.length !== entryPaths.length) {
+      throw new Error("outputNames length must match entries length.");
+    }
+    return outputNames;
+  }
   const basenameCounts = new Map;
   const basenames = entryPaths.map((entryPath) => path2.basename(entryPath).replace(/\.[^/.]+$/, ".js"));
   for (const basename of basenames) {
@@ -323,23 +392,86 @@ async function hashExternalInputs(filePaths) {
   })));
   return hashJson(entries);
 }
+async function collectTrackedFiles(filePaths) {
+  const trackedEntries = await Promise.all([...new Set(filePaths)].sort((left, right) => left.localeCompare(right)).map(async (filePath) => {
+    const stat = await fs3.promises.stat(filePath);
+    return [
+      filePath,
+      {
+        mtimeMs: stat.mtimeMs,
+        size: stat.size
+      }
+    ];
+  }));
+  return Object.fromEntries(trackedEntries);
+}
+async function trackedFilesMatch(trackedFiles) {
+  return (await Promise.all(Object.entries(trackedFiles).map(async ([filePath, expected]) => {
+    try {
+      const stat = await fs3.promises.stat(filePath);
+      return stat.mtimeMs === expected.mtimeMs && stat.size === expected.size;
+    } catch {
+      return false;
+    }
+  }))).every(Boolean);
+}
 function getPackageRoot() {
   return path2.dirname(path2.dirname(fileURLToPath(import.meta.url)));
 }
 async function readRuntimeSignature(packageRoot) {
   try {
-    return await fs3.promises.readFile(path2.join(packageRoot, "dist", "index.mjs"), "utf-8");
+    const stat = await fs3.promises.stat(path2.join(packageRoot, "dist", "index.mjs"));
+    return JSON.stringify({
+      mtimeMs: stat.mtimeMs,
+      size: stat.size
+    });
   } catch {
     return "";
   }
 }
 async function readNativeSignature(packageRoot) {
   try {
-    const contents = await fs3.promises.readFile(path2.join(packageRoot, "native", "index.node"));
-    return hashContent(contents.toString("base64"));
+    const stat = await fs3.promises.stat(path2.join(packageRoot, "native", "index.node"));
+    return JSON.stringify({
+      mtimeMs: stat.mtimeMs,
+      size: stat.size
+    });
   } catch {
     return "";
   }
+}
+var packageSignaturePromise = null;
+async function getPackageSignature(packageRoot = getPackageRoot()) {
+  if (!packageSignaturePromise) {
+    packageSignaturePromise = (async () => {
+      const packageJsonStat = await fs3.promises.stat(path2.join(packageRoot, "package.json"));
+      const runtimeSignature = await readRuntimeSignature(packageRoot);
+      const nativeSignature = await readNativeSignature(packageRoot);
+      return hashContent(JSON.stringify({
+        nativeSignature,
+        packageJson: {
+          mtimeMs: packageJsonStat.mtimeMs,
+          size: packageJsonStat.size
+        },
+        runtimeSignature
+      }));
+    })();
+  }
+  return packageSignaturePromise;
+}
+function getOptionsSignature(options) {
+  return hashJson({
+    compilationLevel: options.compilationLevel,
+    diagnostics: options.diagnostics,
+    entries: options.entries.map((entry) => path2.relative(options.srcDir, entry)),
+    externs: [...options.externs].sort(),
+    js: [...options.js].sort(),
+    languageOut: options.languageOut,
+    outDir: options.outDir,
+    outputNames: [...options.outputNames],
+    projectRoot: options.projectRoot,
+    srcDir: options.srcDir
+  });
 }
 function normalizeBuildOptions(options) {
   const projectRoot = path2.resolve(options.projectRoot ?? process.cwd());
@@ -361,6 +493,7 @@ function normalizeBuildOptions(options) {
     js: [...options.js ?? []].map((filePath) => path2.isAbsolute(filePath) ? filePath : path2.resolve(projectRoot, filePath)),
     languageOut: options.languageOut ?? "ECMASCRIPT_NEXT",
     outDir,
+    outputNames: [...options.outputNames ?? []],
     projectRoot,
     srcDir
   };
@@ -392,18 +525,12 @@ async function emitNativeStage({
   }
   await fs4.promises.rm(outDir, { force: true, recursive: true });
   await fs4.promises.mkdir(outDir, { recursive: true });
-  const finalCompilerOptions = {
-    ...compilerOptions,
-    ignoreDeprecations: "6.0",
-    moduleResolution: ts2.ModuleResolutionKind.Bundler,
-    outDir,
-    rootDir: workspaceDir,
-    skipLibCheck: true,
-    target: ts2.ScriptTarget.ESNext
-  };
-  const compilerHost = ts2.createCompilerHost(finalCompilerOptions);
-  const program = ts2.createProgram(fileNames, finalCompilerOptions, compilerHost);
-  const diagnostics = getPreflightDiagnostics(program, options.diagnostics.preflight);
+  const diagnostics = getPreflightDiagnostics({
+    compilerOptions,
+    fileNames,
+    preflight: options.diagnostics.preflight,
+    workspaceDir
+  });
   if (diagnostics.length > 0) {
     return {
       diagnostics,
@@ -431,17 +558,29 @@ async function emitNativeStage({
     outDir
   };
 }
-function getPreflightDiagnostics(program, preflight) {
+function getPreflightDiagnostics({
+  compilerOptions,
+  fileNames,
+  preflight,
+  workspaceDir
+}) {
   if (preflight === "off") {
     return [];
   }
-  if (preflight === "full") {
-    return [...ts2.getPreEmitDiagnostics(program)];
+  const finalCompilerOptions = {
+    ...compilerOptions,
+    ignoreDeprecations: "6.0",
+    moduleResolution: ts2.ModuleResolutionKind.Bundler,
+    rootDir: workspaceDir,
+    skipLibCheck: true,
+    target: ts2.ScriptTarget.ESNext
+  };
+  if (preflight !== "full") {
+    return [];
   }
-  return [
-    ...program.getOptionsDiagnostics(),
-    ...program.getGlobalDiagnostics()
-  ];
+  const compilerHost = ts2.createCompilerHost(finalCompilerOptions);
+  const program = ts2.createProgram(fileNames, finalCompilerOptions, compilerHost);
+  return [...ts2.getPreEmitDiagnostics(program)];
 }
 async function readMetadata(metadataPath) {
   try {
@@ -468,6 +607,7 @@ import fs5 from "fs/promises";
 import * as closureCompilerPackage from "google-closure-compiler";
 import { getNativeImagePath } from "google-closure-compiler/lib/utils.js";
 import path4 from "path";
+var closureLibFilesCache = new Map;
 async function runClosureStage({
   emittedOutDir,
   entryFiles,
@@ -485,7 +625,7 @@ async function runClosureStage({
   const outputDir = path4.join(finalCacheDir, "outputs");
   await fs5.mkdir(rawDir, { recursive: true });
   await fs5.mkdir(outputDir, { recursive: true });
-  const closureLibFiles = await collectJavaScriptFiles(path4.join(packageRoot, "closure-lib"));
+  const closureLibFiles = await collectClosureLibFiles(packageRoot);
   const chunkPlan = buildChunkPlan({
     entryFiles,
     graph,
@@ -507,15 +647,16 @@ async function runClosureStage({
     outputDir: rawDir
   });
   if (exitCode !== 0) {
-    return exitCode;
+    return { exitCode, outputFiles: [] };
   }
-  const rawOutputs = await collectJavaScriptFiles(rawDir);
-  await Promise.all(rawOutputs.map(async (rawFile) => {
+  const rawOutputs = chunkPlan.map((chunk) => path4.join(rawDir, `${chunk.name}.js`));
+  const outputFiles = chunkPlan.map((chunk) => path4.join(outputDir, `${chunk.name}.js`));
+  await Promise.all(rawOutputs.map(async (rawFile, index) => {
     const contents = await fs5.readFile(rawFile, "utf-8");
     const transformed = rewriteGccExports(contents);
-    await fs5.writeFile(path4.join(outputDir, path4.basename(rawFile)), transformed);
+    await fs5.writeFile(outputFiles[index], transformed);
   }));
-  return 0;
+  return { exitCode: 0, outputFiles };
 }
 async function runSingleClosureCompilation({
   closureLibFiles,
@@ -720,10 +861,43 @@ async function collectJavaScriptFiles(dir) {
   files.sort((left, right) => left.localeCompare(right));
   return files;
 }
+function collectClosureLibFiles(packageRoot) {
+  const closureLibDir = path4.join(packageRoot, "closure-lib");
+  const existing = closureLibFilesCache.get(closureLibDir);
+  if (existing) {
+    return existing;
+  }
+  const filesPromise = collectJavaScriptFiles(closureLibDir);
+  closureLibFilesCache.set(closureLibDir, filesPromise);
+  return filesPromise;
+}
 
 // src/pipeline/build-pipeline.ts
+var bundledExternsCache = null;
 async function build(options) {
   const normalizedOptions = normalizeBuildOptions(options);
+  const projectCacheDir = path5.join(path5.resolve(normalizedOptions.cache.dir || getDefaultPersistentCacheRoot()), hashContent(normalizedOptions.projectRoot));
+  if (normalizedOptions.cache.mode === "persistent") {
+    const fastSnapshot = await readJsonIfExists(path5.join(projectCacheDir, "final-fast.json"));
+    if (fastSnapshot && fastSnapshot.optionsSignature === getOptionsSignature(normalizedOptions) && fastSnapshot.packageSignature === await getPackageSignature()) {
+      const trackedFilesValid = await trackedFilesMatch2(fastSnapshot.trackedFiles);
+      if (trackedFilesValid) {
+        const finalMetadata = await readJsonIfExists(path5.join(projectCacheDir, "final", fastSnapshot.finalKey, "meta.json"));
+        if (finalMetadata && (await Promise.all(finalMetadata.outputFiles.map(pathExists2))).every(Boolean)) {
+          await publishOutputs(finalMetadata.outputFiles, normalizedOptions.outDir);
+          return {
+            cacheHit: true,
+            diagnostics: [],
+            emitSkipped: false,
+            exitCode: 0,
+            options: normalizedOptions,
+            outputFiles: finalMetadata.outputFiles,
+            workspaceDir: path5.join(projectCacheDir, "workspace")
+          };
+        }
+      }
+    }
+  }
   const resolved = await resolveBuild(normalizedOptions);
   try {
     const finalMetadataPath = path5.join(resolved.finalCacheDir, "meta.json");
@@ -769,7 +943,7 @@ async function build(options) {
       };
     }
     const bundledExterns = await collectBundledExterns(resolved.packageRoot);
-    const exitCode = await runClosureStage({
+    const closureResult = await runClosureStage({
       emittedOutDir: nativeEmitResult.outDir,
       entryFiles: resolved.entryFiles,
       externPaths: [
@@ -790,20 +964,31 @@ async function build(options) {
       shimFiles: resolved.shimFiles,
       workspaceDir: resolved.workspaceDir
     });
-    if (exitCode !== 0) {
+    if (closureResult.exitCode !== 0) {
       return {
         cacheHit: false,
         diagnostics: [],
         emitSkipped: true,
-        exitCode,
+        exitCode: closureResult.exitCode,
         options: normalizedOptions,
         outputFiles: [],
         workspaceDir: resolved.workspaceDir
       };
     }
-    const finalOutputFiles = await collectJavaScriptFiles2(path5.join(resolved.finalCacheDir, "outputs"));
+    const finalOutputFiles = closureResult.outputFiles;
     await writeJson(finalMetadataPath, {
       outputFiles: finalOutputFiles
+    });
+    await writeJson(path5.join(projectCacheDir, "final-fast.json"), {
+      finalKey: resolved.finalKey,
+      optionsSignature: getOptionsSignature(normalizedOptions),
+      packageSignature: await getPackageSignature(),
+      trackedFiles: await collectTrackedFiles2([
+        ...resolved.filePaths,
+        resolved.tsConfigPath,
+        ...normalizedOptions.externs,
+        ...normalizedOptions.js
+      ])
     });
     await publishOutputs(finalOutputFiles, normalizedOptions.outDir);
     return {
@@ -837,36 +1022,41 @@ async function cleanCache(options = {}) {
   await fs6.promises.rm(projectCacheDir, { force: true, recursive: true });
 }
 async function collectBundledExterns(packageRoot) {
-  const closureExternsPath = path5.join(packageRoot, "closure-externs");
-  const entries = await fs6.promises.readdir(closureExternsPath);
-  return entries.map((entry) => path5.join(closureExternsPath, entry)).sort((left, right) => left.localeCompare(right));
-}
-async function collectJavaScriptFiles2(dir) {
-  const files = [];
-  const pending = [dir];
-  while (pending.length > 0) {
-    const currentDir = pending.pop();
-    const entries = await fs6.promises.readdir(currentDir, {
-      withFileTypes: true
-    });
-    for (const entry of entries) {
-      const entryPath = path5.join(currentDir, entry.name);
-      if (entry.isDirectory()) {
-        pending.push(entryPath);
-        continue;
-      }
-      if (entry.name.endsWith(".js")) {
-        files.push(entryPath);
-      }
-    }
+  if (!bundledExternsCache) {
+    bundledExternsCache = (async () => {
+      const closureExternsPath = path5.join(packageRoot, "closure-externs");
+      const entries = await fs6.promises.readdir(closureExternsPath);
+      return entries.map((entry) => path5.join(closureExternsPath, entry)).sort((left, right) => left.localeCompare(right));
+    })();
   }
-  files.sort((left, right) => left.localeCompare(right));
-  return files;
+  return bundledExternsCache;
 }
 async function publishOutputs(outputFiles, outDir) {
+  if (await publishedOutputsMatch(outputFiles, outDir)) {
+    return;
+  }
   await fs6.promises.rm(outDir, { force: true, recursive: true });
   await fs6.promises.mkdir(outDir, { recursive: true });
   await Promise.all(outputFiles.map((outputFile) => fs6.promises.copyFile(outputFile, path5.join(outDir, path5.basename(outputFile)))));
+}
+async function publishedOutputsMatch(outputFiles, outDir) {
+  try {
+    const outEntries = (await fs6.promises.readdir(outDir)).sort();
+    const expectedEntries = outputFiles.map((outputFile) => path5.basename(outputFile)).sort();
+    if (outEntries.length !== expectedEntries.length || outEntries.some((entry, index) => entry !== expectedEntries[index])) {
+      return false;
+    }
+    return (await Promise.all(outputFiles.map(async (outputFile) => {
+      const destinationFile = path5.join(outDir, path5.basename(outputFile));
+      const [sourceStat, destinationStat] = await Promise.all([
+        fs6.promises.stat(outputFile),
+        fs6.promises.stat(destinationFile)
+      ]);
+      return sourceStat.size === destinationStat.size;
+    }))).every(Boolean);
+  } catch {
+    return false;
+  }
 }
 function toImportPath(relativePath) {
   const normalized = relativePath.replace(/\\/g, "/").replace(/\.[^/.]+$/, "");
@@ -879,6 +1069,29 @@ async function pathExists2(filePath) {
   } catch {
     return false;
   }
+}
+async function collectTrackedFiles2(filePaths) {
+  const trackedEntries = await Promise.all([...new Set(filePaths)].sort((left, right) => left.localeCompare(right)).map(async (filePath) => {
+    const stat = await fs6.promises.stat(filePath);
+    return [
+      filePath,
+      {
+        mtimeMs: stat.mtimeMs,
+        size: stat.size
+      }
+    ];
+  }));
+  return Object.fromEntries(trackedEntries);
+}
+async function trackedFilesMatch2(trackedFiles) {
+  return (await Promise.all(Object.entries(trackedFiles).map(async ([filePath, expected]) => {
+    try {
+      const stat = await fs6.promises.stat(filePath);
+      return stat.mtimeMs === expected.mtimeMs && stat.size === expected.size;
+    } catch {
+      return false;
+    }
+  }))).every(Boolean);
 }
 
 // src/api/build.ts

@@ -28,6 +28,13 @@ interface ClosureChunk {
   name: string;
 }
 
+export interface ClosureStageResult {
+  exitCode: number;
+  outputFiles: string[];
+}
+
+const closureLibFilesCache = new Map<string, Promise<string[]>>();
+
 export async function runClosureStage({
   emittedOutDir,
   entryFiles,
@@ -48,7 +55,7 @@ export async function runClosureStage({
   packageRoot: string;
   shimFiles: string[];
   workspaceDir: string;
-}): Promise<number> {
+}): Promise<ClosureStageResult> {
   await fs.rm(finalCacheDir, { force: true, recursive: true });
   await fs.mkdir(finalCacheDir, { recursive: true });
 
@@ -57,9 +64,7 @@ export async function runClosureStage({
   await fs.mkdir(rawDir, { recursive: true });
   await fs.mkdir(outputDir, { recursive: true });
 
-  const closureLibFiles = await collectJavaScriptFiles(
-    path.join(packageRoot, "closure-lib"),
-  );
+  const closureLibFiles = await collectClosureLibFiles(packageRoot);
   const chunkPlan = buildChunkPlan({
     entryFiles,
     graph,
@@ -86,22 +91,24 @@ export async function runClosureStage({
         });
 
   if (exitCode !== 0) {
-    return exitCode;
+    return { exitCode, outputFiles: [] };
   }
 
-  const rawOutputs = await collectJavaScriptFiles(rawDir);
+  const rawOutputs = chunkPlan.map((chunk) =>
+    path.join(rawDir, `${chunk.name}.js`),
+  );
+  const outputFiles = chunkPlan.map((chunk) =>
+    path.join(outputDir, `${chunk.name}.js`),
+  );
   await Promise.all(
-    rawOutputs.map(async (rawFile) => {
+    rawOutputs.map(async (rawFile, index) => {
       const contents = await fs.readFile(rawFile, "utf-8");
       const transformed = rewriteGccExports(contents);
-      await fs.writeFile(
-        path.join(outputDir, path.basename(rawFile)),
-        transformed,
-      );
+      await fs.writeFile(outputFiles[index], transformed);
     }),
   );
 
-  return 0;
+  return { exitCode: 0, outputFiles };
 }
 
 async function runSingleClosureCompilation({
@@ -413,4 +420,16 @@ async function collectJavaScriptFiles(dir: string): Promise<string[]> {
 
   files.sort((left, right) => left.localeCompare(right));
   return files;
+}
+
+function collectClosureLibFiles(packageRoot: string): Promise<string[]> {
+  const closureLibDir = path.join(packageRoot, "closure-lib");
+  const existing = closureLibFilesCache.get(closureLibDir);
+  if (existing) {
+    return existing;
+  }
+
+  const filesPromise = collectJavaScriptFiles(closureLibDir);
+  closureLibFilesCache.set(closureLibDir, filesPromise);
+  return filesPromise;
 }

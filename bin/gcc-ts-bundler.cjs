@@ -82,6 +82,7 @@ var DEFAULT_BUILD_OPTIONS = Object.freeze({
   js: [],
   languageOut: "ECMASCRIPT_NEXT",
   outDir: "",
+  outputNames: [],
   projectRoot: "",
   srcDir: ""
 });
@@ -279,24 +280,66 @@ async function resolveBuild(options) {
   const packageRoot = getPackageRoot();
   const packageJsonRaw = await import_fs3.default.promises.readFile(import_path2.default.join(packageRoot, "package.json"), "utf-8");
   const packageJson = JSON.parse(packageJsonRaw);
-  const runtimeSignature = await readRuntimeSignature(packageRoot);
-  const nativeSignature = await readNativeSignature(packageRoot);
-  const packageSignature = hashContent(`${packageJsonRaw}
-${runtimeSignature}
-${nativeSignature}`);
+  const packageSignature = await getPackageSignature(packageRoot);
   const sourceRoot = import_path2.default.join(cacheStore.workspaceDir, "src");
   await ensureSourceSymlink(sourceRoot, options.srcDir);
   const compilerOptions = await loadCompilerOptions(options.projectRoot);
+  const compilerOptionsHash = hashJson(compilerOptions);
+  const entryRelativePaths = options.entries.map((entry) => import_path2.default.relative(options.srcDir, entry));
+  const optionsSignature = getOptionsSignature(options);
   const overlayEntries = options.entries.map((entry) => import_path2.default.join(sourceRoot, import_path2.default.relative(options.srcDir, entry)));
+  const resolveSnapshotPath = import_path2.default.join(cacheStore.projectCacheDir, "resolve", "latest.json");
+  const cachedSnapshot = await readJsonIfExists(resolveSnapshotPath);
+  if (cachedSnapshot && cachedSnapshot.packageSignature === packageSignature && cachedSnapshot.compilerOptionsHash === compilerOptionsHash && cachedSnapshot.optionsSignature === optionsSignature && await trackedFilesMatch(cachedSnapshot.trackedFiles)) {
+    const entryFiles2 = cachedSnapshot.entryFiles.map((entry) => ({
+      chunkName: entry.chunkName,
+      exportNames: entry.exportNames,
+      hasDefaultExport: entry.hasDefaultExport,
+      outputName: entry.outputName,
+      outputPath: import_path2.default.join(options.outDir, entry.outputName),
+      sourcePath: import_path2.default.join(sourceRoot, entry.sourceRelativePath),
+      sourceRelativePath: entry.sourceRelativePath
+    }));
+    const shimDir2 = import_path2.default.join(cacheStore.workspaceDir, "entries");
+    return {
+      cacheRoot: cacheStore.rootDir,
+      cleanup: cacheStore.cleanup,
+      compilerOptions,
+      entryFiles: entryFiles2,
+      externalInputHash: cachedSnapshot.externalInputHash,
+      fileHashes: cachedSnapshot.fileHashes,
+      filePaths: cachedSnapshot.filePaths,
+      finalCacheDir: import_path2.default.join(cacheStore.projectCacheDir, "final", cachedSnapshot.finalKey),
+      finalKey: cachedSnapshot.finalKey,
+      graph: fromRelativeGraph(cachedSnapshot.graph, cacheStore.workspaceDir),
+      isFinalCacheHit: false,
+      isNativeEmitCacheHit: false,
+      isResolveCacheHit: true,
+      options,
+      packageRoot,
+      packageVersion: packageJson.version,
+      projectCacheDir: cacheStore.projectCacheDir,
+      resolveKey: cachedSnapshot.resolveKey,
+      resolveMetadataPath: resolveSnapshotPath,
+      sharedChunkName: entryFiles2.length > 1 ? "shared" : null,
+      shimDir: shimDir2,
+      shimFiles: entryFiles2.map((entry) => import_path2.default.join(shimDir2, `${entry.chunkName}.ts`)),
+      sourceRoot,
+      tsConfigPath: import_path2.default.join(options.projectRoot, "tsconfig.json"),
+      nativeEmitCacheDir: import_path2.default.join(cacheStore.projectCacheDir, "native-emit", cachedSnapshot.nativeEmitKey),
+      nativeEmitKey: cachedSnapshot.nativeEmitKey,
+      workspaceDir: cacheStore.workspaceDir
+    };
+  }
   const graphResult = resolveGraph({
     entries: overlayEntries,
     srcDir: sourceRoot,
     workspaceDir: cacheStore.workspaceDir
   });
-  const outputNames = resolveOutputNames(options.entries.map((entry) => import_path2.default.relative(options.srcDir, entry)));
+  const outputNames = resolveOutputNames(entryRelativePaths, options.outputNames);
   const resolveKey = hashJson({
-    compilerOptions,
-    entries: options.entries.map((entry) => import_path2.default.relative(options.srcDir, entry)),
+    compilerOptionsHash,
+    entries: entryRelativePaths,
     files: graphResult.fileHashes,
     packageSignature
   });
@@ -331,7 +374,7 @@ ${nativeSignature}`);
     ...options.js
   ]);
   const nativeEmitKey = hashJson({
-    compilerOptions,
+    compilerOptionsHash,
     diagnostics: options.diagnostics,
     packageSignature,
     resolveKey
@@ -343,6 +386,26 @@ ${nativeSignature}`);
     packageSignature,
     nativeEmitKey,
     resolveKey
+  });
+  const trackedFiles = await collectTrackedFiles([
+    ...graphResult.filePaths,
+    import_path2.default.join(options.projectRoot, "tsconfig.json"),
+    ...options.externs,
+    ...options.js
+  ]);
+  await writeJson(resolveSnapshotPath, {
+    compilerOptionsHash,
+    entryFiles: resolveMetadata.entryFiles,
+    externalInputHash,
+    fileHashes: graphResult.fileHashes,
+    filePaths: graphResult.filePaths,
+    finalKey,
+    graph: resolveMetadata.graph,
+    nativeEmitKey,
+    optionsSignature,
+    packageSignature,
+    resolveKey,
+    trackedFiles
   });
   return {
     cacheRoot: cacheStore.rootDir,
@@ -374,7 +437,13 @@ ${nativeSignature}`);
     workspaceDir: cacheStore.workspaceDir
   };
 }
-function resolveOutputNames(entryPaths) {
+function resolveOutputNames(entryPaths, outputNames) {
+  if (outputNames.length > 0) {
+    if (outputNames.length !== entryPaths.length) {
+      throw new Error("outputNames length must match entries length.");
+    }
+    return outputNames;
+  }
   const basenameCounts = new Map;
   const basenames = entryPaths.map((entryPath) => import_path2.default.basename(entryPath).replace(/\.[^/.]+$/, ".js"));
   for (const basename of basenames) {
@@ -441,23 +510,86 @@ async function hashExternalInputs(filePaths) {
   })));
   return hashJson(entries);
 }
+async function collectTrackedFiles(filePaths) {
+  const trackedEntries = await Promise.all([...new Set(filePaths)].sort((left, right) => left.localeCompare(right)).map(async (filePath) => {
+    const stat = await import_fs3.default.promises.stat(filePath);
+    return [
+      filePath,
+      {
+        mtimeMs: stat.mtimeMs,
+        size: stat.size
+      }
+    ];
+  }));
+  return Object.fromEntries(trackedEntries);
+}
+async function trackedFilesMatch(trackedFiles) {
+  return (await Promise.all(Object.entries(trackedFiles).map(async ([filePath, expected]) => {
+    try {
+      const stat = await import_fs3.default.promises.stat(filePath);
+      return stat.mtimeMs === expected.mtimeMs && stat.size === expected.size;
+    } catch {
+      return false;
+    }
+  }))).every(Boolean);
+}
 function getPackageRoot() {
   return import_path2.default.dirname(import_path2.default.dirname(import_url.fileURLToPath("file:///Users/Blueagle/Code/gcc-ts-bundler/src/pipeline/resolve-build.ts")));
 }
 async function readRuntimeSignature(packageRoot) {
   try {
-    return await import_fs3.default.promises.readFile(import_path2.default.join(packageRoot, "dist", "index.mjs"), "utf-8");
+    const stat = await import_fs3.default.promises.stat(import_path2.default.join(packageRoot, "dist", "index.mjs"));
+    return JSON.stringify({
+      mtimeMs: stat.mtimeMs,
+      size: stat.size
+    });
   } catch {
     return "";
   }
 }
 async function readNativeSignature(packageRoot) {
   try {
-    const contents = await import_fs3.default.promises.readFile(import_path2.default.join(packageRoot, "native", "index.node"));
-    return hashContent(contents.toString("base64"));
+    const stat = await import_fs3.default.promises.stat(import_path2.default.join(packageRoot, "native", "index.node"));
+    return JSON.stringify({
+      mtimeMs: stat.mtimeMs,
+      size: stat.size
+    });
   } catch {
     return "";
   }
+}
+var packageSignaturePromise = null;
+async function getPackageSignature(packageRoot = getPackageRoot()) {
+  if (!packageSignaturePromise) {
+    packageSignaturePromise = (async () => {
+      const packageJsonStat = await import_fs3.default.promises.stat(import_path2.default.join(packageRoot, "package.json"));
+      const runtimeSignature = await readRuntimeSignature(packageRoot);
+      const nativeSignature = await readNativeSignature(packageRoot);
+      return hashContent(JSON.stringify({
+        nativeSignature,
+        packageJson: {
+          mtimeMs: packageJsonStat.mtimeMs,
+          size: packageJsonStat.size
+        },
+        runtimeSignature
+      }));
+    })();
+  }
+  return packageSignaturePromise;
+}
+function getOptionsSignature(options) {
+  return hashJson({
+    compilationLevel: options.compilationLevel,
+    diagnostics: options.diagnostics,
+    entries: options.entries.map((entry) => import_path2.default.relative(options.srcDir, entry)),
+    externs: [...options.externs].sort(),
+    js: [...options.js].sort(),
+    languageOut: options.languageOut,
+    outDir: options.outDir,
+    outputNames: [...options.outputNames],
+    projectRoot: options.projectRoot,
+    srcDir: options.srcDir
+  });
 }
 function normalizeBuildOptions(options) {
   const projectRoot = import_path2.default.resolve(options.projectRoot ?? process.cwd());
@@ -479,6 +611,7 @@ function normalizeBuildOptions(options) {
     js: [...options.js ?? []].map((filePath) => import_path2.default.isAbsolute(filePath) ? filePath : import_path2.default.resolve(projectRoot, filePath)),
     languageOut: options.languageOut ?? "ECMASCRIPT_NEXT",
     outDir,
+    outputNames: [...options.outputNames ?? []],
     projectRoot,
     srcDir
   };
@@ -510,18 +643,12 @@ async function emitNativeStage({
   }
   await import_fs4.default.promises.rm(outDir, { force: true, recursive: true });
   await import_fs4.default.promises.mkdir(outDir, { recursive: true });
-  const finalCompilerOptions = {
-    ...compilerOptions,
-    ignoreDeprecations: "6.0",
-    moduleResolution: import_typescript2.default.ModuleResolutionKind.Bundler,
-    outDir,
-    rootDir: workspaceDir,
-    skipLibCheck: true,
-    target: import_typescript2.default.ScriptTarget.ESNext
-  };
-  const compilerHost = import_typescript2.default.createCompilerHost(finalCompilerOptions);
-  const program = import_typescript2.default.createProgram(fileNames, finalCompilerOptions, compilerHost);
-  const diagnostics = getPreflightDiagnostics(program, options.diagnostics.preflight);
+  const diagnostics = getPreflightDiagnostics({
+    compilerOptions,
+    fileNames,
+    preflight: options.diagnostics.preflight,
+    workspaceDir
+  });
   if (diagnostics.length > 0) {
     return {
       diagnostics,
@@ -549,17 +676,29 @@ async function emitNativeStage({
     outDir
   };
 }
-function getPreflightDiagnostics(program, preflight) {
+function getPreflightDiagnostics({
+  compilerOptions,
+  fileNames,
+  preflight,
+  workspaceDir
+}) {
   if (preflight === "off") {
     return [];
   }
-  if (preflight === "full") {
-    return [...import_typescript2.default.getPreEmitDiagnostics(program)];
+  const finalCompilerOptions = {
+    ...compilerOptions,
+    ignoreDeprecations: "6.0",
+    moduleResolution: import_typescript2.default.ModuleResolutionKind.Bundler,
+    rootDir: workspaceDir,
+    skipLibCheck: true,
+    target: import_typescript2.default.ScriptTarget.ESNext
+  };
+  if (preflight !== "full") {
+    return [];
   }
-  return [
-    ...program.getOptionsDiagnostics(),
-    ...program.getGlobalDiagnostics()
-  ];
+  const compilerHost = import_typescript2.default.createCompilerHost(finalCompilerOptions);
+  const program = import_typescript2.default.createProgram(fileNames, finalCompilerOptions, compilerHost);
+  return [...import_typescript2.default.getPreEmitDiagnostics(program)];
 }
 async function readMetadata(metadataPath) {
   try {
@@ -586,6 +725,7 @@ var import_promises = __toESM(require("fs/promises"));
 var closureCompilerPackage = __toESM(require("google-closure-compiler"));
 var import_utils = require("google-closure-compiler/lib/utils.js");
 var import_path4 = __toESM(require("path"));
+var closureLibFilesCache = new Map;
 async function runClosureStage({
   emittedOutDir,
   entryFiles,
@@ -603,7 +743,7 @@ async function runClosureStage({
   const outputDir = import_path4.default.join(finalCacheDir, "outputs");
   await import_promises.default.mkdir(rawDir, { recursive: true });
   await import_promises.default.mkdir(outputDir, { recursive: true });
-  const closureLibFiles = await collectJavaScriptFiles(import_path4.default.join(packageRoot, "closure-lib"));
+  const closureLibFiles = await collectClosureLibFiles(packageRoot);
   const chunkPlan = buildChunkPlan({
     entryFiles,
     graph,
@@ -625,15 +765,16 @@ async function runClosureStage({
     outputDir: rawDir
   });
   if (exitCode !== 0) {
-    return exitCode;
+    return { exitCode, outputFiles: [] };
   }
-  const rawOutputs = await collectJavaScriptFiles(rawDir);
-  await Promise.all(rawOutputs.map(async (rawFile) => {
+  const rawOutputs = chunkPlan.map((chunk) => import_path4.default.join(rawDir, `${chunk.name}.js`));
+  const outputFiles = chunkPlan.map((chunk) => import_path4.default.join(outputDir, `${chunk.name}.js`));
+  await Promise.all(rawOutputs.map(async (rawFile, index) => {
     const contents = await import_promises.default.readFile(rawFile, "utf-8");
     const transformed = rewriteGccExports(contents);
-    await import_promises.default.writeFile(import_path4.default.join(outputDir, import_path4.default.basename(rawFile)), transformed);
+    await import_promises.default.writeFile(outputFiles[index], transformed);
   }));
-  return 0;
+  return { exitCode: 0, outputFiles };
 }
 async function runSingleClosureCompilation({
   closureLibFiles,
@@ -838,10 +979,43 @@ async function collectJavaScriptFiles(dir) {
   files.sort((left, right) => left.localeCompare(right));
   return files;
 }
+function collectClosureLibFiles(packageRoot) {
+  const closureLibDir = import_path4.default.join(packageRoot, "closure-lib");
+  const existing = closureLibFilesCache.get(closureLibDir);
+  if (existing) {
+    return existing;
+  }
+  const filesPromise = collectJavaScriptFiles(closureLibDir);
+  closureLibFilesCache.set(closureLibDir, filesPromise);
+  return filesPromise;
+}
 
 // src/pipeline/build-pipeline.ts
+var bundledExternsCache = null;
 async function build(options) {
   const normalizedOptions = normalizeBuildOptions(options);
+  const projectCacheDir = import_path5.default.join(import_path5.default.resolve(normalizedOptions.cache.dir || getDefaultPersistentCacheRoot()), hashContent(normalizedOptions.projectRoot));
+  if (normalizedOptions.cache.mode === "persistent") {
+    const fastSnapshot = await readJsonIfExists(import_path5.default.join(projectCacheDir, "final-fast.json"));
+    if (fastSnapshot && fastSnapshot.optionsSignature === getOptionsSignature(normalizedOptions) && fastSnapshot.packageSignature === await getPackageSignature()) {
+      const trackedFilesValid = await trackedFilesMatch2(fastSnapshot.trackedFiles);
+      if (trackedFilesValid) {
+        const finalMetadata = await readJsonIfExists(import_path5.default.join(projectCacheDir, "final", fastSnapshot.finalKey, "meta.json"));
+        if (finalMetadata && (await Promise.all(finalMetadata.outputFiles.map(pathExists2))).every(Boolean)) {
+          await publishOutputs(finalMetadata.outputFiles, normalizedOptions.outDir);
+          return {
+            cacheHit: true,
+            diagnostics: [],
+            emitSkipped: false,
+            exitCode: 0,
+            options: normalizedOptions,
+            outputFiles: finalMetadata.outputFiles,
+            workspaceDir: import_path5.default.join(projectCacheDir, "workspace")
+          };
+        }
+      }
+    }
+  }
   const resolved = await resolveBuild(normalizedOptions);
   try {
     const finalMetadataPath = import_path5.default.join(resolved.finalCacheDir, "meta.json");
@@ -887,7 +1061,7 @@ async function build(options) {
       };
     }
     const bundledExterns = await collectBundledExterns(resolved.packageRoot);
-    const exitCode = await runClosureStage({
+    const closureResult = await runClosureStage({
       emittedOutDir: nativeEmitResult.outDir,
       entryFiles: resolved.entryFiles,
       externPaths: [
@@ -908,20 +1082,31 @@ async function build(options) {
       shimFiles: resolved.shimFiles,
       workspaceDir: resolved.workspaceDir
     });
-    if (exitCode !== 0) {
+    if (closureResult.exitCode !== 0) {
       return {
         cacheHit: false,
         diagnostics: [],
         emitSkipped: true,
-        exitCode,
+        exitCode: closureResult.exitCode,
         options: normalizedOptions,
         outputFiles: [],
         workspaceDir: resolved.workspaceDir
       };
     }
-    const finalOutputFiles = await collectJavaScriptFiles2(import_path5.default.join(resolved.finalCacheDir, "outputs"));
+    const finalOutputFiles = closureResult.outputFiles;
     await writeJson(finalMetadataPath, {
       outputFiles: finalOutputFiles
+    });
+    await writeJson(import_path5.default.join(projectCacheDir, "final-fast.json"), {
+      finalKey: resolved.finalKey,
+      optionsSignature: getOptionsSignature(normalizedOptions),
+      packageSignature: await getPackageSignature(),
+      trackedFiles: await collectTrackedFiles2([
+        ...resolved.filePaths,
+        resolved.tsConfigPath,
+        ...normalizedOptions.externs,
+        ...normalizedOptions.js
+      ])
     });
     await publishOutputs(finalOutputFiles, normalizedOptions.outDir);
     return {
@@ -955,36 +1140,41 @@ async function cleanCache(options = {}) {
   await import_fs5.default.promises.rm(projectCacheDir, { force: true, recursive: true });
 }
 async function collectBundledExterns(packageRoot) {
-  const closureExternsPath = import_path5.default.join(packageRoot, "closure-externs");
-  const entries = await import_fs5.default.promises.readdir(closureExternsPath);
-  return entries.map((entry) => import_path5.default.join(closureExternsPath, entry)).sort((left, right) => left.localeCompare(right));
-}
-async function collectJavaScriptFiles2(dir) {
-  const files = [];
-  const pending = [dir];
-  while (pending.length > 0) {
-    const currentDir = pending.pop();
-    const entries = await import_fs5.default.promises.readdir(currentDir, {
-      withFileTypes: true
-    });
-    for (const entry of entries) {
-      const entryPath = import_path5.default.join(currentDir, entry.name);
-      if (entry.isDirectory()) {
-        pending.push(entryPath);
-        continue;
-      }
-      if (entry.name.endsWith(".js")) {
-        files.push(entryPath);
-      }
-    }
+  if (!bundledExternsCache) {
+    bundledExternsCache = (async () => {
+      const closureExternsPath = import_path5.default.join(packageRoot, "closure-externs");
+      const entries = await import_fs5.default.promises.readdir(closureExternsPath);
+      return entries.map((entry) => import_path5.default.join(closureExternsPath, entry)).sort((left, right) => left.localeCompare(right));
+    })();
   }
-  files.sort((left, right) => left.localeCompare(right));
-  return files;
+  return bundledExternsCache;
 }
 async function publishOutputs(outputFiles, outDir) {
+  if (await publishedOutputsMatch(outputFiles, outDir)) {
+    return;
+  }
   await import_fs5.default.promises.rm(outDir, { force: true, recursive: true });
   await import_fs5.default.promises.mkdir(outDir, { recursive: true });
   await Promise.all(outputFiles.map((outputFile) => import_fs5.default.promises.copyFile(outputFile, import_path5.default.join(outDir, import_path5.default.basename(outputFile)))));
+}
+async function publishedOutputsMatch(outputFiles, outDir) {
+  try {
+    const outEntries = (await import_fs5.default.promises.readdir(outDir)).sort();
+    const expectedEntries = outputFiles.map((outputFile) => import_path5.default.basename(outputFile)).sort();
+    if (outEntries.length !== expectedEntries.length || outEntries.some((entry, index) => entry !== expectedEntries[index])) {
+      return false;
+    }
+    return (await Promise.all(outputFiles.map(async (outputFile) => {
+      const destinationFile = import_path5.default.join(outDir, import_path5.default.basename(outputFile));
+      const [sourceStat, destinationStat] = await Promise.all([
+        import_fs5.default.promises.stat(outputFile),
+        import_fs5.default.promises.stat(destinationFile)
+      ]);
+      return sourceStat.size === destinationStat.size;
+    }))).every(Boolean);
+  } catch {
+    return false;
+  }
 }
 function toImportPath(relativePath) {
   const normalized = relativePath.replace(/\\/g, "/").replace(/\.[^/.]+$/, "");
@@ -997,6 +1187,29 @@ async function pathExists2(filePath) {
   } catch {
     return false;
   }
+}
+async function collectTrackedFiles2(filePaths) {
+  const trackedEntries = await Promise.all([...new Set(filePaths)].sort((left, right) => left.localeCompare(right)).map(async (filePath) => {
+    const stat = await import_fs5.default.promises.stat(filePath);
+    return [
+      filePath,
+      {
+        mtimeMs: stat.mtimeMs,
+        size: stat.size
+      }
+    ];
+  }));
+  return Object.fromEntries(trackedEntries);
+}
+async function trackedFilesMatch2(trackedFiles) {
+  return (await Promise.all(Object.entries(trackedFiles).map(async ([filePath, expected]) => {
+    try {
+      const stat = await import_fs5.default.promises.stat(filePath);
+      return stat.mtimeMs === expected.mtimeMs && stat.size === expected.size;
+    } catch {
+      return false;
+    }
+  }))).every(Boolean);
 }
 
 // src/api/build.ts
