@@ -1010,16 +1010,14 @@ async function build(options) {
     if (fastSnapshot && fastSnapshot.optionsSignature === getOptionsSignature(normalizedOptions) && fastSnapshot.packageSignature === await getPackageSignature()) {
       const trackedFilesValid = await trackedFilesMatch2(fastSnapshot.trackedFiles);
       if (trackedFilesValid) {
-        const finalMetadata = await readJsonIfExists(import_path5.default.join(projectCacheDir, "final", fastSnapshot.finalKey, "meta.json"));
-        if (finalMetadata && (await Promise.all(finalMetadata.outputFiles.map(pathExists2))).every(Boolean)) {
-          await publishOutputs(finalMetadata.outputFiles, normalizedOptions.outDir);
+        if (await publishedOutputsMatchSnapshot(fastSnapshot.publishedOutputs, normalizedOptions.outDir)) {
           return {
             cacheHit: true,
             diagnostics: [],
             emitSkipped: false,
             exitCode: 0,
             options: normalizedOptions,
-            outputFiles: finalMetadata.outputFiles,
+            outputFiles: fastSnapshot.publishedOutputs.map(({ name }) => import_path5.default.join(normalizedOptions.outDir, name)),
             workspaceDir: import_path5.default.join(projectCacheDir, "workspace")
           };
         }
@@ -1111,6 +1109,7 @@ async function build(options) {
       finalKey: resolved.finalKey,
       optionsSignature: getOptionsSignature(normalizedOptions),
       packageSignature: await getPackageSignature(),
+      publishedOutputs: await collectPublishedOutputStats(finalOutputFiles),
       trackedFiles: await collectTrackedFiles2([
         ...resolved.filePaths,
         resolved.tsConfigPath,
@@ -1186,6 +1185,21 @@ async function publishedOutputsMatch(outputFiles, outDir) {
     return false;
   }
 }
+async function publishedOutputsMatchSnapshot(publishedOutputs, outDir) {
+  try {
+    const outEntries = (await import_fs5.default.promises.readdir(outDir)).sort();
+    const expectedEntries = publishedOutputs.map(({ name }) => name).sort();
+    if (outEntries.length !== expectedEntries.length || outEntries.some((entry, index) => entry !== expectedEntries[index])) {
+      return false;
+    }
+    return (await Promise.all(publishedOutputs.map(async ({ name, size }) => {
+      const stat = await import_fs5.default.promises.stat(import_path5.default.join(outDir, name));
+      return stat.size === size;
+    }))).every(Boolean);
+  } catch {
+    return false;
+  }
+}
 function toImportPath(relativePath) {
   const normalized = relativePath.replace(/\\/g, "/").replace(/\.[^/.]+$/, "");
   return normalized.startsWith(".") ? normalized : `./${normalized}`;
@@ -1210,6 +1224,16 @@ async function collectTrackedFiles2(filePaths) {
     ];
   }));
   return Object.fromEntries(trackedEntries);
+}
+async function collectPublishedOutputStats(outputFiles) {
+  const outputStats = await Promise.all(outputFiles.map(async (outputFile) => {
+    const stat = await import_fs5.default.promises.stat(outputFile);
+    return {
+      name: import_path5.default.basename(outputFile),
+      size: stat.size
+    };
+  }));
+  return outputStats.sort((left, right) => left.name.localeCompare(right.name));
 }
 async function trackedFilesMatch2(trackedFiles) {
   return (await Promise.all(Object.entries(trackedFiles).map(async ([filePath, expected]) => {

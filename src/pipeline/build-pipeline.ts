@@ -26,6 +26,7 @@ interface FinalFastSnapshot {
   finalKey: string;
   optionsSignature: string;
   packageSignature: string;
+  publishedOutputs: Array<{ name: string; size: number }>;
   trackedFiles: Record<string, { mtimeMs: number; size: number }>;
 }
 
@@ -53,31 +54,21 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
         fastSnapshot.trackedFiles,
       );
       if (trackedFilesValid) {
-        const finalMetadata = await readJsonIfExists<FinalCacheMetadata>(
-          path.join(
-            projectCacheDir,
-            "final",
-            fastSnapshot.finalKey,
-            "meta.json",
-          ),
-        );
         if (
-          finalMetadata &&
-          (await Promise.all(finalMetadata.outputFiles.map(pathExists))).every(
-            Boolean,
+          await publishedOutputsMatchSnapshot(
+            fastSnapshot.publishedOutputs,
+            normalizedOptions.outDir,
           )
         ) {
-          await publishOutputs(
-            finalMetadata.outputFiles,
-            normalizedOptions.outDir,
-          );
           return {
             cacheHit: true,
             diagnostics: [],
             emitSkipped: false,
             exitCode: 0,
             options: normalizedOptions,
-            outputFiles: finalMetadata.outputFiles,
+            outputFiles: fastSnapshot.publishedOutputs.map(({ name }) =>
+              path.join(normalizedOptions.outDir, name),
+            ),
             workspaceDir: path.join(projectCacheDir, "workspace"),
           };
         }
@@ -194,6 +185,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       finalKey: resolved.finalKey,
       optionsSignature: getOptionsSignature(normalizedOptions),
       packageSignature: await getPackageSignature(),
+      publishedOutputs: await collectPublishedOutputStats(finalOutputFiles),
       trackedFiles: await collectTrackedFiles([
         ...resolved.filePaths,
         resolved.tsConfigPath,
@@ -299,6 +291,34 @@ async function publishedOutputsMatch(outputFiles: string[], outDir: string) {
   }
 }
 
+async function publishedOutputsMatchSnapshot(
+  publishedOutputs: Array<{ name: string; size: number }>,
+  outDir: string,
+) {
+  try {
+    const outEntries = (await fs.promises.readdir(outDir)).sort();
+    const expectedEntries = publishedOutputs.map(({ name }) => name).sort();
+
+    if (
+      outEntries.length !== expectedEntries.length ||
+      outEntries.some((entry, index) => entry !== expectedEntries[index])
+    ) {
+      return false;
+    }
+
+    return (
+      await Promise.all(
+        publishedOutputs.map(async ({ name, size }) => {
+          const stat = await fs.promises.stat(path.join(outDir, name));
+          return stat.size === size;
+        }),
+      )
+    ).every(Boolean);
+  } catch {
+    return false;
+  }
+}
+
 function toImportPath(relativePath: string): string {
   const normalized = relativePath.replace(/\\/g, "/").replace(/\.[^/.]+$/, "");
   return normalized.startsWith(".") ? normalized : `./${normalized}`;
@@ -330,6 +350,20 @@ async function collectTrackedFiles(filePaths: string[]) {
   );
 
   return Object.fromEntries(trackedEntries);
+}
+
+async function collectPublishedOutputStats(outputFiles: string[]) {
+  const outputStats = await Promise.all(
+    outputFiles.map(async (outputFile) => {
+      const stat = await fs.promises.stat(outputFile);
+      return {
+        name: path.basename(outputFile),
+        size: stat.size,
+      };
+    }),
+  );
+
+  return outputStats.sort((left, right) => left.name.localeCompare(right.name));
 }
 
 async function trackedFilesMatch(
