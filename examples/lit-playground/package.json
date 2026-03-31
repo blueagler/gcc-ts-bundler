@@ -1,11 +1,12 @@
 {
-  "name": "esm-package-demo",
+  "name": "lit-playground",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "node ./build.mjs"
   },
   "dependencies": {
-    "escape-string-regexp": "^5.0.0"
+    "@lit-labs/motion": "^1.0.3",
+    "lit": "^3.0.0"
   }
 }

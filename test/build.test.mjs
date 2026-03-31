@@ -127,6 +127,48 @@ test("full preflight accepts JS dependencies from node_modules", async (t) => {
   assert.equal(result.exitCode, 0);
 });
 
+test("builds decorated TypeScript sources", async (t) => {
+  const fixture = await createFixture(t);
+  await fixture.write(
+    "src/decorators.ts",
+    [
+      "export function increment(_value: unknown, _context: ClassAccessorDecoratorContext) {",
+      "  return {",
+      "    init(value: number) {",
+      "      return value + 1;",
+      "    },",
+      "  };",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "src/index.ts",
+    [
+      'import { increment } from "./decorators.js";',
+      "",
+      "class Counter {",
+      "  @increment accessor value = 1;",
+      "}",
+      "",
+      "export const total = new Counter().value;",
+      "",
+    ].join("\n"),
+  );
+
+  const result = await build({
+    cache: { mode: "off" },
+    entries: ["./index.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  assert.equal(result.exitCode, 0);
+  const output = await fixture.read("dist/index.js");
+  assert.doesNotMatch(output, /@increment/);
+});
+
 test("unsupported CommonJS packages surface actionable diagnostics", async (t) => {
   const fixture = await createFixture(t);
   await fixture.write(

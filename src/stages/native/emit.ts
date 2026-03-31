@@ -89,6 +89,22 @@ export async function emitNativeStage({
     outDir,
     workspaceDir,
   });
+  const decoratorDiagnostics = await rewriteDecoratedTypeScriptOutputs({
+    fileNames,
+    outDir,
+    tsConfigPath,
+    workspaceDir,
+  });
+  if (decoratorDiagnostics.length > 0) {
+    return {
+      diagnostics: decoratorDiagnostics,
+      emitSkipped: true,
+      emittedFiles: [],
+      externsPath,
+      outDir,
+      supportFiles: [],
+    };
+  }
   const supportFiles = await emitPackageSupportFiles({
     outDir,
     packageAliases,
@@ -219,6 +235,103 @@ function shouldIgnorePreflightDiagnostic(diagnostic: ts.Diagnostic) {
 
   const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n");
   return message.includes("node_modules") && message.includes("implicitly has an 'any' type");
+}
+
+async function rewriteDecoratedTypeScriptOutputs({
+  fileNames,
+  outDir,
+  tsConfigPath,
+  workspaceDir,
+}: {
+  fileNames: string[];
+  outDir: string;
+  tsConfigPath: string;
+  workspaceDir: string;
+}) {
+  const compilerOptions = loadCompilerOptions(tsConfigPath);
+  const decoratorCompilerOptions: ts.CompilerOptions = {
+    ...compilerOptions,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    sourceMap: false,
+    target: ts.ScriptTarget.ES2018,
+  };
+  const diagnostics: ts.Diagnostic[] = [];
+
+  for (const fileName of fileNames) {
+    if (!isTypeScriptSourceFile(fileName)) {
+      continue;
+    }
+
+    const sourceText = await fs.promises.readFile(fileName, "utf8");
+    if (!containsDecorators(fileName, sourceText)) {
+      continue;
+    }
+
+    const transpiled = ts.transpileModule(sourceText, {
+      compilerOptions: decoratorCompilerOptions,
+      fileName,
+      reportDiagnostics: true,
+    });
+    diagnostics.push(
+      ...(transpiled.diagnostics ?? []).filter(
+        (diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error,
+      ),
+    );
+
+    const outputPath = path
+      .join(outDir, path.relative(workspaceDir, fileName))
+      .replace(/\.[^/.]+$/, ".js");
+    await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
+    await fs.promises.writeFile(outputPath, transpiled.outputText, "utf8");
+  }
+
+  return diagnostics;
+}
+
+function containsDecorators(fileName: string, sourceText: string) {
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    getScriptKind(fileName),
+  );
+  let found = false;
+
+  const visit = (node: ts.Node) => {
+    if (found) {
+      return;
+    }
+
+    if (ts.canHaveDecorators(node) && (ts.getDecorators(node)?.length ?? 0) > 0) {
+      found = true;
+      return;
+    }
+
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return found;
+}
+
+function getScriptKind(fileName: string) {
+  if (fileName.endsWith(".tsx")) {
+    return ts.ScriptKind.TSX;
+  }
+  if (fileName.endsWith(".mts")) {
+    return ts.ScriptKind.TS;
+  }
+  return ts.ScriptKind.TS;
+}
+
+function isTypeScriptSourceFile(fileName: string) {
+  return (
+    fileName.endsWith(".ts") ||
+    fileName.endsWith(".tsx") ||
+    fileName.endsWith(".mts")
+  ) && !fileName.endsWith(".d.ts");
 }
 
 async function readMetadata(

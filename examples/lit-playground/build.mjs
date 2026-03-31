@@ -6,10 +6,10 @@ const projectRoot = process.cwd();
 const result = await build({
   cache: { mode: "off" },
   diagnostics: { preflight: "full" },
-  entries: ["./main.ts"],
+  entries: ["./motion-hero.ts"],
   outDir: "./dist",
   projectRoot,
-  srcDir: "./src",
+  srcDir: ".",
 });
 
 if (result.exitCode !== 0) {
@@ -17,12 +17,15 @@ if (result.exitCode !== 0) {
     const message =
       typeof diagnostic?.messageText === "string"
         ? diagnostic.messageText
-        : ts.flattenDiagnosticMessageText(diagnostic?.messageText ?? diagnostic, "\n");
+        : ts.flattenDiagnosticMessageText(
+            diagnostic?.messageText ?? diagnostic,
+            "\n",
+          );
     console.error(message);
   }
   process.exit(result.exitCode);
 }
 
 console.log(
-  `Built ESM package demo to ${path.relative(projectRoot, result.outputFiles[0] ?? "./dist/main.js")}`,
+  `Built Lit playground to ${path.relative(projectRoot, result.outputFiles[0] ?? "./dist/motion-hero.js")}`,
 );

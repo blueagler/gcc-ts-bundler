@@ -750,6 +750,22 @@ async function emitNativeStage({
     outDir,
     workspaceDir
   });
+  const decoratorDiagnostics = await rewriteDecoratedTypeScriptOutputs({
+    fileNames,
+    outDir,
+    tsConfigPath,
+    workspaceDir
+  });
+  if (decoratorDiagnostics.length > 0) {
+    return {
+      diagnostics: decoratorDiagnostics,
+      emitSkipped: true,
+      emittedFiles: [],
+      externsPath,
+      outDir,
+      supportFiles: []
+    };
+  }
   const supportFiles = await emitPackageSupportFiles({
     outDir,
     packageAliases,
@@ -833,6 +849,69 @@ function shouldIgnorePreflightDiagnostic(diagnostic) {
   const message = ts2.flattenDiagnosticMessageText(diagnostic.messageText, `
 `);
   return message.includes("node_modules") && message.includes("implicitly has an 'any' type");
+}
+async function rewriteDecoratedTypeScriptOutputs({
+  fileNames,
+  outDir,
+  tsConfigPath,
+  workspaceDir
+}) {
+  const compilerOptions = loadCompilerOptions(tsConfigPath);
+  const decoratorCompilerOptions = {
+    ...compilerOptions,
+    module: ts2.ModuleKind.ESNext,
+    moduleResolution: ts2.ModuleResolutionKind.Bundler,
+    sourceMap: false,
+    target: ts2.ScriptTarget.ES2018
+  };
+  const diagnostics = [];
+  for (const fileName of fileNames) {
+    if (!isTypeScriptSourceFile(fileName)) {
+      continue;
+    }
+    const sourceText = await fs5.promises.readFile(fileName, "utf8");
+    if (!containsDecorators(fileName, sourceText)) {
+      continue;
+    }
+    const transpiled = ts2.transpileModule(sourceText, {
+      compilerOptions: decoratorCompilerOptions,
+      fileName,
+      reportDiagnostics: true
+    });
+    diagnostics.push(...(transpiled.diagnostics ?? []).filter((diagnostic) => diagnostic.category === ts2.DiagnosticCategory.Error));
+    const outputPath = path4.join(outDir, path4.relative(workspaceDir, fileName)).replace(/\.[^/.]+$/, ".js");
+    await fs5.promises.mkdir(path4.dirname(outputPath), { recursive: true });
+    await fs5.promises.writeFile(outputPath, transpiled.outputText, "utf8");
+  }
+  return diagnostics;
+}
+function containsDecorators(fileName, sourceText) {
+  const sourceFile = ts2.createSourceFile(fileName, sourceText, ts2.ScriptTarget.Latest, true, getScriptKind(fileName));
+  let found = false;
+  const visit = (node) => {
+    if (found) {
+      return;
+    }
+    if (ts2.canHaveDecorators(node) && (ts2.getDecorators(node)?.length ?? 0) > 0) {
+      found = true;
+      return;
+    }
+    ts2.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
+}
+function getScriptKind(fileName) {
+  if (fileName.endsWith(".tsx")) {
+    return ts2.ScriptKind.TSX;
+  }
+  if (fileName.endsWith(".mts")) {
+    return ts2.ScriptKind.TS;
+  }
+  return ts2.ScriptKind.TS;
+}
+function isTypeScriptSourceFile(fileName) {
+  return (fileName.endsWith(".ts") || fileName.endsWith(".tsx") || fileName.endsWith(".mts")) && !fileName.endsWith(".d.ts");
 }
 async function readMetadata(metadataPath) {
   try {

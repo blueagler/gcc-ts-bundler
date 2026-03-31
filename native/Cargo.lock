@@ -375,6 +375,7 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "rayon",
+ "regex",
  "serde_json",
  "sha2",
  "swc_core",

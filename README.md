@@ -93,7 +93,7 @@ gcc-ts-bundler clean-cache --project-root=.
 
 ## Examples
 
-- `examples/esm-package-demo` is a working positive example that builds a browser-safe ESM dependency from `node_modules`.
+- `examples/lit-playground` is a copied Lit motion playground with its own package and build wrapper.
 - `examples/react-spa` is a real React SPA fixture with its own `package.json` and `node_modules`.
 - It currently demonstrates a v1 limitation: stock `react` resolves to CommonJS entrypoints, so the build is expected to fail until CommonJS package support is added.
 

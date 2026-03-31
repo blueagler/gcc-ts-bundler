@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use napi_derive::napi;
 use serde_json::Value;
@@ -440,7 +440,7 @@ fn resolve_relative_module(
     } else {
         context.workspace_dir
     };
-    let base = importer_dir.join(specifier);
+    let base = normalize_path(&importer_dir.join(specifier));
     resolve_module_base(
         &base,
         allowed_root,
@@ -508,10 +508,16 @@ fn resolve_package_path(
     context: &ResolveContext,
 ) -> std::result::Result<PathBuf, String> {
     if let Some(package_json) = package_json {
+        let prefer_development_exports =
+            package_prefers_development(package_json, package_dir, &package_import.package_name)?;
         if let Some(exports) = package_json.get("exports") {
-            if let Some(target) =
-                resolve_package_exports(exports, &package_import.subpath, &package_import.package_name)?
-            {
+            if let Some(target) = select_package_export_target(
+                exports,
+                package_dir,
+                &package_import.subpath,
+                &package_import.package_name,
+                prefer_development_exports,
+            )? {
                 if let Some(path) = resolve_package_target(
                     &target,
                     package_dir,
@@ -561,15 +567,86 @@ fn resolve_package_path(
         })
 }
 
-fn resolve_package_exports(
+fn select_package_export_target(
+    exports: &Value,
+    package_dir: &Path,
+    subpath: &str,
+    package_name: &str,
+    prefer_development_exports: bool,
+) -> std::result::Result<Option<String>, String> {
+    let default_target = resolve_package_exports_with_conditions(
+        exports,
+        subpath,
+        package_name,
+        &["browser", "import", "default"],
+    )?;
+    let development_target = resolve_package_exports_with_conditions(
+        exports,
+        subpath,
+        package_name,
+        &["browser", "development", "import", "default"],
+    )?;
+
+    match (default_target, development_target) {
+        (Some(default_target), Some(development_target))
+            if development_target != default_target
+                && (prefer_development_exports
+                    || should_prefer_development_target(
+                        package_dir,
+                        &default_target,
+                        &development_target,
+                    )?) =>
+        {
+            Ok(Some(development_target))
+        }
+        (Some(default_target), _) => Ok(Some(default_target)),
+        (None, Some(development_target)) => Ok(Some(development_target)),
+        (None, None) => Ok(None),
+    }
+}
+
+fn package_prefers_development(
+    package_json: &Value,
+    package_dir: &Path,
+    package_name: &str,
+) -> std::result::Result<bool, String> {
+    let Some(exports) = package_json.get("exports") else {
+        return Ok(false);
+    };
+
+    let default_target = resolve_package_exports_with_conditions(
+        exports,
+        ".",
+        package_name,
+        &["browser", "import", "default"],
+    )?;
+    let development_target = resolve_package_exports_with_conditions(
+        exports,
+        ".",
+        package_name,
+        &["browser", "development", "import", "default"],
+    )?;
+
+    match (default_target, development_target) {
+        (Some(default_target), Some(development_target))
+            if development_target != default_target =>
+        {
+            should_prefer_development_target(package_dir, &default_target, &development_target)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn resolve_package_exports_with_conditions(
     exports: &Value,
     subpath: &str,
     package_name: &str,
+    preferred_conditions: &[&str],
 ) -> std::result::Result<Option<String>, String> {
     match exports {
         Value::String(_) | Value::Array(_) => {
             if subpath == "." {
-                resolve_export_target_value(exports, package_name)
+                resolve_export_target_value(exports, package_name, preferred_conditions)
             } else {
                 Ok(None)
             }
@@ -577,11 +654,13 @@ fn resolve_package_exports(
         Value::Object(object) => {
             if object.keys().any(|key| key.starts_with('.')) {
                 if let Some(value) = object.get(subpath) {
-                    return resolve_export_target_value(value, package_name);
+                    return resolve_export_target_value(value, package_name, preferred_conditions);
                 }
 
                 if let Some((pattern, value)) = match_exports_pattern(object, subpath) {
-                    if let Some(target) = resolve_export_target_value(value, package_name)? {
+                    if let Some(target) =
+                        resolve_export_target_value(value, package_name, preferred_conditions)?
+                    {
                         let capture = extract_pattern_capture(pattern, subpath);
                         return Ok(Some(target.replace('*', &capture)));
                     }
@@ -589,7 +668,7 @@ fn resolve_package_exports(
 
                 Ok(None)
             } else if subpath == "." {
-                resolve_export_target_value(exports, package_name)
+                resolve_export_target_value(exports, package_name, preferred_conditions)
             } else {
                 Ok(None)
             }
@@ -601,21 +680,24 @@ fn resolve_package_exports(
 fn resolve_export_target_value(
     value: &Value,
     package_name: &str,
+    preferred_conditions: &[&str],
 ) -> std::result::Result<Option<String>, String> {
     match value {
         Value::String(target) => Ok(Some(target.clone())),
         Value::Array(values) => {
             for value in values {
-                if let Some(target) = resolve_export_target_value(value, package_name)? {
+                if let Some(target) =
+                    resolve_export_target_value(value, package_name, preferred_conditions)?
+                {
                     return Ok(Some(target));
                 }
             }
             Ok(None)
         }
         Value::Object(object) => {
-            for condition in ["browser", "import", "default"] {
-                if let Some(value) = object.get(condition) {
-                    return resolve_export_target_value(value, package_name);
+            for condition in preferred_conditions {
+                if let Some(value) = object.get(*condition) {
+                    return resolve_export_target_value(value, package_name, preferred_conditions);
                 }
             }
             Ok(None)
@@ -625,6 +707,35 @@ fn resolve_export_target_value(
         )),
         _ => Ok(None),
     }
+}
+
+fn should_prefer_development_target(
+    package_dir: &Path,
+    default_target: &str,
+    development_target: &str,
+) -> std::result::Result<bool, String> {
+    if !default_target.starts_with("./") || !development_target.starts_with("./") {
+        return Ok(false);
+    }
+
+    let default_path = package_dir.join(default_target.trim_start_matches("./"));
+    let development_path = package_dir.join(development_target.trim_start_matches("./"));
+    if !default_path.exists() || !development_path.exists() {
+        return Ok(false);
+    }
+
+    let default_source = fs::read_to_string(default_path).map_err(|error| error.to_string())?;
+    let development_source =
+        fs::read_to_string(development_path).map_err(|error| error.to_string())?;
+
+    Ok(
+        contains_closure_protocol_hints(&development_source)
+            && !contains_closure_protocol_hints(&default_source),
+    )
+}
+
+fn contains_closure_protocol_hints(source: &str) -> bool {
+    source.contains("JSCompiler_renameProperty(") || source.contains("@nocollapse")
 }
 
 fn resolve_browser_subpath(
@@ -662,7 +773,7 @@ fn resolve_package_target(
     _context: &ResolveContext,
 ) -> std::result::Result<Option<PathBuf>, String> {
     if target.starts_with("./") {
-        let base = package_dir.join(target.trim_start_matches("./"));
+        let base = normalize_path(&package_dir.join(target.trim_start_matches("./")));
         return resolve_module_base(
             &base,
             package_dir,
@@ -686,7 +797,7 @@ fn resolve_package_local_path(
     let base = if subpath == "." {
         package_dir.to_path_buf()
     } else {
-        package_dir.join(subpath.trim_start_matches("./"))
+        normalize_path(&package_dir.join(subpath.trim_start_matches("./")))
     };
 
     resolve_module_base(
@@ -955,6 +1066,7 @@ fn module_candidates(base: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if base.extension().is_some() {
         candidates.push(base.to_path_buf());
+        candidates.extend(rewrite_extension_candidates(base));
     } else {
         candidates.push(base.to_path_buf());
         for extension in [
@@ -989,6 +1101,24 @@ fn module_candidates(base: &Path) -> Vec<PathBuf> {
     candidates
 }
 
+fn rewrite_extension_candidates(base: &Path) -> Vec<PathBuf> {
+    let Some(extension) = base.extension().and_then(|value| value.to_str()) else {
+        return Vec::new();
+    };
+
+    let alternates: &[&str] = match extension {
+        "js" => &["ts", "tsx", "mts", "jsx", "mjs"],
+        "jsx" => &["tsx", "ts", "js", "mjs"],
+        "mjs" => &["mts", "ts", "js", "jsx"],
+        _ => &[],
+    };
+
+    alternates
+        .iter()
+        .map(|alternate| base.with_extension(alternate))
+        .collect()
+}
+
 fn export_name_from_module_export_name(name: &ModuleExportName) -> String {
     match name {
         ModuleExportName::Ident(ident) => ident.sym.to_string(),
@@ -1001,6 +1131,23 @@ fn path_relative_to(path: &Path, root: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .to_string()
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(_) | Component::Prefix(_) | Component::RootDir => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+
+    normalized
 }
 
 fn hash_content(content: &str) -> String {
@@ -1216,5 +1363,28 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("Node builtin"));
+    }
+
+    #[test]
+    fn resolves_js_specifier_to_ts_source() {
+        let temp_dir = TestDir::new();
+        temp_dir.write(
+            "src/index.ts",
+            "export { value } from \"./support.js\";\n",
+        );
+        temp_dir.write("src/support.ts", "export const value = 1;\n");
+
+        let result = resolve_graph(
+            vec![temp_dir.join("src/index.ts").to_string_lossy().to_string()],
+            temp_dir.join("src").to_string_lossy().to_string(),
+            temp_dir.path.to_string_lossy().to_string(),
+            "esm-only".to_string(),
+        )
+        .unwrap();
+
+        assert!(result
+            .sourceFiles
+            .iter()
+            .any(|path| path.ends_with("src/support.ts")));
     }
 }
