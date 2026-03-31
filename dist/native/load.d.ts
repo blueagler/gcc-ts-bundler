@@ -3,6 +3,11 @@ interface NativeEntryExportMetadata {
     hasDefaultExport: boolean;
     sourcePath: string;
 }
+interface NativePackageAliasEntry {
+    packageName: string;
+    subpath: string;
+    targetPath: string;
+}
 export interface NativeFileStateEntry {
     exists: boolean;
     filePath: string;
@@ -15,13 +20,17 @@ interface NativeTranspileOutput {
 }
 export declare function resolveGraph(input: {
     entries: string[];
+    packageMode: string;
     srcDir: string;
     workspaceDir: string;
 }): {
     entries: NativeEntryExportMetadata[];
     fileHashes: Record<string, string>;
-    filePaths: string[];
     graph: Record<string, string[]>;
+    packageAliases: NativePackageAliasEntry[];
+    packageJsonFiles: string[];
+    sourceFiles: string[];
+    trackedFiles: string[];
 };
 export declare function rewriteGccExports(code: string): string;
 export declare function transpileSources(input: {

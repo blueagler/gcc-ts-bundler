@@ -43,6 +43,7 @@ export async function runClosureStage({
   finalCacheDir,
   options,
   outDir,
+  supportFiles,
   packageRoot,
 }: {
   chunkPlan: ChunkPlanChunk[];
@@ -51,6 +52,7 @@ export async function runClosureStage({
   finalCacheDir: string;
   options: NormalizedBuildOptions;
   outDir: string;
+  supportFiles: string[];
   packageRoot: string;
 }): Promise<ClosureStageResult> {
   await fs.rm(finalCacheDir, { force: true, recursive: true });
@@ -73,6 +75,7 @@ export async function runClosureStage({
           entryChunk: resolvedChunks[0],
           externPaths,
           options,
+          supportFiles,
           rawOutputPath: path.join(rawDir, `${resolvedChunks[0].name}.js`),
         })
       : await runChunkedClosureCompilation({
@@ -81,6 +84,7 @@ export async function runClosureStage({
           externPaths,
           options,
           outputDir: rawDir,
+          supportFiles,
         });
 
   if (exitCode !== 0) {
@@ -114,12 +118,14 @@ async function runSingleClosureCompilation({
   entryChunk,
   externPaths,
   options,
+  supportFiles,
   rawOutputPath,
 }: {
   closureLibFiles: string[];
   entryChunk: ClosureChunk;
   externPaths: string[];
   options: NormalizedBuildOptions;
+  supportFiles: string[];
   rawOutputPath: string;
 }) {
   return runClosureCompiler({
@@ -127,7 +133,7 @@ async function runSingleClosureCompilation({
     compilationLevel: options.compilationLevel,
     dependencyMode: "NONE",
     externs: externPaths,
-    js: [...options.js, ...closureLibFiles, ...entryChunk.files],
+    js: [...options.js, ...closureLibFiles, ...supportFiles, ...entryChunk.files],
     jsOutputFile: rawOutputPath,
     languageIn: "UNSTABLE",
     languageOut: options.languageOut,
@@ -143,14 +149,16 @@ async function runChunkedClosureCompilation({
   externPaths,
   options,
   outputDir,
+  supportFiles,
 }: {
   chunkPlan: ClosureChunk[];
   closureLibFiles: string[];
   externPaths: string[];
   options: NormalizedBuildOptions;
   outputDir: string;
+  supportFiles: string[];
 }) {
-  const leadingJs = [...options.js, ...closureLibFiles];
+  const leadingJs = [...options.js, ...closureLibFiles, ...supportFiles];
   const chunkSpecs = chunkPlan.map((chunk, index) => {
     const dependencySuffix =
       chunk.dependencies.length > 0 ? `:${chunk.dependencies.join(",")}` : "";

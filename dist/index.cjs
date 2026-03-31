@@ -90,6 +90,9 @@ var DEFAULT_BUILD_OPTIONS = Object.freeze({
   languageOut: "ECMASCRIPT_NEXT",
   outDir: "",
   outputNames: [],
+  packages: {
+    mode: "esm-only"
+  },
   projectRoot: "",
   srcDir: ""
 });
@@ -204,12 +207,15 @@ function loadBinding() {
   return cachedBinding;
 }
 function resolveGraph(input) {
-  const result = loadBinding().resolveGraph(input.entries, input.srcDir, input.workspaceDir);
+  const result = loadBinding().resolveGraph(input.entries, input.srcDir, input.workspaceDir, input.packageMode);
   return {
     entries: result.entries,
     fileHashes: Object.fromEntries(result.fileHashes.map((entry) => [entry.filePath, entry.hash])),
-    filePaths: result.filePaths,
-    graph: Object.fromEntries(result.graph.map((entry) => [entry.filePath, entry.dependencies]))
+    graph: Object.fromEntries(result.graph.map((entry) => [entry.filePath, entry.dependencies])),
+    packageAliases: result.packageAliases,
+    packageJsonFiles: result.packageJsonFiles,
+    sourceFiles: result.sourceFiles,
+    trackedFiles: result.trackedFiles
   };
 }
 function rewriteGccExports(code) {
@@ -339,14 +345,15 @@ async function resolveBuild(context) {
     projectRoot: options.projectRoot
   });
   const sourceRoot = import_path3.default.join(cacheStore.workspaceDir, "src");
-  await ensureSourceSymlink(sourceRoot, options.srcDir);
+  await ensureDirectorySymlink(sourceRoot, options.srcDir);
+  await ensureWorkspaceNodeModules(cacheStore.workspaceDir, options);
   const tsConfigPath = await resolveTsConfigPath(options.projectRoot);
   const compilerOptionsHash = await hashTsConfig(tsConfigPath);
   const entryRelativePaths = options.entries.map((entry) => import_path3.default.relative(options.srcDir, entry));
   const overlayEntries = options.entries.map((entry) => import_path3.default.join(sourceRoot, import_path3.default.relative(options.srcDir, entry)));
   const resolveSnapshotPath = import_path3.default.join(cacheStore.projectCacheDir, "resolve", "latest.json");
   const cachedSnapshot = await readJsonIfExists(resolveSnapshotPath);
-  if (cachedSnapshot && cachedSnapshot.packageSignature === context.packageSignature && cachedSnapshot.compilerOptionsHash === compilerOptionsHash && cachedSnapshot.optionsSignature === context.optionsSignature && await trackedFilesMatch(cachedSnapshot.trackedFiles)) {
+  if (cachedSnapshot && Array.isArray(cachedSnapshot.packageAliases) && Array.isArray(cachedSnapshot.sourceFiles) && Array.isArray(cachedSnapshot.packageJsonFiles) && cachedSnapshot.packageSignature === context.packageSignature && cachedSnapshot.compilerOptionsHash === compilerOptionsHash && cachedSnapshot.optionsSignature === context.optionsSignature && await trackedFilesMatch(cachedSnapshot.trackedFiles)) {
     const entryFiles2 = cachedSnapshot.entryFiles.map((entry) => ({
       chunkName: entry.chunkName,
       exportNames: entry.exportNames,
@@ -360,12 +367,14 @@ async function resolveBuild(context) {
       cleanup: cacheStore.cleanup,
       chunkPlan: await readChunkPlan(cacheStore.projectCacheDir, cachedSnapshot.resolveKey),
       entryFiles: entryFiles2,
-      filePaths: cachedSnapshot.filePaths,
+      packageAliases: cachedSnapshot.packageAliases,
+      packageJsonFiles: cachedSnapshot.packageJsonFiles,
       finalCacheDir: import_path3.default.join(cacheStore.projectCacheDir, "final", cachedSnapshot.finalKey),
       finalKey: cachedSnapshot.finalKey,
       nativeEmitCacheDir: import_path3.default.join(cacheStore.projectCacheDir, "native-emit", cachedSnapshot.nativeEmitKey),
       shimDir: shimDir2,
       shimFiles: entryFiles2.map((entry) => import_path3.default.join(shimDir2, `${entry.chunkName}.ts`)),
+      sourceFiles: cachedSnapshot.sourceFiles,
       trackedFiles: cachedSnapshot.trackedFiles,
       tsConfigPath,
       workspaceDir: cacheStore.workspaceDir
@@ -373,6 +382,7 @@ async function resolveBuild(context) {
   }
   const graphResult = resolveGraph({
     entries: overlayEntries,
+    packageMode: options.packages.mode,
     srcDir: sourceRoot,
     workspaceDir: cacheStore.workspaceDir
   });
@@ -446,7 +456,7 @@ async function resolveBuild(context) {
     resolveKey
   });
   const trackedFiles = await collectTrackedFiles([
-    ...graphResult.filePaths,
+    ...graphResult.trackedFiles,
     tsConfigPath,
     ...options.externs,
     ...options.js
@@ -455,23 +465,27 @@ async function resolveBuild(context) {
     compilerOptionsHash,
     entryFiles: resolveMetadata.entryFiles,
     finalKey,
-    filePaths: graphResult.filePaths,
     nativeEmitKey,
     optionsSignature: context.optionsSignature,
+    packageAliases: graphResult.packageAliases,
+    packageJsonFiles: graphResult.packageJsonFiles,
     packageSignature: context.packageSignature,
     resolveKey,
+    sourceFiles: graphResult.sourceFiles,
     trackedFiles
   });
   return {
     cleanup: cacheStore.cleanup,
     chunkPlan: resolveMetadata.chunkPlan,
     entryFiles,
-    filePaths: graphResult.filePaths,
+    packageAliases: graphResult.packageAliases,
+    packageJsonFiles: graphResult.packageJsonFiles,
     finalCacheDir: import_path3.default.join(cacheStore.projectCacheDir, "final", finalKey),
     finalKey,
     nativeEmitCacheDir: import_path3.default.join(cacheStore.projectCacheDir, "native-emit", nativeEmitKey),
     shimDir,
     shimFiles,
+    sourceFiles: graphResult.sourceFiles,
     trackedFiles,
     tsConfigPath,
     workspaceDir: cacheStore.workspaceDir
@@ -500,7 +514,7 @@ function resolveOutputNames(entryPaths, outputNames) {
 function sanitizeChunkName(outputName) {
   return outputName.replace(/\.js$/, "").replace(/[^\w-]/g, "-");
 }
-async function ensureSourceSymlink(linkPath, targetPath) {
+async function ensureDirectorySymlink(linkPath, targetPath) {
   try {
     const currentTarget = await import_fs4.default.promises.readlink(linkPath);
     if (import_path3.default.resolve(import_path3.default.dirname(linkPath), currentTarget) === targetPath) {
@@ -514,6 +528,29 @@ async function ensureSourceSymlink(linkPath, targetPath) {
   }
   await import_fs4.default.promises.mkdir(import_path3.default.dirname(linkPath), { recursive: true });
   await import_fs4.default.promises.symlink(targetPath, linkPath, process.platform === "win32" ? "junction" : "dir");
+}
+async function ensureWorkspaceNodeModules(workspaceDir, options) {
+  const linkPath = import_path3.default.join(workspaceDir, "node_modules");
+  if (options.packages.mode === "off") {
+    await removePathIfExists(linkPath);
+    return;
+  }
+  const nodeModulesPath = import_path3.default.join(options.projectRoot, "node_modules");
+  const hasNodeModules = await import_fs4.default.promises.access(nodeModulesPath).then(() => true).catch(() => false);
+  if (!hasNodeModules) {
+    await removePathIfExists(linkPath);
+    return;
+  }
+  await ensureDirectorySymlink(linkPath, nodeModulesPath);
+}
+async function removePathIfExists(targetPath) {
+  try {
+    await import_fs4.default.promises.rm(targetPath, { force: true, recursive: true });
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
 }
 async function resolveTsConfigPath(projectRoot) {
   const configPath = import_typescript.default.findConfigFile(projectRoot, import_typescript.default.sys.fileExists, "tsconfig.json");
@@ -695,6 +732,7 @@ function getOptionsSignature(options) {
     languageOut: options.languageOut,
     outDir: options.outDir,
     outputNames: [...options.outputNames],
+    packages: options.packages,
     projectRoot: options.projectRoot,
     srcDir: options.srcDir
   });
@@ -720,6 +758,9 @@ function normalizeBuildOptions(options) {
     languageOut: options.languageOut ?? DEFAULT_BUILD_OPTIONS.languageOut,
     outDir,
     outputNames: [...options.outputNames ?? []],
+    packages: {
+      mode: options.packages?.mode ?? DEFAULT_BUILD_OPTIONS.packages.mode
+    },
     projectRoot,
     srcDir
   };
@@ -734,6 +775,8 @@ async function emitNativeStage({
   fileNames,
   metadataPath,
   options,
+  packageAliases,
+  packageJsonFiles,
   tsConfigPath,
   workspaceDir
 }) {
@@ -742,14 +785,16 @@ async function emitNativeStage({
   const cachedMetadata = await readMetadata(metadataPath);
   if (cachedMetadata && await filesExist([
     cachedMetadata.externsPath,
-    ...cachedMetadata.emittedFiles
+    ...cachedMetadata.emittedFiles,
+    ...cachedMetadata.supportFiles
   ])) {
     return {
       diagnostics: [],
       emitSkipped: false,
       emittedFiles: cachedMetadata.emittedFiles,
       externsPath: cachedMetadata.externsPath,
-      outDir
+      outDir,
+      supportFiles: cachedMetadata.supportFiles
     };
   }
   await import_fs5.default.promises.rm(outDir, { force: true, recursive: true });
@@ -766,7 +811,8 @@ async function emitNativeStage({
       emitSkipped: true,
       emittedFiles: [],
       externsPath,
-      outDir
+      outDir,
+      supportFiles: []
     };
   }
   const result = transpileSources({
@@ -775,16 +821,24 @@ async function emitNativeStage({
     outDir,
     workspaceDir
   });
+  const supportFiles = await emitPackageSupportFiles({
+    outDir,
+    packageAliases,
+    packageJsonFiles,
+    workspaceDir
+  });
   await import_fs5.default.promises.writeFile(metadataPath, JSON.stringify({
     emittedFiles: result.emittedFiles,
-    externsPath: result.externsPath
+    externsPath: result.externsPath,
+    supportFiles
   }, null, 2), "utf-8");
   return {
     diagnostics: [],
     emitSkipped: false,
     emittedFiles: result.emittedFiles,
     externsPath: result.externsPath,
-    outDir
+    outDir,
+    supportFiles
   };
 }
 function getPreflightDiagnostics({
@@ -809,15 +863,17 @@ function getPreflightDiagnostics({
   const compilerOptions = loadCompilerOptions(tsConfigPath);
   const finalCompilerOptions = {
     ...compilerOptions,
+    allowJs: true,
     ignoreDeprecations: "6.0",
     moduleResolution: import_typescript2.default.ModuleResolutionKind.Bundler,
+    noEmit: true,
     rootDir: workspaceDir,
     skipLibCheck: true,
     target: import_typescript2.default.ScriptTarget.ESNext
   };
   const compilerHost = import_typescript2.default.createCompilerHost(finalCompilerOptions);
   const program = import_typescript2.default.createProgram(fileNames, finalCompilerOptions, compilerHost);
-  return [...import_typescript2.default.getPreEmitDiagnostics(program)];
+  return [...import_typescript2.default.getPreEmitDiagnostics(program)].filter((diagnostic) => !shouldIgnorePreflightDiagnostic(diagnostic));
 }
 function loadCompilerOptions(configPath) {
   const configFile = import_typescript2.default.readConfigFile(configPath, import_typescript2.default.sys.readFile);
@@ -841,16 +897,96 @@ function createSimpleDiagnostic(messageText) {
     start: undefined
   };
 }
+function shouldIgnorePreflightDiagnostic(diagnostic) {
+  if (diagnostic.code !== 7016) {
+    return false;
+  }
+  const message = import_typescript2.default.flattenDiagnosticMessageText(diagnostic.messageText, `
+`);
+  return message.includes("node_modules") && message.includes("implicitly has an 'any' type");
+}
 async function readMetadata(metadataPath) {
   try {
     const raw = await import_fs5.default.promises.readFile(metadataPath, "utf-8");
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    return {
+      emittedFiles: parsed.emittedFiles ?? [],
+      externsPath: parsed.externsPath ?? "",
+      supportFiles: parsed.supportFiles ?? []
+    };
   } catch (error) {
     if (error.code === "ENOENT") {
       return null;
     }
     throw error;
   }
+}
+async function emitPackageSupportFiles({
+  outDir,
+  packageAliases,
+  packageJsonFiles,
+  workspaceDir
+}) {
+  const supportFiles = [];
+  const rootPackageNames = new Set(packageAliases.filter((alias) => alias.subpath === ".").map((alias) => alias.packageName));
+  for (const packageJsonFile of packageJsonFiles) {
+    const packageDir = import_path4.default.dirname(packageJsonFile);
+    const packageName = import_path4.default.relative(import_path4.default.join(workspaceDir, "node_modules"), packageDir);
+    if (rootPackageNames.has(packageName)) {
+      continue;
+    }
+    const outputPath = import_path4.default.join(outDir, import_path4.default.relative(workspaceDir, packageJsonFile));
+    await import_fs5.default.promises.mkdir(import_path4.default.dirname(outputPath), { recursive: true });
+    await import_fs5.default.promises.copyFile(packageJsonFile, outputPath);
+    supportFiles.push(outputPath);
+  }
+  for (const alias of packageAliases) {
+    const targetPath = toEmittedPath(alias.targetPath, outDir, workspaceDir);
+    const packageDir = import_path4.default.join(outDir, "node_modules", alias.packageName);
+    if (alias.subpath === ".") {
+      const entryFile = import_path4.default.join(packageDir, "__gcc_entry__.js");
+      const packageJsonOutput = import_path4.default.join(packageDir, "package.json");
+      await import_fs5.default.promises.mkdir(packageDir, { recursive: true });
+      await import_fs5.default.promises.writeFile(entryFile, createReexportModule(entryFile, targetPath), "utf8");
+      await import_fs5.default.promises.writeFile(packageJsonOutput, JSON.stringify({
+        browser: "./__gcc_entry__.js",
+        main: "./__gcc_entry__.js",
+        module: "./__gcc_entry__.js",
+        name: alias.packageName
+      }, null, 2), "utf8");
+      supportFiles.push(entryFile, packageJsonOutput);
+      continue;
+    }
+    const aliasFile = toAliasFilePath(packageDir, alias.subpath);
+    if (aliasFile === targetPath) {
+      continue;
+    }
+    await import_fs5.default.promises.mkdir(import_path4.default.dirname(aliasFile), { recursive: true });
+    await import_fs5.default.promises.writeFile(aliasFile, createReexportModule(aliasFile, targetPath), "utf8");
+    supportFiles.push(aliasFile);
+  }
+  return [...new Set(supportFiles)].sort((left, right) => left.localeCompare(right));
+}
+function createReexportModule(fromPath, targetPath) {
+  const relativePath = toImportPath(import_path4.default.relative(import_path4.default.dirname(fromPath), targetPath));
+  return [
+    `import * as __module from ${JSON.stringify(relativePath)};`,
+    `export * from ${JSON.stringify(relativePath)};`,
+    "export default __module.default;",
+    ""
+  ].join(`
+`);
+}
+function toAliasFilePath(packageDir, subpath) {
+  const relativeSubpath = subpath.replace(/^\.\//, "");
+  return import_path4.default.extname(relativeSubpath) ? import_path4.default.join(packageDir, relativeSubpath) : import_path4.default.join(packageDir, `${relativeSubpath}.js`);
+}
+function toEmittedPath(sourcePath, outDir, workspaceDir) {
+  return import_path4.default.join(outDir, import_path4.default.relative(workspaceDir, sourcePath)).replace(/\.[^/.]+$/, ".js");
+}
+function toImportPath(relativePath) {
+  const normalized = relativePath.replace(/\\/g, "/");
+  return normalized.startsWith(".") ? normalized : `./${normalized}`;
 }
 
 // src/stages/closure/run-closure.ts
@@ -866,6 +1002,7 @@ async function runClosureStage({
   finalCacheDir,
   options,
   outDir,
+  supportFiles,
   packageRoot
 }) {
   await import_promises.default.rm(finalCacheDir, { force: true, recursive: true });
@@ -883,13 +1020,15 @@ async function runClosureStage({
     entryChunk: resolvedChunks[0],
     externPaths,
     options,
+    supportFiles,
     rawOutputPath: import_path5.default.join(rawDir, `${resolvedChunks[0].name}.js`)
   }) : await runChunkedClosureCompilation({
     chunkPlan: resolvedChunks,
     closureLibFiles,
     externPaths,
     options,
-    outputDir: rawDir
+    outputDir: rawDir,
+    supportFiles
   });
   if (exitCode !== 0) {
     return { cacheOutputFiles: [], exitCode, outputFiles: [] };
@@ -910,6 +1049,7 @@ async function runSingleClosureCompilation({
   entryChunk,
   externPaths,
   options,
+  supportFiles,
   rawOutputPath
 }) {
   return runClosureCompiler({
@@ -917,7 +1057,7 @@ async function runSingleClosureCompilation({
     compilationLevel: options.compilationLevel,
     dependencyMode: "NONE",
     externs: externPaths,
-    js: [...options.js, ...closureLibFiles, ...entryChunk.files],
+    js: [...options.js, ...closureLibFiles, ...supportFiles, ...entryChunk.files],
     jsOutputFile: rawOutputPath,
     languageIn: "UNSTABLE",
     languageOut: options.languageOut,
@@ -931,9 +1071,10 @@ async function runChunkedClosureCompilation({
   closureLibFiles,
   externPaths,
   options,
-  outputDir
+  outputDir,
+  supportFiles
 }) {
-  const leadingJs = [...options.js, ...closureLibFiles];
+  const leadingJs = [...options.js, ...closureLibFiles, ...supportFiles];
   const chunkSpecs = chunkPlan.map((chunk, index) => {
     const dependencySuffix = chunk.dependencies.length > 0 ? `:${chunk.dependencies.join(",")}` : "";
     return `${chunk.name}:${chunk.files.length + (index === 0 ? leadingJs.length : 0)}${dependencySuffix}`;
@@ -1051,9 +1192,11 @@ async function build(options) {
       };
     }
   }
-  const resolved = await resolveBuild(context);
+  let resolved = null;
   try {
-    const finalMetadataPath = import_path6.default.join(resolved.finalCacheDir, "meta.json");
+    resolved = await resolveBuild(context);
+    const resolvedBuild = resolved;
+    const finalMetadataPath = import_path6.default.join(resolvedBuild.finalCacheDir, "meta.json");
     const finalMetadata = await readJsonIfExists(finalMetadataPath);
     if (context.options.cache.mode !== "off" && finalMetadata && await filesExist(finalMetadata.outputFiles)) {
       await publishOutputs(finalMetadata.outputFiles, context.options.outDir);
@@ -1066,21 +1209,23 @@ async function build(options) {
       };
     }
     writeEntryShims({
-      entries: resolved.entryFiles.map((entry) => ({
+      entries: resolvedBuild.entryFiles.map((entry) => ({
         exportNames: entry.exportNames,
         hasDefaultExport: entry.hasDefaultExport,
-        importPath: toImportPath(import_path6.default.relative(import_path6.default.dirname(import_path6.default.join(resolved.shimDir, `${entry.chunkName}.ts`)), entry.sourcePath)),
-        shimPath: import_path6.default.join(resolved.shimDir, `${entry.chunkName}.ts`)
+        importPath: toImportPath2(import_path6.default.relative(import_path6.default.dirname(import_path6.default.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`)), entry.sourcePath)),
+        shimPath: import_path6.default.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`)
       }))
     });
-    const nativeEmitMetadataPath = import_path6.default.join(resolved.nativeEmitCacheDir, "meta.json");
+    const nativeEmitMetadataPath = import_path6.default.join(resolvedBuild.nativeEmitCacheDir, "meta.json");
     const nativeEmitResult = await emitNativeStage({
-      cacheDir: resolved.nativeEmitCacheDir,
-      fileNames: [...resolved.filePaths, ...resolved.shimFiles],
+      cacheDir: resolvedBuild.nativeEmitCacheDir,
+      fileNames: [...resolvedBuild.sourceFiles, ...resolvedBuild.shimFiles],
       metadataPath: nativeEmitMetadataPath,
       options: context.options,
-      tsConfigPath: resolved.tsConfigPath,
-      workspaceDir: resolved.workspaceDir
+      packageAliases: resolvedBuild.packageAliases,
+      packageJsonFiles: resolvedBuild.packageJsonFiles,
+      tsConfigPath: resolvedBuild.tsConfigPath,
+      workspaceDir: resolvedBuild.workspaceDir
     });
     if (nativeEmitResult.diagnostics.length > 0 || nativeEmitResult.emitSkipped) {
       return {
@@ -1093,16 +1238,17 @@ async function build(options) {
     }
     const bundledExterns = await collectBundledExterns(context.packageRoot);
     const closureResult = await runClosureStage({
-      chunkPlan: resolved.chunkPlan,
+      chunkPlan: resolvedBuild.chunkPlan,
       emittedOutDir: nativeEmitResult.outDir,
       externPaths: [
         ...context.options.externs,
         ...bundledExterns,
         nativeEmitResult.externsPath
       ],
-      finalCacheDir: resolved.finalCacheDir,
+      finalCacheDir: resolvedBuild.finalCacheDir,
       options: context.options,
       outDir: context.options.outDir,
+      supportFiles: nativeEmitResult.supportFiles,
       packageRoot: context.packageRoot
     });
     if (closureResult.exitCode !== 0) {
@@ -1117,13 +1263,15 @@ async function build(options) {
     await writeJson(finalMetadataPath, {
       outputFiles: closureResult.cacheOutputFiles
     });
-    await writeJson(import_path6.default.join(context.projectCacheDir, "final-fast.json"), {
-      finalKey: resolved.finalKey,
-      optionsSignature: context.optionsSignature,
-      packageSignature: context.packageSignature,
-      publishedOutputs: await collectPublishedOutputStats(closureResult.outputFiles),
-      trackedFiles: resolved.trackedFiles
-    });
+    if (context.options.cache.mode === "persistent") {
+      await writeJson(import_path6.default.join(context.projectCacheDir, "final-fast.json"), {
+        finalKey: resolvedBuild.finalKey,
+        optionsSignature: context.optionsSignature,
+        packageSignature: context.packageSignature,
+        publishedOutputs: await collectPublishedOutputStats(closureResult.outputFiles),
+        trackedFiles: resolvedBuild.trackedFiles
+      });
+    }
     return {
       cacheHit: false,
       diagnostics: [],
@@ -1132,16 +1280,15 @@ async function build(options) {
       outputFiles: closureResult.outputFiles
     };
   } catch (error) {
-    console.error(error);
     return {
       cacheHit: false,
-      diagnostics: [],
+      diagnostics: [createBuildDiagnostic(error)],
       emitSkipped: true,
       exitCode: 1,
       outputFiles: []
     };
   } finally {
-    await resolved.cleanup();
+    await resolved?.cleanup();
   }
 }
 async function cleanCache(options = {}) {
@@ -1166,9 +1313,16 @@ async function publishOutputs(outputFiles, outDir) {
   }
   await copyOrLinkFiles(outputFiles, outDir);
 }
-function toImportPath(relativePath) {
+function toImportPath2(relativePath) {
   const normalized = relativePath.replace(/\\/g, "/").replace(/\.[^/.]+$/, "");
   return normalized.startsWith(".") ? normalized : `./${normalized}`;
+}
+function createBuildDiagnostic(error) {
+  return {
+    category: 1,
+    code: 0,
+    messageText: error instanceof Error ? error.message : typeof error === "string" ? error : "Build failed."
+  };
 }
 
 // src/api/build.ts

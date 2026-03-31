@@ -25,8 +25,9 @@ pub fn resolve_graph(
     entries: Vec<String>,
     src_dir: String,
     workspace_dir: String,
+    package_mode: String,
 ) -> Result<graph::ResolveGraphOutput> {
-    with_globals(|| graph::resolve_graph(entries, src_dir, workspace_dir))
+    with_globals(|| graph::resolve_graph(entries, src_dir, workspace_dir, package_mode))
 }
 
 #[napi(js_name = "writeEntryShims")]

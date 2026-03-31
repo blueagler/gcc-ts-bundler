@@ -5,7 +5,7 @@ import ts from "typescript";
 import { DiagnosticsPreflight } from "../../api/types";
 import { filesExist } from "../../internal/file-state";
 import { collectFileStates } from "../../native/load";
-import { NormalizedBuildOptions } from "../../internal/types";
+import { NormalizedBuildOptions, PackageAlias } from "../../internal/types";
 import { transpileSources } from "../../native/load";
 
 export interface NativeEmitStageResult {
@@ -14,11 +14,13 @@ export interface NativeEmitStageResult {
   emittedFiles: string[];
   externsPath: string;
   outDir: string;
+  supportFiles: string[];
 }
 
 interface NativeEmitMetadata {
   emittedFiles: string[];
   externsPath: string;
+  supportFiles: string[];
 }
 
 export async function emitNativeStage({
@@ -26,6 +28,8 @@ export async function emitNativeStage({
   fileNames,
   metadataPath,
   options,
+  packageAliases,
+  packageJsonFiles,
   tsConfigPath,
   workspaceDir,
 }: {
@@ -33,6 +37,8 @@ export async function emitNativeStage({
   fileNames: string[];
   metadataPath: string;
   options: NormalizedBuildOptions;
+  packageAliases: PackageAlias[];
+  packageJsonFiles: string[];
   tsConfigPath: string;
   workspaceDir: string;
 }): Promise<NativeEmitStageResult> {
@@ -44,6 +50,7 @@ export async function emitNativeStage({
     (await filesExist([
       cachedMetadata.externsPath,
       ...cachedMetadata.emittedFiles,
+      ...cachedMetadata.supportFiles,
     ]))
   ) {
     return {
@@ -52,6 +59,7 @@ export async function emitNativeStage({
       emittedFiles: cachedMetadata.emittedFiles,
       externsPath: cachedMetadata.externsPath,
       outDir,
+      supportFiles: cachedMetadata.supportFiles,
     };
   }
 
@@ -71,6 +79,7 @@ export async function emitNativeStage({
       emittedFiles: [],
       externsPath,
       outDir,
+      supportFiles: [],
     };
   }
 
@@ -80,6 +89,12 @@ export async function emitNativeStage({
     outDir,
     workspaceDir,
   });
+  const supportFiles = await emitPackageSupportFiles({
+    outDir,
+    packageAliases,
+    packageJsonFiles,
+    workspaceDir,
+  });
 
   await fs.promises.writeFile(
     metadataPath,
@@ -87,6 +102,7 @@ export async function emitNativeStage({
       {
         emittedFiles: result.emittedFiles,
         externsPath: result.externsPath,
+        supportFiles,
       } satisfies NativeEmitMetadata,
       null,
       2,
@@ -100,6 +116,7 @@ export async function emitNativeStage({
     emittedFiles: result.emittedFiles,
     externsPath: result.externsPath,
     outDir,
+    supportFiles,
   };
 }
 
@@ -137,8 +154,10 @@ function getPreflightDiagnostics({
   const compilerOptions = loadCompilerOptions(tsConfigPath);
   const finalCompilerOptions: ts.CompilerOptions = {
     ...compilerOptions,
+    allowJs: true,
     ignoreDeprecations: "6.0",
     moduleResolution: ts.ModuleResolutionKind.Bundler,
+    noEmit: true,
     rootDir: workspaceDir,
     skipLibCheck: true,
     target: ts.ScriptTarget.ESNext,
@@ -150,7 +169,9 @@ function getPreflightDiagnostics({
     finalCompilerOptions,
     compilerHost,
   );
-  return [...ts.getPreEmitDiagnostics(program)];
+  return [...ts.getPreEmitDiagnostics(program)].filter(
+    (diagnostic) => !shouldIgnorePreflightDiagnostic(diagnostic),
+  );
 }
 
 function loadCompilerOptions(configPath: string): ts.CompilerOptions {
@@ -191,12 +212,26 @@ function createSimpleDiagnostic(messageText: string): ts.Diagnostic {
   };
 }
 
+function shouldIgnorePreflightDiagnostic(diagnostic: ts.Diagnostic) {
+  if (diagnostic.code !== 7016) {
+    return false;
+  }
+
+  const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n");
+  return message.includes("node_modules") && message.includes("implicitly has an 'any' type");
+}
+
 async function readMetadata(
   metadataPath: string,
 ): Promise<NativeEmitMetadata | null> {
   try {
     const raw = await fs.promises.readFile(metadataPath, "utf-8");
-    return JSON.parse(raw) as NativeEmitMetadata;
+    const parsed = JSON.parse(raw) as Partial<NativeEmitMetadata>;
+    return {
+      emittedFiles: parsed.emittedFiles ?? [],
+      externsPath: parsed.externsPath ?? "",
+      supportFiles: parsed.supportFiles ?? [],
+    };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return null;
@@ -204,4 +239,119 @@ async function readMetadata(
 
     throw error;
   }
+}
+
+async function emitPackageSupportFiles({
+  outDir,
+  packageAliases,
+  packageJsonFiles,
+  workspaceDir,
+}: {
+  outDir: string;
+  packageAliases: PackageAlias[];
+  packageJsonFiles: string[];
+  workspaceDir: string;
+}) {
+  const supportFiles: string[] = [];
+  const rootPackageNames = new Set(
+    packageAliases
+      .filter((alias) => alias.subpath === ".")
+      .map((alias) => alias.packageName),
+  );
+
+  for (const packageJsonFile of packageJsonFiles) {
+    const packageDir = path.dirname(packageJsonFile);
+    const packageName = path.relative(
+      path.join(workspaceDir, "node_modules"),
+      packageDir,
+    );
+    if (rootPackageNames.has(packageName)) {
+      continue;
+    }
+
+    const outputPath = path.join(
+      outDir,
+      path.relative(workspaceDir, packageJsonFile),
+    );
+    await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
+    await fs.promises.copyFile(packageJsonFile, outputPath);
+    supportFiles.push(outputPath);
+  }
+
+  for (const alias of packageAliases) {
+    const targetPath = toEmittedPath(alias.targetPath, outDir, workspaceDir);
+    const packageDir = path.join(outDir, "node_modules", alias.packageName);
+
+    if (alias.subpath === ".") {
+      const entryFile = path.join(packageDir, "__gcc_entry__.js");
+      const packageJsonOutput = path.join(packageDir, "package.json");
+      await fs.promises.mkdir(packageDir, { recursive: true });
+      await fs.promises.writeFile(
+        entryFile,
+        createReexportModule(entryFile, targetPath),
+        "utf8",
+      );
+      await fs.promises.writeFile(
+        packageJsonOutput,
+        JSON.stringify(
+          {
+            browser: "./__gcc_entry__.js",
+            main: "./__gcc_entry__.js",
+            module: "./__gcc_entry__.js",
+            name: alias.packageName,
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+      supportFiles.push(entryFile, packageJsonOutput);
+      continue;
+    }
+
+    const aliasFile = toAliasFilePath(packageDir, alias.subpath);
+    if (aliasFile === targetPath) {
+      continue;
+    }
+
+    await fs.promises.mkdir(path.dirname(aliasFile), { recursive: true });
+    await fs.promises.writeFile(
+      aliasFile,
+      createReexportModule(aliasFile, targetPath),
+      "utf8",
+    );
+    supportFiles.push(aliasFile);
+  }
+
+  return [...new Set(supportFiles)].sort((left, right) =>
+    left.localeCompare(right),
+  );
+}
+
+function createReexportModule(fromPath: string, targetPath: string) {
+  const relativePath = toImportPath(path.relative(path.dirname(fromPath), targetPath));
+  return [
+    `import * as __module from ${JSON.stringify(relativePath)};`,
+    `export * from ${JSON.stringify(relativePath)};`,
+    "export default __module.default;",
+    "",
+  ].join("\n");
+}
+
+function toAliasFilePath(packageDir: string, subpath: string) {
+  const relativeSubpath = subpath.replace(/^\.\//, "");
+  return path.extname(relativeSubpath)
+    ? path.join(packageDir, relativeSubpath)
+    : path.join(packageDir, `${relativeSubpath}.js`);
+}
+
+function toEmittedPath(sourcePath: string, outDir: string, workspaceDir: string) {
+  return path
+    .join(outDir, path.relative(workspaceDir, sourcePath))
+    .replace(/\.[^/.]+$/, ".js");
+}
+
+function toImportPath(relativePath: string) {
+  const normalized = relativePath.replace(/\\/g, "/");
+  return normalized.startsWith(".") ? normalized : `./${normalized}`;
 }

@@ -10,4 +10,6 @@ export type {
   DiagnosticsOptions,
   DiagnosticsPreflight,
   LanguageOut,
+  PackageMode,
+  PackageOptions,
 } from "./api/types";

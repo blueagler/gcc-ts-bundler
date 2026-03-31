@@ -9,6 +9,7 @@ Unlike standard TS bundlers, GCC-TS-Bundler is optimized for Closure's aggressiv
 - Bundles TypeScript code using Google Closure Compiler with a native Rust front-end.
 - Utilizes Closure Compiler's advanced optimizations and dead code elimination.
 - Uses native graph resolution, shim emission, and TypeScript stripping.
+- Resolves browser-safe ESM dependencies from `node_modules`.
 - Generates Closure-ready JS and extern placeholders.
 - Renames property names in objects for better performance.
 - Radically restructures code for optimal performance.
@@ -46,6 +47,7 @@ Programmatic options:
 - `srcDir`
 - `entries`
 - `outDir`
+- `packages`
 - `languageOut`
 - `compilationLevel`
 - `cache`
@@ -56,10 +58,13 @@ Programmatic options:
 Defaults:
 
 - `cache.mode = "persistent"`
+- `packages.mode = "esm-only"`
 - persistent cache lives outside the user project
 - `diagnostics.preflight = "errors-only"`
 
 The runtime path uses a native Rust addon for graph resolution, shim emission, and GCC export rewriting. Closure Compiler remains the final aggressive optimizer.
+
+`packages.mode = "esm-only"` supports browser-safe ESM dependencies from `node_modules`. This mode rejects CommonJS packages, Node builtins, JSON modules, and native addons.
 
 ## CLI
 
@@ -78,12 +83,19 @@ gcc-ts-bundler clean-cache --project-root=.
 - `--out-dir`: Output directory for generated JS
 - `--language-out`: ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT
 - `--compilation-level`: WHITESPACE_ONLY | SIMPLE | ADVANCED
+- `--packages`: `off | esm-only`
 - `--cache-mode`: `off | temp | persistent`
 - `--cache-dir`: Explicit cache directory
 - `--preflight`: `off | errors-only | full`
 - `--fatal-warnings`: Whether typed transpile warnings should be fatal
 - `--verbose`: Print diagnostics to the console.
 - `-h, --help`: Show this help message.
+
+## Examples
+
+- `examples/esm-package-demo` is a working positive example that builds a browser-safe ESM dependency from `node_modules`.
+- `examples/react-spa` is a real React SPA fixture with its own `package.json` and `node_modules`.
+- It currently demonstrates a v1 limitation: stock `react` resolves to CommonJS entrypoints, so the build is expected to fail until CommonJS package support is added.
 
 ## License
 

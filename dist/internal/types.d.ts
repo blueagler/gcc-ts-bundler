@@ -1,4 +1,4 @@
-import type { BuildOptions, CacheOptions, CompilationLevel, DiagnosticsOptions, LanguageOut } from "../api/types";
+import type { BuildOptions, CacheOptions, CompilationLevel, DiagnosticsOptions, LanguageOut, PackageOptions } from "../api/types";
 import type { FileStateSnapshot } from "./file-state";
 export interface NormalizedBuildOptions {
     cache: Required<CacheOptions>;
@@ -10,6 +10,7 @@ export interface NormalizedBuildOptions {
     languageOut: LanguageOut;
     outDir: string;
     outputNames: string[];
+    packages: Required<PackageOptions>;
     projectRoot: string;
     srcDir: string;
 }
@@ -24,6 +25,11 @@ export interface BuildEntry {
     outputName: string;
     sourcePath: string;
     sourceRelativePath: string;
+}
+export interface PackageAlias {
+    packageName: string;
+    subpath: string;
+    targetPath: string;
 }
 export interface ChunkPlanChunk {
     dependencies: string[];
@@ -41,7 +47,9 @@ export interface ResolvedBuild {
     cleanup(): Promise<void>;
     chunkPlan: ChunkPlanChunk[];
     entryFiles: BuildEntry[];
-    filePaths: string[];
+    packageAliases: PackageAlias[];
+    packageJsonFiles: string[];
+    sourceFiles: string[];
     finalCacheDir: string;
     finalKey: string;
     nativeEmitCacheDir: string;

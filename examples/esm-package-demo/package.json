@@ -1,0 +1,11 @@
+{
+  "name": "esm-package-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ./build.mjs"
+  },
+  "dependencies": {
+    "escape-string-regexp": "^5.0.0"
+  }
+}

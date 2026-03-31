@@ -5,3 +5,5 @@ yarn.lock
 bun.lockb
 native/index.node
 native/target/
+examples/**/dist/
+examples/**/node_modules/

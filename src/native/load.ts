@@ -19,11 +19,20 @@ interface NativeDependencyGraphEntry {
   filePath: string;
 }
 
+interface NativePackageAliasEntry {
+  packageName: string;
+  subpath: string;
+  targetPath: string;
+}
+
 interface NativeResolveGraphOutput {
   entries: NativeEntryExportMetadata[];
   fileHashes: NativeFileHashEntry[];
-  filePaths: string[];
   graph: NativeDependencyGraphEntry[];
+  packageAliases: NativePackageAliasEntry[];
+  packageJsonFiles: string[];
+  sourceFiles: string[];
+  trackedFiles: string[];
 }
 
 export interface NativeFileStateEntry {
@@ -52,6 +61,7 @@ interface NativeBinding {
     entries: string[],
     srcDir: string,
     workspaceDir: string,
+    packageMode: string,
   ): NativeResolveGraphOutput;
   rewriteGccExports(code: string): string;
   transpileSources(
@@ -83,6 +93,7 @@ function loadBinding(): NativeBinding {
 
 export function resolveGraph(input: {
   entries: string[];
+  packageMode: string;
   srcDir: string;
   workspaceDir: string;
 }) {
@@ -90,16 +101,20 @@ export function resolveGraph(input: {
     input.entries,
     input.srcDir,
     input.workspaceDir,
+    input.packageMode,
   );
   return {
     entries: result.entries,
     fileHashes: Object.fromEntries(
       result.fileHashes.map((entry) => [entry.filePath, entry.hash]),
     ) as Record<string, string>,
-    filePaths: result.filePaths,
     graph: Object.fromEntries(
       result.graph.map((entry) => [entry.filePath, entry.dependencies]),
     ) as Record<string, string[]>,
+    packageAliases: result.packageAliases,
+    packageJsonFiles: result.packageJsonFiles,
+    sourceFiles: result.sourceFiles,
+    trackedFiles: result.trackedFiles,
   };
 }
 

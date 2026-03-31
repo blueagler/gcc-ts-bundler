@@ -69,10 +69,12 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     }
   }
 
-  const resolved = await resolveBuild(context);
+  let resolved: Awaited<ReturnType<typeof resolveBuild>> | null = null;
 
   try {
-    const finalMetadataPath = path.join(resolved.finalCacheDir, "meta.json");
+    resolved = await resolveBuild(context);
+    const resolvedBuild = resolved;
+    const finalMetadataPath = path.join(resolvedBuild.finalCacheDir, "meta.json");
     const finalMetadata =
       await readJsonIfExists<FinalCacheMetadata>(finalMetadataPath);
     if (
@@ -93,30 +95,34 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     }
 
     writeEntryShims({
-      entries: resolved.entryFiles.map((entry) => ({
+      entries: resolvedBuild.entryFiles.map((entry) => ({
         exportNames: entry.exportNames,
         hasDefaultExport: entry.hasDefaultExport,
         importPath: toImportPath(
           path.relative(
-            path.dirname(path.join(resolved.shimDir, `${entry.chunkName}.ts`)),
+            path.dirname(
+              path.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`),
+            ),
             entry.sourcePath,
           ),
         ),
-        shimPath: path.join(resolved.shimDir, `${entry.chunkName}.ts`),
+        shimPath: path.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`),
       })),
     });
 
     const nativeEmitMetadataPath = path.join(
-      resolved.nativeEmitCacheDir,
+      resolvedBuild.nativeEmitCacheDir,
       "meta.json",
     );
     const nativeEmitResult = await emitNativeStage({
-      cacheDir: resolved.nativeEmitCacheDir,
-      fileNames: [...resolved.filePaths, ...resolved.shimFiles],
+      cacheDir: resolvedBuild.nativeEmitCacheDir,
+      fileNames: [...resolvedBuild.sourceFiles, ...resolvedBuild.shimFiles],
       metadataPath: nativeEmitMetadataPath,
       options: context.options,
-      tsConfigPath: resolved.tsConfigPath,
-      workspaceDir: resolved.workspaceDir,
+      packageAliases: resolvedBuild.packageAliases,
+      packageJsonFiles: resolvedBuild.packageJsonFiles,
+      tsConfigPath: resolvedBuild.tsConfigPath,
+      workspaceDir: resolvedBuild.workspaceDir,
     });
     if (
       nativeEmitResult.diagnostics.length > 0 ||
@@ -133,16 +139,17 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 
     const bundledExterns = await collectBundledExterns(context.packageRoot);
     const closureResult = await runClosureStage({
-      chunkPlan: resolved.chunkPlan,
+      chunkPlan: resolvedBuild.chunkPlan,
       emittedOutDir: nativeEmitResult.outDir,
       externPaths: [
         ...context.options.externs,
         ...bundledExterns,
         nativeEmitResult.externsPath,
       ],
-      finalCacheDir: resolved.finalCacheDir,
+      finalCacheDir: resolvedBuild.finalCacheDir,
       options: context.options,
       outDir: context.options.outDir,
+      supportFiles: nativeEmitResult.supportFiles,
       packageRoot: context.packageRoot,
     });
     if (closureResult.exitCode !== 0) {
@@ -158,15 +165,17 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     await writeJson(finalMetadataPath, {
       outputFiles: closureResult.cacheOutputFiles,
     } satisfies FinalCacheMetadata);
-    await writeJson(path.join(context.projectCacheDir, "final-fast.json"), {
-      finalKey: resolved.finalKey,
-      optionsSignature: context.optionsSignature,
-      packageSignature: context.packageSignature,
-      publishedOutputs: await collectPublishedOutputStats(
-        closureResult.outputFiles,
-      ),
-      trackedFiles: resolved.trackedFiles,
-    } satisfies FinalFastSnapshot);
+    if (context.options.cache.mode === "persistent") {
+      await writeJson(path.join(context.projectCacheDir, "final-fast.json"), {
+        finalKey: resolvedBuild.finalKey,
+        optionsSignature: context.optionsSignature,
+        packageSignature: context.packageSignature,
+        publishedOutputs: await collectPublishedOutputStats(
+          closureResult.outputFiles,
+        ),
+        trackedFiles: resolvedBuild.trackedFiles,
+      } satisfies FinalFastSnapshot);
+    }
 
     return {
       cacheHit: false,
@@ -176,16 +185,15 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       outputFiles: closureResult.outputFiles,
     };
   } catch (error) {
-    console.error(error);
     return {
       cacheHit: false,
-      diagnostics: [],
+      diagnostics: [createBuildDiagnostic(error)],
       emitSkipped: true,
       exitCode: 1,
       outputFiles: [],
     };
   } finally {
-    await resolved.cleanup();
+    await resolved?.cleanup();
   }
 }
 
@@ -223,4 +231,15 @@ async function publishOutputs(outputFiles: string[], outDir: string) {
 function toImportPath(relativePath: string): string {
   const normalized = relativePath.replace(/\\/g, "/").replace(/\.[^/.]+$/, "");
   return normalized.startsWith(".") ? normalized : `./${normalized}`;
+}
+
+function createBuildDiagnostic(error: unknown) {
+  return {
+    category: 1,
+    code: 0,
+    messageText:
+      error instanceof Error ? error.message : typeof error === "string"
+        ? error
+        : "Build failed.",
+  };
 }

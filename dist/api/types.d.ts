@@ -2,6 +2,7 @@ export type CompilationLevel = "WHITESPACE_ONLY" | "SIMPLE" | "ADVANCED";
 export type LanguageOut = "ECMASCRIPT3" | "ECMASCRIPT5" | "ECMASCRIPT6" | "ECMASCRIPT_NEXT";
 export type CacheMode = "off" | "temp" | "persistent";
 export type DiagnosticsPreflight = "off" | "errors-only" | "full";
+export type PackageMode = "off" | "esm-only";
 export interface CacheOptions {
     dir?: string;
     mode?: CacheMode;
@@ -10,6 +11,9 @@ export interface DiagnosticsOptions {
     fatalWarnings?: boolean;
     preflight?: DiagnosticsPreflight;
     verbose?: boolean;
+}
+export interface PackageOptions {
+    mode?: PackageMode;
 }
 export interface BuildOptions {
     cache?: CacheOptions;
@@ -21,6 +25,7 @@ export interface BuildOptions {
     languageOut?: LanguageOut;
     outDir?: string;
     outputNames?: string[];
+    packages?: PackageOptions;
     projectRoot?: string;
     srcDir?: string;
 }
@@ -52,6 +57,9 @@ export declare const DEFAULT_BUILD_OPTIONS: Readonly<{
     languageOut: LanguageOut;
     outDir: "";
     outputNames: string[];
+    packages: {
+        mode: PackageMode;
+    };
     projectRoot: "";
     srcDir: "";
 }>;

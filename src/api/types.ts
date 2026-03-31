@@ -6,6 +6,7 @@ export type LanguageOut =
   | "ECMASCRIPT_NEXT";
 export type CacheMode = "off" | "temp" | "persistent";
 export type DiagnosticsPreflight = "off" | "errors-only" | "full";
+export type PackageMode = "off" | "esm-only";
 
 export interface CacheOptions {
   dir?: string;
@@ -18,6 +19,10 @@ export interface DiagnosticsOptions {
   verbose?: boolean;
 }
 
+export interface PackageOptions {
+  mode?: PackageMode;
+}
+
 export interface BuildOptions {
   cache?: CacheOptions;
   compilationLevel?: CompilationLevel;
@@ -28,6 +33,7 @@ export interface BuildOptions {
   languageOut?: LanguageOut;
   outDir?: string;
   outputNames?: string[];
+  packages?: PackageOptions;
   projectRoot?: string;
   srcDir?: string;
 }
@@ -62,6 +68,9 @@ export const DEFAULT_BUILD_OPTIONS = Object.freeze({
   languageOut: "ECMASCRIPT_NEXT" as LanguageOut,
   outDir: "",
   outputNames: [] as string[],
+  packages: {
+    mode: "esm-only" as PackageMode,
+  },
   projectRoot: "",
   srcDir: "",
 });

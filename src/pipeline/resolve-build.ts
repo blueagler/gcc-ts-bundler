@@ -17,6 +17,7 @@ import {
   BuildEntry,
   ChunkPlanChunk,
   NormalizedBuildOptions,
+  PackageAlias,
   ResolvedBuild,
 } from "../internal/types";
 import { resolveGraph } from "../native/load";
@@ -36,11 +37,13 @@ interface ResolveSnapshot {
   compilerOptionsHash: string;
   entryFiles: ResolveMetadata["entryFiles"];
   finalKey: string;
-  filePaths: string[];
   nativeEmitKey: string;
   optionsSignature: string;
+  packageAliases: PackageAlias[];
+  packageJsonFiles: string[];
   packageSignature: string;
   resolveKey: string;
+  sourceFiles: string[];
   trackedFiles: Awaited<ReturnType<typeof collectTrackedFiles>>;
 }
 
@@ -74,7 +77,8 @@ export async function resolveBuild(
     projectRoot: options.projectRoot,
   });
   const sourceRoot = path.join(cacheStore.workspaceDir, "src");
-  await ensureSourceSymlink(sourceRoot, options.srcDir);
+  await ensureDirectorySymlink(sourceRoot, options.srcDir);
+  await ensureWorkspaceNodeModules(cacheStore.workspaceDir, options);
 
   const tsConfigPath = await resolveTsConfigPath(options.projectRoot);
   const compilerOptionsHash = await hashTsConfig(tsConfigPath);
@@ -93,6 +97,9 @@ export async function resolveBuild(
     await readJsonIfExists<ResolveSnapshot>(resolveSnapshotPath);
   if (
     cachedSnapshot &&
+    Array.isArray(cachedSnapshot.packageAliases) &&
+    Array.isArray(cachedSnapshot.sourceFiles) &&
+    Array.isArray(cachedSnapshot.packageJsonFiles) &&
     cachedSnapshot.packageSignature === context.packageSignature &&
     cachedSnapshot.compilerOptionsHash === compilerOptionsHash &&
     cachedSnapshot.optionsSignature === context.optionsSignature &&
@@ -117,7 +124,8 @@ export async function resolveBuild(
         cachedSnapshot.resolveKey,
       ),
       entryFiles,
-      filePaths: cachedSnapshot.filePaths,
+      packageAliases: cachedSnapshot.packageAliases,
+      packageJsonFiles: cachedSnapshot.packageJsonFiles,
       finalCacheDir: path.join(
         cacheStore.projectCacheDir,
         "final",
@@ -133,6 +141,7 @@ export async function resolveBuild(
       shimFiles: entryFiles.map((entry) =>
         path.join(shimDir, `${entry.chunkName}.ts`),
       ),
+      sourceFiles: cachedSnapshot.sourceFiles,
       trackedFiles: cachedSnapshot.trackedFiles,
       tsConfigPath,
       workspaceDir: cacheStore.workspaceDir,
@@ -141,6 +150,7 @@ export async function resolveBuild(
 
   const graphResult = resolveGraph({
     entries: overlayEntries,
+    packageMode: options.packages.mode,
     srcDir: sourceRoot,
     workspaceDir: cacheStore.workspaceDir,
   });
@@ -234,7 +244,7 @@ export async function resolveBuild(
     resolveKey,
   });
   const trackedFiles = await collectTrackedFiles([
-    ...graphResult.filePaths,
+    ...graphResult.trackedFiles,
     tsConfigPath,
     ...options.externs,
     ...options.js,
@@ -243,11 +253,13 @@ export async function resolveBuild(
     compilerOptionsHash,
     entryFiles: resolveMetadata.entryFiles,
     finalKey,
-    filePaths: graphResult.filePaths,
     nativeEmitKey,
     optionsSignature: context.optionsSignature,
+    packageAliases: graphResult.packageAliases,
+    packageJsonFiles: graphResult.packageJsonFiles,
     packageSignature: context.packageSignature,
     resolveKey,
+    sourceFiles: graphResult.sourceFiles,
     trackedFiles,
   } satisfies ResolveSnapshot);
 
@@ -255,7 +267,8 @@ export async function resolveBuild(
     cleanup: cacheStore.cleanup,
     chunkPlan: resolveMetadata.chunkPlan,
     entryFiles,
-    filePaths: graphResult.filePaths,
+    packageAliases: graphResult.packageAliases,
+    packageJsonFiles: graphResult.packageJsonFiles,
     finalCacheDir: path.join(cacheStore.projectCacheDir, "final", finalKey),
     finalKey,
     nativeEmitCacheDir: path.join(
@@ -265,6 +278,7 @@ export async function resolveBuild(
     ),
     shimDir,
     shimFiles,
+    sourceFiles: graphResult.sourceFiles,
     trackedFiles,
     tsConfigPath,
     workspaceDir: cacheStore.workspaceDir,
@@ -306,7 +320,7 @@ function sanitizeChunkName(outputName: string): string {
   return outputName.replace(/\.js$/, "").replace(/[^\w-]/g, "-");
 }
 
-async function ensureSourceSymlink(linkPath: string, targetPath: string) {
+async function ensureDirectorySymlink(linkPath: string, targetPath: string) {
   try {
     const currentTarget = await fs.promises.readlink(linkPath);
     if (path.resolve(path.dirname(linkPath), currentTarget) === targetPath) {
@@ -325,6 +339,39 @@ async function ensureSourceSymlink(linkPath: string, targetPath: string) {
     linkPath,
     process.platform === "win32" ? "junction" : "dir",
   );
+}
+
+async function ensureWorkspaceNodeModules(
+  workspaceDir: string,
+  options: NormalizedBuildOptions,
+) {
+  const linkPath = path.join(workspaceDir, "node_modules");
+  if (options.packages.mode === "off") {
+    await removePathIfExists(linkPath);
+    return;
+  }
+
+  const nodeModulesPath = path.join(options.projectRoot, "node_modules");
+  const hasNodeModules = await fs.promises
+    .access(nodeModulesPath)
+    .then(() => true)
+    .catch(() => false);
+  if (!hasNodeModules) {
+    await removePathIfExists(linkPath);
+    return;
+  }
+
+  await ensureDirectorySymlink(linkPath, nodeModulesPath);
+}
+
+async function removePathIfExists(targetPath: string) {
+  try {
+    await fs.promises.rm(targetPath, { force: true, recursive: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+  }
 }
 
 async function resolveTsConfigPath(projectRoot: string): Promise<string> {
@@ -588,6 +635,7 @@ export function getOptionsSignature(options: NormalizedBuildOptions) {
     languageOut: options.languageOut,
     outDir: options.outDir,
     outputNames: [...options.outputNames],
+    packages: options.packages,
     projectRoot: options.projectRoot,
     srcDir: options.srcDir,
   });
@@ -642,6 +690,9 @@ export function normalizeBuildOptions(
     languageOut: options.languageOut ?? DEFAULT_BUILD_OPTIONS.languageOut,
     outDir,
     outputNames: [...(options.outputNames ?? [])],
+    packages: {
+      mode: options.packages?.mode ?? DEFAULT_BUILD_OPTIONS.packages.mode,
+    },
     projectRoot,
     srcDir,
   };

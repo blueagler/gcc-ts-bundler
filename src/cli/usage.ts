@@ -16,6 +16,7 @@ Build flags:
   --out-dir             Output directory
   --language-out        ECMASCRIPT3 | ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT_NEXT
   --compilation-level   WHITESPACE_ONLY | SIMPLE | ADVANCED
+  --packages            off | esm-only
   --cache-mode          off | temp | persistent
   --cache-dir           Explicit cache directory
   --preflight           off | errors-only | full

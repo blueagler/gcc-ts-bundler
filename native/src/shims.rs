@@ -18,24 +18,7 @@ pub fn write_entry_shims(entries: Vec<ShimEntry>) -> std::result::Result<Vec<Str
     let mut written_files = Vec::new();
 
     for entry in entries {
-        let mut lines = Vec::new();
-        lines.push(format!("import * as __entry from {:?};", entry.importPath));
-        lines.push(String::new());
-        lines.push("((globalThis as Record<string, unknown>)[\"GCC\"] =".to_string());
-        lines.push("  (globalThis as Record<string, unknown>)[\"GCC\"] || {});".to_string());
-
-        for export_name in entry.exportNames {
-            lines.push(format!(
-                "(((globalThis as Record<string, unknown>)[\"GCC\"]) as Record<string, unknown>)[{:?}] = __entry.{};",
-                export_name, export_name
-            ));
-        }
-
-        if entry.hasDefaultExport {
-            lines.push(
-                "(((globalThis as Record<string, unknown>)[\"GCC\"]) as Record<string, unknown>)[\"__DEFAULT_EXPORT__\"] = __entry.default;".to_string(),
-            );
-        }
+        let lines = render_shim_lines(&entry);
 
         let shim_path = PathBuf::from(&entry.shimPath);
         if let Some(parent) = shim_path.parent() {
@@ -47,4 +30,61 @@ pub fn write_entry_shims(entries: Vec<ShimEntry>) -> std::result::Result<Vec<Str
     }
 
     Ok(written_files)
+}
+
+fn render_shim_lines(entry: &ShimEntry) -> Vec<String> {
+    if entry.exportNames.is_empty() && !entry.hasDefaultExport {
+        return vec![format!("import {:?};", entry.importPath)];
+    }
+
+    let mut lines = Vec::new();
+    lines.push(format!("import * as __entry from {:?};", entry.importPath));
+    lines.push(String::new());
+    lines.push("((globalThis as Record<string, unknown>)[\"GCC\"] =".to_string());
+    lines.push("  (globalThis as Record<string, unknown>)[\"GCC\"] || {});".to_string());
+
+    for export_name in &entry.exportNames {
+        lines.push(format!(
+            "(((globalThis as Record<string, unknown>)[\"GCC\"]) as Record<string, unknown>)[{:?}] = __entry.{};",
+            export_name, export_name
+        ));
+    }
+
+    if entry.hasDefaultExport {
+        lines.push(
+            "(((globalThis as Record<string, unknown>)[\"GCC\"]) as Record<string, unknown>)[\"__DEFAULT_EXPORT__\"] = __entry.default;".to_string(),
+        );
+    }
+
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{render_shim_lines, ShimEntry};
+
+    #[test]
+    fn skips_gcc_bootstrap_when_entry_has_no_exports() {
+        let lines = render_shim_lines(&ShimEntry {
+            exportNames: Vec::new(),
+            hasDefaultExport: false,
+            importPath: "./entry".to_string(),
+            shimPath: "unused.ts".to_string(),
+        });
+
+        assert_eq!(lines, vec!["import \"./entry\";".to_string()]);
+    }
+
+    #[test]
+    fn keeps_gcc_bootstrap_when_entry_has_exports() {
+        let lines = render_shim_lines(&ShimEntry {
+            exportNames: vec!["run".to_string()],
+            hasDefaultExport: false,
+            importPath: "./entry".to_string(),
+            shimPath: "unused.ts".to_string(),
+        });
+
+        assert!(lines.iter().any(|line| line.contains("__entry.run")));
+        assert!(lines.iter().any(|line| line.contains("[\"GCC\"] || {}")));
+    }
 }

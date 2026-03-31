@@ -25,6 +25,7 @@ export function parseCliArgs(args: string[]): CliParseResult {
       "entry-point",
       "language-out",
       "out-dir",
+      "packages",
       "preflight",
       "project-root",
       "src-dir",
@@ -72,6 +73,9 @@ export function parseCliArgs(args: string[]): CliParseResult {
       outDir:
         parsedArgs["out-dir"] ?? parsedArgs.output_dir ?? parsedArgs.outputDir,
       projectRoot: parsedArgs["project-root"] ?? parsedArgs.project_root,
+      packages: {
+        mode: parsedArgs.packages ?? DEFAULT_BUILD_OPTIONS.packages.mode,
+      },
       srcDir: parsedArgs["src-dir"] ?? parsedArgs.src_dir ?? parsedArgs.srcDir,
     },
     showHelp: false,
