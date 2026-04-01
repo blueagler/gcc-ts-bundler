@@ -14,3 +14,9 @@ Navigation.prototype.transition;
 
 /** @type {!Navigation} */
 var navigation;
+
+/** @type {number} */
+var innerWidth;
+
+/** @type {number} */
+var innerHeight;

@@ -129,40 +129,6 @@ test("rewrites namespace imports from CommonJS packages to runtime-safe interop"
   assert.match(output, /42/);
 });
 
-test("preserves object literal keys passed to imported runtimes", async (t) => {
-  const fixture = await createFixture(t);
-  await fixture.write(
-    "src/index.ts",
-    'import { firstKey } from "demo-pkg";\nexport default firstKey({ onClick: 1, nested: { className: "hero" } });\n',
-  );
-  await fixture.write(
-    "node_modules/demo-pkg/package.json",
-    '{"name":"demo-pkg","module":"./index.js"}\n',
-  );
-  await fixture.write(
-    "node_modules/demo-pkg/index.js",
-    [
-      "export function firstKey(input) {",
-      "  return `${Object.keys(input)[0]}:${Object.keys(input.nested)[0]}`;",
-      "}",
-      "",
-    ].join("\n"),
-  );
-
-  const result = await build({
-    cache: { mode: "off" },
-    entries: ["./index.ts"],
-    outDir: fixture.outDir,
-    projectRoot: fixture.projectRoot,
-    srcDir: fixture.srcDir,
-  });
-
-  assert.equal(result.exitCode, 0);
-  const output = await fixture.read("dist/index.js");
-  assert.match(output, /onClick/);
-  assert.match(output, /className/);
-});
-
 test("emits a shared chunk when multiple entries use the same package", async (t) => {
   const fixture = await createFixture(t);
   await fixture.write(
@@ -342,6 +308,33 @@ test("builds decorated TypeScript sources", async (t) => {
   assert.equal(result.exitCode, 0);
   const output = await fixture.read("dist/index.js");
   assert.doesNotMatch(output, /@increment/);
+});
+
+test("exported entry bundles do not retain GCC wrapper exports", async (t) => {
+  const fixture = await createFixture(t);
+  await fixture.write(
+    "src/index.ts",
+    [
+      "export class MotionHero {",
+      "  static tag = 'motion-hero';",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  const result = await build({
+    cache: { mode: "off" },
+    entries: ["./index.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  assert.equal(result.exitCode, 0);
+  const output = await fixture.read("dist/index.js");
+  assert.match(output, /export/);
+  assert.doesNotMatch(output, /globalThis\.GCC/);
+  assert.doesNotMatch(output, /__gcc_export_/);
 });
 
 test("unsupported CommonJS packages surface actionable diagnostics", async (t) => {

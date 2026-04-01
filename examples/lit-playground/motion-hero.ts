@@ -1,20 +1,20 @@
-import {LitElement, html} from 'lit';
-import {customElement, property, state} from 'lit/decorators.js';
-import {repeat} from 'lit/directives/repeat.js';
+import { LitElement, html } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
+import { repeat } from "lit/directives/repeat.js";
 import {
   animate,
   AnimateController,
   fadeInSlow,
   fadeOut,
-} from '@lit-labs/motion';
-import {onFrames, data, DataItem} from './support.js';
-import {styles} from './styles.js';
+} from "@lit-labs/motion";
+import { onFrames, data, DataItem } from "./support.js";
+import { styles } from "./styles.js";
 
-@customElement('motion-hero')
+@customElement("motion-hero")
 export class MotionHero extends LitElement {
   static styles = styles;
 
-  @property({type: Array}) accessor data = data;
+  @property({ type: Array }) accessor data = data;
 
   @state() accessor detail!: DataItem;
 
@@ -22,7 +22,7 @@ export class MotionHero extends LitElement {
     defaultOptions: {
       keyframeOptions: {
         duration: 750,
-        fill: 'both',
+        fill: "both",
       },
       onFrames,
     },
@@ -81,7 +81,7 @@ export class MotionHero extends LitElement {
                   <div>${i.summary}</div>
                 </div>
               </div>
-            </li>`
+            </li>`,
         )}
       </ul>
       ${this.detail
@@ -131,7 +131,7 @@ export class MotionHero extends LitElement {
               et dolore magnam aliquam quaerat voluptatem.
             </div>
           </div>`
-        : ''}
+        : ""}
     </div>`;
   }
 

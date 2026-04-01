@@ -27,7 +27,7 @@ var DEFAULT_BUILD_OPTIONS = Object.freeze({
 });
 
 // src/pipeline/build-pipeline.ts
-import path6 from "path";
+import path7 from "path";
 import fs7 from "fs";
 
 // src/cache/hash.ts
@@ -151,7 +151,7 @@ function rewriteGccExports(code) {
   return loadBinding().rewriteGccExports(code);
 }
 function transpileSources(input) {
-  return loadBinding().transpileSources(input.fileNames, input.outDir, input.externsPath, input.workspaceDir);
+  return loadBinding().transpileSources(input.fileNames, input.outDir, input.externsPath, input.metadataPath, input.workspaceDir, input.packageAliases ?? [], input.packageJsonFiles ?? []);
 }
 function writeEntryShims(input) {
   return loadBinding().writeEntryShims(input.entries);
@@ -698,10 +698,423 @@ function normalizeBuildOptions(options) {
 // src/stages/native/emit.ts
 import fs5 from "fs";
 import { createRequire as createRequire2 } from "module";
+import path5 from "path";
+import ts4 from "typescript";
+
+// src/stages/native/compiler-options.ts
 import path4 from "path";
 import ts2 from "typescript";
+function loadCompilerOptions(configPath, extraOptions = {}) {
+  const configFile = ts2.readConfigFile(configPath, ts2.sys.readFile);
+  if (configFile.error) {
+    throw new Error(ts2.flattenDiagnosticMessageText(configFile.error.messageText, `
+`));
+  }
+  const parsedConfig = ts2.parseJsonConfigFileContent(configFile.config, ts2.sys, path4.dirname(configPath), extraOptions, configPath);
+  if (parsedConfig.errors.length > 0) {
+    throw new Error(ts2.formatDiagnosticsWithColorAndContext(parsedConfig.errors, ts2.createCompilerHost({})));
+  }
+  return parsedConfig.options;
+}
+
+// src/stages/native/closure-ir.ts
+import ts3 from "typescript";
+async function collectClosureIrMetadata({
+  fileNames,
+  tsConfigPath,
+  workspaceDir
+}) {
+  const compilerOptions = loadCompilerOptions(tsConfigPath, {
+    allowJs: true,
+    rootDir: workspaceDir
+  });
+  const program = ts3.createProgram(fileNames, compilerOptions);
+  const checker = program.getTypeChecker();
+  const unsafeEnumSymbols = collectUnsafeEnumSymbols(program, checker);
+  const files = [];
+  const diagnostics = [];
+  for (const sourceFile of program.getSourceFiles()) {
+    if (!fileNames.includes(sourceFile.fileName)) {
+      continue;
+    }
+    const typeDeclarations = [];
+    const topLevelDocs = [];
+    const enumDeclarations = [];
+    for (const statement of sourceFile.statements) {
+      if (ts3.isInterfaceDeclaration(statement)) {
+        typeDeclarations.push(buildInterfaceDeclarationSnippet(statement, checker));
+        continue;
+      }
+      if (ts3.isTypeAliasDeclaration(statement)) {
+        typeDeclarations.push(buildTypeAliasDeclarationSnippet(statement, checker));
+        continue;
+      }
+      if (ts3.isEnumDeclaration(statement)) {
+        const enumDeclaration = buildEnumDeclarationMetadata(statement, checker, unsafeEnumSymbols);
+        if (enumDeclaration) {
+          enumDeclarations.push(enumDeclaration);
+        }
+        continue;
+      }
+      if (ts3.isFunctionDeclaration(statement) && statement.name) {
+        const jsdoc = buildFunctionJsDoc(statement, checker);
+        if (jsdoc) {
+          topLevelDocs.push({
+            jsdoc,
+            kind: "function",
+            name: statement.name.text
+          });
+        }
+        continue;
+      }
+      if (ts3.isClassDeclaration(statement) && statement.name) {
+        const jsdoc = buildClassJsDoc(statement, checker);
+        if (jsdoc) {
+          topLevelDocs.push({
+            jsdoc,
+            kind: "class",
+            name: statement.name.text
+          });
+        }
+      }
+    }
+    let decoratedOutputText;
+    if (containsDecorators(sourceFile)) {
+      const transpiled = ts3.transpileModule(sourceFile.getFullText(), {
+        compilerOptions: {
+          ...compilerOptions,
+          module: ts3.ModuleKind.ESNext,
+          moduleResolution: ts3.ModuleResolutionKind.Bundler,
+          sourceMap: false,
+          target: ts3.ScriptTarget.ES2018
+        },
+        fileName: sourceFile.fileName,
+        reportDiagnostics: true
+      });
+      diagnostics.push(...(transpiled.diagnostics ?? []).filter((diagnostic) => diagnostic.category === ts3.DiagnosticCategory.Error));
+      decoratedOutputText = transpiled.outputText;
+    }
+    files.push({
+      decoratedOutputText,
+      enumDeclarations,
+      filePath: sourceFile.fileName,
+      topLevelDocs,
+      typeDeclarations
+    });
+  }
+  return { diagnostics, files };
+}
+function containsDecorators(sourceFile) {
+  let found = false;
+  const visit = (node) => {
+    if (found) {
+      return;
+    }
+    if (ts3.canHaveDecorators(node) && (ts3.getDecorators(node)?.length ?? 0) > 0) {
+      found = true;
+      return;
+    }
+    ts3.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
+}
+function collectUnsafeEnumSymbols(program, checker) {
+  const unsafe = new Set;
+  const mark = (node) => {
+    const symbol = checker.getSymbolAtLocation(node);
+    if (symbol) {
+      unsafe.add(symbol.flags & ts3.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol);
+    }
+  };
+  for (const sourceFile of program.getSourceFiles()) {
+    const visit = (node) => {
+      if (ts3.isElementAccessExpression(node) && ts3.isIdentifier(node.expression)) {
+        mark(node.expression);
+      }
+      if (ts3.isCallExpression(node) && ts3.isPropertyAccessExpression(node.expression) && ts3.isIdentifier(node.expression.expression) && node.expression.expression.text === "Object" && ["keys", "values", "entries"].includes(node.expression.name.text) && node.arguments.length > 0 && ts3.isIdentifier(node.arguments[0])) {
+        mark(node.arguments[0]);
+      }
+      if (ts3.isIdentifier(node) && !ts3.isPropertyAccessExpression(node.parent) && !ts3.isElementAccessExpression(node.parent) && !ts3.isImportSpecifier(node.parent) && !ts3.isImportClause(node.parent) && !ts3.isExportSpecifier(node.parent) && !ts3.isEnumDeclaration(node.parent) && !ts3.isEnumMember(node.parent)) {
+        const symbol = checker.getSymbolAtLocation(node);
+        if (symbol) {
+          const resolved = symbol.flags & ts3.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+          if (resolved.flags & ts3.SymbolFlags.Enum) {
+            unsafe.add(resolved);
+          }
+        }
+      }
+      ts3.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
+  return unsafe;
+}
+function buildEnumDeclarationMetadata(statement, checker, unsafeEnumSymbols) {
+  const symbol = checker.getSymbolAtLocation(statement.name);
+  const resolved = symbol && symbol.flags & ts3.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+  if (resolved && unsafeEnumSymbols.has(resolved)) {
+    return null;
+  }
+  const members = [];
+  let valueType = null;
+  let nextNumber = 0;
+  for (const member of statement.members) {
+    const memberName = getPropertyNameText(member.name);
+    if (!memberName) {
+      return null;
+    }
+    const constantValue = checker.getConstantValue(member);
+    const memberValue = constantValue ?? (member.initializer ? literalValueFromExpression(member.initializer) : nextNumber);
+    if (memberValue === undefined) {
+      return null;
+    }
+    const currentValueType = typeof memberValue;
+    if (currentValueType !== "number" && currentValueType !== "string" && currentValueType !== "boolean") {
+      return null;
+    }
+    if (valueType && valueType !== currentValueType) {
+      return null;
+    }
+    valueType = currentValueType;
+    members.push({ name: memberName, value: memberValue });
+    if (typeof memberValue === "number") {
+      nextNumber = memberValue + 1;
+    }
+  }
+  if (!valueType || members.length === 0) {
+    return null;
+  }
+  if (valueType === "number" && !hasConstModifier(statement)) {
+    return null;
+  }
+  return {
+    exported: hasExportModifier(statement),
+    members,
+    name: statement.name.text,
+    valueType
+  };
+}
+function buildInterfaceDeclarationSnippet(statement, checker) {
+  const lines = ["/**"];
+  lines.push(" * @record");
+  for (const templateName of getTemplateNames(statement.typeParameters)) {
+    lines.push(` * @template ${templateName}`);
+  }
+  lines.push(" */");
+  lines.push(`function ${statement.name.text}() {}`);
+  for (const member of statement.members) {
+    const memberName = getPropertyNameText(member.name);
+    if (!memberName) {
+      continue;
+    }
+    if (ts3.isPropertySignature(member)) {
+      const propertyType = member.type ? toClosureType(checker.getTypeFromTypeNode(member.type), checker) : "?";
+      lines.push(`/** @type {${propertyType}} */`);
+      lines.push(`${statement.name.text}.prototype.${renderPropertyName(memberName)};`);
+      continue;
+    }
+    if (ts3.isMethodSignature(member)) {
+      const signature = checker.getSignatureFromDeclaration(member);
+      if (!signature) {
+        continue;
+      }
+      const functionType = signatureToClosureFunctionType(signature, checker);
+      lines.push(`/** @type {${functionType}} */`);
+      lines.push(`${statement.name.text}.prototype.${renderPropertyName(memberName)};`);
+    }
+  }
+  if (hasExportModifier(statement)) {
+    lines.push(`exports.${statement.name.text} = ${statement.name.text};`);
+  }
+  return {
+    snippet: `${lines.join(`
+`)}
+`
+  };
+}
+function buildTypeAliasDeclarationSnippet(statement, checker) {
+  const aliasType = checker.getTypeAtLocation(statement);
+  const closureType = toClosureType(aliasType, checker);
+  const lines = ["/**"];
+  for (const templateName of getTemplateNames(statement.typeParameters)) {
+    lines.push(` * @template ${templateName}`);
+  }
+  lines.push(` * @typedef {${closureType}}`);
+  lines.push(" */");
+  lines.push(`let ${statement.name.text};`);
+  if (hasExportModifier(statement)) {
+    lines.push(`exports.${statement.name.text} = ${statement.name.text};`);
+  }
+  return {
+    snippet: `${lines.join(`
+`)}
+`
+  };
+}
+function buildFunctionJsDoc(statement, checker) {
+  const signature = checker.getSignatureFromDeclaration(statement);
+  if (!signature) {
+    return null;
+  }
+  const lines = ["/**"];
+  for (const templateName of getTemplateNames(statement.typeParameters)) {
+    lines.push(` * @template ${templateName}`);
+  }
+  for (const parameter of signature.getParameters()) {
+    const declaration = parameter.valueDeclaration;
+    const parameterType = declaration ? checker.getTypeOfSymbolAtLocation(parameter, declaration) : checker.getTypeOfSymbol(parameter);
+    lines.push(` * @param {${toClosureType(parameterType, checker)}} ${parameter.getName()}`);
+  }
+  const returnType = checker.getReturnTypeOfSignature(signature);
+  lines.push(` * @return {${toClosureType(returnType, checker)}}`);
+  lines.push(" */");
+  return `${lines.join(`
+`)}
+`;
+}
+function buildClassJsDoc(statement, checker) {
+  const symbol = checker.getSymbolAtLocation(statement.name ?? statement);
+  const declaredType = symbol ? checker.getDeclaredTypeOfSymbol(symbol) : checker.getTypeAtLocation(statement);
+  const typeParameters = statement.typeParameters ?? [];
+  const lines = ["/**"];
+  for (const templateName of getTemplateNames(typeParameters)) {
+    lines.push(` * @template ${templateName}`);
+  }
+  if (statement.heritageClauses) {
+    for (const clause of statement.heritageClauses) {
+      for (const typeNode of clause.types) {
+        const closureType = toClosureType(checker.getTypeAtLocation(typeNode), checker);
+        if (clause.token === ts3.SyntaxKind.ExtendsKeyword) {
+          lines.push(` * @extends {${closureType}}`);
+        } else if (clause.token === ts3.SyntaxKind.ImplementsKeyword) {
+          lines.push(` * @implements {${closureType}}`);
+        }
+      }
+    }
+  }
+  lines.push(" */");
+  return `${lines.join(`
+`)}
+`;
+}
+function getTemplateNames(typeParameters) {
+  return (typeParameters ?? []).map((parameter) => parameter.name.text);
+}
+function hasExportModifier(node) {
+  return (ts3.getCombinedModifierFlags(node) & ts3.ModifierFlags.Export) !== 0;
+}
+function hasConstModifier(node) {
+  return (ts3.getCombinedModifierFlags(node) & ts3.ModifierFlags.Const) !== 0;
+}
+function getPropertyNameText(name) {
+  if (!name) {
+    return null;
+  }
+  if (ts3.isIdentifier(name) || ts3.isStringLiteral(name) || ts3.isNumericLiteral(name) || ts3.isPrivateIdentifier(name)) {
+    return name.text;
+  }
+  return null;
+}
+function renderPropertyName(name) {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? name : `[${JSON.stringify(name)}]`;
+}
+function literalValueFromExpression(expression) {
+  if (ts3.isStringLiteralLike(expression)) {
+    return expression.text;
+  }
+  if (ts3.isNumericLiteral(expression)) {
+    return Number(expression.text);
+  }
+  if (expression.kind === ts3.SyntaxKind.TrueKeyword) {
+    return true;
+  }
+  if (expression.kind === ts3.SyntaxKind.FalseKeyword) {
+    return false;
+  }
+  if (ts3.isPrefixUnaryExpression(expression) && expression.operator === ts3.SyntaxKind.MinusToken && ts3.isNumericLiteral(expression.operand)) {
+    return -Number(expression.operand.text);
+  }
+  return;
+}
+function signatureToClosureFunctionType(signature, checker) {
+  const params = signature.getParameters().map((parameter) => {
+    const declaration = parameter.valueDeclaration;
+    const parameterType = declaration ? checker.getTypeOfSymbolAtLocation(parameter, declaration) : checker.getTypeOfSymbol(parameter);
+    return toClosureType(parameterType, checker);
+  });
+  const returnType = toClosureType(checker.getReturnTypeOfSignature(signature), checker);
+  return `function(${params.join(", ")}): ${returnType}`;
+}
+function toClosureType(type, checker, seen = new Set) {
+  if (seen.has(type)) {
+    return "?";
+  }
+  seen.add(type);
+  if (type.flags & ts3.TypeFlags.Any) {
+    return "?";
+  }
+  if (type.flags & ts3.TypeFlags.Unknown) {
+    return "?";
+  }
+  if (type.flags & ts3.TypeFlags.StringLike) {
+    return "string";
+  }
+  if (type.flags & ts3.TypeFlags.NumberLike) {
+    return "number";
+  }
+  if (type.flags & ts3.TypeFlags.BooleanLike) {
+    return "boolean";
+  }
+  if (type.flags & ts3.TypeFlags.Void) {
+    return "void";
+  }
+  if (type.flags & ts3.TypeFlags.Undefined) {
+    return "undefined";
+  }
+  if (type.flags & ts3.TypeFlags.Null) {
+    return "null";
+  }
+  if (type.flags & ts3.TypeFlags.Never) {
+    return "never";
+  }
+  if (type.flags & ts3.TypeFlags.TypeParameter) {
+    return checker.typeToString(type);
+  }
+  if (type.isUnion()) {
+    return `(${type.types.map((item) => toClosureType(item, checker, seen)).join("|")})`;
+  }
+  if (checker.isArrayType(type)) {
+    const typeArguments = checker.getTypeArguments(type);
+    const elementType = typeArguments[0] ? toClosureType(typeArguments[0], checker, seen) : "?";
+    return `!Array<${elementType}>`;
+  }
+  if (checker.isTupleType(type)) {
+    const typeArguments = checker.getTypeArguments(type);
+    if (typeArguments.length === 0) {
+      return "!Array<?>";
+    }
+    return `!Array<${typeArguments.map((item) => toClosureType(item, checker, seen)).join("|")}>`;
+  }
+  const callSignatures = type.getCallSignatures();
+  if (callSignatures.length > 0) {
+    return signatureToClosureFunctionType(callSignatures[0], checker);
+  }
+  if (type.getSymbol()) {
+    const symbolName = checker.symbolToString(type.getSymbol());
+    if (symbolName && symbolName !== "__type") {
+      return symbolName;
+    }
+  }
+  if (type.isClassOrInterface() || type.getProperties().length > 0 && !(type.flags & ts3.TypeFlags.Object)) {
+    return "!Object";
+  }
+  return "?";
+}
+
+// src/stages/native/emit.ts
 var require3 = createRequire2(import.meta.url);
-var NATIVE_EMIT_METADATA_VERSION = 2;
+var NATIVE_EMIT_METADATA_VERSION = 6;
 async function emitNativeStage({
   cacheDir,
   fileNames,
@@ -712,8 +1125,9 @@ async function emitNativeStage({
   tsConfigPath,
   workspaceDir
 }) {
-  const outDir = path4.join(cacheDir, "out");
-  const externsPath = path4.join(cacheDir, "modules-externs.js");
+  const outDir = path5.join(cacheDir, "out");
+  const externsPath = path5.join(cacheDir, "modules-externs.js");
+  const metadataPathForNative = path5.join(cacheDir, "closure-ir.json");
   const runtimePackageInputs = await collectTsxRuntimePackageInputs({
     fileNames,
     tsConfigPath,
@@ -735,6 +1149,7 @@ async function emitNativeStage({
   const cachedMetadata = await readMetadata(metadataPath);
   if (cachedMetadata && await filesExist([
     cachedMetadata.externsPath,
+    cachedMetadata.metadataPath,
     ...cachedMetadata.emittedFiles,
     ...cachedMetadata.supportFiles
   ])) {
@@ -765,21 +1180,14 @@ async function emitNativeStage({
       supportFiles: []
     };
   }
-  const result = transpileSources({
-    externsPath,
+  const closureIr = await collectClosureIrMetadata({
     fileNames: combinedFileNames,
-    outDir,
-    workspaceDir
-  });
-  const decoratorDiagnostics = await rewriteDecoratedTypeScriptOutputs({
-    fileNames: combinedFileNames,
-    outDir,
     tsConfigPath,
     workspaceDir
   });
-  if (decoratorDiagnostics.length > 0) {
+  if (closureIr.diagnostics.length > 0) {
     return {
-      diagnostics: decoratorDiagnostics,
+      diagnostics: closureIr.diagnostics,
       emitSkipped: true,
       emittedFiles: [],
       externsPath,
@@ -787,14 +1195,11 @@ async function emitNativeStage({
       supportFiles: []
     };
   }
-  await rewriteCommonJsPackageImports({
-    emittedFiles: result.emittedFiles,
-    packageAliases: combinedPackageAliases
-  });
-  await stabilizeExternalCallObjectLiteralKeys({
-    emittedFiles: result.emittedFiles
-  });
-  const supportFiles = await emitPackageSupportFiles({
+  await fs5.promises.writeFile(metadataPathForNative, JSON.stringify(closureIr.files, null, 2), "utf-8");
+  const result = transpileSources({
+    metadataPath: metadataPathForNative,
+    externsPath,
+    fileNames: combinedFileNames,
     outDir,
     packageAliases: combinedPackageAliases,
     packageJsonFiles: combinedPackageJsonFiles,
@@ -802,11 +1207,12 @@ async function emitNativeStage({
   });
   const finalSupportFiles = uniqueSorted2([
     ...runtimeSupportFiles,
-    ...supportFiles
+    ...result.supportFiles
   ]);
   await fs5.promises.writeFile(metadataPath, JSON.stringify({
     emittedFiles: result.emittedFiles,
     externsPath: result.externsPath,
+    metadataPath: metadataPathForNative,
     supportFiles: finalSupportFiles,
     version: NATIVE_EMIT_METADATA_VERSION
   }, null, 2), "utf-8");
@@ -848,11 +1254,14 @@ async function collectTsxRuntimePackageInputs({
   const graph = resolveGraph({
     entries: [workspaceEntry],
     packageMode: "esm-only",
-    srcDir: path4.join(workspaceDir, "src"),
+    srcDir: path5.join(workspaceDir, "src"),
     workspaceDir
   });
   return {
-    packageAliases: mergePackageAliases([runtimeAlias, ...graph.packageAliases]),
+    packageAliases: mergePackageAliases([
+      runtimeAlias,
+      ...graph.packageAliases
+    ]),
     packageJsonFiles: graph.packageJsonFiles,
     sourceFiles: graph.sourceFiles
   };
@@ -881,31 +1290,19 @@ function getPreflightDiagnostics({
     ...compilerOptions,
     allowJs: true,
     ignoreDeprecations: "6.0",
-    moduleResolution: ts2.ModuleResolutionKind.Bundler,
+    moduleResolution: ts4.ModuleResolutionKind.Bundler,
     noEmit: true,
     rootDir: workspaceDir,
     skipLibCheck: true,
-    target: ts2.ScriptTarget.ESNext
+    target: ts4.ScriptTarget.ESNext
   };
-  const compilerHost = ts2.createCompilerHost(finalCompilerOptions);
-  const program = ts2.createProgram(fileNames, finalCompilerOptions, compilerHost);
-  return [...ts2.getPreEmitDiagnostics(program)].filter((diagnostic) => !shouldIgnorePreflightDiagnostic(diagnostic));
-}
-function loadCompilerOptions(configPath) {
-  const configFile = ts2.readConfigFile(configPath, ts2.sys.readFile);
-  if (configFile.error) {
-    throw new Error(ts2.flattenDiagnosticMessageText(configFile.error.messageText, `
-`));
-  }
-  const parsedConfig = ts2.parseJsonConfigFileContent(configFile.config, ts2.sys, path4.dirname(configPath), {}, configPath);
-  if (parsedConfig.errors.length > 0) {
-    throw new Error(ts2.formatDiagnosticsWithColorAndContext(parsedConfig.errors, ts2.createCompilerHost({})));
-  }
-  return parsedConfig.options;
+  const compilerHost = ts4.createCompilerHost(finalCompilerOptions);
+  const program = ts4.createProgram(fileNames, finalCompilerOptions, compilerHost);
+  return [...ts4.getPreEmitDiagnostics(program)].filter((diagnostic) => !shouldIgnorePreflightDiagnostic(diagnostic));
 }
 function createSimpleDiagnostic(messageText) {
   return {
-    category: ts2.DiagnosticCategory.Error,
+    category: ts4.DiagnosticCategory.Error,
     code: 0,
     file: undefined,
     length: undefined,
@@ -917,336 +1314,20 @@ function shouldIgnorePreflightDiagnostic(diagnostic) {
   if (diagnostic.code !== 7016) {
     return false;
   }
-  const message = ts2.flattenDiagnosticMessageText(diagnostic.messageText, `
+  const message = ts4.flattenDiagnosticMessageText(diagnostic.messageText, `
 `);
   return message.includes("node_modules") && message.includes("implicitly has an 'any' type");
-}
-async function rewriteDecoratedTypeScriptOutputs({
-  fileNames,
-  outDir,
-  tsConfigPath,
-  workspaceDir
-}) {
-  const compilerOptions = loadCompilerOptions(tsConfigPath);
-  const decoratorCompilerOptions = {
-    ...compilerOptions,
-    module: ts2.ModuleKind.ESNext,
-    moduleResolution: ts2.ModuleResolutionKind.Bundler,
-    sourceMap: false,
-    target: ts2.ScriptTarget.ES2018
-  };
-  const diagnostics = [];
-  for (const fileName of fileNames) {
-    if (!isTypeScriptSourceFile(fileName)) {
-      continue;
-    }
-    const sourceText = await fs5.promises.readFile(fileName, "utf8");
-    if (!shouldTranspileWithTypeScript(fileName, sourceText)) {
-      continue;
-    }
-    const transpiled = ts2.transpileModule(sourceText, {
-      compilerOptions: decoratorCompilerOptions,
-      fileName,
-      reportDiagnostics: true
-    });
-    diagnostics.push(...(transpiled.diagnostics ?? []).filter((diagnostic) => diagnostic.category === ts2.DiagnosticCategory.Error));
-    const outputPath = path4.join(outDir, path4.relative(workspaceDir, fileName)).replace(/\.[^/.]+$/, ".js");
-    await fs5.promises.mkdir(path4.dirname(outputPath), { recursive: true });
-    await fs5.promises.writeFile(outputPath, transpiled.outputText, "utf8");
-  }
-  return diagnostics;
-}
-async function rewriteCommonJsPackageImports({
-  emittedFiles,
-  packageAliases
-}) {
-  const commonJsSpecifiers = [];
-  for (const alias of packageAliases) {
-    if (!await isCommonJsPackageTarget(alias.targetPath)) {
-      continue;
-    }
-    commonJsSpecifiers.push(alias.subpath === "." ? alias.packageName : `${alias.packageName}/${alias.subpath.slice(2)}`);
-  }
-  if (commonJsSpecifiers.length === 0) {
-    return;
-  }
-  for (const emittedFile of emittedFiles) {
-    if (emittedFile.includes(`${path4.sep}node_modules${path4.sep}`)) {
-      continue;
-    }
-    const sourceText = await fs5.promises.readFile(emittedFile, "utf8");
-    const rewritten = rewriteNamedImportsFromCommonJs(sourceText, commonJsSpecifiers);
-    if (rewritten !== sourceText) {
-      await fs5.promises.writeFile(emittedFile, rewritten, "utf8");
-    }
-  }
-}
-async function stabilizeExternalCallObjectLiteralKeys({
-  emittedFiles
-}) {
-  for (const emittedFile of emittedFiles) {
-    if (emittedFile.includes(`${path4.sep}node_modules${path4.sep}`)) {
-      continue;
-    }
-    const sourceText = await fs5.promises.readFile(emittedFile, "utf8");
-    const rewritten = rewriteExternalCallObjectLiteralKeys(sourceText, emittedFile);
-    if (rewritten !== sourceText) {
-      await fs5.promises.writeFile(emittedFile, rewritten, "utf8");
-    }
-  }
-}
-function containsDecorators(fileName, sourceText) {
-  const sourceFile = ts2.createSourceFile(fileName, sourceText, ts2.ScriptTarget.Latest, true, getScriptKind(fileName));
-  let found = false;
-  const visit = (node) => {
-    if (found) {
-      return;
-    }
-    if (ts2.canHaveDecorators(node) && (ts2.getDecorators(node)?.length ?? 0) > 0) {
-      found = true;
-      return;
-    }
-    ts2.forEachChild(node, visit);
-  };
-  visit(sourceFile);
-  return found;
-}
-function shouldTranspileWithTypeScript(fileName, sourceText) {
-  return fileName.endsWith(".tsx") || containsDecorators(fileName, sourceText);
-}
-async function isCommonJsPackageTarget(targetPath) {
-  const sourceText = await fs5.promises.readFile(targetPath, "utf8");
-  return targetPath.endsWith(".cjs") || sourceText.includes("module.exports") || sourceText.includes("exports.") || sourceText.includes("exports[") || sourceText.includes("require(");
-}
-function rewriteNamedImportsFromCommonJs(sourceText, commonJsSpecifiers) {
-  let rewritten = sourceText;
-  let importCounter = 0;
-  for (const specifier of [...new Set(commonJsSpecifiers)]) {
-    const escapedSpecifier = escapeRegExp(specifier);
-    const namespaceRegex = new RegExp(`^import\\s+\\*\\s+as\\s+([A-Za-z_$][\\w$]*)\\s+from\\s+["']${escapedSpecifier}["'];?$`, "gm");
-    rewritten = rewritten.replace(namespaceRegex, (_match, namespaceImport) => {
-      const importName = `__cjs_import_${importCounter++}`;
-      return [
-        `import ${importName} from ${JSON.stringify(specifier)};`,
-        `const ${namespaceImport} = ${importName};`
-      ].join(`
-`);
-    });
-    const defaultAndNamedRegex = new RegExp(`^import\\s+([A-Za-z_$][\\w$]*)\\s*,\\s*\\{([^}]+)\\}\\s*from\\s*["']${escapedSpecifier}["'];?$`, "gm");
-    rewritten = rewritten.replace(defaultAndNamedRegex, (_match, defaultImport, bindings) => {
-      return [
-        `import ${defaultImport} from ${JSON.stringify(specifier)};`,
-        `const { ${normalizeImportBindings(bindings)} } = ${defaultImport};`
-      ].join(`
-`);
-    });
-    const namedOnlyRegex = new RegExp(`^import\\s*\\{([^}]+)\\}\\s*from\\s*["']${escapedSpecifier}["'];?$`, "gm");
-    rewritten = rewritten.replace(namedOnlyRegex, (_match, bindings) => {
-      const importName = `__cjs_import_${importCounter++}`;
-      return [
-        `import ${importName} from ${JSON.stringify(specifier)};`,
-        `const { ${normalizeImportBindings(bindings)} } = ${importName};`
-      ].join(`
-`);
-    });
-  }
-  return rewritten;
-}
-function rewriteExternalCallObjectLiteralKeys(sourceText, fileName) {
-  const sourceFile = ts2.createSourceFile(fileName, sourceText, ts2.ScriptTarget.Latest, true, ts2.ScriptKind.JS);
-  const externalNames = collectExternalCallableNames(sourceFile);
-  if (externalNames.size === 0) {
-    return sourceText;
-  }
-  let changed = false;
-  const transformer = (context) => {
-    const visit = (node) => {
-      if (ts2.isCallExpression(node) && isExternalCallableExpression(node.expression, externalNames)) {
-        let callChanged = false;
-        const rewrittenArguments = node.arguments.map((argument) => {
-          const rewrittenArgument = rewriteExternalObjectValue(argument);
-          if (rewrittenArgument !== argument) {
-            callChanged = true;
-          }
-          return rewrittenArgument;
-        });
-        if (callChanged) {
-          changed = true;
-          return ts2.visitEachChild(context.factory.updateCallExpression(node, node.expression, node.typeArguments, rewrittenArguments), visit, context);
-        }
-      }
-      return ts2.visitEachChild(node, visit, context);
-    };
-    return (node) => ts2.visitNode(node, visit);
-  };
-  const transformed = ts2.transform(sourceFile, [transformer]);
-  try {
-    if (!changed) {
-      return sourceText;
-    }
-    return ts2.createPrinter({ newLine: ts2.NewLineKind.LineFeed }).printFile(transformed.transformed[0]);
-  } finally {
-    transformed.dispose();
-  }
-}
-function collectExternalCallableNames(sourceFile) {
-  const externalNames = new Set;
-  let changed = true;
-  for (const statement of sourceFile.statements) {
-    if (!ts2.isImportDeclaration(statement) || !statement.importClause) {
-      continue;
-    }
-    const { importClause } = statement;
-    if (importClause.name) {
-      externalNames.add(importClause.name.text);
-    }
-    if (importClause.namedBindings) {
-      if (ts2.isNamespaceImport(importClause.namedBindings)) {
-        externalNames.add(importClause.namedBindings.name.text);
-      } else {
-        for (const element of importClause.namedBindings.elements) {
-          externalNames.add((element.name ?? element.propertyName)?.text ?? element.name.text);
-        }
-      }
-    }
-  }
-  while (changed) {
-    changed = false;
-    for (const statement of sourceFile.statements) {
-      if (!ts2.isVariableStatement(statement)) {
-        continue;
-      }
-      for (const declaration of statement.declarationList.declarations) {
-        if (!declaration.initializer) {
-          continue;
-        }
-        if (ts2.isIdentifier(declaration.name) && isExternalValueExpression(declaration.initializer, externalNames) && !externalNames.has(declaration.name.text)) {
-          externalNames.add(declaration.name.text);
-          changed = true;
-          continue;
-        }
-        if (ts2.isObjectBindingPattern(declaration.name) && isExternalValueExpression(declaration.initializer, externalNames)) {
-          for (const element of declaration.name.elements) {
-            if (ts2.isIdentifier(element.name) && !externalNames.has(element.name.text)) {
-              externalNames.add(element.name.text);
-              changed = true;
-            }
-          }
-        }
-      }
-    }
-  }
-  return externalNames;
-}
-function isExternalCallableExpression(expression, externalNames) {
-  if (ts2.isIdentifier(expression)) {
-    return externalNames.has(expression.text);
-  }
-  if (ts2.isPropertyAccessExpression(expression)) {
-    return isExternalValueExpression(expression.expression, externalNames);
-  }
-  if (ts2.isElementAccessExpression(expression)) {
-    return isExternalValueExpression(expression.expression, externalNames);
-  }
-  return false;
-}
-function isExternalValueExpression(expression, externalNames) {
-  if (ts2.isIdentifier(expression)) {
-    return externalNames.has(expression.text);
-  }
-  if (ts2.isParenthesizedExpression(expression)) {
-    return isExternalValueExpression(expression.expression, externalNames);
-  }
-  if (ts2.isPropertyAccessExpression(expression)) {
-    return isExternalValueExpression(expression.expression, externalNames);
-  }
-  if (ts2.isElementAccessExpression(expression)) {
-    return isExternalValueExpression(expression.expression, externalNames);
-  }
-  return false;
-}
-function rewriteExternalObjectValue(expression) {
-  if (ts2.isObjectLiteralExpression(expression)) {
-    return rewriteObjectLiteralKeys(expression);
-  }
-  if (ts2.isArrayLiteralExpression(expression)) {
-    let changed = false;
-    const elements = expression.elements.map((element) => {
-      if (!ts2.isExpression(element)) {
-        return element;
-      }
-      const rewritten = rewriteExternalObjectValue(element);
-      if (rewritten !== element) {
-        changed = true;
-      }
-      return rewritten;
-    });
-    return changed ? ts2.factory.updateArrayLiteralExpression(expression, elements) : expression;
-  }
-  if (ts2.isParenthesizedExpression(expression)) {
-    const rewritten = rewriteExternalObjectValue(expression.expression);
-    return rewritten !== expression.expression ? ts2.factory.updateParenthesizedExpression(expression, rewritten) : expression;
-  }
-  return expression;
-}
-function rewriteObjectLiteralKeys(expression) {
-  let changed = false;
-  const properties = expression.properties.map((property) => {
-    if (ts2.isPropertyAssignment(property)) {
-      const rewrittenInitializer = rewriteExternalObjectValue(property.initializer);
-      const rewrittenName = quotePropertyName(property.name);
-      if (rewrittenInitializer !== property.initializer || rewrittenName !== property.name) {
-        changed = true;
-        return ts2.factory.updatePropertyAssignment(property, rewrittenName, rewrittenInitializer);
-      }
-      return property;
-    }
-    if (ts2.isShorthandPropertyAssignment(property)) {
-      changed = true;
-      return ts2.factory.createPropertyAssignment(ts2.factory.createStringLiteral(property.name.text), property.name);
-    }
-    if (ts2.isSpreadAssignment(property)) {
-      const rewrittenExpression = rewriteExternalObjectValue(property.expression);
-      if (rewrittenExpression !== property.expression) {
-        changed = true;
-        return ts2.factory.updateSpreadAssignment(property, rewrittenExpression);
-      }
-    }
-    return property;
-  });
-  return changed ? ts2.factory.updateObjectLiteralExpression(expression, properties) : expression;
-}
-function quotePropertyName(name) {
-  if (ts2.isIdentifier(name)) {
-    return ts2.factory.createComputedPropertyName(ts2.factory.createStringLiteral(name.text));
-  }
-  if (ts2.isNumericLiteral(name)) {
-    return ts2.factory.createComputedPropertyName(ts2.factory.createStringLiteral(name.text));
-  }
-  return name;
-}
-function getScriptKind(fileName) {
-  if (fileName.endsWith(".tsx")) {
-    return ts2.ScriptKind.TSX;
-  }
-  if (fileName.endsWith(".mts")) {
-    return ts2.ScriptKind.TS;
-  }
-  return ts2.ScriptKind.TS;
 }
 function getJsxRuntimeSpecifier(compilerOptions) {
   const jsxImportSource = compilerOptions.jsxImportSource ?? "react";
   switch (compilerOptions.jsx) {
-    case ts2.JsxEmit.ReactJSX:
+    case ts4.JsxEmit.ReactJSX:
       return `${jsxImportSource}/jsx-runtime`;
-    case ts2.JsxEmit.ReactJSXDev:
+    case ts4.JsxEmit.ReactJSXDev:
       return `${jsxImportSource}/jsx-dev-runtime`;
     default:
       return null;
   }
-}
-function isTypeScriptSourceFile(fileName) {
-  return (fileName.endsWith(".ts") || fileName.endsWith(".tsx") || fileName.endsWith(".mts")) && !fileName.endsWith(".d.ts");
 }
 async function readMetadata(metadataPath) {
   try {
@@ -1258,6 +1339,7 @@ async function readMetadata(metadataPath) {
     return {
       emittedFiles: parsed.emittedFiles ?? [],
       externsPath: parsed.externsPath ?? "",
+      metadataPath: parsed.metadataPath ?? "",
       supportFiles: parsed.supportFiles ?? [],
       version: parsed.version
     };
@@ -1268,84 +1350,8 @@ async function readMetadata(metadataPath) {
     throw error;
   }
 }
-async function emitPackageSupportFiles({
-  outDir,
-  packageAliases,
-  packageJsonFiles,
-  workspaceDir
-}) {
-  const supportFiles = [];
-  const rootPackageNames = new Set(packageAliases.filter((alias) => alias.subpath === ".").map((alias) => alias.packageName));
-  for (const packageJsonFile of packageJsonFiles) {
-    const packageDir = path4.dirname(packageJsonFile);
-    const packageName = path4.relative(path4.join(workspaceDir, "node_modules"), packageDir);
-    if (rootPackageNames.has(packageName)) {
-      continue;
-    }
-    const outputPath = path4.join(outDir, path4.relative(workspaceDir, packageJsonFile));
-    await fs5.promises.mkdir(path4.dirname(outputPath), { recursive: true });
-    await fs5.promises.copyFile(packageJsonFile, outputPath);
-    supportFiles.push(outputPath);
-  }
-  for (const alias of packageAliases) {
-    const targetPath = toEmittedPath(alias.targetPath, outDir, workspaceDir);
-    const packageDir = path4.join(outDir, "node_modules", alias.packageName);
-    if (alias.subpath === ".") {
-      const entryFile = path4.join(packageDir, "__gcc_entry__.js");
-      const packageJsonOutput = path4.join(packageDir, "package.json");
-      const commonJsTarget2 = await isCommonJsPackageTarget(alias.targetPath);
-      await fs5.promises.mkdir(packageDir, { recursive: true });
-      await fs5.promises.writeFile(entryFile, commonJsTarget2 ? createCommonJsReexportModule(entryFile, targetPath) : createReexportModule(entryFile, targetPath), "utf8");
-      await fs5.promises.writeFile(packageJsonOutput, JSON.stringify({
-        browser: "./__gcc_entry__.js",
-        main: "./__gcc_entry__.js",
-        module: "./__gcc_entry__.js",
-        name: alias.packageName
-      }, null, 2), "utf8");
-      supportFiles.push(entryFile, packageJsonOutput);
-      continue;
-    }
-    const aliasFile = toAliasFilePath(packageDir, alias.subpath);
-    if (aliasFile === targetPath) {
-      continue;
-    }
-    const commonJsTarget = await isCommonJsPackageTarget(alias.targetPath);
-    await fs5.promises.mkdir(path4.dirname(aliasFile), { recursive: true });
-    await fs5.promises.writeFile(aliasFile, commonJsTarget ? createCommonJsReexportModule(aliasFile, targetPath) : createReexportModule(aliasFile, targetPath), "utf8");
-    supportFiles.push(aliasFile);
-  }
-  return [...new Set(supportFiles)].sort((left, right) => left.localeCompare(right));
-}
-function createReexportModule(fromPath, targetPath) {
-  const relativePath = toImportPath(path4.relative(path4.dirname(fromPath), targetPath));
-  return [
-    `import * as __module from ${JSON.stringify(relativePath)};`,
-    `export * from ${JSON.stringify(relativePath)};`,
-    "export default __module.default;",
-    ""
-  ].join(`
-`);
-}
-function createCommonJsReexportModule(fromPath, targetPath) {
-  const relativePath = toImportPath(path4.relative(path4.dirname(fromPath), targetPath));
-  return [
-    `import __default, { __cjsExports } from ${JSON.stringify(relativePath)};`,
-    "export default __default;",
-    "export { __cjsExports };",
-    ""
-  ].join(`
-`);
-}
-function toAliasFilePath(packageDir, subpath) {
-  const relativeSubpath = subpath.replace(/^\.\//, "");
-  return path4.extname(relativeSubpath) ? path4.join(packageDir, relativeSubpath) : path4.join(packageDir, `${relativeSubpath}.js`);
-}
 function toEmittedPath(sourcePath, outDir, workspaceDir) {
-  return path4.join(outDir, path4.relative(workspaceDir, sourcePath)).replace(/\.[^/.]+$/, ".js");
-}
-function toImportPath(relativePath) {
-  const normalized = relativePath.replace(/\\/g, "/");
-  return normalized.startsWith(".") ? normalized : `./${normalized}`;
+  return path5.join(outDir, path5.relative(workspaceDir, sourcePath)).replace(/\.[^/.]+$/, ".js");
 }
 function uniqueSorted2(values) {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
@@ -1362,16 +1368,13 @@ function mergePackageAliases(aliases) {
   });
 }
 function toWorkspaceNodeModulesPath(resolvedPath, workspaceDir) {
-  const marker = `${path4.sep}node_modules${path4.sep}`;
+  const marker = `${path5.sep}node_modules${path5.sep}`;
   const markerIndex = resolvedPath.lastIndexOf(marker);
   if (markerIndex === -1) {
     return resolvedPath;
   }
   const relativeNodeModulesPath = resolvedPath.slice(markerIndex + 1);
-  return path4.join(workspaceDir, relativeNodeModulesPath);
-}
-function normalizeImportBindings(bindings) {
-  return bindings.split(",").map((binding) => binding.trim()).filter(Boolean).map((binding) => binding.replace(/\s+as\s+/g, ": ")).join(", ");
+  return path5.join(workspaceDir, relativeNodeModulesPath);
 }
 function toRuntimePackageAlias(specifier, targetPath) {
   const segments = specifier.startsWith("@") ? specifier.split("/", 3) : specifier.split("/", 2);
@@ -1383,13 +1386,10 @@ function toRuntimePackageAlias(specifier, targetPath) {
     targetPath
   };
 }
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 // src/stages/closure/run-closure.ts
 import fs6 from "fs/promises";
-import path5 from "path";
+import path6 from "path";
 import * as closureCompilerPackage from "google-closure-compiler";
 import { getNativeImagePath } from "google-closure-compiler/lib/utils.js";
 var closureLibFilesCache = new Map;
@@ -1405,8 +1405,8 @@ async function runClosureStage({
 }) {
   await fs6.rm(finalCacheDir, { force: true, recursive: true });
   await fs6.mkdir(finalCacheDir, { recursive: true });
-  const rawDir = path5.join(finalCacheDir, "raw");
-  const cacheOutputDir = path5.join(finalCacheDir, "outputs");
+  const rawDir = path6.join(finalCacheDir, "raw");
+  const cacheOutputDir = path6.join(finalCacheDir, "outputs");
   await fs6.mkdir(rawDir, { recursive: true });
   await fs6.mkdir(cacheOutputDir, { recursive: true });
   await fs6.rm(outDir, { force: true, recursive: true });
@@ -1419,7 +1419,7 @@ async function runClosureStage({
     externPaths,
     options,
     supportFiles,
-    rawOutputPath: path5.join(rawDir, `${resolvedChunks[0].name}.js`)
+    rawOutputPath: path6.join(rawDir, `${resolvedChunks[0].name}.js`)
   }) : await runChunkedClosureCompilation({
     chunkPlan: resolvedChunks,
     closureLibFiles,
@@ -1431,15 +1431,15 @@ async function runClosureStage({
   if (exitCode !== 0) {
     return { cacheOutputFiles: [], exitCode, outputFiles: [] };
   }
-  const rawOutputs = resolvedChunks.map((chunk) => path5.join(rawDir, `${chunk.name}.js`));
-  const outputFiles = resolvedChunks.map((chunk) => path5.join(outDir, `${chunk.name}.js`));
+  const rawOutputs = resolvedChunks.map((chunk) => path6.join(rawDir, `${chunk.name}.js`));
+  const outputFiles = resolvedChunks.map((chunk) => path6.join(outDir, `${chunk.name}.js`));
   await Promise.all(rawOutputs.map(async (rawFile, index) => {
     const contents = await fs6.readFile(rawFile, "utf-8");
     const transformed = rewriteGccExports(contents);
     await fs6.writeFile(outputFiles[index], transformed);
   }));
   await copyOrLinkFiles(outputFiles, cacheOutputDir);
-  const cacheOutputFiles = outputFiles.map((outputFile) => path5.join(cacheOutputDir, path5.basename(outputFile)));
+  const cacheOutputFiles = outputFiles.map((outputFile) => path6.join(cacheOutputDir, path6.basename(outputFile)));
   return { cacheOutputFiles, exitCode: 0, outputFiles };
 }
 async function runSingleClosureCompilation({
@@ -1450,19 +1450,27 @@ async function runSingleClosureCompilation({
   supportFiles,
   rawOutputPath
 }) {
-  return runClosureCompiler({
+  const closureOptions = {
     assumeFunctionWrapper: true,
     compilationLevel: options.compilationLevel,
-    dependencyMode: "NONE",
-    externs: externPaths,
-    js: [...options.js, ...closureLibFiles, ...supportFiles, ...entryChunk.files],
+    dependencyMode: "PRUNE",
+    externs: uniquePaths(externPaths),
+    js: uniquePaths([
+      ...options.js,
+      ...closureLibFiles,
+      ...supportFiles,
+      ...entryChunk.files
+    ]),
     jsOutputFile: rawOutputPath,
     languageIn: "UNSTABLE",
     languageOut: options.languageOut,
-    moduleResolution: "NODE",
     rewritePolyfills: false,
     warningLevel: options.diagnostics.verbose ? "VERBOSE" : "QUIET"
-  });
+  };
+  if (entryChunk.entryPoint) {
+    closureOptions.entryPoint = [entryChunk.entryPoint];
+  }
+  return runClosureCompiler(closureOptions);
 }
 async function runChunkedClosureCompilation({
   chunkPlan,
@@ -1472,34 +1480,43 @@ async function runChunkedClosureCompilation({
   outputDir,
   supportFiles
 }) {
-  const leadingJs = [...options.js, ...closureLibFiles, ...supportFiles];
+  const leadingJs = uniquePaths([
+    ...options.js,
+    ...closureLibFiles,
+    ...supportFiles
+  ]);
   const chunkSpecs = chunkPlan.map((chunk, index) => {
     const dependencySuffix = chunk.dependencies.length > 0 ? `:${chunk.dependencies.join(",")}` : "";
-    return `${chunk.name}:${chunk.files.length + (index === 0 ? leadingJs.length : 0)}${dependencySuffix}`;
+    return `${chunk.name}:${uniquePaths(chunk.files).length + (index === 0 ? leadingJs.length : 0)}${dependencySuffix}`;
   });
-  const chunkFiles = [
+  const chunkFiles = uniquePaths([
     ...leadingJs,
     ...chunkPlan.flatMap((chunk) => chunk.files)
-  ];
-  return runClosureCompiler({
+  ]);
+  const closureOptions = {
     compilationLevel: options.compilationLevel,
     chunk: chunkSpecs,
-    chunkOutputPathPrefix: `${outputDir}${path5.sep}`,
-    chunkOutputType: "ES_MODULES",
-    dependencyMode: "NONE",
-    externs: externPaths,
+    chunkOutputPathPrefix: `${outputDir}${path6.sep}`,
+    dependencyMode: "PRUNE",
+    externs: uniquePaths(externPaths),
     js: chunkFiles,
     languageIn: "UNSTABLE",
     languageOut: options.languageOut,
-    moduleResolution: "NODE",
     rewritePolyfills: false,
     warningLevel: options.diagnostics.verbose ? "VERBOSE" : "QUIET"
-  });
+  };
+  const entryPoints = uniquePaths(chunkPlan.map((chunk) => chunk.entryPoint).filter((entryPoint) => Boolean(entryPoint)));
+  if (entryPoints.length > 0) {
+    closureOptions.entryPoint = entryPoints;
+  }
+  return runClosureCompiler(closureOptions);
 }
 function resolveChunkPlan(chunkPlan, emittedOutDir) {
   return chunkPlan.map((chunk) => ({
     dependencies: chunk.dependencies,
-    files: chunk.files.map((filePath) => path5.join(emittedOutDir, filePath.replace(/\.[^/.]+$/, ".js"))),
+    entryFile: chunk.files.length > 0 ? path6.join(emittedOutDir, chunk.files[chunk.files.length - 1].replace(/\.[^/.]+$/, ".js")) : undefined,
+    entryPoint: chunk.files.length > 0 ? toGoogModuleId(path6.join(emittedOutDir, chunk.files[chunk.files.length - 1].replace(/\.[^/.]+$/, ".js")), emittedOutDir) : undefined,
+    files: chunk.files.map((filePath) => path6.join(emittedOutDir, filePath.replace(/\.[^/.]+$/, ".js"))),
     name: chunk.name
   }));
 }
@@ -1508,6 +1525,14 @@ function getDefaultString(value) {
     return value.default;
   }
   return;
+}
+function uniquePaths(paths) {
+  return [...new Set(paths)];
+}
+function toGoogModuleId(filePath, moduleRoot) {
+  const relativePath = path6.relative(moduleRoot, filePath).replace(/\\/g, "/");
+  const withoutExtension = relativePath.replace(/\.[^/.]+$/, "");
+  return `gcc.${withoutExtension.split("/").map((segment) => segment.replace(/[^A-Za-z0-9_$]/g, "_")).join(".")}`;
 }
 function resolveClosureCompilerJarPath() {
   const closureCompilerModule = closureCompilerPackage;
@@ -1550,7 +1575,7 @@ async function collectJavaScriptFiles(dir) {
     const currentDir = pending.pop();
     const entries = await fs6.readdir(currentDir, { withFileTypes: true });
     for (const entry of entries) {
-      const entryPath = path5.join(currentDir, entry.name);
+      const entryPath = path6.join(currentDir, entry.name);
       if (entry.isDirectory()) {
         pending.push(entryPath);
         continue;
@@ -1564,7 +1589,7 @@ async function collectJavaScriptFiles(dir) {
   return files;
 }
 function collectClosureLibFiles(packageRoot) {
-  const closureLibDir = path5.join(packageRoot, "closure-lib");
+  const closureLibDir = path6.join(packageRoot, "closure-lib");
   const existing = closureLibFilesCache.get(closureLibDir);
   if (existing) {
     return existing;
@@ -1579,14 +1604,14 @@ var bundledExternsCache = null;
 async function build(options) {
   const context = await createBuildContext(normalizeBuildOptions(options));
   if (context.options.cache.mode === "persistent") {
-    const fastSnapshot = await readJsonIfExists(path6.join(context.projectCacheDir, "final-fast.json"));
+    const fastSnapshot = await readJsonIfExists(path7.join(context.projectCacheDir, "final-fast.json"));
     if (fastSnapshot && fastSnapshot.optionsSignature === context.optionsSignature && fastSnapshot.packageSignature === context.packageSignature && await trackedFilesMatch(fastSnapshot.trackedFiles) && await publishedOutputsMatchSnapshot(fastSnapshot.publishedOutputs, context.options.outDir)) {
       return {
         cacheHit: true,
         diagnostics: [],
         emitSkipped: false,
         exitCode: 0,
-        outputFiles: fastSnapshot.publishedOutputs.map(({ name }) => path6.join(context.options.outDir, name))
+        outputFiles: fastSnapshot.publishedOutputs.map(({ name }) => path7.join(context.options.outDir, name))
       };
     }
   }
@@ -1594,7 +1619,7 @@ async function build(options) {
   try {
     resolved = await resolveBuild(context);
     const resolvedBuild = resolved;
-    const finalMetadataPath = path6.join(resolvedBuild.finalCacheDir, "meta.json");
+    const finalMetadataPath = path7.join(resolvedBuild.finalCacheDir, "meta.json");
     const finalMetadata = await readJsonIfExists(finalMetadataPath);
     if (context.options.cache.mode !== "off" && finalMetadata && await filesExist(finalMetadata.outputFiles)) {
       await publishOutputs(finalMetadata.outputFiles, context.options.outDir);
@@ -1603,18 +1628,18 @@ async function build(options) {
         diagnostics: [],
         emitSkipped: false,
         exitCode: 0,
-        outputFiles: finalMetadata.outputFiles.map((outputFile) => path6.join(context.options.outDir, path6.basename(outputFile)))
+        outputFiles: finalMetadata.outputFiles.map((outputFile) => path7.join(context.options.outDir, path7.basename(outputFile)))
       };
     }
     writeEntryShims({
       entries: resolvedBuild.entryFiles.map((entry) => ({
         exportNames: entry.exportNames,
         hasDefaultExport: entry.hasDefaultExport,
-        importPath: toImportPath2(path6.relative(path6.dirname(path6.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`)), entry.sourcePath)),
-        shimPath: path6.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`)
+        importPath: toImportPath(path7.relative(path7.dirname(path7.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`)), entry.sourcePath)),
+        shimPath: path7.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`)
       }))
     });
-    const nativeEmitMetadataPath = path6.join(resolvedBuild.nativeEmitCacheDir, "meta.json");
+    const nativeEmitMetadataPath = path7.join(resolvedBuild.nativeEmitCacheDir, "meta.json");
     const nativeEmitResult = await emitNativeStage({
       cacheDir: resolvedBuild.nativeEmitCacheDir,
       fileNames: [...resolvedBuild.sourceFiles, ...resolvedBuild.shimFiles],
@@ -1662,7 +1687,7 @@ async function build(options) {
       outputFiles: closureResult.cacheOutputFiles
     });
     if (context.options.cache.mode === "persistent") {
-      await writeJson(path6.join(context.projectCacheDir, "final-fast.json"), {
+      await writeJson(path7.join(context.projectCacheDir, "final-fast.json"), {
         finalKey: resolvedBuild.finalKey,
         optionsSignature: context.optionsSignature,
         packageSignature: context.packageSignature,
@@ -1690,17 +1715,17 @@ async function build(options) {
   }
 }
 async function cleanCache(options = {}) {
-  const projectRoot = path6.resolve(options.projectRoot ?? process.cwd());
-  const cacheRoot = path6.resolve(options.cacheDir || getDefaultPersistentCacheRoot());
-  const projectCacheDir = path6.join(cacheRoot, hashContent(projectRoot));
+  const projectRoot = path7.resolve(options.projectRoot ?? process.cwd());
+  const cacheRoot = path7.resolve(options.cacheDir || getDefaultPersistentCacheRoot());
+  const projectCacheDir = path7.join(cacheRoot, hashContent(projectRoot));
   await fs7.promises.rm(projectCacheDir, { force: true, recursive: true });
 }
 async function collectBundledExterns(packageRoot) {
   if (!bundledExternsCache) {
     bundledExternsCache = (async () => {
-      const closureExternsPath = path6.join(packageRoot, "closure-externs");
+      const closureExternsPath = path7.join(packageRoot, "closure-externs");
       const entries = await fs7.promises.readdir(closureExternsPath);
-      return entries.map((entry) => path6.join(closureExternsPath, entry)).sort((left, right) => left.localeCompare(right));
+      return entries.map((entry) => path7.join(closureExternsPath, entry)).sort((left, right) => left.localeCompare(right));
     })();
   }
   return bundledExternsCache;
@@ -1711,7 +1736,7 @@ async function publishOutputs(outputFiles, outDir) {
   }
   await copyOrLinkFiles(outputFiles, outDir);
 }
-function toImportPath2(relativePath) {
+function toImportPath(relativePath) {
   const normalized = relativePath.replace(/\\/g, "/").replace(/\.[^/.]+$/, "");
   return normalized.startsWith(".") ? normalized : `./${normalized}`;
 }

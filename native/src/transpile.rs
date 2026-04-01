@@ -1,42 +1,89 @@
 #![allow(non_snake_case)]
 
-use std::fs;
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::mem;
 use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+use std::collections::{BTreeMap, BTreeSet};
 
 use napi_derive::napi;
 use rayon::prelude::*;
 use swc_core::common::{sync::Lrc, Globals, Mark, SourceMap, GLOBALS};
-use swc_core::ecma::ast::{CallExpr, Callee, EmptyStmt, Expr, ExprStmt, Id, MemberExpr, MemberProp, Module, ModuleItem, Pass, Program, Stmt, VarDeclarator};
+use swc_core::ecma::ast::{ArrowExpr, BindingIdent, BlockStmt, BlockStmtOrExpr, Bool, CallExpr, Callee, EmptyStmt, Expr, ExprStmt, Id, Ident, ImportDecl, ImportDefaultSpecifier, ImportSpecifier, Lit, MemberExpr, MemberProp, Module, ModuleItem, Pass, Pat, Program, PropName, Stmt, Str, TsEnumMemberId, UnaryExpr, UnaryOp, VarDecl, VarDeclKind, VarDeclarator};
 use swc_core::ecma::codegen::{text_writer::JsWriter, Config as CodegenConfig, Emitter};
 use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 use swc_ecma_transforms_base::resolver;
+use swc_ecma_transforms_react::{
+    jsx,
+    Options as ReactOptions,
+    Runtime as ReactRuntime,
+};
 use swc_ecma_transforms_typescript::strip;
 
+use crate::closure_metadata::{
+    load_closure_metadata, ClosureEnumDeclaration, ClosureFileMetadata, ClosureTopLevelDoc,
+};
 use crate::commonjs::{analyze_commonjs_module, evaluate_boolean_expr};
 use crate::module_cache::{get_or_parse_cached_module, parse_module};
+use crate::pathing::{normalize_path, to_goog_module_id};
+use crate::support_files::{collect_commonjs_specifiers, emit_package_support_files};
 
 #[allow(non_snake_case)]
 #[napi(object)]
 pub struct TranspileOutput {
     pub emittedFiles: Vec<String>,
     pub externsPath: String,
+    pub supportFiles: Vec<String>,
+}
+
+#[allow(non_snake_case)]
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct PackageAliasInput {
+    pub packageName: String,
+    pub subpath: String,
+    pub targetPath: String,
+}
+
+#[derive(Clone, Debug)]
+struct TranspileContext {
+    commonjs_specifiers: HashSet<String>,
+    file_metadata: HashMap<String, ClosureFileMetadata>,
+    global_property_names: HashSet<String>,
+    package_aliases: Vec<PackageAliasInput>,
+    static_property_names: HashSet<String>,
+    workspace_dir: PathBuf,
 }
 
 pub fn transpile_sources(
     file_names: Vec<String>,
     out_dir: String,
     externs_path: String,
+    metadata_path: String,
     workspace_dir: String,
+    package_aliases: Vec<PackageAliasInput>,
+    package_json_files: Vec<String>,
 ) -> std::result::Result<TranspileOutput, String> {
     fs::create_dir_all(&out_dir).map_err(|error| error.to_string())?;
     if let Some(parent) = PathBuf::from(&externs_path).parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    fs::write(&externs_path, "").map_err(|error| error.to_string())?;
-
     let workspace_dir = PathBuf::from(workspace_dir);
     let out_dir = PathBuf::from(out_dir);
+    let file_metadata = load_closure_metadata(&metadata_path)?;
+    let context = TranspileContext {
+        commonjs_specifiers: collect_commonjs_specifiers(&package_aliases)?
+            .into_iter()
+            .collect(),
+        file_metadata,
+        global_property_names: collect_global_property_names(&file_names)?,
+        package_aliases,
+        static_property_names: collect_static_property_names(&file_names)?,
+        workspace_dir: workspace_dir.clone(),
+    };
+
     let emitted_outputs = file_names
         .par_iter()
         .filter(|file_name| !file_name.ends_with(".d.ts"))
@@ -45,11 +92,23 @@ pub fn transpile_sources(
             let relative_path = file_path.strip_prefix(&workspace_dir).unwrap_or(&file_path);
             let output_path = out_dir.join(relative_path).with_extension("js");
 
-            let code = GLOBALS.set(&Globals::new(), || transform_source_file(&file_path))?;
+            let code = GLOBALS.set(&Globals::new(), || {
+                let code = transform_source_file(&file_path, &context)?;
+                Ok::<_, String>(code)
+            })?;
 
             Ok::<_, String>((output_path, code))
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    fs::write(
+        &externs_path,
+        render_generated_externs(
+            &context.global_property_names,
+            &context.static_property_names,
+        ),
+    )
+    .map_err(|error| error.to_string())?;
 
     let mut emitted_files = Vec::with_capacity(emitted_outputs.len());
     for (output_path, code) in emitted_outputs {
@@ -61,27 +120,392 @@ pub fn transpile_sources(
     }
 
     emitted_files.sort();
+    let support_files = emit_package_support_files(
+        &out_dir,
+        &workspace_dir,
+        &context.package_aliases,
+        &package_json_files,
+    )?;
     Ok(TranspileOutput {
         emittedFiles: emitted_files,
         externsPath: externs_path,
+        supportFiles: support_files,
     })
 }
 
-fn transform_source_file(file_path: &Path) -> std::result::Result<String, String> {
-    let source_text = fs::read_to_string(file_path).map_err(|error| error.to_string())?;
-    let module = get_or_parse_cached_module(&file_path.to_path_buf())?;
-    let commonjs_analysis = analyze_commonjs_module(&module);
-
-    if !should_run_resolver(file_path) {
-        if should_normalize_commonjs(file_path, &commonjs_analysis) {
-            return normalize_commonjs_module(module, &commonjs_analysis);
-        }
-
-        return Ok(apply_js_compat_text_fixes(source_text));
+#[cfg(test)]
+fn render_externs(
+    export_names: &BTreeSet<String>,
+    enum_externs: &BTreeMap<String, BTreeSet<String>>,
+) -> String {
+    let mut lines = vec!["/** @externs */".to_string()];
+    let mut all_names = export_names.clone();
+    for member_names in enum_externs.values() {
+        all_names.extend(member_names.iter().cloned());
+    }
+    if all_names.is_empty() {
+        lines.push(String::new());
+        return lines.join("\n");
     }
 
-    let program = transform_program(module, file_path)?;
-    print_program(&program).map(apply_js_compat_text_fixes)
+    for name in all_names {
+        if is_valid_js_ident(&name) {
+            lines.push(format!("Object.prototype.{name};"));
+        } else {
+            lines.push(format!("Object.prototype[{name:?}];"));
+        }
+    }
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+fn render_generated_externs(
+    global_property_names: &HashSet<String>,
+    static_property_names: &HashSet<String>,
+) -> String {
+    let mut lines = vec!["/** @externs */".to_string()];
+    let mut global_names = global_property_names.iter().cloned().collect::<Vec<_>>();
+    global_names.sort();
+    for name in global_names {
+        if is_valid_js_identifier(&name) {
+            lines.push(format!("Window.prototype.{name};"));
+        } else {
+            lines.push(format!("Window.prototype[{name:?}];"));
+        }
+    }
+    let mut static_names = static_property_names.iter().cloned().collect::<Vec<_>>();
+    static_names.sort();
+    for name in static_names {
+        if is_valid_js_identifier(&name) {
+            lines.push(format!("Function.prototype.{name};"));
+        } else {
+            lines.push(format!("Function.prototype[{name:?}];"));
+        }
+    }
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+fn is_valid_js_identifier(name: &str) -> bool {
+    let mut characters = name.chars();
+    match characters.next() {
+        Some(character)
+            if character.is_ascii_alphabetic() || character == '_' || character == '$' => {}
+        _ => return false,
+    }
+    characters.all(|character| {
+        character.is_ascii_alphanumeric() || character == '_' || character == '$'
+    })
+}
+
+fn collect_static_property_names(file_names: &[String]) -> std::result::Result<HashSet<String>, String> {
+    let mut names = HashSet::new();
+    for file_name in file_names {
+        if file_name.ends_with(".d.ts") {
+            continue;
+        }
+        let file_path = PathBuf::from(file_name);
+        let source_text = fs::read_to_string(&file_path).map_err(|error| error.to_string())?;
+        names.extend(collect_static_property_names_from_text(&source_text));
+    }
+    Ok(names)
+}
+
+fn collect_static_property_names_from_text(source_text: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for (_, property_name) in collect_class_static_assignments(source_text) {
+        names.insert(property_name);
+    }
+    if let Ok(regex) =
+        regex::Regex::new(r"\bstatic\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=")
+    {
+        for captures in regex.captures_iter(source_text) {
+            if let Some(capture) = captures.get(1) {
+                names.insert(capture.as_str().to_string());
+            }
+        }
+    }
+    names
+}
+
+fn is_valid_js_ident(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '$' || first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|char| char == '$' || char == '_' || char.is_ascii_alphanumeric())
+}
+
+#[cfg(test)]
+fn collect_commonjs_extern_names(
+    module: &Module,
+    analysis: &crate::commonjs::CommonJsAnalysis,
+) -> Vec<String> {
+    let mut externs = analysis
+        .export_names
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let object_bindings = collect_top_level_object_bindings(module);
+
+    for item in &module.body {
+        let ModuleItem::Stmt(Stmt::Expr(ExprStmt { expr, .. })) = item else {
+            continue;
+        };
+        let Expr::Assign(assign) = &**expr else {
+            continue;
+        };
+        if assign.op != swc_core::ecma::ast::AssignOp::Assign {
+            continue;
+        }
+        let swc_core::ecma::ast::AssignTarget::Simple(
+            swc_core::ecma::ast::SimpleAssignTarget::Member(member),
+        ) = &assign.left
+        else {
+            continue;
+        };
+        if !is_commonjs_export_member_expr(member) && !is_module_exports_member_expr(member) {
+            continue;
+        }
+        let Expr::Ident(ident) = &*assign.right else {
+            continue;
+        };
+        if let Some(bound_props) = object_bindings.get(ident.sym.as_ref()) {
+            externs.extend(bound_props.iter().cloned());
+        }
+    }
+
+    externs.into_iter().collect()
+}
+
+#[cfg(test)]
+fn collect_top_level_object_bindings(module: &Module) -> HashMap<String, BTreeSet<String>> {
+    let mut bindings = HashMap::new();
+
+    for item in &module.body {
+        let ModuleItem::Stmt(Stmt::Decl(swc_core::ecma::ast::Decl::Var(var_decl))) = item else {
+            continue;
+        };
+        for declarator in &var_decl.decls {
+            let Pat::Ident(binding) = &declarator.name else {
+                continue;
+            };
+            let Some(init) = &declarator.init else {
+                continue;
+            };
+            let Expr::Object(object) = &**init else {
+                continue;
+            };
+            let props = object_literal_prop_names(object);
+            if !props.is_empty() {
+                bindings.insert(binding.id.sym.to_string(), props);
+            }
+        }
+    }
+
+    bindings
+}
+
+#[cfg(test)]
+fn collect_protocol_extern_names(module: &Module) -> BTreeSet<String> {
+    let mut collector = ProtocolExternCollector::default();
+    module.visit_with(&mut collector);
+    collector.names
+}
+
+#[cfg(test)]
+fn collect_enum_extern_names(module: &Module) -> BTreeSet<String> {
+    collect_enum_extern_specs(module)
+        .into_values()
+        .flatten()
+        .collect()
+}
+
+#[cfg(test)]
+fn collect_enum_extern_specs(module: &Module) -> BTreeMap<String, BTreeSet<String>> {
+    let mut collector = EnumExternCollector::default();
+    module.visit_with(&mut collector);
+    collector.enums
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct EnumExternCollector {
+    enums: BTreeMap<String, BTreeSet<String>>,
+}
+
+#[cfg(test)]
+impl Visit for EnumExternCollector {
+    fn visit_ts_enum_decl(&mut self, enum_decl: &swc_core::ecma::ast::TsEnumDecl) {
+        let enum_name = enum_decl.id.sym.to_string();
+        let entry = self.enums.entry(enum_name).or_default();
+        for member in &enum_decl.members {
+            match &member.id {
+                TsEnumMemberId::Ident(ident) => {
+                    entry.insert(ident.sym.to_string());
+                }
+                TsEnumMemberId::Str(value) => {
+                    entry.insert(value.value.to_string_lossy().to_string());
+                }
+            }
+        }
+        enum_decl.visit_children_with(self);
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct ProtocolExternCollector {
+    names: BTreeSet<String>,
+}
+
+#[cfg(test)]
+impl Visit for ProtocolExternCollector {
+    fn visit_var_declarator(&mut self, declarator: &VarDeclarator) {
+        declarator.visit_children_with(self);
+
+        let Pat::Object(object_pat) = &declarator.name else {
+            return;
+        };
+        let Some(init) = &declarator.init else {
+            return;
+        };
+        let Expr::Ident(ident) = &**init else {
+            return;
+        };
+        if !is_protocol_object_name(ident.sym.as_ref()) {
+            return;
+        }
+        for prop in &object_pat.props {
+            match prop {
+                swc_core::ecma::ast::ObjectPatProp::Assign(assign) => {
+                    self.names.insert(assign.key.sym.to_string());
+                }
+                swc_core::ecma::ast::ObjectPatProp::KeyValue(key_value) => {
+                    if let Some(name) = prop_name_to_string(&key_value.key) {
+                        self.names.insert(name);
+                    }
+                }
+                swc_core::ecma::ast::ObjectPatProp::Rest(_) => {}
+            }
+        }
+    }
+
+    fn visit_member_expr(&mut self, member_expr: &MemberExpr) {
+        member_expr.visit_children_with(self);
+
+        let Expr::Ident(ident) = &*member_expr.obj else {
+            return;
+        };
+        if !is_protocol_object_name(ident.sym.as_ref()) {
+            return;
+        }
+        let MemberProp::Ident(prop_ident) = &member_expr.prop else {
+            return;
+        };
+        self.names.insert(prop_ident.sym.to_string());
+    }
+}
+
+#[cfg(test)]
+fn is_protocol_object_name(value: &str) -> bool {
+    matches!(
+        value,
+        "config" | "configs" | "options" | "option" | "opts" | "factory" | "factories"
+    )
+}
+
+#[cfg(test)]
+fn object_literal_prop_names(object: &swc_core::ecma::ast::ObjectLit) -> BTreeSet<String> {
+    let mut props = BTreeSet::new();
+    for property in &object.props {
+        let swc_core::ecma::ast::PropOrSpread::Prop(prop) = property else {
+            continue;
+        };
+        match &**prop {
+            swc_core::ecma::ast::Prop::KeyValue(key_value) => {
+                if let Some(name) = prop_name_to_string(&key_value.key) {
+                    props.insert(name);
+                }
+            }
+            swc_core::ecma::ast::Prop::Shorthand(ident) => {
+                props.insert(ident.sym.to_string());
+            }
+            swc_core::ecma::ast::Prop::Method(method) => {
+                if let Some(name) = prop_name_to_string(&method.key) {
+                    props.insert(name);
+                }
+            }
+            swc_core::ecma::ast::Prop::Getter(getter) => {
+                if let Some(name) = prop_name_to_string(&getter.key) {
+                    props.insert(name);
+                }
+            }
+            swc_core::ecma::ast::Prop::Setter(setter) => {
+                if let Some(name) = prop_name_to_string(&setter.key) {
+                    props.insert(name);
+                }
+            }
+            _ => {}
+        }
+    }
+    props
+}
+
+#[cfg(test)]
+fn prop_name_to_string(prop_name: &PropName) -> Option<String> {
+    match prop_name {
+        PropName::Ident(ident) => Some(ident.sym.to_string()),
+        PropName::Str(value) => Some(value.value.to_string_lossy().to_string()),
+        PropName::Num(value) => Some(value.value.to_string()),
+        _ => None,
+    }
+}
+
+fn transform_source_file(
+    file_path: &Path,
+    context: &TranspileContext,
+) -> std::result::Result<String, String> {
+    let source_text = fs::read_to_string(file_path).map_err(|error| error.to_string())?;
+    let file_metadata = context
+        .file_metadata
+        .get(&file_path.to_string_lossy().to_string())
+        .cloned();
+    let module = if let Some(decorated_output_text) = file_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.decorated_output_text.clone())
+    {
+        parse_module(&file_path.with_extension("js"), &decorated_output_text)?
+    } else {
+        get_or_parse_cached_module(&file_path.to_path_buf())?
+    };
+    let commonjs_analysis = analyze_commonjs_module(&module);
+
+    if should_normalize_commonjs(file_path, &commonjs_analysis) {
+        return normalize_commonjs_module(
+            module,
+            &commonjs_analysis,
+            file_path,
+            context,
+            file_metadata.as_ref(),
+        );
+    }
+
+    let program = if should_run_resolver(file_path) {
+        transform_program(module, file_path, context, file_metadata.as_ref())?
+    } else {
+        transform_js_pass_through_program(module, source_text, context)
+    };
+    emit_goog_module_program(
+        file_path,
+        program,
+        context,
+        file_metadata.as_ref(),
+        None,
+    )
 }
 
 fn should_normalize_commonjs(file_path: &Path, analysis: &crate::commonjs::CommonJsAnalysis) -> bool {
@@ -93,6 +517,9 @@ fn should_normalize_commonjs(file_path: &Path, analysis: &crate::commonjs::Commo
 fn normalize_commonjs_module(
     module: Module,
     analysis: &crate::commonjs::CommonJsAnalysis,
+    file_path: &Path,
+    context: &TranspileContext,
+    file_metadata: Option<&ClosureFileMetadata>,
 ) -> std::result::Result<String, String> {
     if let Some(reason) = analysis.unsupported.first() {
         return Err(format!("Unsupported CommonJS pattern: {reason}"));
@@ -128,16 +555,24 @@ fn normalize_commonjs_module(
     normalized_body.extend(import_items);
     normalized_body.extend(parse_module_items("var module = { exports: {} };")?);
     normalized_body.extend(module.body.drain(..));
-    normalized_body.extend(parse_module_items(
-        "var __cjsExports = module.exports; export { __cjsExports }; export default __cjsExports;",
-    )?);
+    normalized_body.extend(parse_module_items("var __cjsExports = module.exports;")?);
 
-    print_program(&Program::Module(Module {
+    let mut program = Program::Module(Module {
         body: normalized_body,
         shebang: None,
         span: module.span,
-    }))
-    .map(apply_js_compat_text_fixes)
+    });
+    let has_t_declaration = false;
+    program.visit_mut_with(&mut JsCompatAstVisitor::new(has_t_declaration));
+    apply_program_compat_transforms(&mut program, context);
+
+    emit_goog_module_program(
+        file_path,
+        program,
+        context,
+        file_metadata,
+        Some("__cjsExports"),
+    )
 }
 
 fn to_emitted_commonjs_specifier(specifier: &str) -> String {
@@ -152,7 +587,10 @@ fn to_emitted_commonjs_specifier(specifier: &str) -> String {
 
 fn apply_js_compat_text_fixes(source_text: String) -> String {
     let global_properties = collect_global_this_property_names(&source_text);
-    let mut source_text = source_text;
+    let mut source_text =
+        rewrite_typescript_helper_this_fallbacks(rewrite_process_env_node_env(
+            rewrite_directory_module_specifiers(source_text),
+        ));
     for property_name in global_properties {
         let pattern = format!(r"(?m)(?P<prefix>^|[^\w$.]){property_name}(?P<suffix>\.)");
         let replacement = format!("${{prefix}}globalThis.{property_name}${{suffix}}");
@@ -229,19 +667,151 @@ fn apply_js_compat_text_fixes(source_text: String) -> String {
         }
     }
 
-    source_text = rewrite_static_class_fields(source_text);
+    rewrite_static_class_fields(source_text)
+}
 
-    source_text
+fn rewrite_typescript_helper_this_fallbacks(source_text: String) -> String {
+    regex::Regex::new(
+        r#"(?m)\b(var|let|const)\s+(__[A-Za-z0-9_$]+)\s*=\s*\(this\s*&&\s*this\.__[A-Za-z0-9_$]+\)\s*\|\|\s*function"#,
+    )
+    .map(|regex| regex.replace_all(&source_text, "$1 $2 = function").into_owned())
+    .unwrap_or(source_text)
+}
+
+fn rewrite_process_env_node_env(source_text: String) -> String {
+    regex::Regex::new(r#"\bprocess\.env\.NODE_ENV\b"#)
+        .map(|regex| regex.replace_all(&source_text, "\"production\"").into_owned())
+        .unwrap_or(source_text)
+}
+
+#[cfg(test)]
+fn transform_js_pass_through_module(
+    module: Module,
+    source_text: String,
+    _file_path: &Path,
+    context: &TranspileContext,
+) -> std::result::Result<String, String> {
+    GLOBALS.set(&Globals::new(), || {
+        let program = transform_js_pass_through_program(module, source_text.clone(), context);
+        print_program(&program)
+            .map(apply_js_compat_text_fixes)
+            .or_else(|_| Ok(apply_js_compat_text_fixes(source_text)))
+    })
+}
+
+fn transform_js_pass_through_program(
+    module: Module,
+    source_text: String,
+    context: &TranspileContext,
+) -> Program {
+    let mut program = Program::Module(module);
+    let unresolved_mark = Mark::new();
+    let top_level_mark = Mark::new();
+    resolver(unresolved_mark, top_level_mark, true).process(&mut program);
+    let unresolved_ctxt = swc_core::common::SyntaxContext::empty().apply_mark(unresolved_mark);
+    let compat_property_names = collect_global_this_compat_property_names(&program, unresolved_ctxt);
+    if !compat_property_names.is_empty() {
+        program.visit_mut_with(
+            &mut GlobalThisCompatVisitor::new(compat_property_names, unresolved_ctxt)
+                .expect("global compat rewrite"),
+        );
+    }
+    let has_t_declaration = source_declares_ident(&source_text, "T");
+    program.visit_mut_with(&mut JsCompatAstVisitor::new(has_t_declaration));
+    apply_program_compat_transforms(&mut program, context);
+    program
+}
+
+fn source_declares_ident(source_text: &str, name: &str) -> bool {
+    let pattern = format!(
+        r#"(?m)\b(?:var|let|const|function|class|import)\s+{}\b"#,
+        regex::escape(name)
+    );
+    regex::Regex::new(&pattern)
+        .map(|regex| regex.is_match(source_text))
+        .unwrap_or(false)
+}
+
+struct JsCompatAstVisitor {
+    has_t_declaration: bool,
+}
+
+impl JsCompatAstVisitor {
+    fn new(has_t_declaration: bool) -> Self {
+        Self { has_t_declaration }
+    }
+}
+
+impl VisitMut for JsCompatAstVisitor {
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        expr.visit_mut_children_with(self);
+
+        if let Expr::Cond(conditional) = expr {
+            if let Expr::Lit(Lit::Bool(Bool { value, .. })) = &*conditional.test {
+                let replacement = if *value {
+                    mem::replace(&mut conditional.cons, Box::new(Expr::Invalid(Default::default())))
+                } else {
+                    mem::replace(&mut conditional.alt, Box::new(Expr::Invalid(Default::default())))
+                };
+                *expr = *replacement;
+                return;
+            }
+        }
+
+        if self.has_t_declaration {
+            return;
+        }
+
+        let Expr::Arrow(ArrowExpr { params, body, .. }) = expr else {
+            return;
+        };
+        if !params.is_empty() {
+            return;
+        }
+        let BlockStmtOrExpr::Expr(returned_expr) = &mut **body else {
+            return;
+        };
+        if !matches!(&**returned_expr, Expr::Ident(ident) if ident.sym == "T") {
+            return;
+        }
+
+        *returned_expr = Box::new(Expr::Unary(UnaryExpr {
+            span: Default::default(),
+            op: UnaryOp::Void,
+            arg: Box::new(Expr::Lit(Lit::Num(0f64.into()))),
+        }));
+    }
+}
+
+fn rewrite_directory_module_specifiers(source_text: String) -> String {
+    let source_text = regex::Regex::new(r#"(?m)(\bfrom\s+)'\.'"#)
+        .map(|regex| regex.replace_all(&source_text, "$1'./index.js'").into_owned())
+        .unwrap_or(source_text);
+    let source_text = regex::Regex::new(r#"(?m)(\bfrom\s+)"\.""#)
+        .map(|regex| regex.replace_all(&source_text, "$1\"./index.js\"").into_owned())
+        .unwrap_or(source_text);
+    let source_text = regex::Regex::new(r#"(?m)(\bfrom\s+)'\.\.'"#)
+        .map(|regex| regex.replace_all(&source_text, "$1'../index.js'").into_owned())
+        .unwrap_or(source_text);
+    let source_text = regex::Regex::new(r#"(?m)(\bfrom\s+)"\.\.""#)
+        .map(|regex| regex.replace_all(&source_text, "$1\"../index.js\"").into_owned())
+        .unwrap_or(source_text);
+    let source_text = regex::Regex::new(r#"import\(\s*'\.'\s*\)"#)
+        .map(|regex| regex.replace_all(&source_text, "import('./index.js')").into_owned())
+        .unwrap_or(source_text);
+    let source_text = regex::Regex::new(r#"import\(\s*"\."\s*\)"#)
+        .map(|regex| regex.replace_all(&source_text, "import('./index.js')").into_owned())
+        .unwrap_or(source_text);
+    let source_text = regex::Regex::new(r#"import\(\s*'\.\.'\s*\)"#)
+        .map(|regex| regex.replace_all(&source_text, "import('../index.js')").into_owned())
+        .unwrap_or(source_text);
+    regex::Regex::new(r#"import\(\s*"\.\."\s*\)"#)
+        .map(|regex| regex.replace_all(&source_text, "import('../index.js')").into_owned())
+        .unwrap_or(source_text)
 }
 
 fn rewrite_static_class_fields(source_text: String) -> String {
-    regex::Regex::new(r"(?m)(\bstatic)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=")
-        .map(|regex| {
-            regex
-                .replace_all(&source_text, "$1 [\"$2\"] =")
-                .into_owned()
-        })
-        .unwrap_or(source_text)
+    source_text
 }
 
 fn parse_module_items(source: &str) -> std::result::Result<Vec<ModuleItem>, String> {
@@ -251,7 +821,7 @@ fn parse_module_items(source: &str) -> std::result::Result<Vec<ModuleItem>, Stri
 fn collect_global_this_property_names(source_text: &str) -> HashSet<String> {
     let mut global_aliases = HashSet::from(["globalThis".to_string()]);
     if let Ok(alias_regex) = regex::Regex::new(
-        r"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*;",
+        r"(?m)(?:^|[;,]\s*|\b(?:const|let|var)\s+)([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*([A-Za-z_$][A-Za-z0-9_$]*)\b",
     ) {
         let mut changed = true;
         while changed {
@@ -273,7 +843,10 @@ fn collect_global_this_property_names(source_text: &str) -> HashSet<String> {
         {
             for captures in regex.captures_iter(source_text) {
                 if let Some(capture) = captures.get(1) {
-                    properties.insert(capture.as_str().to_string());
+                    let property_name = capture.as_str();
+                    if is_global_protocol_name(property_name) {
+                        properties.insert(property_name.to_string());
+                    }
                 }
             }
         }
@@ -282,9 +855,26 @@ fn collect_global_this_property_names(source_text: &str) -> HashSet<String> {
     properties
 }
 
+fn is_global_protocol_name(name: &str) -> bool {
+    name.len() >= 8 || name.chars().any(|character| character.is_ascii_uppercase())
+}
+
+fn collect_global_property_names(file_names: &[String]) -> std::result::Result<HashSet<String>, String> {
+    let mut names = HashSet::new();
+    for file_name in file_names {
+        if file_name.ends_with(".d.ts") {
+            continue;
+        }
+        let file_path = PathBuf::from(file_name);
+        let source_text = fs::read_to_string(&file_path).map_err(|error| error.to_string())?;
+        names.extend(collect_global_this_property_names(&source_text));
+    }
+    Ok(names)
+}
+
 fn collect_static_fallbacks(source_text: &str) -> Vec<(String, String, String)> {
     let assignment_regex = match regex::Regex::new(
-        r"(?s)([A-Z][A-Za-z0-9_$]*)\.([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(\[[^;]*?\]);",
+        r#"(?s)([A-Z][A-Za-z0-9_$]*)(?:\.([A-Za-z_$][A-Za-z0-9_$]*)|\["([A-Za-z_$][A-Za-z0-9_$]*)"\])\s*=\s*(\[[^;]*?\]);"#,
     ) {
         Ok(regex) => regex,
         Err(_) => return Vec::new(),
@@ -293,9 +883,13 @@ fn collect_static_fallbacks(source_text: &str) -> Vec<(String, String, String)> 
     let mut fallbacks = Vec::new();
     for captures in assignment_regex.captures_iter(source_text) {
         let class_name = captures.get(1).map(|capture| capture.as_str()).unwrap_or_default();
-        let property_name = captures.get(2).map(|capture| capture.as_str()).unwrap_or_default();
+        let property_name = captures
+            .get(2)
+            .or_else(|| captures.get(3))
+            .map(|capture| capture.as_str())
+            .unwrap_or_default();
         let initializer = captures
-            .get(3)
+            .get(4)
             .map(|capture| capture.as_str().to_string())
             .unwrap_or_default();
 
@@ -365,23 +959,85 @@ struct CommonJsRewriteVisitor {
     module_exports_expr: Box<Expr>,
     production_expr: Box<Expr>,
     require_bindings: HashMap<String, String>,
+    commonjs_object_bindings: HashSet<String>,
 }
 
 impl CommonJsRewriteVisitor {
     fn new(require_bindings: HashMap<String, String>) -> std::result::Result<Self, String> {
+        let commonjs_object_bindings =
+            require_bindings.values().cloned().collect::<HashSet<_>>();
         Ok(Self {
             module_exports_expr: parse_expr("module.exports")?,
             production_expr: parse_expr("\"production\"")?,
             require_bindings,
+            commonjs_object_bindings,
         })
     }
 }
 
 impl VisitMut for CommonJsRewriteVisitor {
+    fn visit_mut_assign_expr(&mut self, expression: &mut swc_core::ecma::ast::AssignExpr) {
+        expression.visit_mut_children_with(self);
+
+        let swc_core::ecma::ast::AssignTarget::Simple(
+            swc_core::ecma::ast::SimpleAssignTarget::Member(member),
+        ) = &mut expression.left
+        else {
+            return;
+        };
+
+        if is_commonjs_export_member_expr(member) {
+            let object_expr = Expr::Member(MemberExpr {
+                span: member.span,
+                obj: member.obj.clone(),
+                prop: member.prop.clone(),
+            });
+            quote_commonjs_export_member(member, object_expr.clone());
+            if let Expr::Object(object) = &mut *expression.right {
+                quote_commonjs_export_object(object, object_expr);
+            }
+            return;
+        }
+
+        if is_module_exports_member_expr(member) {
+            quote_commonjs_export_member(
+                member,
+                Expr::Member(MemberExpr {
+                    span: member.span,
+                    obj: member.obj.clone(),
+                    prop: member.prop.clone(),
+                }),
+            );
+            if let Expr::Object(object) = &mut *expression.right {
+                quote_commonjs_export_object(
+                    object,
+                    Expr::Member(MemberExpr {
+                        span: member.span,
+                        obj: member.obj.clone(),
+                        prop: member.prop.clone(),
+                    }),
+                );
+            }
+            return;
+        }
+    }
+
     fn visit_mut_expr(&mut self, expr: &mut Expr) {
         expr.visit_mut_children_with(self);
 
         match expr {
+            Expr::Member(member_expr)
+                if !member_expr.prop.is_computed()
+                    && matches!(&*member_expr.obj, Expr::Ident(ident) if self.commonjs_object_bindings.contains(ident.sym.as_ref())) =>
+            {
+                if let MemberProp::Ident(ident) = &member_expr.prop {
+                    member_expr.prop = create_string_computed_prop(ident.sym.as_ref());
+                }
+            }
+            Expr::Member(member_expr) if is_commonjs_export_member_expr(member_expr) => {
+                let object_expr = (*member_expr.obj).clone();
+                quote_commonjs_export_member(member_expr, object_expr);
+            }
             Expr::Call(call_expr) => {
                 if let Some(specifier) = require_call_specifier(call_expr) {
                     if let Some(binding_name) = self.require_bindings.get(&specifier) {
@@ -396,6 +1052,24 @@ impl VisitMut for CommonJsRewriteVisitor {
                 *expr = *self.production_expr.clone();
             }
             _ => {}
+        }
+    }
+
+    fn visit_mut_var_declarator(&mut self, declarator: &mut VarDeclarator) {
+        declarator.visit_mut_children_with(self);
+
+        let Pat::Ident(binding) = &declarator.name else {
+            return;
+        };
+        let Some(init) = &declarator.init else {
+            return;
+        };
+        let Expr::Ident(ident) = &**init else {
+            return;
+        };
+        if self.commonjs_object_bindings.contains(ident.sym.as_ref()) {
+            self.commonjs_object_bindings
+                .insert(binding.id.sym.to_string());
         }
     }
 
@@ -430,6 +1104,78 @@ impl VisitMut for CommonJsRewriteVisitor {
             _ => {}
         }
     }
+}
+
+fn is_commonjs_export_member_expr(member_expr: &MemberExpr) -> bool {
+    matches!(
+        &*member_expr.obj,
+        Expr::Ident(ident) if ident.sym == *"exports"
+    ) || matches!(
+        &*member_expr.obj,
+        Expr::Member(member) if is_module_exports_member_expr(member)
+    )
+}
+
+fn quote_commonjs_export_member(member_expr: &mut MemberExpr, _object_expr: Expr) {
+    if let MemberProp::Ident(ident) = &member_expr.prop {
+        member_expr.prop = create_string_computed_prop(ident.sym.as_ref());
+    }
+}
+
+fn quote_commonjs_export_object(object: &mut swc_core::ecma::ast::ObjectLit, _object_expr: Expr) {
+    for property in &mut object.props {
+        let swc_core::ecma::ast::PropOrSpread::Prop(prop) = property else {
+            continue;
+        };
+        match &mut **prop {
+            swc_core::ecma::ast::Prop::KeyValue(key_value) => {
+                key_value.key = quote_commonjs_prop_name(key_value.key.clone());
+            }
+            swc_core::ecma::ast::Prop::Shorthand(ident) => {
+                let key = quote_commonjs_prop_name(PropName::Ident(ident.clone().into()));
+                *prop = Box::new(swc_core::ecma::ast::Prop::KeyValue(
+                    swc_core::ecma::ast::KeyValueProp {
+                        key,
+                        value: Box::new(Expr::Ident(ident.clone())),
+                    },
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn quote_commonjs_prop_name(prop_name: PropName) -> PropName {
+    match prop_name {
+        PropName::Ident(ident) => PropName::Computed(create_string_computed_name(ident.sym.as_ref())),
+        PropName::Num(number) => {
+            PropName::Computed(create_string_computed_name(&number.value.to_string()))
+        }
+        other => other,
+    }
+}
+
+fn create_string_computed_prop(property_name: &str) -> MemberProp {
+    MemberProp::Computed(create_string_computed_name(property_name))
+}
+
+fn create_string_computed_name(property_name: &str) -> swc_core::ecma::ast::ComputedPropName {
+    swc_core::ecma::ast::ComputedPropName {
+        span: Default::default(),
+        expr: Box::new(Expr::Lit(Lit::Str(Str {
+            span: Default::default(),
+            value: property_name.into(),
+            raw: None,
+        }))),
+    }
+}
+
+fn is_module_exports_member_expr(member_expr: &MemberExpr) -> bool {
+    matches!(
+        (&*member_expr.obj, &member_expr.prop),
+        (Expr::Ident(module_ident), MemberProp::Ident(exports_ident))
+            if module_ident.sym == *"module" && exports_ident.sym == *"exports"
+    )
 }
 
 fn parse_expr(source: &str) -> std::result::Result<Box<Expr>, String> {
@@ -534,12 +1280,794 @@ fn collect_class_static_assignments(source_text: &str) -> Vec<(String, String)> 
     assignments
 }
 
+fn apply_program_compat_transforms(program: &mut Program, context: &TranspileContext) {
+    let mut commonjs_namespace_bindings = HashSet::new();
+    if let Program::Module(module) = program {
+        commonjs_namespace_bindings =
+            rewrite_commonjs_imports(module, &context.commonjs_specifiers);
+    }
+
+    if !commonjs_namespace_bindings.is_empty() {
+        program.visit_mut_with(&mut CommonJsNamespaceAccessVisitor::new(
+            commonjs_namespace_bindings,
+        ));
+    }
+    if !context.global_property_names.is_empty() {
+        let aliases = collect_global_this_aliases(program);
+        program.visit_mut_with(&mut GlobalThisPropertyCompatVisitor::new(
+            context.global_property_names.clone(),
+            aliases,
+        ));
+    }
+    if !context.static_property_names.is_empty() {
+        program.visit_mut_with(&mut StaticPropertyCompatVisitor::new(
+            context.static_property_names.clone(),
+        ));
+    }
+    program.visit_mut_with(&mut ConstantLikePropertyCompatVisitor);
+    program.visit_mut_with(&mut UppercaseStaticMemberCompatVisitor);
+    program.visit_mut_with(&mut ReactComponentPropsVisitor::default());
+}
+
+struct StaticPropertyCompatVisitor {
+    property_names: HashSet<String>,
+}
+
+impl StaticPropertyCompatVisitor {
+    fn new(property_names: HashSet<String>) -> Self {
+        Self { property_names }
+    }
+}
+
+impl VisitMut for StaticPropertyCompatVisitor {
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        expr.visit_mut_children_with(self);
+
+        let Expr::Member(member) = expr else {
+            return;
+        };
+        if member.prop.is_computed() {
+            return;
+        }
+        let MemberProp::Ident(prop_ident) = &member.prop else {
+            return;
+        };
+        if !self.property_names.contains(prop_ident.sym.as_ref()) {
+            return;
+        }
+
+        member.prop = create_string_computed_prop(prop_ident.sym.as_ref());
+    }
+}
+
+struct GlobalThisAliasCollector {
+    aliases: HashSet<String>,
+}
+
+impl Visit for GlobalThisAliasCollector {
+    fn visit_var_declarator(&mut self, declarator: &VarDeclarator) {
+        declarator.visit_children_with(self);
+
+        let Pat::Ident(binding) = &declarator.name else {
+            return;
+        };
+        let Some(init) = &declarator.init else {
+            return;
+        };
+        let Expr::Ident(ident) = &**init else {
+            return;
+        };
+        if self.aliases.contains(ident.sym.as_ref()) {
+            self.aliases.insert(binding.id.sym.to_string());
+        }
+    }
+}
+
+fn collect_global_this_aliases(program: &Program) -> HashSet<String> {
+    let mut collector = GlobalThisAliasCollector {
+        aliases: HashSet::from(["globalThis".to_string()]),
+    };
+    program.visit_with(&mut collector);
+    collector.aliases
+}
+
+struct GlobalThisPropertyCompatVisitor {
+    aliases: HashSet<String>,
+    property_names: HashSet<String>,
+}
+
+impl GlobalThisPropertyCompatVisitor {
+    fn new(property_names: HashSet<String>, aliases: HashSet<String>) -> Self {
+        Self {
+            aliases,
+            property_names,
+        }
+    }
+}
+
+impl VisitMut for GlobalThisPropertyCompatVisitor {
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        expr.visit_mut_children_with(self);
+
+        let Expr::Member(member) = expr else {
+            return;
+        };
+        if member.prop.is_computed() {
+            return;
+        }
+        let Expr::Ident(object_ident) = &*member.obj else {
+            return;
+        };
+        let MemberProp::Ident(prop_ident) = &member.prop else {
+            return;
+        };
+        if self.aliases.contains(object_ident.sym.as_ref())
+            && self.property_names.contains(prop_ident.sym.as_ref())
+        {
+            member.prop = create_string_computed_prop(prop_ident.sym.as_ref());
+        }
+    }
+}
+
+struct ConstantLikePropertyCompatVisitor;
+
+impl VisitMut for ConstantLikePropertyCompatVisitor {
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        expr.visit_mut_children_with(self);
+
+        let Expr::Member(member) = expr else {
+            return;
+        };
+        if member.prop.is_computed() {
+            return;
+        }
+        let MemberProp::Ident(prop_ident) = &member.prop else {
+            return;
+        };
+        if !is_constant_like_property_name(prop_ident.sym.as_ref()) {
+            return;
+        }
+
+        member.prop = create_string_computed_prop(prop_ident.sym.as_ref());
+    }
+
+    fn visit_mut_prop_name(&mut self, prop_name: &mut PropName) {
+        prop_name.visit_mut_children_with(self);
+
+        let PropName::Ident(ident) = prop_name else {
+            return;
+        };
+        if !is_constant_like_property_name(ident.sym.as_ref()) {
+            return;
+        }
+
+        *prop_name = PropName::Str(Str {
+            span: Default::default(),
+            value: ident.sym.to_string().into(),
+            raw: None,
+        });
+    }
+}
+
+struct UppercaseStaticMemberCompatVisitor;
+
+impl VisitMut for UppercaseStaticMemberCompatVisitor {
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        expr.visit_mut_children_with(self);
+
+        let Expr::Member(member) = expr else {
+            return;
+        };
+        if member.prop.is_computed() {
+            return;
+        }
+        let Expr::Ident(object_ident) = &*member.obj else {
+            return;
+        };
+        let MemberProp::Ident(prop_ident) = &member.prop else {
+            return;
+        };
+        if !is_component_like_name(object_ident.sym.as_ref())
+            || !is_component_like_name(prop_ident.sym.as_ref())
+        {
+            return;
+        }
+
+        member.prop = MemberProp::Computed(swc_core::ecma::ast::ComputedPropName {
+            span: Default::default(),
+            expr: Box::new(Expr::Lit(Lit::Str(Str {
+                span: Default::default(),
+                value: prop_ident.sym.to_string().into(),
+                raw: None,
+            }))),
+        });
+    }
+}
+
+struct CommonJsNamespaceAccessVisitor {
+    bindings: HashSet<String>,
+}
+
+impl CommonJsNamespaceAccessVisitor {
+    fn new(bindings: HashSet<String>) -> Self {
+        Self { bindings }
+    }
+}
+
+impl VisitMut for CommonJsNamespaceAccessVisitor {
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        expr.visit_mut_children_with(self);
+
+        let Expr::Member(member) = expr else {
+            return;
+        };
+        if member.prop.is_computed() {
+            return;
+        }
+        let Expr::Ident(object_ident) = &*member.obj else {
+            return;
+        };
+        if !self.bindings.contains(object_ident.sym.as_ref()) {
+            return;
+        }
+        let MemberProp::Ident(prop_ident) = &member.prop else {
+            return;
+        };
+        member.prop = create_string_computed_prop(prop_ident.sym.as_ref());
+    }
+}
+
+fn rewrite_commonjs_imports(
+    module: &mut Module,
+    commonjs_specifiers: &HashSet<String>,
+) -> HashSet<String> {
+    if commonjs_specifiers.is_empty() {
+        return HashSet::new();
+    }
+
+    let mut import_counter = 0usize;
+    let mut next_body = Vec::with_capacity(module.body.len());
+    let mut namespace_bindings = HashSet::new();
+
+    for item in module.body.drain(..) {
+        let ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import_decl)) = &item else {
+            next_body.push(item);
+            continue;
+        };
+
+        let specifier = import_decl.src.value.to_string_lossy().to_string();
+        if !commonjs_specifiers.contains(&specifier) {
+            next_body.push(item);
+            continue;
+        }
+
+        let (rewritten_items, bindings) =
+            rewrite_commonjs_import_decl(import_decl, &specifier, &mut import_counter);
+        namespace_bindings.extend(bindings);
+        if rewritten_items.is_empty() {
+            next_body.push(item);
+        } else {
+            next_body.extend(rewritten_items);
+        }
+    }
+
+    module.body = next_body;
+    namespace_bindings
+}
+
+fn rewrite_commonjs_import_decl(
+    import_decl: &ImportDecl,
+    specifier: &str,
+    import_counter: &mut usize,
+) -> (Vec<ModuleItem>, HashSet<String>) {
+    let mut default_local: Option<String> = None;
+    let mut namespace_local: Option<String> = None;
+    let mut named_bindings: Vec<(String, String)> = Vec::new();
+
+    for import_specifier in &import_decl.specifiers {
+        match import_specifier {
+            ImportSpecifier::Default(default_specifier) => {
+                default_local = Some(default_specifier.local.sym.to_string());
+            }
+            ImportSpecifier::Namespace(namespace_specifier) => {
+                namespace_local = Some(namespace_specifier.local.sym.to_string());
+            }
+            ImportSpecifier::Named(named_specifier) => {
+                let imported = match &named_specifier.imported {
+                    Some(swc_core::ecma::ast::ModuleExportName::Ident(ident)) => ident.sym.to_string(),
+                    Some(swc_core::ecma::ast::ModuleExportName::Str(string)) => {
+                        string.value.to_string_lossy().to_string()
+                    }
+                    None => named_specifier.local.sym.to_string(),
+                };
+                named_bindings.push((imported, named_specifier.local.sym.to_string()));
+            }
+        }
+    }
+
+    if namespace_local.is_none() && named_bindings.is_empty() {
+        return (Vec::new(), HashSet::new());
+    }
+
+    let helper_name = default_local
+        .clone()
+        .unwrap_or_else(|| {
+            let helper = format!("__cjs_import_{import_counter}");
+            *import_counter += 1;
+            helper
+        });
+
+    let mut items = vec![create_default_import_item(&helper_name, specifier)];
+    let mut bindings = HashSet::new();
+    bindings.insert(helper_name.clone());
+
+    if let Some(namespace_binding) = namespace_local {
+        if namespace_binding != helper_name {
+            items.push(create_const_alias_item(&namespace_binding, &helper_name));
+        }
+        bindings.insert(namespace_binding);
+    }
+
+    if !named_bindings.is_empty() {
+        items.push(create_named_destructure_item(&helper_name, &named_bindings));
+    }
+
+    (items, bindings)
+}
+
+fn create_default_import_item(local_name: &str, specifier: &str) -> ModuleItem {
+    ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(ImportDecl {
+        specifiers: vec![ImportSpecifier::Default(ImportDefaultSpecifier {
+            local: create_ident(local_name),
+            span: Default::default(),
+        })],
+        src: Box::new(Str {
+            span: Default::default(),
+            value: specifier.into(),
+            raw: None,
+        }),
+        type_only: false,
+        with: None,
+        phase: Default::default(),
+        span: Default::default(),
+    }))
+}
+
+fn create_const_alias_item(local_name: &str, target_name: &str) -> ModuleItem {
+    ModuleItem::Stmt(Stmt::Decl(swc_core::ecma::ast::Decl::Var(Box::new(VarDecl {
+        kind: VarDeclKind::Const,
+        span: Default::default(),
+        ctxt: Default::default(),
+        declare: false,
+        decls: vec![VarDeclarator {
+            span: Default::default(),
+            definite: false,
+            name: Pat::Ident(BindingIdent {
+                id: create_ident(local_name),
+                type_ann: None,
+            }),
+            init: Some(Box::new(Expr::Ident(create_ident(target_name)))),
+        }],
+    }))))
+}
+
+fn create_named_destructure_item(
+    source_name: &str,
+    bindings: &[(String, String)],
+) -> ModuleItem {
+    ModuleItem::Stmt(Stmt::Decl(swc_core::ecma::ast::Decl::Var(Box::new(VarDecl {
+        kind: VarDeclKind::Const,
+        span: Default::default(),
+        ctxt: Default::default(),
+        declare: false,
+        decls: bindings
+            .iter()
+            .map(|(imported, local)| VarDeclarator {
+                span: Default::default(),
+                definite: false,
+                name: Pat::Ident(BindingIdent {
+                    id: create_ident(local),
+                    type_ann: None,
+                }),
+                init: Some(Box::new(Expr::Member(MemberExpr {
+                    span: Default::default(),
+                    obj: Box::new(Expr::Ident(create_ident(source_name))),
+                    prop: create_string_computed_prop(imported),
+                }))),
+            })
+            .collect(),
+    }))))
+}
+
+fn create_ident(value: &str) -> Ident {
+    Ident::new(value.into(), Default::default(), Default::default())
+}
+
+fn create_rename_property_expr(property_name: &str, object_name: &str) -> Expr {
+    create_rename_property_expr_for_object(property_name, Expr::Ident(create_ident(object_name)))
+}
+
+fn create_rename_property_expr_for_object(property_name: &str, object_expr: Expr) -> Expr {
+    Expr::Call(CallExpr {
+        span: Default::default(),
+        ctxt: Default::default(),
+        callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+            span: Default::default(),
+            obj: Box::new(Expr::Member(MemberExpr {
+                span: Default::default(),
+                obj: Box::new(Expr::Ident(create_ident("goog"))),
+                prop: MemberProp::Ident(create_ident("reflect").into()),
+            })),
+            prop: MemberProp::Ident(create_ident("objectProperty").into()),
+        }))),
+        args: vec![
+            swc_core::ecma::ast::ExprOrSpread {
+                spread: None,
+                expr: Box::new(Expr::Lit(Lit::Str(Str {
+                    span: Default::default(),
+                    value: property_name.into(),
+                    raw: None,
+                }))),
+            },
+            swc_core::ecma::ast::ExprOrSpread {
+                spread: None,
+                expr: Box::new(object_expr),
+            },
+        ],
+        type_args: None,
+    })
+}
+
+#[derive(Default)]
+struct ReactComponentPropsVisitor;
+
+impl VisitMut for ReactComponentPropsVisitor {
+    fn visit_mut_module_items(&mut self, items: &mut Vec<ModuleItem>) {
+        items.visit_mut_children_with(self);
+
+        for item in items {
+            let ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDecl(export_decl)) = item else {
+                continue;
+            };
+
+            match &mut export_decl.decl {
+                swc_core::ecma::ast::Decl::Fn(function_decl)
+                    if is_component_like_name(function_decl.ident.sym.as_ref()) =>
+                {
+                    rewrite_function_like_component(&mut function_decl.function);
+                }
+                swc_core::ecma::ast::Decl::Var(var_decl) => {
+                    for declarator in &mut var_decl.decls {
+                        let Pat::Ident(binding) = &declarator.name else {
+                            continue;
+                        };
+                        if !is_component_like_name(binding.id.sym.as_ref()) {
+                            continue;
+                        }
+                        if let Some(init) = &mut declarator.init {
+                            match &mut **init {
+                                Expr::Arrow(arrow) => rewrite_arrow_component(arrow),
+                                Expr::Fn(function_expr) => rewrite_function_like_component(&mut function_expr.function),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn visit_mut_stmt(&mut self, stmt: &mut Stmt) {
+        stmt.visit_mut_children_with(self);
+
+        match stmt {
+            Stmt::Decl(swc_core::ecma::ast::Decl::Fn(function_decl)) => {
+                if is_component_like_name(function_decl.ident.sym.as_ref()) {
+                    rewrite_function_like_component(&mut function_decl.function);
+                }
+            }
+            Stmt::Decl(swc_core::ecma::ast::Decl::Var(var_decl)) => {
+                for declarator in &mut var_decl.decls {
+                    let Pat::Ident(binding) = &declarator.name else {
+                        continue;
+                    };
+                    if !is_component_like_name(binding.id.sym.as_ref()) {
+                        continue;
+                    }
+                    if let Some(init) = &mut declarator.init {
+                        match &mut **init {
+                            Expr::Arrow(arrow) => rewrite_arrow_component(arrow),
+                            Expr::Fn(function_expr) => rewrite_function_like_component(&mut function_expr.function),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn is_component_like_name(value: &str) -> bool {
+    value.chars().next().map(|character| character.is_ascii_uppercase()).unwrap_or(false)
+}
+
+fn is_constant_like_property_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    value
+        .chars()
+        .all(|character| character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_')
+}
+
+fn rewrite_function_like_component(function: &mut swc_core::ecma::ast::Function) {
+    let Some(first_param) = function.params.first_mut() else {
+        return;
+    };
+    let Pat::Object(object_pat) = &first_param.pat else {
+        return;
+    };
+
+    let props_ident = create_ident("__props");
+    let setup_stmts = build_component_prop_setup(object_pat, "__props")
+        .unwrap_or_else(|| vec![create_props_destructure_stmt(
+            quote_object_pattern_keys(object_pat.clone()),
+            &props_ident,
+        )]);
+    first_param.pat = Pat::Ident(BindingIdent {
+        id: props_ident.clone(),
+        type_ann: None,
+    });
+
+    if let Some(body) = &mut function.body {
+        body.stmts.splice(0..0, setup_stmts);
+    }
+}
+
+fn rewrite_arrow_component(arrow: &mut ArrowExpr) {
+    let Some(first_param) = arrow.params.first_mut() else {
+        return;
+    };
+    let Pat::Object(object_pat) = first_param else {
+        return;
+    };
+
+    let props_ident = create_ident("__props");
+    let setup_stmts = build_component_prop_setup(object_pat, "__props")
+        .unwrap_or_else(|| vec![create_props_destructure_stmt(
+            quote_object_pattern_keys(object_pat.clone()),
+            &props_ident,
+        )]);
+    *first_param = Pat::Ident(BindingIdent {
+        id: props_ident.clone(),
+        type_ann: None,
+    });
+
+    match &mut *arrow.body {
+        BlockStmtOrExpr::BlockStmt(block) => {
+            block.stmts.splice(0..0, setup_stmts);
+        }
+        BlockStmtOrExpr::Expr(expression) => {
+            let return_stmt = Stmt::Return(swc_core::ecma::ast::ReturnStmt {
+                span: Default::default(),
+                arg: Some(expression.clone()),
+            });
+            arrow.body = Box::new(BlockStmtOrExpr::BlockStmt(BlockStmt {
+                span: Default::default(),
+                ctxt: Default::default(),
+                stmts: setup_stmts.into_iter().chain([return_stmt]).collect(),
+            }));
+        }
+    }
+}
+
+fn create_props_destructure_stmt(object_pat: swc_core::ecma::ast::ObjectPat, props_ident: &Ident) -> Stmt {
+    Stmt::Decl(swc_core::ecma::ast::Decl::Var(Box::new(VarDecl {
+        kind: VarDeclKind::Const,
+        span: Default::default(),
+        ctxt: Default::default(),
+        declare: false,
+        decls: vec![VarDeclarator {
+            span: Default::default(),
+            definite: false,
+            name: Pat::Object(object_pat),
+            init: Some(Box::new(Expr::Ident(props_ident.clone()))),
+        }],
+    })))
+}
+
+fn quote_object_pattern_keys(object_pat: swc_core::ecma::ast::ObjectPat) -> swc_core::ecma::ast::ObjectPat {
+    swc_core::ecma::ast::ObjectPat {
+        props: object_pat
+            .props
+            .into_iter()
+            .map(|prop| match prop {
+                swc_core::ecma::ast::ObjectPatProp::Assign(assign) => {
+                    swc_core::ecma::ast::ObjectPatProp::KeyValue(swc_core::ecma::ast::KeyValuePatProp {
+                        key: PropName::Str(Str {
+                            span: Default::default(),
+                            value: assign.key.sym.to_string().into(),
+                            raw: None,
+                        }),
+                        value: Box::new(match assign.value {
+                            Some(value) => Pat::Assign(swc_core::ecma::ast::AssignPat {
+                                span: assign.span,
+                                left: Box::new(Pat::Ident(assign.key)),
+                                right: value,
+                            }),
+                            None => Pat::Ident(assign.key),
+                        }),
+                    })
+                }
+                swc_core::ecma::ast::ObjectPatProp::KeyValue(mut key_value) => {
+                    key_value.key = quote_prop_name(key_value.key);
+                    if let Pat::Object(nested) = *key_value.value.clone() {
+                        key_value.value = Box::new(Pat::Object(quote_object_pattern_keys(nested)));
+                    }
+                    swc_core::ecma::ast::ObjectPatProp::KeyValue(key_value)
+                }
+                other => other,
+            })
+            .collect(),
+        ..object_pat
+    }
+}
+
+fn build_component_prop_setup(
+    object_pat: &swc_core::ecma::ast::ObjectPat,
+    props_name: &str,
+) -> Option<Vec<Stmt>> {
+    let mut statements = Vec::new();
+    let mut omitted_keys = Vec::new();
+    let mut rest_name: Option<String> = None;
+
+    for prop in &object_pat.props {
+        match prop {
+            swc_core::ecma::ast::ObjectPatProp::Assign(assign) => {
+                if assign.value.is_some() {
+                    return None;
+                }
+                let key = assign.key.sym.to_string();
+                omitted_keys.push(key.clone());
+                statements.push(create_component_prop_read_stmt(
+                    &assign.key.sym.to_string(),
+                    &assign.key.sym.to_string(),
+                    props_name,
+                ));
+            }
+            swc_core::ecma::ast::ObjectPatProp::KeyValue(key_value) => {
+                let key = match &key_value.key {
+                    PropName::Ident(ident) => ident.sym.to_string(),
+                    PropName::Str(value) => value.value.to_string_lossy().to_string(),
+                    _ => return None,
+                };
+                let Pat::Ident(binding) = &*key_value.value else {
+                    return None;
+                };
+                omitted_keys.push(key.clone());
+                statements.push(create_component_prop_read_stmt(
+                    &key,
+                    &binding.id.sym.to_string(),
+                    props_name,
+                ));
+            }
+            swc_core::ecma::ast::ObjectPatProp::Rest(rest) => {
+                let Pat::Ident(binding) = &*rest.arg else {
+                    return None;
+                };
+                rest_name = Some(binding.id.sym.to_string());
+            }
+        }
+    }
+
+    if let Some(rest_name) = rest_name {
+        statements.extend(create_rest_props_stmts(&rest_name, props_name, &omitted_keys)?);
+    }
+
+    Some(statements)
+}
+
+fn create_component_prop_read_stmt(key: &str, local_name: &str, props_name: &str) -> Stmt {
+    Stmt::Decl(swc_core::ecma::ast::Decl::Var(Box::new(VarDecl {
+        kind: VarDeclKind::Const,
+        span: Default::default(),
+        ctxt: Default::default(),
+        declare: false,
+        decls: vec![VarDeclarator {
+            span: Default::default(),
+            definite: false,
+            name: Pat::Ident(BindingIdent {
+                id: create_ident(local_name),
+                type_ann: None,
+            }),
+            init: Some(Box::new(Expr::Member(MemberExpr {
+                span: Default::default(),
+                obj: Box::new(Expr::Ident(create_ident(props_name))),
+                prop: MemberProp::Computed(swc_core::ecma::ast::ComputedPropName {
+                    span: Default::default(),
+                    expr: Box::new(create_rename_property_expr(key, props_name)),
+                }),
+            }))),
+        }],
+    })))
+}
+
+fn create_rest_props_stmts(
+    rest_name: &str,
+    props_name: &str,
+    omitted_keys: &[String],
+) -> Option<Vec<Stmt>> {
+    let conditions = omitted_keys
+        .iter()
+        .map(|key| {
+            format!(
+                "key !== goog.reflect.objectProperty({key:?}, {props_name})"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" && ");
+    let guard = if conditions.is_empty() {
+        "true".to_string()
+    } else {
+        conditions
+    };
+    let snippet = format!(
+        "const {rest_name} = {{}};\nfor (const key in {props_name}) {{ if ({guard}) {rest_name}[key] = {props_name}[key]; }}"
+    );
+    let items = parse_module_items(&snippet).ok()?;
+    let mut statements = Vec::with_capacity(items.len());
+    for item in items {
+        let ModuleItem::Stmt(statement) = item else {
+            return None;
+        };
+        statements.push(statement);
+    }
+    Some(statements)
+}
+
+fn quote_prop_name(prop_name: PropName) -> PropName {
+    match prop_name {
+        PropName::Ident(ident) => PropName::Str(Str {
+            span: Default::default(),
+            value: ident.sym.to_string().into(),
+            raw: None,
+        }),
+        PropName::Num(number) => PropName::Str(Str {
+            span: Default::default(),
+            value: number.value.to_string().into(),
+            raw: None,
+        }),
+        other => other,
+    }
+}
+
 fn transform_program(
     module: swc_core::ecma::ast::Module,
-    _file_path: &Path,
+    file_path: &Path,
+    context: &TranspileContext,
+    file_metadata: Option<&ClosureFileMetadata>,
 ) -> std::result::Result<Program, String> {
+    let safe_enums = file_metadata
+        .map(|metadata| {
+            metadata
+                .enum_declarations
+                .iter()
+                .map(|enum_decl| enum_decl.name.clone())
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let module = remove_closure_safe_enums(module, &safe_enums);
+    let mut enum_literal_values = collect_ts_enum_literal_values(&module);
+    enum_literal_values.extend(collect_imported_ts_enum_literal_values(&module, file_path));
     let mut program = Program::Module(module);
-    let resolver_marks = if should_run_resolver(_file_path) {
+    let cm: Lrc<SourceMap> = Default::default();
+    let resolver_marks = if should_run_resolver(file_path) {
         let unresolved_mark = Mark::new();
         let top_level_mark = Mark::new();
         resolver(unresolved_mark, top_level_mark, true).process(&mut program);
@@ -558,9 +2086,55 @@ fn transform_program(
         )?);
     }
     if let Some((unresolved_mark, top_level_mark)) = resolver_marks {
+        if should_run_react_transform(file_path) {
+            jsx(
+                cm,
+                None::<swc_core::common::comments::SingleThreadedComments>,
+                ReactOptions {
+                    runtime: Some(ReactRuntime::Classic),
+                    development: Some(false),
+                    ..Default::default()
+                },
+                top_level_mark,
+                unresolved_mark,
+            )
+            .process(&mut program);
+        }
         strip(unresolved_mark, top_level_mark).process(&mut program);
     }
+    if !enum_literal_values.is_empty() {
+        program.visit_mut_with(&mut EnumValueInlineVisitor::new(enum_literal_values));
+    }
+    apply_program_compat_transforms(&mut program, context);
     Ok(program)
+}
+
+fn remove_closure_safe_enums(module: Module, safe_enums: &HashSet<String>) -> Module {
+    if safe_enums.is_empty() {
+        return module;
+    }
+
+    Module {
+        body: module
+            .body
+            .into_iter()
+            .filter(|item| match item {
+                ModuleItem::Stmt(Stmt::Decl(swc_core::ecma::ast::Decl::TsEnum(enum_decl))) => {
+                    !safe_enums.contains(enum_decl.id.sym.as_ref())
+                }
+                ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDecl(export_decl)) => {
+                    match &export_decl.decl {
+                        swc_core::ecma::ast::Decl::TsEnum(enum_decl) => {
+                            !safe_enums.contains(enum_decl.id.sym.as_ref())
+                        }
+                        _ => true,
+                    }
+                }
+                _ => true,
+            })
+            .collect(),
+        ..module
+    }
 }
 
 fn print_program(program: &Program) -> std::result::Result<String, String> {
@@ -579,6 +2153,440 @@ fn print_program(program: &Program) -> std::result::Result<String, String> {
     String::from_utf8(output).map_err(|error| error.to_string())
 }
 
+fn print_module_item(item: ModuleItem) -> std::result::Result<String, String> {
+    print_program(&Program::Module(Module {
+        body: vec![item],
+        shebang: None,
+        span: Default::default(),
+    }))
+}
+
+fn print_statement(statement: Stmt) -> std::result::Result<String, String> {
+    print_module_item(ModuleItem::Stmt(statement))
+}
+
+fn print_expression(expression: Expr) -> std::result::Result<String, String> {
+    let printed = print_statement(Stmt::Expr(ExprStmt {
+        expr: Box::new(expression),
+        span: Default::default(),
+    }))?;
+    Ok(printed.trim().trim_end_matches(';').to_string())
+}
+
+fn emit_goog_module_program(
+    file_path: &Path,
+    program: Program,
+    context: &TranspileContext,
+    file_metadata: Option<&ClosureFileMetadata>,
+    commonjs_export_name: Option<&str>,
+) -> std::result::Result<String, String> {
+    let Program::Module(module) = program else {
+        return Err("Expected module program".to_string());
+    };
+    let module_id = to_goog_module_id(file_path, &context.workspace_dir);
+    let mut output = vec![format!("goog.module({module_id:?});")];
+
+    if let Some(metadata) = file_metadata {
+        for type_decl in &metadata.type_declarations {
+            output.push(type_decl.snippet.trim().to_string());
+        }
+        for enum_decl in &metadata.enum_declarations {
+            output.push(render_closure_enum(enum_decl));
+            if enum_decl.exported {
+                output.push(format!("exports.{} = {};", enum_decl.name, enum_decl.name));
+            }
+        }
+    }
+
+    let mut import_counter = 0usize;
+    let mut export_counter = 0usize;
+
+    for item in module.body {
+        match item {
+            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import_decl)) => {
+                output.extend(convert_import_decl(
+                    file_path,
+                    &import_decl,
+                    context,
+                    &mut import_counter,
+                )?);
+            }
+            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDecl(export_decl)) => {
+                let exported_names = exported_decl_names(&export_decl.decl);
+                output.push(print_statement(Stmt::Decl(export_decl.decl))?);
+                for export_name in exported_names {
+                    output.push(format!("exports.{export_name} = {export_name};"));
+                }
+            }
+            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportNamed(named_export)) => {
+                output.extend(convert_named_export(
+                    file_path,
+                    &named_export,
+                    context,
+                    &mut export_counter,
+                )?);
+            }
+            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDefaultExpr(default_expr)) => {
+                let local_name = format!("__goog_default_export_{export_counter}");
+                export_counter += 1;
+                output.push(format!(
+                    "const {local_name} = {};",
+                    print_expression(*default_expr.expr)?
+                ));
+                output.push(format!("exports.default = {local_name};"));
+            }
+            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDefaultDecl(default_decl)) => {
+                match default_decl.decl {
+                    swc_core::ecma::ast::DefaultDecl::Fn(function_expr) => {
+                        let local_name = function_expr
+                            .ident
+                            .as_ref()
+                            .map(|ident| ident.sym.to_string())
+                            .unwrap_or_else(|| format!("__goog_default_export_{export_counter}"));
+                        export_counter += 1;
+                        if function_expr.ident.is_some() {
+                            output.push(print_statement(Stmt::Decl(swc_core::ecma::ast::Decl::Fn(
+                                swc_core::ecma::ast::FnDecl {
+                                    declare: false,
+                                    function: function_expr.function,
+                                    ident: Ident::new(local_name.clone().into(), Default::default(), Default::default()),
+                                },
+                            )))?);
+                        } else {
+                            output.push(format!(
+                                "const {local_name} = {};",
+                                print_expression(Expr::Fn(function_expr))?
+                            ));
+                        }
+                        output.push(format!("exports.default = {local_name};"));
+                    }
+                    swc_core::ecma::ast::DefaultDecl::Class(class_expr) => {
+                        let local_name = class_expr
+                            .ident
+                            .as_ref()
+                            .map(|ident| ident.sym.to_string())
+                            .unwrap_or_else(|| format!("__goog_default_export_{export_counter}"));
+                        export_counter += 1;
+                        if class_expr.ident.is_some() {
+                            output.push(print_statement(Stmt::Decl(swc_core::ecma::ast::Decl::Class(
+                                swc_core::ecma::ast::ClassDecl {
+                                    class: class_expr.class,
+                                    declare: false,
+                                    ident: Ident::new(local_name.clone().into(), Default::default(), Default::default()),
+                                },
+                            )))?);
+                        } else {
+                            output.push(format!(
+                                "const {local_name} = {};",
+                                print_expression(Expr::Class(class_expr))?
+                            ));
+                        }
+                        output.push(format!("exports.default = {local_name};"));
+                    }
+                    _ => {}
+                }
+            }
+            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportAll(export_all)) => {
+                let require_name = format!("__goog_export_all_{export_counter}");
+                export_counter += 1;
+                let export_module_id = resolve_module_id_for_specifier(
+                    file_path,
+                    &export_all.src.value.to_string_lossy(),
+                    context,
+                )?;
+                output.push(format!(
+                    "const {require_name} = goog.require({export_module_id:?});"
+                ));
+                output.push(format!(
+                    "for (const key in {require_name}) {{ if (key !== \"default\") {{ exports[key] = {require_name}[key]; }} }}"
+                ));
+            }
+            ModuleItem::Stmt(statement) => {
+                output.push(print_statement(statement)?);
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(export_name) = commonjs_export_name {
+        output.push(format!("exports.{export_name} = {export_name};"));
+        output.push(format!("exports.default = {export_name};"));
+    }
+
+    let mut source_text = output
+        .into_iter()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if let Some(metadata) = file_metadata {
+        source_text = attach_top_level_docs(source_text, &metadata.top_level_docs);
+    }
+    Ok(apply_js_compat_text_fixes(source_text))
+}
+
+fn convert_import_decl(
+    file_path: &Path,
+    import_decl: &ImportDecl,
+    context: &TranspileContext,
+    import_counter: &mut usize,
+) -> std::result::Result<Vec<String>, String> {
+    let module_id = resolve_module_id_for_specifier(
+        file_path,
+        &import_decl.src.value.to_string_lossy(),
+        context,
+    )?;
+    let mut lines = Vec::new();
+    if import_decl.specifiers.is_empty() {
+        lines.push(format!("goog.require({module_id:?});"));
+        return Ok(lines);
+    }
+
+    let mut value_specifiers = Vec::new();
+    let mut type_specifiers = Vec::new();
+    for specifier in &import_decl.specifiers {
+        match specifier {
+            ImportSpecifier::Named(named) if import_decl.type_only || named.is_type_only => {
+                type_specifiers.push(specifier);
+            }
+            _ if import_decl.type_only => type_specifiers.push(specifier),
+            _ => value_specifiers.push(specifier),
+        }
+    }
+
+    if !value_specifiers.is_empty() {
+        let local_name = format!("__goog_import_{}", *import_counter);
+        *import_counter += 1;
+        lines.push(format!("const {local_name} = goog.require({module_id:?});"));
+        lines.extend(bind_import_specifiers(&local_name, &value_specifiers));
+    }
+    if !type_specifiers.is_empty() {
+        let local_name = format!("__goog_type_{}", *import_counter);
+        *import_counter += 1;
+        lines.push(format!("const {local_name} = goog.requireType({module_id:?});"));
+        lines.extend(bind_import_specifiers(&local_name, &type_specifiers));
+    }
+
+    Ok(lines)
+}
+
+fn bind_import_specifiers(local_name: &str, specifiers: &[&ImportSpecifier]) -> Vec<String> {
+    specifiers
+        .iter()
+        .map(|specifier| match specifier {
+            ImportSpecifier::Default(default_specifier) => format!(
+                "const {} = {}.default;",
+                default_specifier.local.sym, local_name
+            ),
+            ImportSpecifier::Namespace(namespace_specifier) => format!(
+                "const {} = {};",
+                namespace_specifier.local.sym, local_name
+            ),
+            ImportSpecifier::Named(named_specifier) => {
+                let imported_name = named_specifier
+                    .imported
+                    .as_ref()
+                    .map(module_export_name_to_string)
+                    .unwrap_or_else(|| named_specifier.local.sym.to_string());
+                format!(
+                    "const {} = {};",
+                    named_specifier.local.sym,
+                    member_access(local_name, &imported_name)
+                )
+            }
+        })
+        .collect()
+}
+
+fn convert_named_export(
+    file_path: &Path,
+    named_export: &swc_core::ecma::ast::NamedExport,
+    context: &TranspileContext,
+    export_counter: &mut usize,
+) -> std::result::Result<Vec<String>, String> {
+    let mut lines = Vec::new();
+    if let Some(src) = &named_export.src {
+        let require_name = format!("__goog_export_{}", *export_counter);
+        *export_counter += 1;
+        let module_id = resolve_module_id_for_specifier(
+            file_path,
+            &src.value.to_string_lossy(),
+            context,
+        )?;
+        lines.push(format!("const {require_name} = goog.require({module_id:?});"));
+        for specifier in &named_export.specifiers {
+            let swc_core::ecma::ast::ExportSpecifier::Named(named) = specifier else {
+                continue;
+            };
+            let local_name = module_export_name_to_string(&named.orig);
+            let export_name = named
+                .exported
+                .as_ref()
+                .map(module_export_name_to_string)
+                .unwrap_or_else(|| local_name.clone());
+            lines.push(format!(
+                "exports.{export_name} = {};",
+                member_access(&require_name, &local_name)
+            ));
+        }
+        return Ok(lines);
+    }
+
+    for specifier in &named_export.specifiers {
+        let swc_core::ecma::ast::ExportSpecifier::Named(named) = specifier else {
+            continue;
+        };
+        let local_name = module_export_name_to_string(&named.orig);
+        let export_name = named
+            .exported
+            .as_ref()
+            .map(module_export_name_to_string)
+            .unwrap_or_else(|| local_name.clone());
+        lines.push(format!("exports.{export_name} = {local_name};"));
+    }
+    Ok(lines)
+}
+
+fn exported_decl_names(decl: &swc_core::ecma::ast::Decl) -> Vec<String> {
+    match decl {
+        swc_core::ecma::ast::Decl::Fn(function_decl) => vec![function_decl.ident.sym.to_string()],
+        swc_core::ecma::ast::Decl::Class(class_decl) => vec![class_decl.ident.sym.to_string()],
+        swc_core::ecma::ast::Decl::Var(var_decl) => var_decl
+            .decls
+            .iter()
+            .flat_map(|decl| binding_names(&decl.name))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn binding_names(pattern: &Pat) -> Vec<String> {
+    match pattern {
+        Pat::Ident(ident) => vec![ident.id.sym.to_string()],
+        Pat::Array(array) => array
+            .elems
+            .iter()
+            .flatten()
+            .flat_map(binding_names)
+            .collect(),
+        Pat::Object(object) => object
+            .props
+            .iter()
+            .flat_map(|prop| match prop {
+                swc_core::ecma::ast::ObjectPatProp::KeyValue(key_value) => binding_names(&key_value.value),
+                swc_core::ecma::ast::ObjectPatProp::Assign(assign) => vec![assign.key.sym.to_string()],
+                swc_core::ecma::ast::ObjectPatProp::Rest(rest) => binding_names(&rest.arg),
+            })
+            .collect(),
+        Pat::Assign(assign) => binding_names(&assign.left),
+        Pat::Rest(rest) => binding_names(&rest.arg),
+        _ => Vec::new(),
+    }
+}
+
+fn member_access(object_name: &str, property_name: &str) -> String {
+    if is_valid_js_ident(property_name) {
+        format!("{object_name}.{property_name}")
+    } else {
+        format!("{object_name}[{property_name:?}]")
+    }
+}
+
+fn module_export_name_to_string(name: &swc_core::ecma::ast::ModuleExportName) -> String {
+    match name {
+        swc_core::ecma::ast::ModuleExportName::Ident(ident) => ident.sym.to_string(),
+        swc_core::ecma::ast::ModuleExportName::Str(value) => {
+            value.value.to_string_lossy().to_string()
+        }
+    }
+}
+
+fn resolve_module_id_for_specifier(
+    file_path: &Path,
+    specifier: &str,
+    context: &TranspileContext,
+) -> std::result::Result<String, String> {
+    if specifier.starts_with('.') {
+        let resolved = resolve_relative_module(file_path, specifier)
+            .ok_or_else(|| format!("Failed to resolve module specifier {specifier:?} from {}", file_path.display()))?;
+        return Ok(to_goog_module_id(&resolved, &context.workspace_dir));
+    }
+
+    let (package_name, subpath) = split_package_specifier(specifier);
+    let alias = context
+        .package_aliases
+        .iter()
+        .find(|alias| alias.packageName == package_name && alias.subpath == subpath)
+        .or_else(|| {
+            context
+                .package_aliases
+                .iter()
+                .find(|alias| alias.packageName == package_name && alias.subpath == ".")
+        })
+        .ok_or_else(|| format!("Failed to resolve package specifier {specifier:?}"))?;
+    Ok(to_goog_module_id(Path::new(&alias.targetPath), &context.workspace_dir))
+}
+
+fn split_package_specifier(specifier: &str) -> (String, String) {
+    if specifier.starts_with('@') {
+        let parts = specifier.split('/').collect::<Vec<_>>();
+        let package_name = format!("{}/{}", parts[0], parts[1]);
+        let subpath = if parts.len() > 2 {
+            format!("./{}", parts[2..].join("/"))
+        } else {
+            ".".to_string()
+        };
+        (package_name, subpath)
+    } else {
+        let parts = specifier.split('/').collect::<Vec<_>>();
+        let package_name = parts[0].to_string();
+        let subpath = if parts.len() > 1 {
+            format!("./{}", parts[1..].join("/"))
+        } else {
+            ".".to_string()
+        };
+        (package_name, subpath)
+    }
+}
+
+fn render_closure_enum(enum_decl: &ClosureEnumDeclaration) -> String {
+    let member_lines = enum_decl
+        .members
+        .iter()
+        .map(|member| {
+            let value = match &member.value {
+                serde_json::Value::Bool(value) => value.to_string(),
+                serde_json::Value::Number(value) => value.to_string(),
+                serde_json::Value::String(value) => format!("{value:?}"),
+                _ => "undefined".to_string(),
+            };
+            if is_valid_js_ident(&member.name) {
+                format!("  {}: {},", member.name, value)
+            } else {
+                format!("  {:?}: {},", member.name, value)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "/** @enum {{{}}} */\nconst {} = {{\n{}\n}};",
+        enum_decl.value_type, enum_decl.name, member_lines
+    )
+}
+
+fn attach_top_level_docs(source_text: String, docs: &[ClosureTopLevelDoc]) -> String {
+    let mut rewritten = source_text;
+    for doc in docs {
+        let needle = match doc.kind.as_str() {
+            "class" => format!("class {}", doc.name),
+            _ => format!("function {}", doc.name),
+        };
+        if let Some(index) = rewritten.find(&needle) {
+            rewritten.insert_str(index, &doc.jsdoc);
+        }
+    }
+    rewritten
+}
+
 fn collect_global_this_compat_property_names(
     program: &Program,
     unresolved_ctxt: swc_core::common::SyntaxContext,
@@ -592,6 +2600,255 @@ struct GlobalThisCompatCollector {
     aliases: HashSet<Id>,
     properties: HashSet<String>,
     unresolved_ctxt: swc_core::common::SyntaxContext,
+}
+
+#[derive(Clone)]
+enum EnumLiteralValue {
+    Bool(bool),
+    Number(f64),
+    String(String),
+}
+
+fn collect_ts_enum_literal_values(module: &Module) -> HashMap<String, HashMap<String, EnumLiteralValue>> {
+    let mut enums = HashMap::new();
+    for item in &module.body {
+        let enum_decl = match item {
+            ModuleItem::Stmt(Stmt::Decl(swc_core::ecma::ast::Decl::TsEnum(enum_decl))) => {
+                Some(enum_decl)
+            }
+            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDecl(export_decl)) => {
+                match &export_decl.decl {
+                    swc_core::ecma::ast::Decl::TsEnum(enum_decl) => Some(enum_decl),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let Some(enum_decl) = enum_decl else {
+            continue;
+        };
+
+        let mut members = HashMap::new();
+        let mut next_number = 0f64;
+        let mut has_next_number = true;
+        for member in &enum_decl.members {
+            let member_name = match &member.id {
+                TsEnumMemberId::Ident(ident) => ident.sym.to_string(),
+                TsEnumMemberId::Str(value) => value.value.to_string_lossy().to_string(),
+            };
+            let value = if let Some(initializer) = &member.init {
+                let Some(value) = enum_literal_value_from_expr(initializer) else {
+                    has_next_number = false;
+                    continue;
+                };
+                if let EnumLiteralValue::Number(number) = value {
+                    next_number = number + 1.0;
+                    has_next_number = true;
+                    EnumLiteralValue::Number(number)
+                } else {
+                    has_next_number = false;
+                    value
+                }
+            } else if has_next_number {
+                let value = EnumLiteralValue::Number(next_number);
+                next_number += 1.0;
+                value
+            } else {
+                continue;
+            };
+            members.insert(member_name, value);
+        }
+        if !members.is_empty() {
+            enums.insert(enum_decl.id.sym.to_string(), members);
+        }
+    }
+    enums
+}
+
+fn collect_imported_ts_enum_literal_values(
+    module: &Module,
+    file_path: &Path,
+) -> HashMap<String, HashMap<String, EnumLiteralValue>> {
+    let mut imported = HashMap::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import_decl)) = item else {
+            continue;
+        };
+        let specifier = import_decl.src.value.to_string_lossy().to_string();
+        if !specifier.starts_with('.') {
+            continue;
+        }
+        let Some(resolved_path) = resolve_relative_module(file_path, &specifier) else {
+            continue;
+        };
+        let Ok(target_module) = get_or_parse_cached_module(&resolved_path) else {
+            continue;
+        };
+        let mut target_values = collect_ts_enum_literal_values(&target_module);
+        if target_values.is_empty() {
+            for metadata_path in enum_metadata_candidate_paths(&resolved_path) {
+                if !metadata_path.exists() {
+                    continue;
+                }
+                let Ok(metadata_module) = get_or_parse_cached_module(&metadata_path) else {
+                    continue;
+                };
+                target_values = collect_ts_enum_literal_values(&metadata_module);
+                if !target_values.is_empty() {
+                    break;
+                }
+            }
+        }
+        if target_values.is_empty() {
+            continue;
+        }
+        for import_specifier in &import_decl.specifiers {
+            let swc_core::ecma::ast::ImportSpecifier::Named(named) = import_specifier else {
+                continue;
+            };
+            let imported_name = match &named.imported {
+                Some(swc_core::ecma::ast::ModuleExportName::Ident(ident)) => ident.sym.to_string(),
+                Some(swc_core::ecma::ast::ModuleExportName::Str(value)) => {
+                    value.value.to_string_lossy().to_string()
+                }
+                None => named.local.sym.to_string(),
+            };
+            let Some(enum_members) = target_values.get(&imported_name) else {
+                continue;
+            };
+            imported.insert(named.local.sym.to_string(), enum_members.clone());
+        }
+    }
+    imported
+}
+
+fn enum_metadata_candidate_paths(resolved_path: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if resolved_path.extension().and_then(|value| value.to_str()) == Some("js") {
+        candidates.push(resolved_path.with_extension("d.ts"));
+        if let Ok(relative) = resolved_path.strip_prefix("/") {
+            let _ = relative;
+        }
+        let resolved_str = resolved_path.to_string_lossy();
+        if resolved_str.contains("/dist/esm/") {
+            let source_guess = resolved_str.replace("/dist/esm/", "/src/");
+            candidates.push(PathBuf::from(source_guess.clone()).with_extension("ts"));
+            candidates.push(PathBuf::from(source_guess).with_extension("tsx"));
+        }
+    }
+    candidates
+}
+
+fn resolve_relative_module(file_path: &Path, specifier: &str) -> Option<PathBuf> {
+    let base = normalize_path(&file_path.parent()?.join(specifier));
+    let candidates = if base.extension().is_some() {
+        let extension = base.extension().and_then(|value| value.to_str()).unwrap_or_default();
+        match extension {
+            "js" => vec![base.clone(), base.with_extension("ts"), base.with_extension("tsx"), base.with_extension("mts"), base.with_extension("cjs"), base.with_extension("cts"), base.with_extension("jsx"), base.with_extension("mjs")],
+            "cjs" => vec![base.clone(), base.with_extension("js"), base.with_extension("ts"), base.with_extension("cts")],
+            _ => vec![base],
+        }
+    } else {
+        vec![
+            base.with_extension("ts"),
+            base.with_extension("tsx"),
+            base.with_extension("mts"),
+            base.with_extension("js"),
+            base.with_extension("cjs"),
+            base.with_extension("cts"),
+            base.with_extension("jsx"),
+            base.with_extension("mjs"),
+            base.join("index.ts"),
+            base.join("index.tsx"),
+            base.join("index.mts"),
+            base.join("index.js"),
+            base.join("index.cjs"),
+            base.join("index.cts"),
+            base.join("index.jsx"),
+            base.join("index.mjs"),
+        ]
+    };
+    candidates.into_iter().find(|candidate| candidate.exists())
+}
+
+
+fn enum_literal_value_from_expr(expr: &Expr) -> Option<EnumLiteralValue> {
+    match expr {
+        Expr::Lit(Lit::Num(value)) => Some(EnumLiteralValue::Number(value.value)),
+        Expr::Lit(Lit::Str(value)) => {
+            Some(EnumLiteralValue::String(value.value.to_string_lossy().to_string()))
+        }
+        Expr::Lit(Lit::Bool(value)) => Some(EnumLiteralValue::Bool(value.value)),
+        Expr::Unary(UnaryExpr {
+            op: UnaryOp::Minus,
+            arg,
+            ..
+        }) => {
+            let EnumLiteralValue::Number(value) = enum_literal_value_from_expr(arg)? else {
+                return None;
+            };
+            Some(EnumLiteralValue::Number(-value))
+        }
+        Expr::Paren(parenthesized) => enum_literal_value_from_expr(&parenthesized.expr),
+        _ => None,
+    }
+}
+
+struct EnumValueInlineVisitor {
+    values: HashMap<String, HashMap<String, EnumLiteralValue>>,
+}
+
+impl EnumValueInlineVisitor {
+    fn new(values: HashMap<String, HashMap<String, EnumLiteralValue>>) -> Self {
+        Self { values }
+    }
+}
+
+impl VisitMut for EnumValueInlineVisitor {
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        expr.visit_mut_children_with(self);
+
+        let Expr::Member(member) = expr else {
+            return;
+        };
+        let Expr::Ident(object_ident) = &*member.obj else {
+            return;
+        };
+        let member_name = match &member.prop {
+            MemberProp::Ident(ident) => Some(ident.sym.to_string()),
+            MemberProp::Computed(computed) => match &*computed.expr {
+                Expr::Lit(Lit::Str(value)) => Some(value.value.to_string_lossy().to_string()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(member_name) = member_name else {
+            return;
+        };
+        let Some(enum_members) = self.values.get(object_ident.sym.as_ref()) else {
+            return;
+        };
+        let Some(value) = enum_members.get(&member_name) else {
+            return;
+        };
+
+        *expr = match value {
+            EnumLiteralValue::Bool(value) => Expr::Lit(Lit::Bool(Bool {
+                span: Default::default(),
+                value: *value,
+            })),
+            EnumLiteralValue::Number(value) => Expr::Lit(Lit::Num(swc_core::ecma::ast::Number {
+                span: Default::default(),
+                value: *value,
+                raw: None,
+            })),
+            EnumLiteralValue::String(value) => Expr::Lit(Lit::Str(Str {
+                span: Default::default(),
+                value: value.clone().into(),
+                raw: None,
+            })),
+        };
+    }
 }
 
 impl GlobalThisCompatCollector {
@@ -739,14 +2996,33 @@ fn should_run_resolver(file_path: &Path) -> bool {
     is_typescript_source_file(file_path)
 }
 
+fn should_run_react_transform(file_path: &Path) -> bool {
+    matches!(
+        file_path.extension().and_then(|value| value.to_str()),
+        Some("tsx") | Some("jsx")
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{apply_js_compat_text_fixes, print_program, rewrite_static_class_fields, transform_program, transform_source_file};
+    use super::{apply_js_compat_text_fixes, collect_commonjs_extern_names, collect_enum_extern_names, collect_protocol_extern_names, collect_static_property_names_from_text, print_program, render_externs, rewrite_static_class_fields, transform_js_pass_through_module, transform_program, transform_source_file};
     use crate::module_cache::parse_module;
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
     use swc_core::common::{Globals, GLOBALS};
+
+    fn empty_context() -> super::TranspileContext {
+        super::TranspileContext {
+            commonjs_specifiers: HashSet::new(),
+            file_metadata: HashMap::new(),
+            global_property_names: HashSet::new(),
+            package_aliases: Vec::new(),
+            static_property_names: HashSet::new(),
+            workspace_dir: PathBuf::from("/tmp"),
+        }
+    }
 
     #[test]
     fn rewrites_global_property_accesses_to_global_this() {
@@ -758,7 +3034,7 @@ mod tests {
         .unwrap();
 
         let program = GLOBALS
-            .set(&Globals::new(), || transform_program(module, &file_path))
+            .set(&Globals::new(), || transform_program(module, &file_path, &empty_context(), None))
             .unwrap();
         let output = print_program(&program).unwrap();
 
@@ -771,7 +3047,7 @@ mod tests {
         let module = parse_module(&file_path, "const value = registry.get(meta);").unwrap();
 
         let program = GLOBALS
-            .set(&Globals::new(), || transform_program(module, &file_path))
+            .set(&Globals::new(), || transform_program(module, &file_path, &empty_context(), None))
             .unwrap();
         let output = print_program(&program).unwrap();
 
@@ -790,10 +3066,41 @@ mod tests {
         fs::write(&file_path, source_text).unwrap();
 
         let output = GLOBALS
-            .set(&Globals::new(), || transform_source_file(&file_path))
+            .set(&Globals::new(), || {
+                transform_source_file(
+                    &file_path,
+                    &super::TranspileContext {
+                        commonjs_specifiers: HashSet::new(),
+                        file_metadata: HashMap::new(),
+                        global_property_names: HashSet::new(),
+                        package_aliases: vec![super::PackageAliasInput {
+                            packageName: "react".to_string(),
+                            subpath: ".".to_string(),
+                            targetPath: file_path
+                                .parent()
+                                .unwrap()
+                                .parent()
+                                .unwrap()
+                                .join("react/index.js")
+                                .to_string_lossy()
+                                .to_string(),
+                        }],
+                        static_property_names: HashSet::new(),
+                        workspace_dir: file_path
+                            .parent()
+                            .unwrap()
+                            .parent()
+                            .unwrap()
+                            .parent()
+                            .unwrap()
+                            .to_path_buf(),
+                    },
+                )
+            })
             .unwrap();
 
-        assert_eq!(output, source_text);
+        assert!(output.contains("goog.module("), "{output}");
+        assert!(output.contains("JSCompiler_renameProperty"), "{output}");
     }
 
     #[test]
@@ -807,10 +3114,43 @@ mod tests {
         fs::write(&file_path, source_text).unwrap();
 
         let output = GLOBALS
-            .set(&Globals::new(), || transform_source_file(&file_path))
+            .set(&Globals::new(), || {
+                transform_source_file(
+                    &file_path,
+                    &super::TranspileContext {
+                        commonjs_specifiers: HashSet::new(),
+                        file_metadata: HashMap::new(),
+                        global_property_names: HashSet::new(),
+                        package_aliases: vec![super::PackageAliasInput {
+                            packageName: "react".to_string(),
+                            subpath: ".".to_string(),
+                            targetPath: file_path
+                                .parent()
+                                .unwrap()
+                                .parent()
+                                .unwrap()
+                                .join("react/index.js")
+                                .to_string_lossy()
+                                .to_string(),
+                        }],
+                        static_property_names: HashSet::new(),
+                        workspace_dir: file_path
+                            .parent()
+                            .unwrap()
+                            .parent()
+                            .unwrap()
+                            .parent()
+                            .unwrap()
+                            .to_path_buf(),
+                    },
+                )
+            })
             .unwrap();
 
-        assert!(output.contains("Demo[\"enabledWarnings\"] = Demo[\"enabledWarnings\"] ?? [\"x\"];"));
+        assert!(
+            output.contains("this.constructor[\"enabledWarnings\"].includes(\"x\")"),
+            "{output}"
+        );
     }
 
     #[test]
@@ -824,7 +3164,37 @@ mod tests {
         fs::write(&file_path, source_text).unwrap();
 
         let output = GLOBALS
-            .set(&Globals::new(), || transform_source_file(&file_path))
+            .set(&Globals::new(), || {
+                transform_source_file(
+                    &file_path,
+                    &super::TranspileContext {
+                        commonjs_specifiers: HashSet::new(),
+                        file_metadata: HashMap::new(),
+                        global_property_names: HashSet::new(),
+                        package_aliases: vec![super::PackageAliasInput {
+                            packageName: "react".to_string(),
+                            subpath: ".".to_string(),
+                            targetPath: file_path
+                                .parent()
+                                .unwrap()
+                                .parent()
+                                .unwrap()
+                                .join("react/index.js")
+                                .to_string_lossy()
+                                .to_string(),
+                        }],
+                        static_property_names: HashSet::new(),
+                        workspace_dir: file_path
+                            .parent()
+                            .unwrap()
+                            .parent()
+                            .unwrap()
+                            .parent()
+                            .unwrap()
+                            .to_path_buf(),
+                    },
+                )
+            })
             .unwrap();
 
         assert!(
@@ -844,20 +3214,20 @@ mod tests {
         fs::write(&file_path, source_text).unwrap();
 
         let output = GLOBALS
-            .set(&Globals::new(), || transform_source_file(&file_path))
+            .set(&Globals::new(), || transform_source_file(&file_path, &empty_context()))
             .unwrap();
 
         assert!(output.contains("Demo[\"styles\"] = theme;"), "{output}");
     }
 
     #[test]
-    fn rewrites_static_class_field_declarations_to_quoted_fields() {
+    fn leaves_static_class_field_declarations_unchanged() {
         let transformed = rewrite_static_class_fields(
             "class Demo {\n  static styles = theme;\n  static shadowRootOptions = {};\n}\n".to_string(),
         );
 
-        assert!(transformed.contains("static [\"styles\"] = theme;"));
-        assert!(transformed.contains("static [\"shadowRootOptions\"] = {};"));
+        assert!(transformed.contains("static styles = theme;"));
+        assert!(transformed.contains("static shadowRootOptions = {};"));
     }
 
     #[test]
@@ -869,5 +3239,379 @@ mod tests {
         assert!(transformed.contains("ctor[\"elementProperties\"].size"), "{transformed}");
         assert!(transformed.contains("this[\"finalized\"]"), "{transformed}");
         assert!(transformed.contains("superCtor[\"elementProperties\"]"), "{transformed}");
+    }
+
+    #[test]
+    fn rewrites_directory_import_specifiers_to_explicit_index_files() {
+        let transformed = apply_js_compat_text_fixes(
+            "import item from '.';\nexport { other } from '..';\n".to_string(),
+        );
+
+        assert!(transformed.contains("from './index.js'"), "{transformed}");
+        assert!(transformed.contains("from '../index.js'"), "{transformed}");
+    }
+
+    #[test]
+    fn simplifies_literal_conditional_expressions_in_js_pass_through() {
+        let source =
+            "const value = false ? missing() : fallback();\nconst other = true ? keep() : drop();\n";
+        let transformed = transform_js_pass_through_module(
+            parse_module(std::path::Path::new("fixture.js"), source).expect("module"),
+            source.to_string(),
+            std::path::Path::new("fixture.js"),
+            &empty_context(),
+        )
+        .expect("transform");
+
+        assert!(transformed.contains("const value = fallback();"), "{transformed}");
+        assert!(transformed.contains("const other = keep();"), "{transformed}");
+    }
+
+    #[test]
+    fn rewrites_undeclared_placeholder_returns_to_void_zero() {
+        let source = "var RETURN = () => T;\n";
+        let transformed = transform_js_pass_through_module(
+            parse_module(std::path::Path::new("fixture.js"), source).expect("module"),
+            source.to_string(),
+            std::path::Path::new("fixture.js"),
+            &empty_context(),
+        )
+        .expect("transform");
+
+        assert!(transformed.contains("var RETURN = ()=>void 0;"), "{transformed}");
+    }
+
+    #[test]
+    fn folds_process_env_node_env_for_browser_packages() {
+        let transformed = apply_js_compat_text_fixes(
+            "if (process.env.NODE_ENV !== 'production') console.warn('dev');\n".to_string(),
+        );
+
+        assert!(transformed.contains("\"production\" !== 'production'"), "{transformed}");
+    }
+
+    #[test]
+    fn rewrites_commonjs_namespace_imports_in_native_stage() {
+        let file_path = PathBuf::from("/tmp/src/index.js");
+        let source = "import * as demo from \"demo-pkg\";\nexport default demo.answer;\n";
+        let transformed = transform_js_pass_through_module(
+            parse_module(&file_path, source).expect("module"),
+            source.to_string(),
+            &file_path,
+            &super::TranspileContext {
+                commonjs_specifiers: HashSet::from(["demo-pkg".to_string()]),
+                file_metadata: HashMap::new(),
+                global_property_names: HashSet::new(),
+                package_aliases: Vec::new(),
+                static_property_names: HashSet::new(),
+                workspace_dir: PathBuf::from("/tmp"),
+            },
+        )
+        .expect("transform");
+
+        assert!(transformed.contains("import __cjs_import_0 from \"demo-pkg\";"), "{transformed}");
+        assert!(transformed.contains("const demo = __cjs_import_0;"), "{transformed}");
+        assert!(transformed.contains("demo[\"answer\"]"), "{transformed}");
+    }
+
+    #[test]
+    fn preserves_module_exports_member_names_in_commonjs_normalization() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let file_path = std::env::temp_dir()
+            .join(format!("gcc-ts-bundler-cjs-export-{unique}"))
+            .join("node_modules/demo/index.js");
+        let source_text =
+            "module.exports.Component = Component;\nmodule.exports.createContext = createContext;\n";
+        fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        fs::write(&file_path, source_text).unwrap();
+
+        let output = GLOBALS
+            .set(&Globals::new(), || transform_source_file(&file_path, &empty_context()))
+            .unwrap();
+
+        assert!(output.contains("module.exports[\"Component\"] = Component;"), "{output}");
+        assert!(
+            output.contains("module.exports[\"createContext\"] = createContext;"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn preserves_commonjs_alias_member_reads() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let file_path = std::env::temp_dir()
+            .join(format!("gcc-ts-bundler-cjs-alias-{unique}"))
+            .join("node_modules/demo/index.js");
+        let source_text = "const React = require(\"react\");\nmodule.exports = React.Component;\n";
+        fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        fs::write(&file_path, source_text).unwrap();
+
+        let context = super::TranspileContext {
+            commonjs_specifiers: HashSet::new(),
+            file_metadata: HashMap::new(),
+            global_property_names: HashSet::new(),
+            package_aliases: vec![super::PackageAliasInput {
+                packageName: "react".to_string(),
+                subpath: ".".to_string(),
+                targetPath: file_path
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join("react/index.js")
+                    .to_string_lossy()
+                    .to_string(),
+            }],
+            workspace_dir: file_path
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf(),
+            static_property_names: HashSet::new(),
+        };
+        let output = GLOBALS
+            .set(&Globals::new(), || transform_source_file(&file_path, &context))
+            .unwrap();
+
+        assert!(output.contains("const React = __cjs_require_0;"), "{output}");
+        assert!(output.contains("module[\"exports\"] = React[\"Component\"];"), "{output}");
+    }
+
+    #[test]
+    fn rewrites_component_props_to_runtime_object_reads() {
+        let file_path = PathBuf::from("/tmp/node_modules/demo-pkg/index.js");
+        let source = "export function RouterProvider({ router, children, ...rest }) { return render(router, children, rest); }\n";
+        let transformed = transform_js_pass_through_module(
+            parse_module(&file_path, source).expect("module"),
+            source.to_string(),
+            &file_path,
+            &empty_context(),
+        )
+        .expect("transform");
+
+        assert!(transformed.contains("function RouterProvider(__props)"), "{transformed}");
+        assert!(transformed.contains("const router = __props[goog.reflect.objectProperty(\"router\", __props)];"), "{transformed}");
+        assert!(transformed.contains("const children = __props[goog.reflect.objectProperty(\"children\", __props)];"), "{transformed}");
+        assert!(
+            transformed.contains(
+                "key !== goog.reflect.objectProperty(\"router\", __props) && key !== goog.reflect.objectProperty(\"children\", __props)"
+            ),
+            "{transformed}"
+        );
+    }
+
+    #[test]
+    fn preserves_uppercase_static_member_names_with_bracket_access() {
+        let file_path = PathBuf::from("/tmp/node_modules/demo-pkg/index.ts");
+        let source = "export const enum Flags { None = 0, Dirty = 1 }\nexport const value = Flags.None | Flags.Dirty;\n";
+        let transformed = GLOBALS
+            .set(&Globals::new(), || {
+                let program = transform_program(
+                    parse_module(&file_path, source).expect("module"),
+                    &file_path,
+                    &empty_context(),
+                    None,
+                )
+                .expect("transform");
+                print_program(&program).expect("print")
+            });
+
+        assert!(transformed.contains("const value = 0 | 1;"), "{transformed}");
+    }
+
+    #[test]
+    fn collects_static_property_names_from_assignments_and_fields() {
+        let names = collect_static_property_names_from_text(
+            "class Demo { static styles = theme; }\nlet Other = class Other {};\nOther.shadowRootOptions = {};\n",
+        );
+
+        assert!(names.contains("styles"));
+        assert!(names.contains("shadowRootOptions"));
+    }
+
+    #[test]
+    fn preserves_constant_like_object_keys_and_member_reads() {
+        let source = "const PartType = { ATTRIBUTE: 1, CHILD: 2, ELEMENT: 6 };\nconst alias = PartType;\nexport const value = alias.CHILD + PartType.ELEMENT;\n";
+        let transformed = transform_js_pass_through_module(
+            parse_module(std::path::Path::new("fixture.js"), source).expect("module"),
+            source.to_string(),
+            std::path::Path::new("fixture.js"),
+            &empty_context(),
+        )
+        .expect("transform");
+
+        assert!(
+            transformed.contains("\"ATTRIBUTE\": 1")
+                || transformed.contains("\"ATTRIBUTE\":1"),
+            "{transformed}"
+        );
+        assert!(transformed.contains("alias[\"CHILD\"]"), "{transformed}");
+        assert!(transformed.contains("PartType[\"ELEMENT\"]"), "{transformed}");
+    }
+
+    #[test]
+    fn rewrites_collected_global_property_reads_to_bracket_access() {
+        let source = "const root = globalThis;\nroot.sharedRegistry = root.sharedRegistry || new WeakMap();\nexport const value = sharedRegistry.get(meta) ?? globalThis.sharedRegistry ?? root.sharedRegistry;\n";
+        let transformed = transform_js_pass_through_module(
+            parse_module(std::path::Path::new("fixture.js"), source).expect("module"),
+            source.to_string(),
+            std::path::Path::new("fixture.js"),
+            &super::TranspileContext {
+                commonjs_specifiers: HashSet::new(),
+                file_metadata: HashMap::new(),
+                global_property_names: HashSet::from(["sharedRegistry".to_string()]),
+                package_aliases: vec![],
+                static_property_names: HashSet::new(),
+                workspace_dir: PathBuf::from("/tmp"),
+            },
+        )
+        .expect("transform");
+
+        assert!(transformed.contains("root[\"sharedRegistry\"]"), "{transformed}");
+        assert!(transformed.contains("globalThis[\"sharedRegistry\"].get(meta)"), "{transformed}");
+        assert!(transformed.contains("globalThis[\"sharedRegistry\"]"), "{transformed}");
+    }
+
+    #[test]
+    fn rewrites_collected_static_property_reads_to_bracket_access() {
+        let source = "class Base { static finalize(ctor) { return ctor.styles && ctor.elementStyles; } }\nclass Demo extends Base {}\nDemo.styles = theme;\n";
+        let transformed = transform_js_pass_through_module(
+            parse_module(std::path::Path::new("fixture.js"), source).expect("module"),
+            source.to_string(),
+            std::path::Path::new("fixture.js"),
+            &super::TranspileContext {
+                commonjs_specifiers: HashSet::new(),
+                file_metadata: HashMap::new(),
+                global_property_names: HashSet::new(),
+                package_aliases: vec![],
+                static_property_names: HashSet::from([
+                    "styles".to_string(),
+                    "elementStyles".to_string(),
+                ]),
+                workspace_dir: PathBuf::from("/tmp"),
+            },
+        )
+        .expect("transform");
+
+        assert!(transformed.contains("ctor[\"styles\"]"), "{transformed}");
+        assert!(transformed.contains("ctor[\"elementStyles\"]"), "{transformed}");
+        assert!(transformed.contains("Demo[\"styles\"] = theme;"), "{transformed}");
+    }
+
+    #[test]
+    fn renders_commonjs_export_externs() {
+        let externs = render_externs(
+            &BTreeSet::from([
+                "forwardRef".to_string(),
+                "__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE".to_string(),
+            ]),
+            &BTreeMap::new(),
+        );
+
+        assert!(externs.contains("Object.prototype.forwardRef;"), "{externs}");
+        assert!(
+            externs.contains(
+                "Object.prototype.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;"
+            ),
+            "{externs}"
+        );
+    }
+
+    #[test]
+    fn collects_object_literal_protocol_names_from_exported_bindings() {
+        let file_path = PathBuf::from("/tmp/node_modules/demo/index.js");
+        let source = "var Shared = { H: null, T: null, S: null };\nmodule.exports.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE = Shared;\n";
+        let module = parse_module(&file_path, source).expect("module");
+        let analysis = crate::commonjs::analyze_commonjs_module(&module);
+        let externs = collect_commonjs_extern_names(&module, &analysis);
+
+        assert!(externs.iter().any(|name| name == "__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE"));
+        assert!(externs.iter().any(|name| name == "H"));
+        assert!(externs.iter().any(|name| name == "T"));
+        assert!(externs.iter().any(|name| name == "S"));
+    }
+
+    #[test]
+    fn collects_protocol_names_from_config_destructuring() {
+        let file_path = PathBuf::from("/tmp/node_modules/demo/index.js");
+        let source = "function build(config) { const { createMutableStore, createReadonlyStore, batch, init } = config; return { createMutableStore, createReadonlyStore, batch, init }; }\n";
+        let module = parse_module(&file_path, source).expect("module");
+        let externs = collect_protocol_extern_names(&module);
+
+        assert!(externs.iter().any(|name| name == "createMutableStore"));
+        assert!(externs.iter().any(|name| name == "createReadonlyStore"));
+        assert!(externs.iter().any(|name| name == "batch"));
+        assert!(externs.iter().any(|name| name == "init"));
+    }
+
+    #[test]
+    fn collects_enum_member_names_for_externs() {
+        let file_path = PathBuf::from("/tmp/node_modules/demo/index.ts");
+        let source = "export const enum ReactiveFlags { None = 0, Mutable = 1, Watching = 2, Dirty = 16 }\n";
+        let module = parse_module(&file_path, source).expect("module");
+        let externs = collect_enum_extern_names(&module);
+
+        assert!(externs.iter().any(|name| name == "None"));
+        assert!(externs.iter().any(|name| name == "Mutable"));
+        assert!(externs.iter().any(|name| name == "Watching"));
+        assert!(externs.iter().any(|name| name == "Dirty"));
+    }
+
+    #[test]
+    fn inlines_relative_imported_enum_members() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir()
+            .join(format!("gcc-ts-bundler-imported-enum-{unique}"))
+            .join("node_modules/demo");
+        let dep_file = root.join("flags.ts");
+        let entry_file = root.join("index.ts");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            &dep_file,
+            "export const enum ReactiveFlags { None = 0, Dirty = 16 }\n",
+        )
+        .unwrap();
+        fs::write(
+            &entry_file,
+            "import { ReactiveFlags } from './flags';\nexport const value = ReactiveFlags.None | ReactiveFlags.Dirty;\n",
+        )
+        .unwrap();
+
+        let transformed = GLOBALS
+            .set(&Globals::new(), || transform_source_file(&entry_file, &empty_context()))
+            .unwrap();
+
+        assert!(transformed.contains("const value = 0 | 16;"), "{transformed}");
+    }
+
+    #[test]
+    fn renders_named_enum_externs() {
+        let externs = render_externs(
+            &BTreeSet::new(),
+            &BTreeMap::from([(
+                "ReactiveFlags".to_string(),
+                BTreeSet::from([
+                    "None".to_string(),
+                    "Mutable".to_string(),
+                    "Watching".to_string(),
+                ]),
+            )]),
+        );
+
+        assert!(externs.contains("Object.prototype.None;"), "{externs}");
+        assert!(externs.contains("Object.prototype.Mutable;"), "{externs}");
+        assert!(externs.contains("Object.prototype.Watching;"), "{externs}");
     }
 }

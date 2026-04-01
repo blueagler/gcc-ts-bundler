@@ -52,6 +52,13 @@ interface NativeShimEntry {
 interface NativeTranspileOutput {
   emittedFiles: string[];
   externsPath: string;
+  supportFiles: string[];
+}
+
+interface NativeTranspilePackageAlias {
+  packageName: string;
+  subpath: string;
+  targetPath: string;
 }
 
 interface NativeBinding {
@@ -68,7 +75,10 @@ interface NativeBinding {
     fileNames: string[],
     outDir: string,
     externsPath: string,
+    metadataPath: string,
     workspaceDir: string,
+    packageAliases: NativeTranspilePackageAlias[],
+    packageJsonFiles: string[],
   ): NativeTranspileOutput;
   writeEntryShims(entries: NativeShimEntry[]): string[];
 }
@@ -125,14 +135,20 @@ export function rewriteGccExports(code: string) {
 export function transpileSources(input: {
   externsPath: string;
   fileNames: string[];
+  metadataPath: string;
   outDir: string;
+  packageAliases?: NativeTranspilePackageAlias[];
+  packageJsonFiles?: string[];
   workspaceDir: string;
 }) {
   return loadBinding().transpileSources(
     input.fileNames,
     input.outDir,
     input.externsPath,
+    input.metadataPath,
     input.workspaceDir,
+    input.packageAliases ?? [],
+    input.packageJsonFiles ?? [],
   );
 }
 

@@ -17,6 +17,12 @@ export interface NativeFileStateEntry {
 interface NativeTranspileOutput {
     emittedFiles: string[];
     externsPath: string;
+    supportFiles: string[];
+}
+interface NativeTranspilePackageAlias {
+    packageName: string;
+    subpath: string;
+    targetPath: string;
 }
 export declare function resolveGraph(input: {
     entries: string[];
@@ -36,7 +42,10 @@ export declare function rewriteGccExports(code: string): string;
 export declare function transpileSources(input: {
     externsPath: string;
     fileNames: string[];
+    metadataPath: string;
     outDir: string;
+    packageAliases?: NativeTranspilePackageAlias[];
+    packageJsonFiles?: string[];
     workspaceDir: string;
 }): NativeTranspileOutput;
 export declare function writeEntryShims(input: {

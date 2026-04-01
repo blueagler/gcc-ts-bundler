@@ -10,6 +10,7 @@ const result = await build({
   outDir: "./dist",
   projectRoot,
   srcDir: ".",
+  // languageOut: "ECMASCRIPT5",
 });
 
 if (result.exitCode !== 0) {
@@ -18,9 +19,9 @@ if (result.exitCode !== 0) {
       typeof diagnostic?.messageText === "string"
         ? diagnostic.messageText
         : ts.flattenDiagnosticMessageText(
-            diagnostic?.messageText ?? diagnostic,
-            "\n",
-          );
+          diagnostic?.messageText ?? diagnostic,
+          "\n",
+        );
     console.error(message);
   }
   process.exit(result.exitCode);

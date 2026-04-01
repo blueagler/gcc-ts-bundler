@@ -376,10 +376,12 @@ dependencies = [
  "napi-derive",
  "rayon",
  "regex",
+ "serde",
  "serde_json",
  "sha2",
  "swc_core",
  "swc_ecma_transforms_base",
+ "swc_ecma_transforms_react",
  "swc_ecma_transforms_typescript",
 ]
 

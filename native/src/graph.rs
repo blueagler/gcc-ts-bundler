@@ -784,18 +784,30 @@ fn should_prefer_development_target(
         return Ok(false);
     }
 
-    let default_source = fs::read_to_string(default_path).map_err(|error| error.to_string())?;
+    let default_source = fs::read_to_string(&default_path).map_err(|error| error.to_string())?;
     let development_source =
-        fs::read_to_string(development_path).map_err(|error| error.to_string())?;
+        fs::read_to_string(&development_path).map_err(|error| error.to_string())?;
+    let development_path_name = development_path.to_string_lossy();
+    let default_path_name = default_path.to_string_lossy();
 
     Ok(
-        contains_closure_protocol_hints(&development_source)
-            && !contains_closure_protocol_hints(&default_source),
+        (contains_closure_protocol_hints(&development_source)
+            && !contains_closure_protocol_hints(&default_source))
+            || (default_path_name.contains("/production/")
+                && development_path_name.contains("/development/"))
+            || (looks_minified_source(&default_source)
+                && !looks_minified_source(&development_source)),
     )
 }
 
 fn contains_closure_protocol_hints(source: &str) -> bool {
     source.contains("JSCompiler_renameProperty(") || source.contains("@nocollapse")
+}
+
+fn looks_minified_source(source: &str) -> bool {
+    let newline_count = source.bytes().filter(|byte| *byte == b'\n').count();
+    let longest_line = source.lines().map(str::len).max().unwrap_or(0);
+    newline_count <= 3 && longest_line > 2000
 }
 
 fn resolve_browser_subpath(
@@ -832,8 +844,9 @@ fn resolve_package_target(
     package_name: &str,
     _context: &ResolveContext,
 ) -> std::result::Result<Option<PathBuf>, String> {
-    if target.starts_with("./") {
-        let base = normalize_path(&package_dir.join(target.trim_start_matches("./")));
+    if is_package_relative_target(target) {
+        let normalized_target = target.strip_prefix("./").unwrap_or(target);
+        let base = normalize_path(&package_dir.join(normalized_target));
         return resolve_module_base(
             &base,
             true,
@@ -846,6 +859,13 @@ fn resolve_package_target(
     Err(format!(
         "Unsupported export target \"{target}\" in package \"{package_name}\""
     ))
+}
+
+fn is_package_relative_target(target: &str) -> bool {
+    !target.is_empty()
+        && !target.starts_with('/')
+        && !target.starts_with("../")
+        && !target.contains(':')
 }
 
 fn resolve_package_local_path(
@@ -1355,6 +1375,31 @@ mod tests {
             .sourceFiles
             .iter()
             .any(|path| path.ends_with("node_modules/demo-pkg/browser.js")));
+    }
+
+    #[test]
+    fn resolves_package_relative_module_field_without_dot_prefix() {
+        let temp_dir = TestDir::new();
+        temp_dir.write("src/index.ts", "import pkg from \"demo-pkg\";\nexport default pkg;\n");
+        temp_dir.write(
+            "node_modules/demo-pkg/package.json",
+            r#"{"name":"demo-pkg","module":"es/index.js","main":"lib/index.js"}"#,
+        );
+        temp_dir.write("node_modules/demo-pkg/es/index.js", "export default 1;\n");
+        temp_dir.write("node_modules/demo-pkg/lib/index.js", "module.exports = 2;\n");
+
+        let result = resolve_graph(
+            vec![temp_dir.join("src/index.ts").to_string_lossy().to_string()],
+            temp_dir.join("src").to_string_lossy().to_string(),
+            temp_dir.path.to_string_lossy().to_string(),
+            "esm-only".to_string(),
+        )
+        .unwrap();
+
+        assert!(result
+            .sourceFiles
+            .iter()
+            .any(|path| path.ends_with("node_modules/demo-pkg/es/index.js")));
     }
 
     #[test]

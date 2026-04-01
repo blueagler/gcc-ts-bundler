@@ -4,5 +4,6 @@ This example is a real consumer fixture for `gcc-ts-bundler`. It has its own `pa
 
 Current status:
 
-- The example app source builds successfully with React 19 and `react-dom` from npm.
-- This now validates the browser-safe CommonJS package support path, including production `process.env.NODE_ENV` folding and React JSX runtime package resolution.
+- The example app source targets React 19, `react-dom`, and the full `@tanstack/react-router` runtime from npm.
+- It is the primary browser fixture for routed React behavior under `ADVANCED`.
+- The acceptance path is simple and explicit: home route render, counter interaction, route transition to the second page, and second-page stateful UI.

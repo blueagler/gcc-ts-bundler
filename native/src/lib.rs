@@ -1,9 +1,12 @@
+mod closure_metadata;
 mod commonjs;
 mod exports;
 mod fs_state;
 mod graph;
 mod module_cache;
+mod pathing;
 mod shims;
+mod support_files;
 mod transpile;
 
 use napi::{Error, Result};
@@ -41,13 +44,19 @@ pub fn transpile_sources(
     file_names: Vec<String>,
     out_dir: String,
     externs_path: String,
+    metadata_path: String,
     workspace_dir: String,
+    package_aliases: Vec<transpile::PackageAliasInput>,
+    package_json_files: Vec<String>,
 ) -> Result<transpile::TranspileOutput> {
     into_napi(transpile::transpile_sources(
         file_names,
         out_dir,
         externs_path,
+        metadata_path,
         workspace_dir,
+        package_aliases,
+        package_json_files,
     ))
 }
 

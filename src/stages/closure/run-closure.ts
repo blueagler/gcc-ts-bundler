@@ -24,6 +24,8 @@ type ClosureCompilerOptions = ConstructorParameters<ClosureCompilerClass>[0];
 
 interface ClosureChunk {
   dependencies: string[];
+  entryPoint?: string;
+  entryFile?: string;
   files: string[];
   name: string;
 }
@@ -128,24 +130,27 @@ async function runSingleClosureCompilation({
   supportFiles: string[];
   rawOutputPath: string;
 }) {
-  return runClosureCompiler({
+  const closureOptions: ClosureCompilerOptions = {
     assumeFunctionWrapper: true,
     compilationLevel: options.compilationLevel,
-    dependencyMode: "NONE",
-    externs: externPaths,
-    js: [
+    dependencyMode: "PRUNE",
+    externs: uniquePaths(externPaths),
+    js: uniquePaths([
       ...options.js,
       ...closureLibFiles,
       ...supportFiles,
       ...entryChunk.files,
-    ],
+    ]),
     jsOutputFile: rawOutputPath,
     languageIn: "UNSTABLE",
     languageOut: options.languageOut,
-    moduleResolution: "NODE",
     rewritePolyfills: false,
     warningLevel: options.diagnostics.verbose ? "VERBOSE" : "QUIET",
-  });
+  };
+  if (entryChunk.entryPoint) {
+    closureOptions.entryPoint = [entryChunk.entryPoint];
+  }
+  return runClosureCompiler(closureOptions);
 }
 
 async function runChunkedClosureCompilation({
@@ -163,31 +168,42 @@ async function runChunkedClosureCompilation({
   outputDir: string;
   supportFiles: string[];
 }) {
-  const leadingJs = [...options.js, ...closureLibFiles, ...supportFiles];
+  const leadingJs = uniquePaths([
+    ...options.js,
+    ...closureLibFiles,
+    ...supportFiles,
+  ]);
   const chunkSpecs = chunkPlan.map((chunk, index) => {
     const dependencySuffix =
       chunk.dependencies.length > 0 ? `:${chunk.dependencies.join(",")}` : "";
-    return `${chunk.name}:${chunk.files.length + (index === 0 ? leadingJs.length : 0)}${dependencySuffix}`;
+    return `${chunk.name}:${uniquePaths(chunk.files).length + (index === 0 ? leadingJs.length : 0)}${dependencySuffix}`;
   });
-  const chunkFiles = [
+  const chunkFiles = uniquePaths([
     ...leadingJs,
     ...chunkPlan.flatMap((chunk) => chunk.files),
-  ];
+  ]);
 
-  return runClosureCompiler({
+  const closureOptions: ClosureCompilerOptions = {
     compilationLevel: options.compilationLevel,
     chunk: chunkSpecs,
     chunkOutputPathPrefix: `${outputDir}${path.sep}`,
-    chunkOutputType: "ES_MODULES",
-    dependencyMode: "NONE",
-    externs: externPaths,
+    dependencyMode: "PRUNE",
+    externs: uniquePaths(externPaths),
     js: chunkFiles,
     languageIn: "UNSTABLE",
     languageOut: options.languageOut,
-    moduleResolution: "NODE",
     rewritePolyfills: false,
     warningLevel: options.diagnostics.verbose ? "VERBOSE" : "QUIET",
-  });
+  };
+  const entryPoints = uniquePaths(
+    chunkPlan
+      .map((chunk) => chunk.entryPoint)
+      .filter((entryPoint): entryPoint is string => Boolean(entryPoint)),
+  );
+  if (entryPoints.length > 0) {
+    closureOptions.entryPoint = entryPoints;
+  }
+  return runClosureCompiler(closureOptions);
 }
 
 function resolveChunkPlan(
@@ -196,6 +212,23 @@ function resolveChunkPlan(
 ): ClosureChunk[] {
   return chunkPlan.map((chunk) => ({
     dependencies: chunk.dependencies,
+    entryFile:
+      chunk.files.length > 0
+        ? path.join(
+            emittedOutDir,
+            chunk.files[chunk.files.length - 1].replace(/\.[^/.]+$/, ".js"),
+          )
+        : undefined,
+    entryPoint:
+      chunk.files.length > 0
+        ? toGoogModuleId(
+            path.join(
+              emittedOutDir,
+              chunk.files[chunk.files.length - 1].replace(/\.[^/.]+$/, ".js"),
+            ),
+            emittedOutDir,
+          )
+        : undefined,
     files: chunk.files.map((filePath) =>
       path.join(emittedOutDir, filePath.replace(/\.[^/.]+$/, ".js")),
     ),
@@ -214,6 +247,19 @@ function getDefaultString(value: unknown): string | undefined {
   }
 
   return undefined;
+}
+
+function uniquePaths(paths: string[]) {
+  return [...new Set(paths)];
+}
+
+function toGoogModuleId(filePath: string, moduleRoot: string) {
+  const relativePath = path.relative(moduleRoot, filePath).replace(/\\/g, "/");
+  const withoutExtension = relativePath.replace(/\.[^/.]+$/, "");
+  return `gcc.${withoutExtension
+    .split("/")
+    .map((segment) => segment.replace(/[^A-Za-z0-9_$]/g, "_"))
+    .join(".")}`;
 }
 
 function resolveClosureCompilerJarPath(): string | undefined {

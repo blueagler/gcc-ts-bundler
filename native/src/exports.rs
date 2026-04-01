@@ -18,12 +18,15 @@ pub fn rewrite_gcc_exports(code: String) -> std::result::Result<String, String> 
 
     let mut module = parse_module(&PathBuf::from("bundle.js"), &code)?;
     let mut body = Vec::new();
-    let mut exports_map = BTreeMap::<String, String>::new();
+    let mut exports_map = BTreeMap::<String, ExportRewrite>::new();
     let mut processed_exports = HashSet::<String>::new();
     let mut existing_export_names = HashSet::<String>::new();
+    let mut declared_names = HashSet::<String>::new();
     let mut has_default_export = false;
+    let mut named_export_specifiers = Vec::<String>::new();
 
     for item in &module.body {
+        collect_top_level_declared_names(item, &mut declared_names);
         match item {
             ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(named)) => {
                 for specifier in &named.specifiers {
@@ -43,37 +46,58 @@ pub fn rewrite_gcc_exports(code: String) -> std::result::Result<String, String> 
     }
 
     for item in module.body.into_iter() {
+        if is_gcc_bootstrap_statement(&item) {
+            continue;
+        }
+
         if let Some((export_name, right)) = get_gcc_export_assignment(&item) {
             if processed_exports.insert(export_name.clone()) {
-                let local_name = if export_name == "__DEFAULT_EXPORT__" {
-                    "__gcc_default_export__".to_string()
+                let rewrite = if let Some(identifier) = bare_identifier_name(&right) {
+                    ExportRewrite::Direct(identifier)
+                } else if export_name != "__DEFAULT_EXPORT__"
+                    && is_valid_identifier(&export_name)
+                    && !declared_names.contains(&export_name)
+                {
+                    body.push(create_const_declaration(&export_name, right)?);
+                    declared_names.insert(export_name.clone());
+                    ExportRewrite::Direct(export_name.clone())
                 } else {
-                    format!("__gcc_export_{}", sanitize_identifier(&export_name))
+                    let local_name = if export_name == "__DEFAULT_EXPORT__" {
+                        "__gcc_default_export__".to_string()
+                    } else {
+                        format!("__gcc_export_{}", sanitize_identifier(&export_name))
+                    };
+                    body.push(create_const_declaration(&local_name, right)?);
+                    ExportRewrite::Temp(local_name)
                 };
-                exports_map.insert(export_name, local_name.clone());
-                body.push(create_const_declaration(&local_name, right)?);
+                exports_map.insert(export_name, rewrite);
             }
         } else {
             body.push(item);
         }
     }
 
-    for (export_name, local_name) in exports_map {
+    for (export_name, rewrite) in exports_map {
         if export_name == "__DEFAULT_EXPORT__" {
             if !has_default_export {
-                body.push(parse_first_item(&format!("export default {};", local_name))?);
+                body.push(parse_first_item(&format!(
+                    "export default {};",
+                    rewrite.local_name()
+                ))?);
             }
         } else if !existing_export_names.contains(&export_name) {
-            let exported_name = if is_valid_identifier(&export_name) {
-                export_name
-            } else {
-                format!("{:?}", export_name)
-            };
-            body.push(parse_first_item(&format!(
-                "export {{ {} as {} }};",
-                local_name, exported_name
-            ))?);
+            named_export_specifiers.push(format_named_export_specifier(
+                rewrite.local_name(),
+                &export_name,
+            ));
         }
+    }
+
+    if !named_export_specifiers.is_empty() {
+        body.push(parse_first_item(&format!(
+            "export {{ {} }};",
+            named_export_specifiers.join(", ")
+        ))?);
     }
 
     module.body = body;
@@ -102,6 +126,19 @@ fn create_const_declaration(
             Ok(ModuleItem::Stmt(Stmt::Decl(Decl::Var(variable_decl))))
         }
         _ => Err("failed to create const declaration".to_string()),
+    }
+}
+
+enum ExportRewrite {
+    Direct(String),
+    Temp(String),
+}
+
+impl ExportRewrite {
+    fn local_name(&self) -> &str {
+        match self {
+            Self::Direct(name) | Self::Temp(name) => name,
+        }
     }
 }
 
@@ -140,6 +177,105 @@ fn get_gcc_export_assignment(item: &ModuleItem) -> Option<(String, Box<Expr>)> {
     Some((export_name, assignment.right.clone()))
 }
 
+fn is_gcc_bootstrap_statement(item: &ModuleItem) -> bool {
+    let statement = match item {
+        ModuleItem::Stmt(Stmt::Expr(statement)) => statement,
+        _ => return false,
+    };
+
+    let assignment = match &*statement.expr {
+        Expr::Assign(assignment) => assignment,
+        _ => return false,
+    };
+
+    let left = match &assignment.left {
+        AssignTarget::Simple(SimpleAssignTarget::Member(member)) => member,
+        _ => return false,
+    };
+
+    let right = match &*assignment.right {
+        Expr::Bin(binary) if binary.op == BinaryOp::LogicalOr => binary,
+        _ => return false,
+    };
+
+    is_global_gcc_member(&left.obj, &left.prop)
+        && matches!(&*right.left, Expr::Member(member) if is_global_gcc_member(&member.obj, &member.prop))
+        && matches!(&*right.right, Expr::Object(object) if object.props.is_empty())
+}
+
+fn is_global_gcc_member(object: &Expr, prop: &MemberProp) -> bool {
+    matches!(object, Expr::Ident(ident) if ident.sym == "globalThis") && member_prop_name(prop).as_deref() == Some("GCC")
+}
+
+fn bare_identifier_name(expression: &Expr) -> Option<String> {
+    match expression {
+        Expr::Ident(ident) => Some(ident.sym.to_string()),
+        _ => None,
+    }
+}
+
+fn collect_top_level_declared_names(item: &ModuleItem, names: &mut HashSet<String>) {
+    match item {
+        ModuleItem::Stmt(Stmt::Decl(Decl::Var(variable))) => {
+            for declarator in &variable.decls {
+                collect_pattern_names(&declarator.name, names);
+            }
+        }
+        ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) => {
+            names.insert(function.ident.sym.to_string());
+        }
+        ModuleItem::Stmt(Stmt::Decl(Decl::Class(class))) => {
+            names.insert(class.ident.sym.to_string());
+        }
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export_decl)) => match &export_decl.decl {
+            Decl::Var(variable) => {
+                for declarator in &variable.decls {
+                    collect_pattern_names(&declarator.name, names);
+                }
+            }
+            Decl::Fn(function) => {
+                names.insert(function.ident.sym.to_string());
+            }
+            Decl::Class(class) => {
+                names.insert(class.ident.sym.to_string());
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+fn collect_pattern_names(pattern: &Pat, names: &mut HashSet<String>) {
+    match pattern {
+        Pat::Ident(binding) => {
+            names.insert(binding.id.sym.to_string());
+        }
+        Pat::Array(array) => {
+            for element in array.elems.iter().flatten() {
+                collect_pattern_names(element, names);
+            }
+        }
+        Pat::Object(object) => {
+            for prop in &object.props {
+                match prop {
+                    ObjectPatProp::Assign(assign) => {
+                        names.insert(assign.key.sym.to_string());
+                    }
+                    ObjectPatProp::KeyValue(key_value) => {
+                        collect_pattern_names(&key_value.value, names);
+                    }
+                    ObjectPatProp::Rest(rest) => {
+                        collect_pattern_names(&rest.arg, names);
+                    }
+                }
+            }
+        }
+        Pat::Assign(assign) => collect_pattern_names(&assign.left, names),
+        Pat::Rest(rest) => collect_pattern_names(&rest.arg, names),
+        _ => {}
+    }
+}
+
 fn member_prop_name(prop: &MemberProp) -> Option<String> {
     match prop {
         MemberProp::Ident(ident) => Some(ident.sym.to_string()),
@@ -168,6 +304,19 @@ fn sanitize_identifier(name: &str) -> String {
             }
         })
         .collect()
+}
+
+fn format_named_export_specifier(local_name: &str, export_name: &str) -> String {
+    if local_name == export_name && is_valid_identifier(export_name) {
+        local_name.to_string()
+    } else {
+        let exported_name = if is_valid_identifier(export_name) {
+            export_name.to_string()
+        } else {
+            format!("{:?}", export_name)
+        };
+        format!("{local_name} as {exported_name}")
+    }
 }
 
 fn is_valid_identifier(name: &str) -> bool {
@@ -208,6 +357,9 @@ fn rewrite_gcc_exports_fast(code: &str) -> Option<String> {
         .iter()
         .filter_map(|candidate| code.rfind(candidate).map(|index| (index, *candidate)))
         .max_by_key(|(index, _)| *index)?;
+    if code[..start_index].contains("export") {
+        return None;
+    }
     let tail = &code[start_index..];
     let statements = split_top_level_statements(tail)?;
     if statements.first().copied()? != init_statement {
@@ -215,31 +367,28 @@ fn rewrite_gcc_exports_fast(code: &str) -> Option<String> {
     }
 
     let mut rewritten = String::with_capacity(code.len() + 128);
+    let mut named_export_specifiers = Vec::new();
     rewritten.push_str(&code[..start_index]);
-    rewritten.push_str(init_statement);
 
     for statement in statements.iter().skip(1) {
         let (export_name, expression) = parse_gcc_assignment(statement)?;
         if export_name == "__DEFAULT_EXPORT__" {
-            rewritten.push_str("const __gcc_default_export__=");
+            rewritten.push_str("export default ");
             rewritten.push_str(expression);
-            rewritten.push_str(";export default __gcc_default_export__;");
+            rewritten.push(';');
             continue;
         }
 
-        if !is_valid_identifier(export_name) {
+        if !is_valid_identifier(expression) {
             return None;
         }
 
-        let local_name = format!("__gcc_export_{}", sanitize_identifier(export_name));
-        rewritten.push_str("const ");
-        rewritten.push_str(&local_name);
-        rewritten.push('=');
-        rewritten.push_str(expression);
-        rewritten.push_str(";export{");
-        rewritten.push_str(&local_name);
-        rewritten.push_str(" as ");
-        rewritten.push_str(export_name);
+        named_export_specifiers.push(format_named_export_specifier(expression, export_name));
+    }
+
+    if !named_export_specifiers.is_empty() {
+        rewritten.push_str("export{");
+        rewritten.push_str(&named_export_specifiers.join(","));
         rewritten.push_str("};");
     }
 
@@ -324,4 +473,98 @@ fn parse_gcc_assignment(statement: &str) -> Option<(&str, &str)> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rewrite_gcc_exports;
+
+    #[test]
+    fn rewrites_named_identifier_exports_without_gcc_wrapper() {
+        let output = rewrite_gcc_exports(
+            "const Mc=1;globalThis.GCC=globalThis.GCC||{};globalThis.GCC.MotionHero=Mc;"
+                .to_string(),
+        )
+        .unwrap();
+
+        assert!(output.contains("export{Mc as MotionHero};"), "{output}");
+        assert!(!output.contains("globalThis.GCC"), "{output}");
+        assert!(!output.contains("__gcc_export_"), "{output}");
+    }
+
+    #[test]
+    fn rewrites_default_identifier_exports_without_gcc_wrapper() {
+        let output = rewrite_gcc_exports(
+            "const Mc=1;globalThis.GCC=globalThis.GCC||{};globalThis.GCC.__DEFAULT_EXPORT__=Mc;"
+                .to_string(),
+        )
+        .unwrap();
+
+        assert!(output.contains("export default Mc;"), "{output}");
+        assert!(!output.contains("globalThis.GCC"), "{output}");
+        assert!(!output.contains("__gcc_default_export__"), "{output}");
+    }
+
+    #[test]
+    fn keeps_temp_fallback_for_non_identifier_exports() {
+        let output = rewrite_gcc_exports(
+            "globalThis.GCC=globalThis.GCC||{};globalThis.GCC.MotionHero=foo();".to_string(),
+        )
+        .unwrap();
+
+        assert!(
+            output.contains("const MotionHero=foo();export{MotionHero};"),
+            "{output}"
+        );
+        assert!(!output.contains("globalThis.GCC"), "{output}");
+        assert!(!output.contains("__gcc_export_MotionHero"), "{output}");
+    }
+
+    #[test]
+    fn skips_duplicate_exports_already_present() {
+        let output = rewrite_gcc_exports(
+            "const Mc=1;export{Mc as MotionHero};globalThis.GCC=globalThis.GCC||{};globalThis.GCC.MotionHero=Mc;"
+                .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(output.matches("MotionHero").count(), 1, "{output}");
+        assert!(!output.contains("globalThis.GCC"), "{output}");
+    }
+
+    #[test]
+    fn leaves_non_gcc_modules_unchanged() {
+        let input = "export const value = 1;".to_string();
+        let output = rewrite_gcc_exports(input.clone()).unwrap();
+
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn rewrites_member_expression_exports_to_named_binding_without_gcc_temp() {
+        let output = rewrite_gcc_exports(
+            "const Y={tb:1};globalThis.GCC=globalThis.GCC||{};globalThis.GCC.MotionHero=Y.tb;"
+        .to_string(),
+        )
+        .unwrap();
+
+        assert!(
+            output.contains("const MotionHero=Y.tb;export{MotionHero};"),
+            "{output}"
+        );
+        assert!(!output.contains("__gcc_export_"), "{output}");
+        assert!(!output.contains("globalThis.GCC"), "{output}");
+    }
+
+    #[test]
+    fn merges_named_exports_into_one_statement() {
+        let output = rewrite_gcc_exports(
+            "const A=1;const B=2;globalThis.GCC=globalThis.GCC||{};globalThis.GCC.First=A;globalThis.GCC.Second=B;"
+                .to_string(),
+        )
+        .unwrap();
+
+        assert!(output.contains("export{A as First,B as Second};"), "{output}");
+        assert_eq!(output.matches("export{").count(), 1, "{output}");
+    }
 }
