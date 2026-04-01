@@ -7,12 +7,13 @@ use std::path::{Path, PathBuf};
 use napi_derive::napi;
 use rayon::prelude::*;
 use swc_core::common::{sync::Lrc, Globals, Mark, SourceMap, GLOBALS};
-use swc_core::ecma::ast::{Expr, ExprStmt, Id, MemberExpr, MemberProp, ModuleItem, Pass, Program, Stmt, VarDeclarator};
+use swc_core::ecma::ast::{CallExpr, Callee, EmptyStmt, Expr, ExprStmt, Id, MemberExpr, MemberProp, Module, ModuleItem, Pass, Program, Stmt, VarDeclarator};
 use swc_core::ecma::codegen::{text_writer::JsWriter, Config as CodegenConfig, Emitter};
 use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 use swc_ecma_transforms_base::resolver;
 use swc_ecma_transforms_typescript::strip;
 
+use crate::commonjs::{analyze_commonjs_module, evaluate_boolean_expr};
 use crate::module_cache::{get_or_parse_cached_module, parse_module};
 
 #[allow(non_snake_case)]
@@ -67,14 +68,86 @@ pub fn transpile_sources(
 }
 
 fn transform_source_file(file_path: &Path) -> std::result::Result<String, String> {
+    let source_text = fs::read_to_string(file_path).map_err(|error| error.to_string())?;
+    let module = get_or_parse_cached_module(&file_path.to_path_buf())?;
+    let commonjs_analysis = analyze_commonjs_module(&module);
+
     if !should_run_resolver(file_path) {
-        let source_text = fs::read_to_string(file_path).map_err(|error| error.to_string())?;
+        if should_normalize_commonjs(file_path, &commonjs_analysis) {
+            return normalize_commonjs_module(module, &commonjs_analysis);
+        }
+
         return Ok(apply_js_compat_text_fixes(source_text));
     }
 
-    let module = get_or_parse_cached_module(&file_path.to_path_buf())?;
     let program = transform_program(module, file_path)?;
     print_program(&program).map(apply_js_compat_text_fixes)
+}
+
+fn should_normalize_commonjs(file_path: &Path, analysis: &crate::commonjs::CommonJsAnalysis) -> bool {
+    analysis.has_commonjs
+        && file_path.to_string_lossy().contains("/node_modules/")
+        && !file_path.to_string_lossy().ends_with(".d.ts")
+}
+
+fn normalize_commonjs_module(
+    module: Module,
+    analysis: &crate::commonjs::CommonJsAnalysis,
+) -> std::result::Result<String, String> {
+    if let Some(reason) = analysis.unsupported.first() {
+        return Err(format!("Unsupported CommonJS pattern: {reason}"));
+    }
+
+    let require_bindings = analysis
+        .dependencies
+        .iter()
+        .enumerate()
+        .map(|(index, specifier)| (specifier.clone(), format!("__cjs_require_{index}")))
+        .collect::<HashMap<_, _>>();
+
+    let import_items = analysis
+        .dependencies
+        .iter()
+        .enumerate()
+        .flat_map(|(index, specifier)| {
+            parse_module_items(&format!(
+                "import * as __cjs_import_{index} from {:?}; const __cjs_require_{index} = \"__cjsExports\" in __cjs_import_{index} ? __cjs_import_{index}.__cjsExports : __cjs_import_{index};",
+                to_emitted_commonjs_specifier(specifier)
+            ))
+            .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+
+    let mut program = Program::Module(module);
+    program.visit_mut_with(&mut CommonJsRewriteVisitor::new(require_bindings)?);
+    let Program::Module(mut module) = program else {
+        return Err("Expected module program".to_string());
+    };
+
+    let mut normalized_body = Vec::new();
+    normalized_body.extend(import_items);
+    normalized_body.extend(parse_module_items("var module = { exports: {} };")?);
+    normalized_body.extend(module.body.drain(..));
+    normalized_body.extend(parse_module_items(
+        "var __cjsExports = module.exports; export { __cjsExports }; export default __cjsExports;",
+    )?);
+
+    print_program(&Program::Module(Module {
+        body: normalized_body,
+        shebang: None,
+        span: module.span,
+    }))
+    .map(apply_js_compat_text_fixes)
+}
+
+fn to_emitted_commonjs_specifier(specifier: &str) -> String {
+    if specifier.starts_with('.') {
+        return specifier
+            .replace(".cjs", ".js")
+            .replace(".cts", ".js");
+    }
+
+    specifier.to_string()
 }
 
 fn apply_js_compat_text_fixes(source_text: String) -> String {
@@ -169,6 +242,10 @@ fn rewrite_static_class_fields(source_text: String) -> String {
                 .into_owned()
         })
         .unwrap_or(source_text)
+}
+
+fn parse_module_items(source: &str) -> std::result::Result<Vec<ModuleItem>, String> {
+    Ok(parse_module(&PathBuf::from("snippet.js"), source)?.body)
 }
 
 fn collect_global_this_property_names(source_text: &str) -> HashSet<String> {
@@ -282,6 +359,146 @@ fn rewrite_protected_property_accesses(mut source_text: String, property_name: &
     }
 
     source_text
+}
+
+struct CommonJsRewriteVisitor {
+    module_exports_expr: Box<Expr>,
+    production_expr: Box<Expr>,
+    require_bindings: HashMap<String, String>,
+}
+
+impl CommonJsRewriteVisitor {
+    fn new(require_bindings: HashMap<String, String>) -> std::result::Result<Self, String> {
+        Ok(Self {
+            module_exports_expr: parse_expr("module.exports")?,
+            production_expr: parse_expr("\"production\"")?,
+            require_bindings,
+        })
+    }
+}
+
+impl VisitMut for CommonJsRewriteVisitor {
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        expr.visit_mut_children_with(self);
+
+        match expr {
+            Expr::Call(call_expr) => {
+                if let Some(specifier) = require_call_specifier(call_expr) {
+                    if let Some(binding_name) = self.require_bindings.get(&specifier) {
+                        *expr = *parse_expr(binding_name).expect("valid require binding identifier");
+                    }
+                }
+            }
+            Expr::Ident(ident) if ident.sym == *"exports" => {
+                *expr = *self.module_exports_expr.clone();
+            }
+            Expr::Member(member_expr) if is_process_env_node_env_expr(member_expr) => {
+                *expr = *self.production_expr.clone();
+            }
+            _ => {}
+        }
+    }
+
+    fn visit_mut_stmt(&mut self, stmt: &mut Stmt) {
+        stmt.visit_mut_children_with(self);
+
+        match stmt {
+            Stmt::Expr(ExprStmt { expr, .. }) => {
+                if matches!(&**expr, Expr::Lit(swc_core::ecma::ast::Lit::Str(value)) if value.value == *"use strict") {
+                    *stmt = Stmt::Empty(EmptyStmt { span: Default::default() });
+                    return;
+                }
+
+                if matches!(&**expr, Expr::Call(call_expr) if object_define_property_es_module(call_expr)) {
+                    *stmt = Stmt::Empty(EmptyStmt { span: Default::default() });
+                    return;
+                }
+            }
+            Stmt::If(if_stmt) => match evaluate_boolean_expr(&if_stmt.test) {
+                Some(true) => {
+                    *stmt = *if_stmt.cons.clone();
+                }
+                Some(false) => {
+                    *stmt = if_stmt
+                        .alt
+                        .as_ref()
+                        .map(|alt| *alt.clone())
+                        .unwrap_or(Stmt::Empty(EmptyStmt { span: Default::default() }));
+                }
+                None => {}
+            },
+            _ => {}
+        }
+    }
+}
+
+fn parse_expr(source: &str) -> std::result::Result<Box<Expr>, String> {
+    let mut items = parse_module_items(&format!("{source};"))?;
+    let Some(ModuleItem::Stmt(Stmt::Expr(ExprStmt { expr, .. }))) = items.pop() else {
+        return Err("Expected expression snippet".to_string());
+    };
+    Ok(expr)
+}
+
+fn is_process_env_node_env_expr(member_expr: &MemberExpr) -> bool {
+    let MemberProp::Ident(node_env_ident) = &member_expr.prop else {
+        return false;
+    };
+    if node_env_ident.sym != *"NODE_ENV" {
+        return false;
+    }
+
+    let Expr::Member(env_member) = &*member_expr.obj else {
+        return false;
+    };
+    let MemberProp::Ident(env_ident) = &env_member.prop else {
+        return false;
+    };
+    if env_ident.sym != *"env" {
+        return false;
+    }
+
+    matches!(&*env_member.obj, Expr::Ident(process_ident) if process_ident.sym == *"process")
+}
+
+fn object_define_property_es_module(call_expr: &CallExpr) -> bool {
+    let Callee::Expr(callee) = &call_expr.callee else {
+        return false;
+    };
+    let Expr::Member(member) = &**callee else {
+        return false;
+    };
+    let MemberProp::Ident(ident) = &member.prop else {
+        return false;
+    };
+    if ident.sym != *"defineProperty" || call_expr.args.len() < 2 {
+        return false;
+    }
+    matches!(&*member.obj, Expr::Ident(object_ident) if object_ident.sym == *"Object")
+        && matches!(&*call_expr.args[0].expr, Expr::Ident(exports_ident) if exports_ident.sym == *"exports")
+        && matches!(&*call_expr.args[1].expr, Expr::Lit(swc_core::ecma::ast::Lit::Str(value)) if value.value == *"__esModule")
+}
+
+fn require_call_specifier(expression: &CallExpr) -> Option<String> {
+    let Callee::Expr(callee) = &expression.callee else {
+        return None;
+    };
+    let Expr::Ident(ident) = &**callee else {
+        return None;
+    };
+    if ident.sym != *"require" || expression.args.len() != 1 {
+        return None;
+    }
+
+    match &*expression.args[0].expr {
+        Expr::Lit(swc_core::ecma::ast::Lit::Str(string)) => {
+            Some(string.value.to_string_lossy().to_string())
+        }
+        Expr::Tpl(template) if template.exprs.is_empty() && template.quasis.len() == 1 => {
+            Some(template.quasis[0].raw.to_string())
+        }
+        _ => None,
+    }
 }
 
 fn collect_class_static_assignments(source_text: &str) -> Vec<(String, String)> {

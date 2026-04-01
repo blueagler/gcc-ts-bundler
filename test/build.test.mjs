@@ -70,6 +70,99 @@ test("builds an ESM package from node_modules in ADVANCED mode", async (t) => {
   assert.doesNotMatch(output, /demo-pkg/);
 });
 
+test("builds a CommonJS package entrypoint from node_modules", async (t) => {
+  const fixture = await createFixture(t);
+  await fixture.write(
+    "src/index.ts",
+    'import { answer } from "demo-pkg";\nexport default answer;\n',
+  );
+  await fixture.write(
+    "node_modules/demo-pkg/package.json",
+    '{"name":"demo-pkg","main":"./index.cjs"}\n',
+  );
+  await fixture.write(
+    "node_modules/demo-pkg/index.cjs",
+    [
+      "exports.answer = 42;",
+      "",
+    ].join("\n"),
+  );
+
+  const result = await build({
+    cache: { mode: "off" },
+    entries: ["./index.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  assert.equal(result.exitCode, 0);
+  const output = await fixture.read("dist/index.js");
+  assert.match(output, /42/);
+});
+
+test("rewrites namespace imports from CommonJS packages to runtime-safe interop", async (t) => {
+  const fixture = await createFixture(t);
+  await fixture.write(
+    "src/index.ts",
+    'import * as demo from "demo-pkg";\nexport default demo.answer;\n',
+  );
+  await fixture.write(
+    "node_modules/demo-pkg/package.json",
+    '{"name":"demo-pkg","main":"./index.cjs"}\n',
+  );
+  await fixture.write(
+    "node_modules/demo-pkg/index.cjs",
+    "exports.answer = 42;\n",
+  );
+
+  const result = await build({
+    cache: { mode: "off" },
+    entries: ["./index.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  assert.equal(result.exitCode, 0);
+  const output = await fixture.read("dist/index.js");
+  assert.match(output, /42/);
+});
+
+test("preserves object literal keys passed to imported runtimes", async (t) => {
+  const fixture = await createFixture(t);
+  await fixture.write(
+    "src/index.ts",
+    'import { firstKey } from "demo-pkg";\nexport default firstKey({ onClick: 1, nested: { className: "hero" } });\n',
+  );
+  await fixture.write(
+    "node_modules/demo-pkg/package.json",
+    '{"name":"demo-pkg","module":"./index.js"}\n',
+  );
+  await fixture.write(
+    "node_modules/demo-pkg/index.js",
+    [
+      "export function firstKey(input) {",
+      "  return `${Object.keys(input)[0]}:${Object.keys(input.nested)[0]}`;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  const result = await build({
+    cache: { mode: "off" },
+    entries: ["./index.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  assert.equal(result.exitCode, 0);
+  const output = await fixture.read("dist/index.js");
+  assert.match(output, /onClick/);
+  assert.match(output, /className/);
+});
+
 test("emits a shared chunk when multiple entries use the same package", async (t) => {
   const fixture = await createFixture(t);
   await fixture.write(
@@ -103,6 +196,51 @@ test("emits a shared chunk when multiple entries use the same package", async (t
   );
 });
 
+test("folds process.env.NODE_ENV to the production CommonJS branch", async (t) => {
+  const fixture = await createFixture(t);
+  await fixture.write(
+    "src/index.ts",
+    'import { value } from "demo-pkg";\nexport const result = value;\n',
+  );
+  await fixture.write(
+    "node_modules/demo-pkg/package.json",
+    '{"name":"demo-pkg","main":"./index.js"}\n',
+  );
+  await fixture.write(
+    "node_modules/demo-pkg/index.js",
+    [
+      'if (process.env.NODE_ENV === "production") {',
+      '  module.exports = require("./prod.cjs");',
+      "} else {",
+      '  module.exports = require("./dev.cjs");',
+      "}",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "node_modules/demo-pkg/prod.cjs",
+    'exports.value = "PROD_BRANCH";\n',
+  );
+  await fixture.write(
+    "node_modules/demo-pkg/dev.cjs",
+    'exports.value = "DEV_BRANCH";\n',
+  );
+
+  const result = await build({
+    cache: { mode: "off" },
+    entries: ["./index.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  assert.equal(result.exitCode, 0);
+  const output = await fixture.read("dist/index.js");
+  assert.match(output, /PROD_BRANCH/);
+  assert.doesNotMatch(output, /DEV_BRANCH/);
+  assert.doesNotMatch(output, /\.cjs/);
+});
+
 test("full preflight accepts JS dependencies from node_modules", async (t) => {
   const fixture = await createFixture(t);
   await fixture.write(
@@ -125,6 +263,43 @@ test("full preflight accepts JS dependencies from node_modules", async (t) => {
   });
 
   assert.equal(result.exitCode, 0);
+});
+
+test("builds mixed ESM and CommonJS package graphs", async (t) => {
+  const fixture = await createFixture(t);
+  await fixture.write(
+    "src/index.ts",
+    'import { result } from "demo-pkg";\nexport default result;\n',
+  );
+  await fixture.write(
+    "node_modules/demo-pkg/package.json",
+    '{"name":"demo-pkg","main":"./index.cjs"}\n',
+  );
+  await fixture.write(
+    "node_modules/demo-pkg/index.cjs",
+    [
+      'const dep = require("./dep.js");',
+      "exports.result = dep.value + 1;",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "node_modules/demo-pkg/dep.js",
+    "export const value = 4;\n",
+  );
+
+  const result = await build({
+    cache: { mode: "off" },
+    entries: ["./index.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  assert.equal(result.exitCode, 0);
+  const output = await fixture.read("dist/index.js");
+  assert.doesNotMatch(output, /require\(/);
+  assert.doesNotMatch(output, /module\.exports/);
 });
 
 test("builds decorated TypeScript sources", async (t) => {
@@ -179,7 +354,10 @@ test("unsupported CommonJS packages surface actionable diagnostics", async (t) =
     "node_modules/demo-pkg/package.json",
     '{"name":"demo-pkg","main":"./index.cjs"}\n',
   );
-  await fixture.write("node_modules/demo-pkg/index.cjs", "module.exports = 1;\n");
+  await fixture.write(
+    "node_modules/demo-pkg/index.cjs",
+    "module.exports = require(name);\n",
+  );
 
   const result = await build({
     cache: { mode: "off" },
@@ -192,5 +370,5 @@ test("unsupported CommonJS packages surface actionable diagnostics", async (t) =
   assert.equal(result.exitCode, 1);
   assert.equal(result.emitSkipped, true);
   assert.ok(result.diagnostics.length > 0);
-  assert.match(String(result.diagnostics[0].messageText), /CommonJS/);
+  assert.match(String(result.diagnostics[0].messageText), /Unsupported CommonJS/);
 });

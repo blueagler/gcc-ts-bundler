@@ -9,7 +9,7 @@ Unlike standard TS bundlers, GCC-TS-Bundler is optimized for Closure's aggressiv
 - Bundles TypeScript code using Google Closure Compiler with a native Rust front-end.
 - Utilizes Closure Compiler's advanced optimizations and dead code elimination.
 - Uses native graph resolution, shim emission, and TypeScript stripping.
-- Resolves browser-safe ESM dependencies from `node_modules`.
+- Resolves browser-safe ESM and statically analyzable CommonJS dependencies from `node_modules`.
 - Generates Closure-ready JS and extern placeholders.
 - Renames property names in objects for better performance.
 - Radically restructures code for optimal performance.
@@ -64,7 +64,7 @@ Defaults:
 
 The runtime path uses a native Rust addon for graph resolution, shim emission, and GCC export rewriting. Closure Compiler remains the final aggressive optimizer.
 
-`packages.mode = "esm-only"` supports browser-safe ESM dependencies from `node_modules`. This mode rejects CommonJS packages, Node builtins, JSON modules, and native addons.
+`packages.mode = "esm-only"` supports browser-safe ESM dependencies from `node_modules`, plus statically analyzable CommonJS package entrypoints and internal package modules. Dynamic `require()`, Node builtins, JSON modules, and native addons are still rejected.
 
 ## CLI
 
@@ -94,8 +94,7 @@ gcc-ts-bundler clean-cache --project-root=.
 ## Examples
 
 - `examples/lit-playground` is a copied Lit motion playground with its own package and build wrapper.
-- `examples/react-spa` is a real React SPA fixture with its own `package.json` and `node_modules`.
-- It currently demonstrates a v1 limitation: stock `react` resolves to CommonJS entrypoints, so the build is expected to fail until CommonJS package support is added.
+- `examples/react-spa` is a real React 19 SPA fixture with its own `package.json` and `node_modules`.
 
 ## License
 

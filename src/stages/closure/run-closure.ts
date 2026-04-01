@@ -133,7 +133,12 @@ async function runSingleClosureCompilation({
     compilationLevel: options.compilationLevel,
     dependencyMode: "NONE",
     externs: externPaths,
-    js: [...options.js, ...closureLibFiles, ...supportFiles, ...entryChunk.files],
+    js: [
+      ...options.js,
+      ...closureLibFiles,
+      ...supportFiles,
+      ...entryChunk.files,
+    ],
     jsOutputFile: rawOutputPath,
     languageIn: "UNSTABLE",
     languageOut: options.languageOut,

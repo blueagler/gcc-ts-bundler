@@ -9,6 +9,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use swc_core::ecma::ast::*;
 
+use crate::commonjs::{analyze_commonjs_module, CommonJsAnalysis};
 use crate::module_cache::{get_or_parse_cached_module, parse_and_cache_module};
 
 #[allow(non_snake_case)]
@@ -97,6 +98,7 @@ pub fn resolve_graph(
     };
 
     let mut consulted_package_jsons = BTreeSet::new();
+    let mut commonjs_cache = HashMap::<PathBuf, CommonJsAnalysis>::new();
     let mut file_hashes = BTreeMap::new();
     let mut graph = BTreeMap::new();
     let mut module_cache = HashMap::new();
@@ -114,13 +116,21 @@ pub fn resolve_graph(
         let relative = path_relative_to(&current_file, context.workspace_dir);
         file_hashes.insert(relative, hash_content(&contents));
 
-        if is_package_source_file(&current_file, &context) {
-            validate_package_source(&current_file, &contents)?;
-        }
-
         let module = parse_and_cache_module(&current_file, &contents)?;
+        let commonjs_analysis = analyze_commonjs_module(&module);
+        if commonjs_analysis.has_commonjs {
+            validate_commonjs_usage(&current_file, &commonjs_analysis, &context)?;
+        }
+        commonjs_cache.insert(current_file.clone(), commonjs_analysis.clone());
+
+        let specifiers = if commonjs_analysis.has_commonjs {
+            commonjs_analysis.dependencies.clone()
+        } else {
+            extract_dependencies(&module)
+        };
+
         let mut dependencies = BTreeSet::new();
-        for specifier in extract_dependencies(&module) {
+        for specifier in specifiers {
             if let Some(resolved) = resolve_module_specifier(&specifier, &current_file, &context)? {
                 consulted_package_jsons.extend(resolved.package_json_files.iter().cloned());
                 if let Some(package_alias) = resolved.package_alias {
@@ -154,7 +164,15 @@ pub fn resolve_graph(
     let mut export_cache = HashMap::<PathBuf, EntryExportMetadata>::new();
     let entries_metadata = entries
         .iter()
-        .map(|entry| collect_exports(entry, &mut module_cache, &mut export_cache, &context))
+        .map(|entry| {
+            collect_exports(
+                entry,
+                &mut commonjs_cache,
+                &mut module_cache,
+                &mut export_cache,
+                &context,
+            )
+        })
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
     let package_json_files = consulted_package_jsons
@@ -206,6 +224,7 @@ impl PackageMode {
 
 fn collect_exports(
     file_path: &PathBuf,
+    commonjs_cache: &mut HashMap<PathBuf, CommonJsAnalysis>,
     module_cache: &mut HashMap<PathBuf, Module>,
     export_cache: &mut HashMap<PathBuf, EntryExportMetadata>,
     context: &ResolveContext,
@@ -221,6 +240,35 @@ fn collect_exports(
         module_cache.insert(file_path.clone(), parsed.clone());
         parsed
     };
+
+    let commonjs_analysis = commonjs_cache
+        .get(file_path)
+        .cloned()
+        .unwrap_or_else(|| analyze_commonjs_module(&module));
+    commonjs_cache.insert(file_path.clone(), commonjs_analysis.clone());
+    if commonjs_analysis.has_commonjs {
+        if let Some(specifier) = commonjs_analysis.proxy_export {
+            if let Some(resolved) = resolve_module_specifier(&specifier, file_path, context)? {
+                let metadata = collect_exports(
+                    &resolved.path,
+                    commonjs_cache,
+                    module_cache,
+                    export_cache,
+                    context,
+                )?;
+                export_cache.insert(file_path.clone(), metadata.clone());
+                return Ok(metadata);
+            }
+        }
+
+        let metadata = EntryExportMetadata {
+            exportNames: commonjs_analysis.export_names,
+            hasDefaultExport: commonjs_analysis.has_default_export,
+            sourcePath: file_path.to_string_lossy().to_string(),
+        };
+        export_cache.insert(file_path.clone(), metadata.clone());
+        return Ok(metadata);
+    }
 
     let mut export_names = BTreeSet::new();
     let mut has_default_export = false;
@@ -257,8 +305,13 @@ fn collect_exports(
                     if let Some(resolved) =
                         resolve_module_specifier(&src.value.to_string_lossy(), file_path, context)?
                     {
-                        let target_exports =
-                            collect_exports(&resolved.path, module_cache, export_cache, context)?;
+                        let target_exports = collect_exports(
+                            &resolved.path,
+                            commonjs_cache,
+                            module_cache,
+                            export_cache,
+                            context,
+                        )?;
                         for specifier in &named.specifiers {
                             if let ExportSpecifier::Named(named_specifier) = specifier {
                                 let exported_name = export_name_from_module_export_name(
@@ -311,8 +364,13 @@ fn collect_exports(
                 if let Some(resolved) =
                     resolve_module_specifier(&export_all.src.value.to_string_lossy(), file_path, context)?
                 {
-                    let target_exports =
-                        collect_exports(&resolved.path, module_cache, export_cache, context)?;
+                    let target_exports = collect_exports(
+                        &resolved.path,
+                        commonjs_cache,
+                        module_cache,
+                        export_cache,
+                        context,
+                    )?;
                     for export_name in target_exports.exportNames {
                         export_names.insert(export_name);
                     }
@@ -440,9 +498,11 @@ fn resolve_relative_module(
     } else {
         context.workspace_dir
     };
+    let allow_commonjs = !importer.starts_with(context.src_dir);
     let base = normalize_path(&importer_dir.join(specifier));
     resolve_module_base(
         &base,
+        allow_commonjs,
         allowed_root,
         &format!("import \"{specifier}\""),
         importer,
@@ -776,6 +836,7 @@ fn resolve_package_target(
         let base = normalize_path(&package_dir.join(target.trim_start_matches("./")));
         return resolve_module_base(
             &base,
+            true,
             package_dir,
             &format!("package \"{package_name}\" target \"{target}\""),
             importer,
@@ -802,6 +863,7 @@ fn resolve_package_local_path(
 
     resolve_module_base(
         &base,
+        true,
         package_dir,
         &format!("package \"{package_name}\""),
         importer,
@@ -810,6 +872,7 @@ fn resolve_package_local_path(
 
 fn resolve_module_base(
     base: &Path,
+    allow_commonjs: bool,
     allowed_root: &Path,
     description: &str,
     importer: &Path,
@@ -822,7 +885,13 @@ fn resolve_module_base(
             continue;
         }
 
-        validate_candidate(&candidate, allowed_root, description, importer)?;
+        validate_candidate(
+            &candidate,
+            allow_commonjs,
+            allowed_root,
+            description,
+            importer,
+        )?;
         return Ok(Some(candidate));
     }
 
@@ -831,6 +900,7 @@ fn resolve_module_base(
 
 fn validate_candidate(
     candidate: &Path,
+    allow_commonjs: bool,
     allowed_root: &Path,
     description: &str,
     importer: &Path,
@@ -848,6 +918,7 @@ fn validate_candidate(
     };
     match extension {
         "ts" | "tsx" | "js" | "jsx" | "mjs" | "mts" => Ok(()),
+        "cjs" | "cts" if allow_commonjs => Ok(()),
         "cjs" | "cts" => Err(format!(
             "Unsupported CommonJS module {} referenced by {}",
             candidate.to_string_lossy(),
@@ -871,15 +942,23 @@ fn validate_candidate(
     }
 }
 
-fn validate_package_source(file_path: &Path, source: &str) -> std::result::Result<(), String> {
-    if source.contains("module.exports")
-        || source.contains("exports.")
-        || source.contains("exports[")
-        || source.contains("require(")
-    {
+fn validate_commonjs_usage(
+    file_path: &Path,
+    analysis: &CommonJsAnalysis,
+    context: &ResolveContext,
+) -> std::result::Result<(), String> {
+    if !is_package_source_file(file_path, context) {
         return Err(format!(
-            "Unsupported CommonJS syntax in package source {}",
+            "CommonJS is only supported for package sources under node_modules: {}",
             file_path.to_string_lossy()
+        ));
+    }
+
+    if let Some(reason) = analysis.unsupported.first() {
+        return Err(format!(
+            "Unsupported CommonJS pattern in {}: {}",
+            file_path.to_string_lossy(),
+            reason,
         ));
     }
 
@@ -1326,14 +1405,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_commonjs_package_entrypoints() {
+    fn rejects_unsupported_commonjs_package_patterns() {
         let temp_dir = TestDir::new();
         temp_dir.write("src/index.ts", "import pkg from \"demo-pkg\";\nexport default pkg;\n");
         temp_dir.write(
             "node_modules/demo-pkg/package.json",
             r#"{"name":"demo-pkg","main":"./index.cjs"}"#,
         );
-        temp_dir.write("node_modules/demo-pkg/index.cjs", "module.exports = 1;\n");
+        temp_dir.write("node_modules/demo-pkg/index.cjs", "module.exports = require(name);\n");
 
         let error = resolve_graph(
             vec![temp_dir.join("src/index.ts").to_string_lossy().to_string()],
@@ -1343,7 +1422,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.contains("CommonJS"));
+        assert!(error.contains("Unsupported CommonJS"));
     }
 
     #[test]

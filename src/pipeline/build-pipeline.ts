@@ -74,7 +74,10 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   try {
     resolved = await resolveBuild(context);
     const resolvedBuild = resolved;
-    const finalMetadataPath = path.join(resolvedBuild.finalCacheDir, "meta.json");
+    const finalMetadataPath = path.join(
+      resolvedBuild.finalCacheDir,
+      "meta.json",
+    );
     const finalMetadata =
       await readJsonIfExists<FinalCacheMetadata>(finalMetadataPath);
     if (
@@ -238,8 +241,10 @@ function createBuildDiagnostic(error: unknown) {
     category: 1,
     code: 0,
     messageText:
-      error instanceof Error ? error.message : typeof error === "string"
-        ? error
-        : "Build failed.",
+      error instanceof Error
+        ? error.message
+        : typeof error === "string"
+          ? error
+          : "Build failed.",
   };
 }

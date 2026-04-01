@@ -4,6 +4,5 @@ This example is a real consumer fixture for `gcc-ts-bundler`. It has its own `pa
 
 Current status:
 
-- The example app source is valid and the bundler can resolve its package graph.
-- `npm run build` currently fails on `react` because the published package entrypoint is CommonJS.
-- That is expected in the current `packages.mode = "esm-only"` implementation, which only accepts browser-safe ESM dependencies.
+- The example app source builds successfully with React 19 and `react-dom` from npm.
+- This now validates the browser-safe CommonJS package support path, including production `process.env.NODE_ENV` folding and React JSX runtime package resolution.

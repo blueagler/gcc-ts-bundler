@@ -1,3 +1,4 @@
+mod commonjs;
 mod exports;
 mod fs_state;
 mod graph;
