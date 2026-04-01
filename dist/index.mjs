@@ -832,7 +832,7 @@ function collectUnsafeEnumSymbols(program, checker) {
       if (ts3.isElementAccessExpression(node) && ts3.isIdentifier(node.expression)) {
         mark(node.expression);
       }
-      if (ts3.isCallExpression(node) && ts3.isPropertyAccessExpression(node.expression) && ts3.isIdentifier(node.expression.expression) && node.expression.expression.text === "Object" && ["keys", "values", "entries"].includes(node.expression.name.text) && node.arguments.length > 0 && ts3.isIdentifier(node.arguments[0])) {
+      if (ts3.isCallExpression(node) && ts3.isPropertyAccessExpression(node.expression) && ts3.isIdentifier(node.expression.expression) && node.expression.expression.text === "Object" && ["entries", "keys", "values"].includes(node.expression.name.text) && node.arguments.length > 0 && ts3.isIdentifier(node.arguments[0])) {
         mark(node.arguments[0]);
       }
       if (ts3.isIdentifier(node) && !ts3.isPropertyAccessExpression(node.parent) && !ts3.isElementAccessExpression(node.parent) && !ts3.isImportSpecifier(node.parent) && !ts3.isImportClause(node.parent) && !ts3.isExportSpecifier(node.parent) && !ts3.isEnumDeclaration(node.parent) && !ts3.isEnumMember(node.parent)) {

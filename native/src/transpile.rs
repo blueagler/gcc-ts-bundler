@@ -149,7 +149,7 @@ fn render_externs(
     }
 
     for name in all_names {
-        if is_valid_js_ident(&name) {
+        if is_valid_js_identifier(&name) {
             lines.push(format!("Object.prototype.{name};"));
         } else {
             lines.push(format!("Object.prototype[{name:?}];"));
@@ -186,29 +186,10 @@ fn render_generated_externs(
     lines.join("\n")
 }
 
-fn is_valid_js_identifier(name: &str) -> bool {
-    let mut characters = name.chars();
-    match characters.next() {
-        Some(character)
-            if character.is_ascii_alphabetic() || character == '_' || character == '$' => {}
-        _ => return false,
-    }
-    characters.all(|character| {
-        character.is_ascii_alphanumeric() || character == '_' || character == '$'
-    })
-}
-
-fn collect_static_property_names(file_names: &[String]) -> std::result::Result<HashSet<String>, String> {
-    let mut names = HashSet::new();
-    for file_name in file_names {
-        if file_name.ends_with(".d.ts") {
-            continue;
-        }
-        let file_path = PathBuf::from(file_name);
-        let source_text = fs::read_to_string(&file_path).map_err(|error| error.to_string())?;
-        names.extend(collect_static_property_names_from_text(&source_text));
-    }
-    Ok(names)
+fn collect_static_property_names(
+    file_names: &[String],
+) -> std::result::Result<HashSet<String>, String> {
+    collect_names_from_files(file_names, collect_static_property_names_from_text)
 }
 
 fn collect_static_property_names_from_text(source_text: &str) -> HashSet<String> {
@@ -228,15 +209,32 @@ fn collect_static_property_names_from_text(source_text: &str) -> HashSet<String>
     names
 }
 
-fn is_valid_js_ident(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
+fn is_valid_js_identifier(name: &str) -> bool {
+    let mut characters = name.chars();
+    let Some(first) = characters.next() else {
         return false;
     };
-    if !(first == '$' || first == '_' || first.is_ascii_alphabetic()) {
+    if !(first.is_ascii_alphabetic() || first == '_' || first == '$') {
         return false;
     }
-    chars.all(|char| char == '$' || char == '_' || char.is_ascii_alphanumeric())
+    characters.all(|character| {
+        character.is_ascii_alphanumeric() || character == '_' || character == '$'
+    })
+}
+
+fn collect_names_from_files(
+    file_names: &[String],
+    collect_names: fn(&str) -> HashSet<String>,
+) -> std::result::Result<HashSet<String>, String> {
+    let mut names = HashSet::new();
+    for file_name in file_names {
+        if file_name.ends_with(".d.ts") {
+            continue;
+        }
+        let source_text = fs::read_to_string(file_name).map_err(|error| error.to_string())?;
+        names.extend(collect_names(&source_text));
+    }
+    Ok(names)
 }
 
 #[cfg(test)]
@@ -667,7 +665,7 @@ fn apply_js_compat_text_fixes(source_text: String) -> String {
         }
     }
 
-    rewrite_static_class_fields(source_text)
+    source_text
 }
 
 fn rewrite_typescript_helper_this_fallbacks(source_text: String) -> String {
@@ -810,10 +808,6 @@ fn rewrite_directory_module_specifiers(source_text: String) -> String {
         .unwrap_or(source_text)
 }
 
-fn rewrite_static_class_fields(source_text: String) -> String {
-    source_text
-}
-
 fn parse_module_items(source: &str) -> std::result::Result<Vec<ModuleItem>, String> {
     Ok(parse_module(&PathBuf::from("snippet.js"), source)?.body)
 }
@@ -859,17 +853,10 @@ fn is_global_protocol_name(name: &str) -> bool {
     name.len() >= 8 || name.chars().any(|character| character.is_ascii_uppercase())
 }
 
-fn collect_global_property_names(file_names: &[String]) -> std::result::Result<HashSet<String>, String> {
-    let mut names = HashSet::new();
-    for file_name in file_names {
-        if file_name.ends_with(".d.ts") {
-            continue;
-        }
-        let file_path = PathBuf::from(file_name);
-        let source_text = fs::read_to_string(&file_path).map_err(|error| error.to_string())?;
-        names.extend(collect_global_this_property_names(&source_text));
-    }
-    Ok(names)
+fn collect_global_property_names(
+    file_names: &[String],
+) -> std::result::Result<HashSet<String>, String> {
+    collect_names_from_files(file_names, collect_global_this_property_names)
 }
 
 fn collect_static_fallbacks(source_text: &str) -> Vec<(String, String, String)> {
@@ -987,36 +974,17 @@ impl VisitMut for CommonJsRewriteVisitor {
         };
 
         if is_commonjs_export_member_expr(member) {
-            let object_expr = Expr::Member(MemberExpr {
-                span: member.span,
-                obj: member.obj.clone(),
-                prop: member.prop.clone(),
-            });
-            quote_commonjs_export_member(member, object_expr.clone());
+            quote_commonjs_export_member(member);
             if let Expr::Object(object) = &mut *expression.right {
-                quote_commonjs_export_object(object, object_expr);
+                quote_commonjs_export_object(object);
             }
             return;
         }
 
         if is_module_exports_member_expr(member) {
-            quote_commonjs_export_member(
-                member,
-                Expr::Member(MemberExpr {
-                    span: member.span,
-                    obj: member.obj.clone(),
-                    prop: member.prop.clone(),
-                }),
-            );
+            quote_commonjs_export_member(member);
             if let Expr::Object(object) = &mut *expression.right {
-                quote_commonjs_export_object(
-                    object,
-                    Expr::Member(MemberExpr {
-                        span: member.span,
-                        obj: member.obj.clone(),
-                        prop: member.prop.clone(),
-                    }),
-                );
+                quote_commonjs_export_object(object);
             }
             return;
         }
@@ -1035,8 +1003,7 @@ impl VisitMut for CommonJsRewriteVisitor {
                 }
             }
             Expr::Member(member_expr) if is_commonjs_export_member_expr(member_expr) => {
-                let object_expr = (*member_expr.obj).clone();
-                quote_commonjs_export_member(member_expr, object_expr);
+                quote_commonjs_export_member(member_expr);
             }
             Expr::Call(call_expr) => {
                 if let Some(specifier) = require_call_specifier(call_expr) {
@@ -1116,13 +1083,13 @@ fn is_commonjs_export_member_expr(member_expr: &MemberExpr) -> bool {
     )
 }
 
-fn quote_commonjs_export_member(member_expr: &mut MemberExpr, _object_expr: Expr) {
+fn quote_commonjs_export_member(member_expr: &mut MemberExpr) {
     if let MemberProp::Ident(ident) = &member_expr.prop {
         member_expr.prop = create_string_computed_prop(ident.sym.as_ref());
     }
 }
 
-fn quote_commonjs_export_object(object: &mut swc_core::ecma::ast::ObjectLit, _object_expr: Expr) {
+fn quote_commonjs_export_object(object: &mut swc_core::ecma::ast::ObjectLit) {
     for property in &mut object.props {
         let swc_core::ecma::ast::PropOrSpread::Prop(prop) = property else {
             continue;
@@ -2484,7 +2451,7 @@ fn binding_names(pattern: &Pat) -> Vec<String> {
 }
 
 fn member_access(object_name: &str, property_name: &str) -> String {
-    if is_valid_js_ident(property_name) {
+    if is_valid_js_identifier(property_name) {
         format!("{object_name}.{property_name}")
     } else {
         format!("{object_name}[{property_name:?}]")
@@ -2559,7 +2526,7 @@ fn render_closure_enum(enum_decl: &ClosureEnumDeclaration) -> String {
                 serde_json::Value::String(value) => format!("{value:?}"),
                 _ => "undefined".to_string(),
             };
-            if is_valid_js_ident(&member.name) {
+            if is_valid_js_identifier(&member.name) {
                 format!("  {}: {},", member.name, value)
             } else {
                 format!("  {:?}: {},", member.name, value)
@@ -3005,7 +2972,7 @@ fn should_run_react_transform(file_path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_js_compat_text_fixes, collect_commonjs_extern_names, collect_enum_extern_names, collect_protocol_extern_names, collect_static_property_names_from_text, print_program, render_externs, rewrite_static_class_fields, transform_js_pass_through_module, transform_program, transform_source_file};
+    use super::{apply_js_compat_text_fixes, collect_commonjs_extern_names, collect_enum_extern_names, collect_protocol_extern_names, collect_static_property_names_from_text, print_program, render_externs, transform_js_pass_through_module, transform_program, transform_source_file};
     use crate::module_cache::parse_module;
     use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
     use std::fs;
@@ -3218,16 +3185,6 @@ mod tests {
             .unwrap();
 
         assert!(output.contains("Demo[\"styles\"] = theme;"), "{output}");
-    }
-
-    #[test]
-    fn leaves_static_class_field_declarations_unchanged() {
-        let transformed = rewrite_static_class_fields(
-            "class Demo {\n  static styles = theme;\n  static shadowRootOptions = {};\n}\n".to_string(),
-        );
-
-        assert!(transformed.contains("static styles = theme;"));
-        assert!(transformed.contains("static shadowRootOptions = {};"));
     }
 
     #[test]

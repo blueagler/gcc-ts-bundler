@@ -955,7 +955,7 @@ function collectUnsafeEnumSymbols(program, checker) {
       if (import_typescript3.default.isElementAccessExpression(node) && import_typescript3.default.isIdentifier(node.expression)) {
         mark(node.expression);
       }
-      if (import_typescript3.default.isCallExpression(node) && import_typescript3.default.isPropertyAccessExpression(node.expression) && import_typescript3.default.isIdentifier(node.expression.expression) && node.expression.expression.text === "Object" && ["keys", "values", "entries"].includes(node.expression.name.text) && node.arguments.length > 0 && import_typescript3.default.isIdentifier(node.arguments[0])) {
+      if (import_typescript3.default.isCallExpression(node) && import_typescript3.default.isPropertyAccessExpression(node.expression) && import_typescript3.default.isIdentifier(node.expression.expression) && node.expression.expression.text === "Object" && ["entries", "keys", "values"].includes(node.expression.name.text) && node.arguments.length > 0 && import_typescript3.default.isIdentifier(node.arguments[0])) {
         mark(node.arguments[0]);
       }
       if (import_typescript3.default.isIdentifier(node) && !import_typescript3.default.isPropertyAccessExpression(node.parent) && !import_typescript3.default.isElementAccessExpression(node.parent) && !import_typescript3.default.isImportSpecifier(node.parent) && !import_typescript3.default.isImportClause(node.parent) && !import_typescript3.default.isExportSpecifier(node.parent) && !import_typescript3.default.isEnumDeclaration(node.parent) && !import_typescript3.default.isEnumMember(node.parent)) {

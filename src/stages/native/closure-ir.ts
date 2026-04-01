@@ -191,7 +191,7 @@ function collectUnsafeEnumSymbols(
         ts.isPropertyAccessExpression(node.expression) &&
         ts.isIdentifier(node.expression.expression) &&
         node.expression.expression.text === "Object" &&
-        ["keys", "values", "entries"].includes(node.expression.name.text) &&
+        ["entries", "keys", "values"].includes(node.expression.name.text) &&
         node.arguments.length > 0 &&
         ts.isIdentifier(node.arguments[0])
       ) {
