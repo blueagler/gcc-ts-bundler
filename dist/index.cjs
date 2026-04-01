@@ -828,7 +828,11 @@ async function collectClosureIrMetadata({
         continue;
       }
       if (import_typescript3.default.isFunctionDeclaration(statement) && statement.name) {
-        const jsdoc = buildFunctionJsDoc(statement, checker);
+        const objectParamRecord = buildFunctionObjectParamRecord(statement, checker);
+        if (objectParamRecord) {
+          typeDeclarations.push({ snippet: objectParamRecord.snippet });
+        }
+        const jsdoc = buildFunctionJsDoc(statement, checker, objectParamRecord?.typeName);
         if (jsdoc) {
           topLevelDocs.push({
             jsdoc,
@@ -1023,7 +1027,7 @@ function buildTypeAliasDeclarationSnippet(statement, checker) {
 `
   };
 }
-function buildFunctionJsDoc(statement, checker) {
+function buildFunctionJsDoc(statement, checker, firstParamObjectRecordTypeName) {
   const signature = checker.getSignatureFromDeclaration(statement);
   if (!signature) {
     return null;
@@ -1032,10 +1036,12 @@ function buildFunctionJsDoc(statement, checker) {
   for (const templateName of getTemplateNames(statement.typeParameters)) {
     lines.push(` * @template ${templateName}`);
   }
-  for (const parameter of signature.getParameters()) {
+  for (const [index, parameter] of signature.getParameters().entries()) {
     const declaration = parameter.valueDeclaration;
     const parameterType = declaration ? checker.getTypeOfSymbolAtLocation(parameter, declaration) : checker.getTypeOfSymbol(parameter);
-    lines.push(` * @param {${toClosureType(parameterType, checker)}} ${parameter.getName()}`);
+    const parameterName = index === 0 && firstParamObjectRecordTypeName ? "__props" : parameter.getName();
+    const closureType = index === 0 && firstParamObjectRecordTypeName ? `!${firstParamObjectRecordTypeName}` : toClosureType(parameterType, checker);
+    lines.push(` * @param {${closureType}} ${parameterName}`);
   }
   const returnType = checker.getReturnTypeOfSignature(signature);
   lines.push(` * @return {${toClosureType(returnType, checker)}}`);
@@ -1043,6 +1049,40 @@ function buildFunctionJsDoc(statement, checker) {
   return `${lines.join(`
 `)}
 `;
+}
+function buildFunctionObjectParamRecord(statement, checker) {
+  if (!isComponentLikeName(statement.name?.text)) {
+    return null;
+  }
+  const firstParameter = statement.parameters[0];
+  if (!firstParameter || !import_typescript3.default.isObjectBindingPattern(firstParameter.name) || hasRestElement(firstParameter.name)) {
+    return null;
+  }
+  const parameterType = checker.getTypeAtLocation(firstParameter);
+  const properties = checker.getPropertiesOfType(parameterType);
+  if (properties.length === 0) {
+    return null;
+  }
+  const typeName = `${statement.name.text}$Param0`;
+  const lines = ["/**", " * @record", " */", `function ${typeName}() {}`];
+  for (const property of properties) {
+    const declaration = property.valueDeclaration ?? property.declarations?.[0] ?? firstParameter;
+    const propertyType = checker.getTypeOfSymbolAtLocation(property, declaration);
+    lines.push(`/** @type {${toClosureType(propertyType, checker)}} */`);
+    lines.push(`${typeName}.prototype.${renderPropertyName(property.getName())};`);
+  }
+  return {
+    snippet: `${lines.join(`
+`)}
+`,
+    typeName
+  };
+}
+function hasRestElement(pattern) {
+  return pattern.elements.some((element) => element.dotDotDotToken);
+}
+function isComponentLikeName(name) {
+  return !!name && /^[A-Z]/.test(name);
 }
 function buildClassJsDoc(statement, checker) {
   const symbol = checker.getSymbolAtLocation(statement.name ?? statement);
@@ -1541,6 +1581,7 @@ async function runSingleClosureCompilation({
   if (entryChunk.entryPoint) {
     closureOptions.entryPoint = [entryChunk.entryPoint];
   }
+  applyInternalClosureDebugOptions(closureOptions);
   return runClosureCompiler(closureOptions);
 }
 async function runChunkedClosureCompilation({
@@ -1580,7 +1621,18 @@ async function runChunkedClosureCompilation({
   if (entryPoints.length > 0) {
     closureOptions.entryPoint = entryPoints;
   }
+  applyInternalClosureDebugOptions(closureOptions);
   return runClosureCompiler(closureOptions);
+}
+function applyInternalClosureDebugOptions(closureOptions) {
+  const mutableOptions = closureOptions;
+  if (process.env.GCC_CLOSURE_DEBUG === "1") {
+    mutableOptions.debug = true;
+    mutableOptions.formatting = "PRETTY_PRINT";
+  }
+  if (process.env.GCC_USE_TYPES_FOR_OPTIMIZATION === "false") {
+    mutableOptions.useTypesForOptimization = false;
+  }
 }
 function resolveChunkPlan(chunkPlan, emittedOutDir) {
   return chunkPlan.map((chunk) => ({

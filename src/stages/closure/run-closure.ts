@@ -150,6 +150,7 @@ async function runSingleClosureCompilation({
   if (entryChunk.entryPoint) {
     closureOptions.entryPoint = [entryChunk.entryPoint];
   }
+  applyInternalClosureDebugOptions(closureOptions);
   return runClosureCompiler(closureOptions);
 }
 
@@ -203,7 +204,25 @@ async function runChunkedClosureCompilation({
   if (entryPoints.length > 0) {
     closureOptions.entryPoint = entryPoints;
   }
+  applyInternalClosureDebugOptions(closureOptions);
   return runClosureCompiler(closureOptions);
+}
+
+function applyInternalClosureDebugOptions(
+  closureOptions: ClosureCompilerOptions,
+) {
+  const mutableOptions = closureOptions as ClosureCompilerOptions & {
+    debug?: boolean;
+    formatting?: string;
+    useTypesForOptimization?: boolean;
+  };
+  if (process.env.GCC_CLOSURE_DEBUG === "1") {
+    mutableOptions.debug = true;
+    mutableOptions.formatting = "PRETTY_PRINT";
+  }
+  if (process.env.GCC_USE_TYPES_FOR_OPTIMIZATION === "false") {
+    mutableOptions.useTypesForOptimization = false;
+  }
 }
 
 function resolveChunkPlan(

@@ -30,6 +30,11 @@ export interface ClosureIrTypeDeclaration {
   snippet: string;
 }
 
+interface FunctionObjectParamRecord {
+  snippet: string;
+  typeName: string;
+}
+
 export async function collectClosureIrMetadata({
   fileNames,
   tsConfigPath,
@@ -87,7 +92,18 @@ export async function collectClosureIrMetadata({
       }
 
       if (ts.isFunctionDeclaration(statement) && statement.name) {
-        const jsdoc = buildFunctionJsDoc(statement, checker);
+        const objectParamRecord = buildFunctionObjectParamRecord(
+          statement,
+          checker,
+        );
+        if (objectParamRecord) {
+          typeDeclarations.push({ snippet: objectParamRecord.snippet });
+        }
+        const jsdoc = buildFunctionJsDoc(
+          statement,
+          checker,
+          objectParamRecord?.typeName,
+        );
         if (jsdoc) {
           topLevelDocs.push({
             jsdoc,
@@ -367,6 +383,7 @@ function buildTypeAliasDeclarationSnippet(
 function buildFunctionJsDoc(
   statement: ts.FunctionDeclaration,
   checker: ts.TypeChecker,
+  firstParamObjectRecordTypeName?: string,
 ) {
   const signature = checker.getSignatureFromDeclaration(statement);
   if (!signature) {
@@ -376,14 +393,20 @@ function buildFunctionJsDoc(
   for (const templateName of getTemplateNames(statement.typeParameters)) {
     lines.push(` * @template ${templateName}`);
   }
-  for (const parameter of signature.getParameters()) {
+  for (const [index, parameter] of signature.getParameters().entries()) {
     const declaration = parameter.valueDeclaration;
     const parameterType = declaration
       ? checker.getTypeOfSymbolAtLocation(parameter, declaration)
       : checker.getTypeOfSymbol(parameter);
-    lines.push(
-      ` * @param {${toClosureType(parameterType, checker)}} ${parameter.getName()}`,
-    );
+    const parameterName =
+      index === 0 && firstParamObjectRecordTypeName
+        ? "__props"
+        : parameter.getName();
+    const closureType =
+      index === 0 && firstParamObjectRecordTypeName
+        ? `!${firstParamObjectRecordTypeName}`
+        : toClosureType(parameterType, checker);
+    lines.push(` * @param {${closureType}} ${parameterName}`);
   }
   const returnType = checker.getReturnTypeOfSignature(signature);
   lines.push(` * @return {${toClosureType(returnType, checker)}}`);
@@ -391,14 +414,60 @@ function buildFunctionJsDoc(
   return `${lines.join("\n")}\n`;
 }
 
+function buildFunctionObjectParamRecord(
+  statement: ts.FunctionDeclaration,
+  checker: ts.TypeChecker,
+): FunctionObjectParamRecord | null {
+  if (!isComponentLikeName(statement.name?.text)) {
+    return null;
+  }
+  const firstParameter = statement.parameters[0];
+  if (
+    !firstParameter ||
+    !ts.isObjectBindingPattern(firstParameter.name) ||
+    hasRestElement(firstParameter.name)
+  ) {
+    return null;
+  }
+
+  const parameterType = checker.getTypeAtLocation(firstParameter);
+  const properties = checker.getPropertiesOfType(parameterType);
+  if (properties.length === 0) {
+    return null;
+  }
+
+  const typeName = `${statement.name!.text}$Param0`;
+  const lines = ["/**", " * @record", " */", `function ${typeName}() {}`];
+  for (const property of properties) {
+    const declaration =
+      property.valueDeclaration ?? property.declarations?.[0] ?? firstParameter;
+    const propertyType = checker.getTypeOfSymbolAtLocation(
+      property,
+      declaration,
+    );
+    lines.push(`/** @type {${toClosureType(propertyType, checker)}} */`);
+    lines.push(
+      `${typeName}.prototype.${renderPropertyName(property.getName())};`,
+    );
+  }
+  return {
+    snippet: `${lines.join("\n")}\n`,
+    typeName,
+  };
+}
+
+function hasRestElement(pattern: ts.ObjectBindingPattern) {
+  return pattern.elements.some((element) => element.dotDotDotToken);
+}
+
+function isComponentLikeName(name: string | undefined) {
+  return !!name && /^[A-Z]/.test(name);
+}
+
 function buildClassJsDoc(
   statement: ts.ClassDeclaration,
   checker: ts.TypeChecker,
 ) {
-  const symbol = checker.getSymbolAtLocation(statement.name ?? statement);
-  const declaredType = symbol
-    ? checker.getDeclaredTypeOfSymbol(symbol)
-    : checker.getTypeAtLocation(statement);
   const typeParameters = statement.typeParameters ?? [];
   const lines = ["/**"];
   for (const templateName of getTemplateNames(typeParameters)) {
