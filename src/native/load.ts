@@ -1,7 +1,4 @@
-import fs from "fs";
-import { createBundleRequire } from "../internal/bundle-location";
-
-const require = createBundleRequire();
+import nativeBinding from "./index";
 
 interface NativeEntryExportMetadata {
   exportNames: string[];
@@ -119,14 +116,7 @@ function loadBinding(): NativeBinding {
     return cachedBinding;
   }
 
-  const nativeModulePath = require.resolve("gcc-ts-bundler/native");
-  if (!fs.existsSync(nativeModulePath)) {
-    throw new Error(
-      `Native module not found at ${nativeModulePath}. Run \`bun run build:native\` in gcc-ts-bundler.`,
-    );
-  }
-
-  cachedBinding = require(nativeModulePath) as NativeBinding;
+  cachedBinding = nativeBinding as NativeBinding;
   return cachedBinding;
 }
 

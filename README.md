@@ -4,6 +4,8 @@ GCC-TS-Bundler is a TypeScript bundler built around Google Closure Compiler. It 
 
 Unlike standard TS bundlers, GCC-TS-Bundler is optimized for Closure's aggressive compilation pipeline. The package now uses a native Rust module for the non-Closure stages and keeps Closure Compiler as the final optimizer. This results in smaller, faster, and more efficient output for performance-critical code.
 
+The npm package uses a JS loader plus platform-specific optional native packages. That keeps the main package smaller and allows publishing separate Rust binaries per OS/architecture instead of one bundled addon for every install.
+
 ## Features
 
 - Bundles TypeScript code using Google Closure Compiler with a native Rust front-end.

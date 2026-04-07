@@ -23,7 +23,10 @@
       "default": "./dist/runtime/index.mjs"
     },
     "./native": {
-      "default": "./native/index.node"
+      "types": "./dist/native/index.d.ts",
+      "import": "./dist/native/index.mjs",
+      "require": "./dist/native/index.cjs",
+      "default": "./dist/native/index.mjs"
     }
   },
   "devDependencies": {
@@ -40,7 +43,8 @@
   },
   "scripts": {
     "build:native": "node ./scripts/build-native.mjs",
-    "build": "bun run build:native && bun build ./src/entry/cli.ts --outdir ./bin --format cjs --packages external --banner \"#!/usr/bin/env node\nconst __gcc_current_module_url = require('node:url').pathToFileURL(__filename).href;\" --entry-naming \"gcc-ts-bundler.cjs\" --target node && bun build ./src/index.ts --outdir ./dist --format esm --packages external --banner \"const __gcc_current_module_url = import.meta.url;\" --entry-naming \"index.mjs\" --target node && bun build ./src/index.ts --outdir ./dist --format cjs --packages external --banner \"const __gcc_current_module_url = require('node:url').pathToFileURL(__filename).href;\" --entry-naming \"index.cjs\" --target node && bun build ./src/runtime/index.ts --outdir ./dist/runtime --format esm --packages external --banner \"const __gcc_current_module_url = import.meta.url;\" --entry-naming \"index.mjs\" --target node && bun build ./src/runtime/index.ts --outdir ./dist/runtime --format cjs --packages external --banner \"const __gcc_current_module_url = require('node:url').pathToFileURL(__filename).href;\" --entry-naming \"index.cjs\" --target node && bun --bun tsc -p ./tsconfig.types.json",
+    "build:js": "bun build ./src/entry/cli.ts --outdir ./bin --format cjs --packages external --banner \"#!/usr/bin/env node\nconst __gcc_current_module_url = require('node:url').pathToFileURL(__filename).href;\" --entry-naming \"gcc-ts-bundler.cjs\" --target node && bun build ./src/index.ts --outdir ./dist --format esm --packages external --banner \"const __gcc_current_module_url = import.meta.url;\" --entry-naming \"index.mjs\" --target node && bun build ./src/index.ts --outdir ./dist --format cjs --packages external --banner \"const __gcc_current_module_url = require('node:url').pathToFileURL(__filename).href;\" --entry-naming \"index.cjs\" --target node && bun build ./src/runtime/index.ts --outdir ./dist/runtime --format esm --packages external --banner \"const __gcc_current_module_url = import.meta.url;\" --entry-naming \"index.mjs\" --target node && bun build ./src/runtime/index.ts --outdir ./dist/runtime --format cjs --packages external --banner \"const __gcc_current_module_url = require('node:url').pathToFileURL(__filename).href;\" --entry-naming \"index.cjs\" --target node && bun build ./src/native/index.ts --outdir ./dist/native --format esm --packages external --banner \"const __gcc_current_module_url = import.meta.url;\" --entry-naming \"index.mjs\" --target node && bun build ./src/native/index.ts --outdir ./dist/native --format cjs --packages external --banner \"const __gcc_current_module_url = require('node:url').pathToFileURL(__filename).href;\" --entry-naming \"index.cjs\" --target node && bun --bun tsc -p ./tsconfig.types.json",
+    "build": "bun run build:native && bun run build:js",
     "lint": "bun --bun tsc --noEmit && bun --bun ./scripts/format.ts && bun --bun eslint -c eslint.config.ts \"src/**/*.ts\" --fix",
     "test": "cargo test --manifest-path native/Cargo.toml && bun run build && bun test ./test/*.test.mjs",
     "publish": "bun publish"
@@ -54,10 +58,19 @@
     "minimist": "1.2.8",
     "typescript": "^6.0.2"
   },
+  "optionalDependencies": {
+    "gcc-ts-bundler-darwin-arm64": "0.1.8",
+    "gcc-ts-bundler-darwin-x64": "0.1.8",
+    "gcc-ts-bundler-linux-arm64-gnu": "0.1.8",
+    "gcc-ts-bundler-linux-arm64-musl": "0.1.8",
+    "gcc-ts-bundler-linux-x64-gnu": "0.1.8",
+    "gcc-ts-bundler-linux-x64-musl": "0.1.8",
+    "gcc-ts-bundler-win32-arm64-msvc": "0.1.8",
+    "gcc-ts-bundler-win32-x64-msvc": "0.1.8"
+  },
   "files": [
     "bin",
     "dist",
-    "native/index.node",
     "closure-externs",
     "closure-lib",
     "README.md"

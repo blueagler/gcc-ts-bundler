@@ -42,7 +42,7 @@ async function createFixture() {
   };
 }
 
-test("builds an ESM package from node_modules in ADVANCED mode", async () => {
+test.serial("builds an ESM package from node_modules in ADVANCED mode", async () => {
   const fixture = await createFixture();
   await fixture.write(
     "src/index.ts",
@@ -69,7 +69,7 @@ test("builds an ESM package from node_modules in ADVANCED mode", async () => {
   expect(output).not.toMatch(/demo-pkg/);
 });
 
-test("builds a CommonJS package entrypoint from node_modules", async () => {
+test.serial("builds a CommonJS package entrypoint from node_modules", async () => {
   const fixture = await createFixture();
   await fixture.write(
     "src/index.ts",
@@ -100,7 +100,7 @@ test("builds a CommonJS package entrypoint from node_modules", async () => {
   expect(output).toMatch(/42/);
 });
 
-test("rewrites namespace imports from CommonJS packages to runtime-safe interop", async () => {
+test.serial("rewrites namespace imports from CommonJS packages to runtime-safe interop", async () => {
   const fixture = await createFixture();
   await fixture.write(
     "src/index.ts",
@@ -128,7 +128,7 @@ test("rewrites namespace imports from CommonJS packages to runtime-safe interop"
   expect(output).toMatch(/42/);
 });
 
-test("emits a shared chunk when multiple entries use the same package", async () => {
+test.serial("emits a shared chunk when multiple entries use the same package", async () => {
   const fixture = await createFixture();
   await fixture.write(
     "src/a.ts",
@@ -160,7 +160,7 @@ test("emits a shared chunk when multiple entries use the same package", async ()
   ).toEqual(["a.js", "b.js", "shared.js"]);
 });
 
-test("folds process.env.NODE_ENV to the production CommonJS branch", async () => {
+test.serial("folds process.env.NODE_ENV to the production CommonJS branch", async () => {
   const fixture = await createFixture();
   await fixture.write(
     "src/index.ts",
@@ -205,7 +205,7 @@ test("folds process.env.NODE_ENV to the production CommonJS branch", async () =>
   expect(output).not.toMatch(/\.cjs/);
 });
 
-test("full preflight accepts JS dependencies from node_modules", async () => {
+test.serial("full preflight accepts JS dependencies from node_modules", async () => {
   const fixture = await createFixture();
   await fixture.write(
     "src/index.ts",
@@ -229,7 +229,7 @@ test("full preflight accepts JS dependencies from node_modules", async () => {
   expect(result.exitCode).toBe(0);
 });
 
-test("persistent cache restores published outputs after the outDir is removed", async () => {
+test.serial("persistent cache restores published outputs after the outDir is removed", async () => {
   const fixture = await createFixture();
   const cacheDir = path.join(fixture.projectRoot, ".cache");
   await fixture.write(
@@ -262,7 +262,7 @@ test("persistent cache restores published outputs after the outDir is removed", 
   expect(await fixture.read("dist/index.js")).toMatch(/CACHE_HIT/);
 });
 
-test("builds mixed ESM and CommonJS package graphs", async () => {
+test.serial("builds mixed ESM and CommonJS package graphs", async () => {
   const fixture = await createFixture();
   await fixture.write(
     "src/index.ts",
@@ -299,7 +299,7 @@ test("builds mixed ESM and CommonJS package graphs", async () => {
   expect(output).not.toMatch(/module\.exports/);
 });
 
-test("builds decorated TypeScript sources", async () => {
+test.serial("builds decorated TypeScript sources", async () => {
   const fixture = await createFixture();
   await fixture.write(
     "src/decorators.ts",
@@ -341,7 +341,7 @@ test("builds decorated TypeScript sources", async () => {
   expect(output).not.toMatch(/@increment/);
 });
 
-test("exported entry bundles do not retain GCC wrapper exports", async () => {
+test.serial("exported entry bundles do not retain GCC wrapper exports", async () => {
   const fixture = await createFixture();
   await fixture.write(
     "src/index.ts",
@@ -368,7 +368,7 @@ test("exported entry bundles do not retain GCC wrapper exports", async () => {
   expect(output).not.toMatch(/__gcc_export_/);
 });
 
-test("unsupported CommonJS packages surface actionable diagnostics", async () => {
+test.serial("unsupported CommonJS packages surface actionable diagnostics", async () => {
   const fixture = await createFixture();
   await fixture.write(
     "src/index.ts",
@@ -399,7 +399,7 @@ test("unsupported CommonJS packages surface actionable diagnostics", async () =>
   );
 });
 
-test("emits smaller Closure script chunks for explicit lazy modules", async () => {
+test.serial("emits smaller Closure script chunks for explicit lazy modules", async () => {
   const fixture = await createFixture();
   await fixture.write(
     "src/main.ts",
@@ -447,7 +447,7 @@ test("emits smaller Closure script chunks for explicit lazy modules", async () =
   expect(lazyOutput).toMatch(/LAZY_FEATURE/);
 });
 
-test("emits an optional chunk manifest when requested", async () => {
+test.serial("emits an optional chunk manifest when requested", async () => {
   const fixture = await createFixture();
   await fixture.write(
     "src/main.ts",
@@ -483,7 +483,7 @@ test("emits an optional chunk manifest when requested", async () => {
   expect(manifest.lazyModules["gcc.src.feature"]).toBe("src-feature-lazy");
 });
 
-test("rejects non-literal dynamic import specifiers", async () => {
+test.serial("rejects non-literal dynamic import specifiers", async () => {
   const fixture = await createFixture();
   await fixture.write(
     "src/main.ts",

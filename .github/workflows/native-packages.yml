@@ -1,0 +1,162 @@
+name: Native Packages
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/native-packages.yml"
+      - "native/**"
+      - "scripts/build-native.mjs"
+      - "src/native/**"
+      - "package.json"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/native-packages.yml"
+      - "native/**"
+      - "scripts/build-native.mjs"
+      - "src/native/**"
+      - "package.json"
+  workflow_dispatch:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+jobs:
+  build-native-package:
+    name: ${{ matrix.package_name }}
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package_name: gcc-ts-bundler-darwin-arm64
+            runs_on: macos-14
+            target: aarch64-apple-darwin
+            platform: darwin
+            arch: arm64
+          - package_name: gcc-ts-bundler-darwin-x64
+            runs_on: macos-13
+            target: x86_64-apple-darwin
+            platform: darwin
+            arch: x64
+          - package_name: gcc-ts-bundler-linux-arm64-gnu
+            runs_on: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux
+            arch: arm64
+            libc: gnu
+          - package_name: gcc-ts-bundler-linux-arm64-musl
+            runs_on: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            platform: linux
+            arch: arm64
+            libc: musl
+            cargo_command: zigbuild
+          - package_name: gcc-ts-bundler-linux-x64-gnu
+            runs_on: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+            arch: x64
+            libc: gnu
+          - package_name: gcc-ts-bundler-linux-x64-musl
+            runs_on: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            platform: linux
+            arch: x64
+            libc: musl
+            cargo_command: zigbuild
+          - package_name: gcc-ts-bundler-win32-arm64-msvc
+            runs_on: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            platform: win32
+            arch: arm64
+          - package_name: gcc-ts-bundler-win32-x64-msvc
+            runs_on: windows-2025
+            target: x86_64-pc-windows-msvc
+            platform: win32
+            arch: x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - if: ${{ matrix.cargo_command == 'zigbuild' }}
+        uses: mlugg/setup-zig@v1
+        with:
+          version: latest
+
+      - if: ${{ matrix.cargo_command == 'zigbuild' }}
+        shell: bash
+        run: cargo install cargo-zigbuild --locked
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+          PACKAGE_NAME: ${{ matrix.package_name }}
+          LIBC: ${{ matrix.libc }}
+          CARGO_COMMAND: ${{ matrix.cargo_command }}
+        run: |
+          args=(
+            --skip-root-copy
+            --target "$TARGET"
+            --platform "$PLATFORM"
+            --arch "$ARCH"
+            --package-name "$PACKAGE_NAME"
+          )
+
+          if [ -n "$LIBC" ]; then
+            args+=(--libc "$LIBC")
+          fi
+
+          if [ -n "$CARGO_COMMAND" ]; then
+            args+=(--cargo-command "$CARGO_COMMAND")
+          fi
+
+          node ./scripts/build-native.mjs "${args[@]}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package_name }}
+          path: npm/${{ matrix.package_name }}
+
+      - if: ${{ github.event_name == 'release' }}
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish "./npm/${{ matrix.package_name }}" --access public
+
+  publish-root-package:
+    if: ${{ github.event_name == 'release' }}
+    needs:
+      - build-native-package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
+
+      - run: bun install --frozen-lockfile
+      - run: bun run build:js
+
+      - env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public

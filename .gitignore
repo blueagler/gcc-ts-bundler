@@ -8,5 +8,6 @@ native/index.node
 native/target/
 bin/
 dist/
+npm/
 examples/**/dist/
 examples/**/node_modules/
