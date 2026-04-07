@@ -95,15 +95,5 @@ export async function writeJson(filePath: string, value: unknown) {
 }
 
 async function ensureDirectoryExistence(filePath: string): Promise<void> {
-  const dirName = path.dirname(filePath);
-  if (
-    await fs.promises
-      .access(dirName)
-      .then(() => true)
-      .catch(() => false)
-  ) {
-    return;
-  }
-
-  await fs.promises.mkdir(dirName, { recursive: true });
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
 }

@@ -1,19 +1,30 @@
+import fs from "fs";
 import path from "path";
 import ts from "typescript";
-import { fileURLToPath } from "url";
+
+import { hashJson } from "../../cache/hash";
+import { getPackageRootFromBundle } from "../../internal/bundle-location";
 
 const RUNTIME_SPECIFIER = "gcc-ts-bundler/runtime";
-const PACKAGE_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
-);
+const PACKAGE_ROOT = getPackageRootFromBundle();
+const compilerOptionsCache = new Map<string, ts.CompilerOptions>();
 
-export function loadCompilerOptions(
+export async function loadCompilerOptions(
   configPath: string,
   extraOptions: ts.CompilerOptions = {},
 ) {
+  const configStat = await fs.promises.stat(configPath);
+  const cacheKey = hashJson({
+    configPath,
+    extraOptions,
+    mtimeMs: configStat.mtimeMs,
+    size: configStat.size,
+  });
+  const cached = compilerOptionsCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const configDir = path.dirname(configPath);
   const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
   if (configFile.error) {
@@ -53,5 +64,6 @@ export function loadCompilerOptions(
     );
   }
 
+  compilerOptionsCache.set(cacheKey, parsedConfig.options);
   return parsedConfig.options;
 }

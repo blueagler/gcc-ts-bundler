@@ -20,6 +20,10 @@ export interface NativeFileStateEntry {
     mtimeMs: number;
     size: number;
 }
+export interface NativePublishedOutputEntry {
+    name: string;
+    size: number;
+}
 interface NativeTranspileOutput {
     emittedFiles: string[];
     externsPath: string;
@@ -73,5 +77,8 @@ export declare function writeEntryShims(input: {
     }>;
 }): string[];
 export declare function collectFileStates(filePaths: string[]): NativeFileStateEntry[];
+export declare function collectPublishedOutputStats(filePaths: string[]): NativePublishedOutputEntry[];
 export declare function matchFileStates(expected: NativeFileStateEntry[]): boolean;
+export declare function publishedOutputSnapshotMatches(publishedOutputs: NativePublishedOutputEntry[], outDir: string): boolean;
+export declare function publishedOutputsMatch(outputFiles: string[], outDir: string): boolean;
 export {};

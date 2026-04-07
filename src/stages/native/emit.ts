@@ -1,9 +1,9 @@
 import fs from "fs";
-import { createRequire } from "module";
 import path from "path";
 import ts from "typescript";
 
 import { DiagnosticsPreflight } from "../../api/types";
+import { createBundleRequire } from "../../internal/bundle-location";
 import { filesExist } from "../../internal/file-state";
 import { collectFileStates } from "../../native/load";
 import {
@@ -16,7 +16,7 @@ import { transpileSources } from "../../native/load";
 import { loadCompilerOptions } from "./compiler-options";
 import { collectClosureIrMetadata } from "./closure-ir";
 
-const require = createRequire(import.meta.url);
+const require = createBundleRequire();
 
 export interface NativeEmitStageResult {
   diagnostics: ts.Diagnostic[];
@@ -58,6 +58,7 @@ export async function emitNativeStage({
   tsConfigPath: string;
   workspaceDir: string;
 }): Promise<NativeEmitStageResult> {
+  const usesPersistentCache = options.cache.mode === "persistent";
   const outDir = path.join(cacheDir, "out");
   const externsPath = path.join(cacheDir, "modules-externs.js");
   const metadataPathForNative = path.join(cacheDir, "closure-ir.json");
@@ -81,7 +82,9 @@ export async function emitNativeStage({
     ...packageJsonFiles,
     ...runtimePackageInputs.packageJsonFiles,
   ]);
-  const cachedMetadata = await readMetadata(metadataPath);
+  const cachedMetadata = usesPersistentCache
+    ? await readMetadata(metadataPath)
+    : null;
   if (
     cachedMetadata &&
     (await filesExist([
@@ -104,7 +107,7 @@ export async function emitNativeStage({
   await fs.promises.rm(outDir, { force: true, recursive: true });
   await fs.promises.mkdir(outDir, { recursive: true });
 
-  const diagnostics = getPreflightDiagnostics({
+  const diagnostics = await getPreflightDiagnostics({
     fileNames: combinedFileNames,
     preflight: options.diagnostics.preflight,
     tsConfigPath,
@@ -156,21 +159,23 @@ export async function emitNativeStage({
     ...result.supportFiles,
   ]);
 
-  await fs.promises.writeFile(
-    metadataPath,
-    JSON.stringify(
-      {
-        emittedFiles: result.emittedFiles,
-        externsPath: result.externsPath,
-        metadataPath: metadataPathForNative,
-        supportFiles: finalSupportFiles,
-        version: NATIVE_EMIT_METADATA_VERSION,
-      } satisfies NativeEmitMetadata,
-      null,
-      2,
-    ),
-    "utf-8",
-  );
+  if (usesPersistentCache) {
+    await fs.promises.writeFile(
+      metadataPath,
+      JSON.stringify(
+        {
+          emittedFiles: result.emittedFiles,
+          externsPath: result.externsPath,
+          metadataPath: metadataPathForNative,
+          supportFiles: finalSupportFiles,
+          version: NATIVE_EMIT_METADATA_VERSION,
+        } satisfies NativeEmitMetadata,
+        null,
+        2,
+      ),
+      "utf-8",
+    );
+  }
 
   return {
     diagnostics: [],
@@ -199,7 +204,7 @@ async function collectTsxRuntimePackageInputs({
     };
   }
 
-  const compilerOptions = loadCompilerOptions(tsConfigPath);
+  const compilerOptions = await loadCompilerOptions(tsConfigPath);
   const runtimeSpecifier = getJsxRuntimeSpecifier(compilerOptions);
   if (!runtimeSpecifier) {
     return {
@@ -234,7 +239,7 @@ async function collectTsxRuntimePackageInputs({
   };
 }
 
-function getPreflightDiagnostics({
+async function getPreflightDiagnostics({
   fileNames,
   preflight,
   tsConfigPath,
@@ -244,7 +249,7 @@ function getPreflightDiagnostics({
   preflight: DiagnosticsPreflight;
   tsConfigPath: string;
   workspaceDir: string;
-}): ts.Diagnostic[] {
+}): Promise<ts.Diagnostic[]> {
   if (preflight === "off") {
     return [];
   }
@@ -265,7 +270,7 @@ function getPreflightDiagnostics({
     return [];
   }
 
-  const compilerOptions = loadCompilerOptions(tsConfigPath);
+  const compilerOptions = await loadCompilerOptions(tsConfigPath);
   const finalCompilerOptions: ts.CompilerOptions = {
     ...compilerOptions,
     allowJs: true,

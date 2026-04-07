@@ -1,7 +1,6 @@
 import fs from "fs";
 import path from "path";
 import ts from "typescript";
-import { fileURLToPath } from "url";
 
 import { BuildOptions, DEFAULT_BUILD_OPTIONS } from "../api/types";
 import { hashContent, hashJson } from "../cache/hash";
@@ -12,6 +11,7 @@ import {
   writeJson,
 } from "../cache/store";
 import { collectTrackedFiles, trackedFilesMatch } from "../internal/file-state";
+import { getPackageRootFromBundle } from "../internal/bundle-location";
 import {
   BuildContext,
   BuildEntry,
@@ -54,11 +54,14 @@ export async function createBuildContext(
   options: NormalizedBuildOptions,
 ): Promise<BuildContext> {
   const packageRoot = getPackageRoot();
+  const usesPersistentCache = options.cache.mode === "persistent";
   return {
     options,
     optionsSignature: getOptionsSignature(options),
     packageRoot,
-    packageSignature: await getPackageSignature(packageRoot),
+    packageSignature: usesPersistentCache
+      ? await getPackageSignature(packageRoot)
+      : "",
     projectCacheDir: path.join(
       path.resolve(options.cache.dir || getDefaultPersistentCacheRoot()),
       hashContent(options.projectRoot),
@@ -79,12 +82,15 @@ export async function resolveBuild(
     mode: options.cache.mode,
     projectRoot: options.projectRoot,
   });
+  const usesPersistentCache = options.cache.mode === "persistent";
   const sourceRoot = path.join(cacheStore.workspaceDir, "src");
   await ensureDirectorySymlink(sourceRoot, options.srcDir);
   await ensureWorkspaceNodeModules(cacheStore.workspaceDir, options);
 
   const tsConfigPath = await resolveTsConfigPath(options.projectRoot);
-  const compilerOptionsHash = await hashTsConfig(tsConfigPath);
+  const compilerOptionsHash = usesPersistentCache
+    ? await hashTsConfig(tsConfigPath)
+    : "";
   const entryRelativePaths = options.entries.map((entry) =>
     path.relative(options.srcDir, entry),
   );
@@ -96,8 +102,9 @@ export async function resolveBuild(
     "resolve",
     "latest.json",
   );
-  const cachedSnapshot =
-    await readJsonIfExists<ResolveSnapshot>(resolveSnapshotPath);
+  const cachedSnapshot = usesPersistentCache
+    ? await readJsonIfExists<ResolveSnapshot>(resolveSnapshotPath)
+    : null;
   if (
     cachedSnapshot &&
     Array.isArray(cachedSnapshot.packageAliases) &&
@@ -109,16 +116,10 @@ export async function resolveBuild(
     (await trackedFilesMatch(cachedSnapshot.trackedFiles))
   ) {
     const entryFiles = cachedSnapshot.entryFiles.map(
-      (entry): BuildEntry => ({
-        chunkName: entry.chunkName,
-        exportNames: entry.exportNames,
-        hasDefaultExport: entry.hasDefaultExport,
-        outputName: entry.outputName,
-        sourcePath: path.join(sourceRoot, entry.sourceRelativePath),
-        sourceRelativePath: entry.sourceRelativePath,
-      }),
+      (entry): BuildEntry => toBuildEntry(entry, sourceRoot),
     );
     const shimDir = path.join(cacheStore.workspaceDir, "entries");
+    const shimFiles = toShimFiles(entryFiles, shimDir);
 
     return {
       cleanup: cacheStore.cleanup,
@@ -142,9 +143,7 @@ export async function resolveBuild(
         cachedSnapshot.nativeEmitKey,
       ),
       shimDir,
-      shimFiles: entryFiles.map((entry) =>
-        path.join(shimDir, `${entry.chunkName}.ts`),
-      ),
+      shimFiles,
       sourceFiles: cachedSnapshot.sourceFiles,
       trackedFiles: cachedSnapshot.trackedFiles,
       tsConfigPath,
@@ -163,19 +162,22 @@ export async function resolveBuild(
     options.outputNames,
   );
   const resolvedLazyImports = assignLazyRuntimeBindings(graphResult.lazyImports);
-  const resolveKey = hashJson({
-    compilerOptionsHash,
-    entries: entryRelativePaths,
-    files: graphResult.fileHashes,
-    packageSignature: context.packageSignature,
-  });
+  const resolveKey = usesPersistentCache
+    ? hashJson({
+        compilerOptionsHash,
+        entries: entryRelativePaths,
+        files: graphResult.fileHashes,
+        packageSignature: context.packageSignature,
+      })
+    : "active";
   const resolveMetadataPath = path.join(
     cacheStore.projectCacheDir,
     "resolve",
     `${resolveKey}.json`,
   );
-  let resolveMetadata =
-    await readJsonIfExists<ResolveMetadata>(resolveMetadataPath);
+  let resolveMetadata = usesPersistentCache
+    ? await readJsonIfExists<ResolveMetadata>(resolveMetadataPath)
+    : null;
 
   if (!resolveMetadata) {
     const entryFiles = graphResult.entries.map(
@@ -189,9 +191,7 @@ export async function resolveBuild(
       }),
     );
     const shimDir = path.join(cacheStore.workspaceDir, "entries");
-    const shimFiles = entryFiles.map((entry) =>
-      path.join(shimDir, `${entry.chunkName}.ts`),
-    );
+    const shimFiles = toShimFiles(entryFiles, shimDir);
     resolveMetadata = {
       chunkPlan: buildChunkPlan({
         chunkOptions: options.chunks,
@@ -218,59 +218,60 @@ export async function resolveBuild(
       })),
       lazyImports: resolvedLazyImports,
     };
-    await writeJson(resolveMetadataPath, resolveMetadata);
+    if (usesPersistentCache) {
+      await writeJson(resolveMetadataPath, resolveMetadata);
+    }
   }
 
-  const entryFiles = resolveMetadata.entryFiles.map(
-    (entry): BuildEntry => ({
-      chunkName: entry.chunkName,
-      exportNames: entry.exportNames,
-      hasDefaultExport: entry.hasDefaultExport,
-      outputName: entry.outputName,
-      sourcePath: path.join(sourceRoot, entry.sourceRelativePath),
-      sourceRelativePath: entry.sourceRelativePath,
-    }),
+  const entryFiles = resolveMetadata.entryFiles.map((entry): BuildEntry =>
+    toBuildEntry(entry, sourceRoot),
   );
   const shimDir = path.join(cacheStore.workspaceDir, "entries");
-  const shimFiles = entryFiles.map((entry) =>
-    path.join(shimDir, `${entry.chunkName}.ts`),
-  );
-  const nativeEmitKey = hashJson({
-    compilerOptionsHash,
-    diagnostics: options.diagnostics,
-    packageSignature: context.packageSignature,
-    resolveKey,
-  });
-  const finalKey = hashJson({
-    compilationLevel: options.compilationLevel,
-    externalInputHash: await hashExternalInputs([
-      ...options.externs,
-      ...options.js,
-    ]),
-    languageOut: options.languageOut,
-    packageSignature: context.packageSignature,
-    resolveKey,
-  });
-  const trackedFiles = await collectTrackedFiles([
-    ...graphResult.trackedFiles,
-    tsConfigPath,
-    ...options.externs,
-    ...options.js,
-  ]);
-  await writeJson(resolveSnapshotPath, {
-    compilerOptionsHash,
-    entryFiles: resolveMetadata.entryFiles,
-    finalKey,
-    lazyImports: resolvedLazyImports,
-    nativeEmitKey,
-    optionsSignature: context.optionsSignature,
-    packageAliases: graphResult.packageAliases,
-    packageJsonFiles: graphResult.packageJsonFiles,
-    packageSignature: context.packageSignature,
-    resolveKey,
-    sourceFiles: graphResult.sourceFiles,
-    trackedFiles,
-  } satisfies ResolveSnapshot);
+  const shimFiles = toShimFiles(entryFiles, shimDir);
+  const nativeEmitKey = usesPersistentCache
+    ? hashJson({
+        compilerOptionsHash,
+        diagnostics: options.diagnostics,
+        packageSignature: context.packageSignature,
+        resolveKey,
+      })
+    : "active";
+  const finalKey = usesPersistentCache
+    ? hashJson({
+        compilationLevel: options.compilationLevel,
+        externalInputHash: await hashExternalInputs([
+          ...options.externs,
+          ...options.js,
+        ]),
+        languageOut: options.languageOut,
+        packageSignature: context.packageSignature,
+        resolveKey,
+      })
+    : "active";
+  const trackedFiles = usesPersistentCache
+    ? await collectTrackedFiles([
+        ...graphResult.trackedFiles,
+        tsConfigPath,
+        ...options.externs,
+        ...options.js,
+      ])
+    : {};
+  if (usesPersistentCache) {
+    await writeJson(resolveSnapshotPath, {
+      compilerOptionsHash,
+      entryFiles: resolveMetadata.entryFiles,
+      finalKey,
+      lazyImports: resolvedLazyImports,
+      nativeEmitKey,
+      optionsSignature: context.optionsSignature,
+      packageAliases: graphResult.packageAliases,
+      packageJsonFiles: graphResult.packageJsonFiles,
+      packageSignature: context.packageSignature,
+      resolveKey,
+      sourceFiles: graphResult.sourceFiles,
+      trackedFiles,
+    } satisfies ResolveSnapshot);
+  }
 
   return {
     cleanup: cacheStore.cleanup,
@@ -328,6 +329,24 @@ function resolveOutputNames(
 
 function sanitizeChunkName(outputName: string): string {
   return outputName.replace(/\.js$/, "").replace(/[^\w-]/g, "-");
+}
+
+function toBuildEntry(
+  entry: ResolveMetadata["entryFiles"][number],
+  sourceRoot: string,
+): BuildEntry {
+  return {
+    chunkName: entry.chunkName,
+    exportNames: entry.exportNames,
+    hasDefaultExport: entry.hasDefaultExport,
+    outputName: entry.outputName,
+    sourcePath: path.join(sourceRoot, entry.sourceRelativePath),
+    sourceRelativePath: entry.sourceRelativePath,
+  };
+}
+
+function toShimFiles(entryFiles: BuildEntry[], shimDir: string): string[] {
+  return entryFiles.map((entry) => path.join(shimDir, `${entry.chunkName}.ts`));
 }
 
 async function ensureDirectorySymlink(linkPath: string, targetPath: string) {
@@ -738,7 +757,7 @@ function stripExtension(filePath: string) {
 }
 
 export function getPackageRoot() {
-  return path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+  return getPackageRootFromBundle();
 }
 
 async function readRuntimeSignature(packageRoot: string) {
@@ -769,9 +788,10 @@ async function readNativeSignature(packageRoot: string) {
   }
 }
 
-let packageSignaturePromise: Promise<string> | null = null;
+const packageSignaturePromises = new Map<string, Promise<string>>();
 
 export async function getPackageSignature(packageRoot = getPackageRoot()) {
+  let packageSignaturePromise = packageSignaturePromises.get(packageRoot);
   if (!packageSignaturePromise) {
     packageSignaturePromise = (async () => {
       const packageJsonStat = await fs.promises.stat(
@@ -790,6 +810,7 @@ export async function getPackageSignature(packageRoot = getPackageRoot()) {
         }),
       );
     })();
+    packageSignaturePromises.set(packageRoot, packageSignaturePromise);
   }
 
   return packageSignaturePromise;

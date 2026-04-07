@@ -38,12 +38,13 @@ interface FinalFastSnapshot {
   trackedFiles: Record<string, FileStateSnapshot>;
 }
 
-let bundledExternsCache: Promise<string[]> | null = null;
+const bundledExternsCacheByRoot = new Map<string, Promise<string[]>>();
 
 export async function build(options: BuildOptions): Promise<BuildResult> {
   const context = await createBuildContext(normalizeBuildOptions(options));
+  const usesPersistentCache = context.options.cache.mode === "persistent";
 
-  if (context.options.cache.mode === "persistent") {
+  if (usesPersistentCache) {
     const fastSnapshot = await readJsonIfExists<FinalFastSnapshot>(
       path.join(context.projectCacheDir, "final-fast.json"),
     );
@@ -62,8 +63,9 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
         diagnostics: [],
         emitSkipped: false,
         exitCode: 0,
-        outputFiles: fastSnapshot.publishedOutputs.map(({ name }) =>
-          path.join(context.options.outDir, name),
+        outputFiles: toPublishedOutputPaths(
+          fastSnapshot.publishedOutputs,
+          context.options.outDir,
         ),
       };
     }
@@ -78,10 +80,11 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       resolvedBuild.finalCacheDir,
       "meta.json",
     );
-    const finalMetadata =
-      await readJsonIfExists<FinalCacheMetadata>(finalMetadataPath);
+    const finalMetadata = usesPersistentCache
+      ? await readJsonIfExists<FinalCacheMetadata>(finalMetadataPath)
+      : null;
     if (
-      context.options.cache.mode !== "off" &&
+      usesPersistentCache &&
       finalMetadata &&
       (await filesExist(finalMetadata.outputFiles))
     ) {
@@ -91,8 +94,11 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
         diagnostics: [],
         emitSkipped: false,
         exitCode: 0,
-        outputFiles: finalMetadata.outputFiles.map((outputFile) =>
-          path.join(context.options.outDir, path.basename(outputFile)),
+        outputFiles: toPublishedOutputPaths(
+          finalMetadata.outputFiles.map((outputFile) => ({
+            name: path.basename(outputFile),
+          })),
+          context.options.outDir,
         ),
       };
     }
@@ -191,10 +197,10 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       };
     }
 
-    await writeJson(finalMetadataPath, {
-      outputFiles: closureResult.cacheOutputFiles,
-    } satisfies FinalCacheMetadata);
-    if (context.options.cache.mode === "persistent") {
+    if (usesPersistentCache) {
+      await writeJson(finalMetadataPath, {
+        outputFiles: closureResult.cacheOutputFiles,
+      } satisfies FinalCacheMetadata);
       await writeJson(path.join(context.projectCacheDir, "final-fast.json"), {
         finalKey: resolvedBuild.finalKey,
         optionsSignature: context.optionsSignature,
@@ -236,17 +242,19 @@ export async function cleanCache(options: CleanCacheOptions = {}) {
 }
 
 async function collectBundledExterns(packageRoot: string) {
-  if (!bundledExternsCache) {
-    bundledExternsCache = (async () => {
+  let bundledExternsPromise = bundledExternsCacheByRoot.get(packageRoot);
+  if (!bundledExternsPromise) {
+    bundledExternsPromise = (async () => {
       const closureExternsPath = path.join(packageRoot, "closure-externs");
       const entries = await fs.promises.readdir(closureExternsPath);
       return entries
         .map((entry) => path.join(closureExternsPath, entry))
         .sort((left, right) => left.localeCompare(right));
     })();
+    bundledExternsCacheByRoot.set(packageRoot, bundledExternsPromise);
   }
 
-  return bundledExternsCache;
+  return bundledExternsPromise;
 }
 
 async function publishOutputs(outputFiles: string[], outDir: string) {
@@ -260,6 +268,13 @@ async function publishOutputs(outputFiles: string[], outDir: string) {
 function toImportPath(relativePath: string): string {
   const normalized = relativePath.replace(/\\/g, "/").replace(/\.[^/.]+$/, "");
   return normalized.startsWith(".") ? normalized : `./${normalized}`;
+}
+
+function toPublishedOutputPaths(
+  publishedOutputs: Array<{ name: string }>,
+  outDir: string,
+) {
+  return publishedOutputs.map(({ name }) => path.join(outDir, name));
 }
 
 function createBuildDiagnostic(error: unknown) {

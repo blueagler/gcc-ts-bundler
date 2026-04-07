@@ -1,14 +1,13 @@
-import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import { expect, onTestFinished, test } from "bun:test";
 
 import { build } from "../dist/index.mjs";
 
-async function createFixture(t) {
+async function createFixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "gcc-ts-bundler-test-"));
-  t.after(async () => {
+  onTestFinished(async () => {
     await fs.rm(root, { force: true, recursive: true });
   });
 
@@ -43,8 +42,8 @@ async function createFixture(t) {
   };
 }
 
-test("builds an ESM package from node_modules in ADVANCED mode", async (t) => {
-  const fixture = await createFixture(t);
+test("builds an ESM package from node_modules in ADVANCED mode", async () => {
+  const fixture = await createFixture();
   await fixture.write(
     "src/index.ts",
     'import { value } from "demo-pkg";\nexport default value + 1;\n',
@@ -64,14 +63,14 @@ test("builds an ESM package from node_modules in ADVANCED mode", async (t) => {
     srcDir: fixture.srcDir,
   });
 
-  assert.equal(result.exitCode, 0);
-  assert.equal(result.outputFiles.length, 1);
+  expect(result.exitCode).toBe(0);
+  expect(result.outputFiles).toHaveLength(1);
   const output = await fixture.read("dist/index.js");
-  assert.doesNotMatch(output, /demo-pkg/);
+  expect(output).not.toMatch(/demo-pkg/);
 });
 
-test("builds a CommonJS package entrypoint from node_modules", async (t) => {
-  const fixture = await createFixture(t);
+test("builds a CommonJS package entrypoint from node_modules", async () => {
+  const fixture = await createFixture();
   await fixture.write(
     "src/index.ts",
     'import { answer } from "demo-pkg";\nexport default answer;\n',
@@ -96,13 +95,13 @@ test("builds a CommonJS package entrypoint from node_modules", async (t) => {
     srcDir: fixture.srcDir,
   });
 
-  assert.equal(result.exitCode, 0);
+  expect(result.exitCode).toBe(0);
   const output = await fixture.read("dist/index.js");
-  assert.match(output, /42/);
+  expect(output).toMatch(/42/);
 });
 
-test("rewrites namespace imports from CommonJS packages to runtime-safe interop", async (t) => {
-  const fixture = await createFixture(t);
+test("rewrites namespace imports from CommonJS packages to runtime-safe interop", async () => {
+  const fixture = await createFixture();
   await fixture.write(
     "src/index.ts",
     'import * as demo from "demo-pkg";\nexport default demo.answer;\n',
@@ -124,13 +123,13 @@ test("rewrites namespace imports from CommonJS packages to runtime-safe interop"
     srcDir: fixture.srcDir,
   });
 
-  assert.equal(result.exitCode, 0);
+  expect(result.exitCode).toBe(0);
   const output = await fixture.read("dist/index.js");
-  assert.match(output, /42/);
+  expect(output).toMatch(/42/);
 });
 
-test("emits a shared chunk when multiple entries use the same package", async (t) => {
-  const fixture = await createFixture(t);
+test("emits a shared chunk when multiple entries use the same package", async () => {
+  const fixture = await createFixture();
   await fixture.write(
     "src/a.ts",
     'import { shared } from "demo-pkg";\nexport const a = shared + 1;\n',
@@ -153,17 +152,16 @@ test("emits a shared chunk when multiple entries use the same package", async (t
     srcDir: fixture.srcDir,
   });
 
-  assert.equal(result.exitCode, 0);
-  assert.deepEqual(
+  expect(result.exitCode).toBe(0);
+  expect(
     result.outputFiles
       .map((filePath) => path.basename(filePath))
       .sort((left, right) => left.localeCompare(right)),
-    ["a.js", "b.js", "shared.js"],
-  );
+  ).toEqual(["a.js", "b.js", "shared.js"]);
 });
 
-test("folds process.env.NODE_ENV to the production CommonJS branch", async (t) => {
-  const fixture = await createFixture(t);
+test("folds process.env.NODE_ENV to the production CommonJS branch", async () => {
+  const fixture = await createFixture();
   await fixture.write(
     "src/index.ts",
     'import { value } from "demo-pkg";\nexport const result = value;\n',
@@ -200,15 +198,15 @@ test("folds process.env.NODE_ENV to the production CommonJS branch", async (t) =
     srcDir: fixture.srcDir,
   });
 
-  assert.equal(result.exitCode, 0);
+  expect(result.exitCode).toBe(0);
   const output = await fixture.read("dist/index.js");
-  assert.match(output, /PROD_BRANCH/);
-  assert.doesNotMatch(output, /DEV_BRANCH/);
-  assert.doesNotMatch(output, /\.cjs/);
+  expect(output).toMatch(/PROD_BRANCH/);
+  expect(output).not.toMatch(/DEV_BRANCH/);
+  expect(output).not.toMatch(/\.cjs/);
 });
 
-test("full preflight accepts JS dependencies from node_modules", async (t) => {
-  const fixture = await createFixture(t);
+test("full preflight accepts JS dependencies from node_modules", async () => {
+  const fixture = await createFixture();
   await fixture.write(
     "src/index.ts",
     'import { value } from "demo-pkg";\nexport const answer = value;\n',
@@ -228,11 +226,44 @@ test("full preflight accepts JS dependencies from node_modules", async (t) => {
     srcDir: fixture.srcDir,
   });
 
-  assert.equal(result.exitCode, 0);
+  expect(result.exitCode).toBe(0);
 });
 
-test("builds mixed ESM and CommonJS package graphs", async (t) => {
-  const fixture = await createFixture(t);
+test("persistent cache restores published outputs after the outDir is removed", async () => {
+  const fixture = await createFixture();
+  const cacheDir = path.join(fixture.projectRoot, ".cache");
+  await fixture.write(
+    "src/index.ts",
+    'export const value = "CACHE_HIT";\n',
+  );
+
+  const firstResult = await build({
+    cache: { dir: cacheDir, mode: "persistent" },
+    entries: ["./index.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+  expect(firstResult.exitCode).toBe(0);
+  expect(firstResult.cacheHit).toBe(false);
+
+  await fs.rm(fixture.outDir, { force: true, recursive: true });
+
+  const secondResult = await build({
+    cache: { dir: cacheDir, mode: "persistent" },
+    entries: ["./index.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  expect(secondResult.exitCode).toBe(0);
+  expect(secondResult.cacheHit).toBe(true);
+  expect(await fixture.read("dist/index.js")).toMatch(/CACHE_HIT/);
+});
+
+test("builds mixed ESM and CommonJS package graphs", async () => {
+  const fixture = await createFixture();
   await fixture.write(
     "src/index.ts",
     'import { result } from "demo-pkg";\nexport default result;\n',
@@ -262,14 +293,14 @@ test("builds mixed ESM and CommonJS package graphs", async (t) => {
     srcDir: fixture.srcDir,
   });
 
-  assert.equal(result.exitCode, 0);
+  expect(result.exitCode).toBe(0);
   const output = await fixture.read("dist/index.js");
-  assert.doesNotMatch(output, /require\(/);
-  assert.doesNotMatch(output, /module\.exports/);
+  expect(output).not.toMatch(/require\(/);
+  expect(output).not.toMatch(/module\.exports/);
 });
 
-test("builds decorated TypeScript sources", async (t) => {
-  const fixture = await createFixture(t);
+test("builds decorated TypeScript sources", async () => {
+  const fixture = await createFixture();
   await fixture.write(
     "src/decorators.ts",
     [
@@ -305,13 +336,13 @@ test("builds decorated TypeScript sources", async (t) => {
     srcDir: fixture.srcDir,
   });
 
-  assert.equal(result.exitCode, 0);
+  expect(result.exitCode).toBe(0);
   const output = await fixture.read("dist/index.js");
-  assert.doesNotMatch(output, /@increment/);
+  expect(output).not.toMatch(/@increment/);
 });
 
-test("exported entry bundles do not retain GCC wrapper exports", async (t) => {
-  const fixture = await createFixture(t);
+test("exported entry bundles do not retain GCC wrapper exports", async () => {
+  const fixture = await createFixture();
   await fixture.write(
     "src/index.ts",
     [
@@ -330,15 +361,15 @@ test("exported entry bundles do not retain GCC wrapper exports", async (t) => {
     srcDir: fixture.srcDir,
   });
 
-  assert.equal(result.exitCode, 0);
+  expect(result.exitCode).toBe(0);
   const output = await fixture.read("dist/index.js");
-  assert.match(output, /export/);
-  assert.doesNotMatch(output, /globalThis\.GCC/);
-  assert.doesNotMatch(output, /__gcc_export_/);
+  expect(output).toMatch(/export/);
+  expect(output).not.toMatch(/globalThis\.GCC/);
+  expect(output).not.toMatch(/__gcc_export_/);
 });
 
-test("unsupported CommonJS packages surface actionable diagnostics", async (t) => {
-  const fixture = await createFixture(t);
+test("unsupported CommonJS packages surface actionable diagnostics", async () => {
+  const fixture = await createFixture();
   await fixture.write(
     "src/index.ts",
     'import value from "demo-pkg";\nexport default value;\n',
@@ -360,14 +391,16 @@ test("unsupported CommonJS packages surface actionable diagnostics", async (t) =
     srcDir: fixture.srcDir,
   });
 
-  assert.equal(result.exitCode, 1);
-  assert.equal(result.emitSkipped, true);
-  assert.ok(result.diagnostics.length > 0);
-  assert.match(String(result.diagnostics[0].messageText), /Unsupported CommonJS/);
+  expect(result.exitCode).toBe(1);
+  expect(result.emitSkipped).toBe(true);
+  expect(result.diagnostics.length).toBeGreaterThan(0);
+  expect(String(result.diagnostics[0].messageText)).toMatch(
+    /Unsupported CommonJS/,
+  );
 });
 
-test("emits smaller Closure script chunks for explicit lazy modules", async (t) => {
-  const fixture = await createFixture(t);
+test("emits smaller Closure script chunks for explicit lazy modules", async () => {
+  const fixture = await createFixture();
   await fixture.write(
     "src/main.ts",
     [
@@ -397,26 +430,25 @@ test("emits smaller Closure script chunks for explicit lazy modules", async (t) 
     srcDir: fixture.srcDir,
   });
 
-  assert.equal(result.exitCode, 0);
-  assert.deepEqual(
+  expect(result.exitCode).toBe(0);
+  expect(
     result.outputFiles
       .map((filePath) => path.basename(filePath))
       .sort((left, right) => left.localeCompare(right)),
-    ["main.js", "src-feature-lazy.js"],
-  );
+  ).toEqual(["main.js", "src-feature-lazy.js"]);
 
   const baseOutput = await fixture.read("dist/main.js");
   const lazyOutput = await fixture.read("dist/src-feature-lazy.js");
 
-  assert.doesNotMatch(baseOutput, /\bexport\s*\{/);
-  assert.doesNotMatch(baseOutput, /globalThis\.__gccChunkRuntime/);
-  assert.doesNotMatch(baseOutput, /gcc\.src\.feature/);
-  assert.doesNotMatch(baseOutput, /LAZY_FEATURE/);
-  assert.match(lazyOutput, /LAZY_FEATURE/);
+  expect(baseOutput).not.toMatch(/\bexport\s*\{/);
+  expect(baseOutput).not.toMatch(/globalThis\.__gccChunkRuntime/);
+  expect(baseOutput).not.toMatch(/gcc\.src\.feature/);
+  expect(baseOutput).not.toMatch(/LAZY_FEATURE/);
+  expect(lazyOutput).toMatch(/LAZY_FEATURE/);
 });
 
-test("emits an optional chunk manifest when requested", async (t) => {
-  const fixture = await createFixture(t);
+test("emits an optional chunk manifest when requested", async () => {
+  const fixture = await createFixture();
   await fixture.write(
     "src/main.ts",
     [
@@ -439,21 +471,20 @@ test("emits an optional chunk manifest when requested", async (t) => {
     srcDir: fixture.srcDir,
   });
 
-  assert.equal(result.exitCode, 0);
-  assert.deepEqual(
+  expect(result.exitCode).toBe(0);
+  expect(
     result.outputFiles
       .map((filePath) => path.basename(filePath))
       .sort((left, right) => left.localeCompare(right)),
-    ["chunk-map.json", "main.js", "src-feature-lazy.js"],
-  );
+  ).toEqual(["chunk-map.json", "main.js", "src-feature-lazy.js"]);
 
   const manifest = JSON.parse(await fixture.read("dist/chunk-map.json"));
-  assert.equal(manifest.baseChunkName, "main");
-  assert.equal(manifest.lazyModules["gcc.src.feature"], "src-feature-lazy");
+  expect(manifest.baseChunkName).toBe("main");
+  expect(manifest.lazyModules["gcc.src.feature"]).toBe("src-feature-lazy");
 });
 
-test("rejects non-literal dynamic import specifiers", async (t) => {
-  const fixture = await createFixture(t);
+test("rejects non-literal dynamic import specifiers", async () => {
+  const fixture = await createFixture();
   await fixture.write(
     "src/main.ts",
     [
@@ -473,9 +504,8 @@ test("rejects non-literal dynamic import specifiers", async (t) => {
     srcDir: fixture.srcDir,
   });
 
-  assert.equal(result.exitCode, 1);
-  assert.match(
-    String(result.diagnostics[0]?.messageText ?? ""),
+  expect(result.exitCode).toBe(1);
+  expect(String(result.diagnostics[0]?.messageText ?? "")).toMatch(
     /import\(\) requires a string literal module specifier/,
   );
 });

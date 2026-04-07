@@ -1,7 +1,7 @@
 import fs from "fs";
-import { createRequire } from "module";
+import { createBundleRequire } from "../internal/bundle-location";
 
-const require = createRequire(import.meta.url);
+const require = createBundleRequire();
 
 interface NativeEntryExportMetadata {
   exportNames: string[];
@@ -50,6 +50,11 @@ export interface NativeFileStateEntry {
   size: number;
 }
 
+export interface NativePublishedOutputEntry {
+  name: string;
+  size: number;
+}
+
 interface NativeShimEntry {
   exportNames: string[];
   hasDefaultExport: boolean;
@@ -80,7 +85,13 @@ interface NativeTranspilePackageAlias {
 
 interface NativeBinding {
   collectFileStates(filePaths: string[]): NativeFileStateEntry[];
+  collectPublishedOutputStats(filePaths: string[]): NativePublishedOutputEntry[];
   matchFileStates(expected: NativeFileStateEntry[]): boolean;
+  publishedOutputSnapshotMatches(
+    publishedOutputs: NativePublishedOutputEntry[],
+    outDir: string,
+  ): boolean;
+  publishedOutputsMatch(outputFiles: string[], outDir: string): boolean;
   resolveGraph(
     entries: string[],
     srcDir: string,
@@ -188,6 +199,21 @@ export function collectFileStates(filePaths: string[]) {
   return loadBinding().collectFileStates(filePaths);
 }
 
+export function collectPublishedOutputStats(filePaths: string[]) {
+  return loadBinding().collectPublishedOutputStats(filePaths);
+}
+
 export function matchFileStates(expected: NativeFileStateEntry[]) {
   return loadBinding().matchFileStates(expected);
+}
+
+export function publishedOutputSnapshotMatches(
+  publishedOutputs: NativePublishedOutputEntry[],
+  outDir: string,
+) {
+  return loadBinding().publishedOutputSnapshotMatches(publishedOutputs, outDir);
+}
+
+export function publishedOutputsMatch(outputFiles: string[], outDir: string) {
+  return loadBinding().publishedOutputsMatch(outputFiles, outDir);
 }

@@ -1,10 +1,21 @@
 import fs from "fs";
 import path from "path";
 
-import { collectFileStates, matchFileStates } from "../native/load";
+import {
+  collectFileStates,
+  collectPublishedOutputStats as collectPublishedOutputStatsNative,
+  matchFileStates,
+  publishedOutputSnapshotMatches,
+  publishedOutputsMatch as publishedOutputsMatchNative,
+} from "../native/load";
 
 export interface FileStateSnapshot {
   mtimeMs: number;
+  size: number;
+}
+
+interface PublishedOutputSnapshot {
+  name: string;
   size: number;
 }
 
@@ -54,77 +65,18 @@ export async function publishedOutputsMatch(
   outputFiles: string[],
   outDir: string,
 ): Promise<boolean> {
-  try {
-    const outEntries = (await fs.promises.readdir(outDir)).sort();
-    const expectedEntries = outputFiles
-      .map((outputFile) => path.basename(outputFile))
-      .sort();
-
-    if (
-      outEntries.length !== expectedEntries.length ||
-      outEntries.some((entry, index) => entry !== expectedEntries[index])
-    ) {
-      return false;
-    }
-
-    const destinationFiles = outputFiles.map((outputFile) =>
-      path.join(outDir, path.basename(outputFile)),
-    );
-    const states = collectFileStates([...outputFiles, ...destinationFiles]);
-    const stateMap = new Map(states.map((state) => [state.filePath, state]));
-
-    return outputFiles.every((outputFile, index) => {
-      const sourceState = stateMap.get(outputFile);
-      const destinationState = stateMap.get(destinationFiles[index]);
-      return (
-        sourceState?.exists === true &&
-        destinationState?.exists === true &&
-        sourceState.size === destinationState.size
-      );
-    });
-  } catch {
-    return false;
-  }
+  return publishedOutputsMatchNative(uniqueSorted(outputFiles), outDir);
 }
 
 export async function publishedOutputsMatchSnapshot(
-  publishedOutputs: Array<{ name: string; size: number }>,
+  publishedOutputs: PublishedOutputSnapshot[],
   outDir: string,
 ): Promise<boolean> {
-  try {
-    const outEntries = (await fs.promises.readdir(outDir)).sort();
-    const expectedEntries = publishedOutputs.map(({ name }) => name).sort();
-
-    if (
-      outEntries.length !== expectedEntries.length ||
-      outEntries.some((entry, index) => entry !== expectedEntries[index])
-    ) {
-      return false;
-    }
-
-    const states = collectFileStates(
-      publishedOutputs.map(({ name }) => path.join(outDir, name)),
-    );
-    const stateMap = new Map(states.map((state) => [state.filePath, state]));
-
-    return publishedOutputs.every(({ name, size }) => {
-      const state = stateMap.get(path.join(outDir, name));
-      return state?.exists === true && state.size === size;
-    });
-  } catch {
-    return false;
-  }
+  return publishedOutputSnapshotMatches(publishedOutputs, outDir);
 }
 
 export async function collectPublishedOutputStats(outputFiles: string[]) {
-  const states = collectFileStates(outputFiles);
-  return states
-    .filter((state) => state.exists)
-    .map((state) => ({
-      name: path.basename(state.filePath),
-      size: state.size,
-    }))
-    .sort((left, right) => left.name.localeCompare(right.name));
+  return collectPublishedOutputStatsNative(uniqueSorted(outputFiles));
 }
 
 export async function copyOrLinkFiles(sourceFiles: string[], outDir: string) {

@@ -44,19 +44,20 @@ export async function collectClosureIrMetadata({
   tsConfigPath: string;
   workspaceDir: string;
 }) {
-  const compilerOptions = loadCompilerOptions(tsConfigPath, {
+  const compilerOptions = await loadCompilerOptions(tsConfigPath, {
     allowJs: true,
     rootDir: workspaceDir,
   });
   const program = ts.createProgram(fileNames, compilerOptions);
   const checker = program.getTypeChecker();
   const unsafeEnumSymbols = collectUnsafeEnumSymbols(program, checker);
+  const inputFiles = new Set(fileNames);
 
   const files: ClosureIrFileMetadata[] = [];
   const diagnostics: ts.Diagnostic[] = [];
 
   for (const sourceFile of program.getSourceFiles()) {
-    if (!fileNames.includes(sourceFile.fileName)) {
+    if (!inputFiles.has(sourceFile.fileName)) {
       continue;
     }
 
