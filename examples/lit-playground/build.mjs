@@ -5,12 +5,12 @@ import { build } from "../../dist/index.mjs";
 const projectRoot = process.cwd();
 const result = await build({
   cache: { mode: "off" },
+  chunks: { mode: "closure-library", publicPath: "./" },
   diagnostics: { preflight: "full" },
-  entries: ["./motion-hero.ts"],
+  entries: ["./main.ts"],
   outDir: "./dist",
   projectRoot,
   srcDir: ".",
-  // languageOut: "ECMASCRIPT5",
 });
 
 if (result.exitCode !== 0) {
@@ -28,5 +28,5 @@ if (result.exitCode !== 0) {
 }
 
 console.log(
-  `Built Lit playground to ${path.relative(projectRoot, result.outputFiles[0] ?? "./dist/motion-hero.js")}`,
+  `Built Lit playground to ${path.relative(projectRoot, result.outputFiles[0] ?? "./dist/main.js")}`,
 );

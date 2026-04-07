@@ -16,6 +16,12 @@
       "require": "./dist/index.cjs",
       "default": "./dist/index.mjs"
     },
+    "./runtime": {
+      "types": "./dist/runtime/index.d.ts",
+      "import": "./dist/runtime/index.mjs",
+      "require": "./dist/runtime/index.cjs",
+      "default": "./dist/runtime/index.mjs"
+    },
     "./native": {
       "default": "./native/index.node"
     }
@@ -34,7 +40,7 @@
   },
   "scripts": {
     "build:native": "node ./scripts/build-native.mjs",
-    "build": "bun run build:native && bun build ./src/entry/cli.ts --outdir ./bin --format cjs --packages external --banner \"#!/usr/bin/env node\" --entry-naming \"gcc-ts-bundler.cjs\" --target node && bun build ./src/index.ts --outdir ./dist --format esm --packages external --entry-naming \"index.mjs\" --target node && bun build ./src/index.ts --outdir ./dist --format cjs --packages external --entry-naming \"index.cjs\" --target node && bun --bun tsc -p ./tsconfig.types.json",
+    "build": "bun run build:native && bun build ./src/entry/cli.ts --outdir ./bin --format cjs --packages external --banner \"#!/usr/bin/env node\" --entry-naming \"gcc-ts-bundler.cjs\" --target node && bun build ./src/index.ts --outdir ./dist --format esm --packages external --entry-naming \"index.mjs\" --target node && bun build ./src/index.ts --outdir ./dist --format cjs --packages external --entry-naming \"index.cjs\" --target node && bun build ./src/runtime/index.ts --outdir ./dist/runtime --format esm --packages external --entry-naming \"index.mjs\" --target node && bun build ./src/runtime/index.ts --outdir ./dist/runtime --format cjs --packages external --entry-naming \"index.cjs\" --target node && bun --bun tsc -p ./tsconfig.types.json",
     "lint": "bun --bun tsc --noEmit && bun --bun ./scripts/format.ts && bun --bun eslint -c eslint.config.ts \"src/**/*.ts\" --fix",
     "test": "cargo test --manifest-path native/Cargo.toml && bun run build && node --test ./test/*.test.mjs",
     "publish": "bun publish"

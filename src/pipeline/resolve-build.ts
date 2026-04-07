@@ -16,6 +16,7 @@ import {
   BuildContext,
   BuildEntry,
   ChunkPlanChunk,
+  LazyImport,
   NormalizedBuildOptions,
   PackageAlias,
   ResolvedBuild,
@@ -31,12 +32,14 @@ interface ResolveMetadata {
     outputName: string;
     sourceRelativePath: string;
   }>;
+  lazyImports: LazyImport[];
 }
 
 interface ResolveSnapshot {
   compilerOptionsHash: string;
   entryFiles: ResolveMetadata["entryFiles"];
   finalKey: string;
+  lazyImports: LazyImport[];
   nativeEmitKey: string;
   optionsSignature: string;
   packageAliases: PackageAlias[];
@@ -124,6 +127,7 @@ export async function resolveBuild(
         cachedSnapshot.resolveKey,
       ),
       entryFiles,
+      lazyImports: cachedSnapshot.lazyImports ?? [],
       packageAliases: cachedSnapshot.packageAliases,
       packageJsonFiles: cachedSnapshot.packageJsonFiles,
       finalCacheDir: path.join(
@@ -158,6 +162,7 @@ export async function resolveBuild(
     entryRelativePaths,
     options.outputNames,
   );
+  const resolvedLazyImports = assignLazyRuntimeBindings(graphResult.lazyImports);
   const resolveKey = hashJson({
     compilerOptionsHash,
     entries: entryRelativePaths,
@@ -189,6 +194,7 @@ export async function resolveBuild(
     );
     resolveMetadata = {
       chunkPlan: buildChunkPlan({
+        chunkOptions: options.chunks,
         entryFiles,
         graph: {
           ...graphResult.graph,
@@ -199,6 +205,7 @@ export async function resolveBuild(
             ]),
           ),
         },
+        lazyImports: resolvedLazyImports,
         shimFiles,
         workspaceDir: cacheStore.workspaceDir,
       }),
@@ -209,6 +216,7 @@ export async function resolveBuild(
         outputName: entry.outputName,
         sourceRelativePath: entry.sourceRelativePath,
       })),
+      lazyImports: resolvedLazyImports,
     };
     await writeJson(resolveMetadataPath, resolveMetadata);
   }
@@ -253,6 +261,7 @@ export async function resolveBuild(
     compilerOptionsHash,
     entryFiles: resolveMetadata.entryFiles,
     finalKey,
+    lazyImports: resolvedLazyImports,
     nativeEmitKey,
     optionsSignature: context.optionsSignature,
     packageAliases: graphResult.packageAliases,
@@ -267,6 +276,7 @@ export async function resolveBuild(
     cleanup: cacheStore.cleanup,
     chunkPlan: resolveMetadata.chunkPlan,
     entryFiles,
+    lazyImports: resolvedLazyImports,
     packageAliases: graphResult.packageAliases,
     packageJsonFiles: graphResult.packageJsonFiles,
     finalCacheDir: path.join(cacheStore.projectCacheDir, "final", finalKey),
@@ -418,16 +428,30 @@ async function readChunkPlan(projectCacheDir: string, resolveKey: string) {
 }
 
 function buildChunkPlan({
+  chunkOptions,
   entryFiles,
   graph,
+  lazyImports,
   shimFiles,
   workspaceDir,
 }: {
+  chunkOptions: NormalizedBuildOptions["chunks"];
   entryFiles: BuildEntry[];
   graph: Record<string, string[]>;
+  lazyImports: LazyImport[];
   shimFiles: string[];
   workspaceDir: string;
 }): ChunkPlanChunk[] {
+  if (chunkOptions.mode === "closure-library") {
+    return buildClosureChunkPlan({
+      baseChunkName: chunkOptions.baseChunkName,
+      entryFiles,
+      graph,
+      lazyImports,
+      workspaceDir,
+    });
+  }
+
   const shimToEntry = new Map(
     shimFiles.map((shimFile, index) => [shimFile, entryFiles[index]]),
   );
@@ -488,6 +512,154 @@ function buildChunkPlan({
   }
 
   return chunks;
+}
+
+function buildClosureChunkPlan({
+  baseChunkName,
+  entryFiles,
+  graph,
+  lazyImports,
+  workspaceDir,
+}: {
+  baseChunkName: string;
+  entryFiles: BuildEntry[];
+  graph: Record<string, string[]>;
+  lazyImports: LazyImport[];
+  workspaceDir: string;
+}): ChunkPlanChunk[] {
+  const baseChunk = sanitizeChunkName(baseChunkName);
+  const baseReachable = new Set<string>();
+  for (const entry of entryFiles) {
+    for (const filePath of walkReachableFiles(entry.sourcePath, graph)) {
+      baseReachable.add(filePath);
+    }
+  }
+
+  const uniqueLazyImports = dedupeLazyImports(lazyImports);
+  if (uniqueLazyImports.length === 0) {
+    return [
+      {
+        dependencies: [],
+        entryFiles: entryFiles.map((entry) =>
+          path.relative(workspaceDir, entry.sourcePath),
+        ),
+        files: toRelativeFiles(
+          topologicalSort(Array.from(baseReachable), graph),
+          workspaceDir,
+        ),
+        kind: "base",
+        name: baseChunk,
+      },
+    ];
+  }
+
+  const lazyRootTargets = new Set(uniqueLazyImports.map((item) => item.targetPath));
+  const lazyClosures = uniqueLazyImports.map((lazyImport) => ({
+    lazyImport,
+    reachable: new Set(
+      Array.from(walkReachableFiles(lazyImport.targetPath, graph)).filter(
+        (filePath) => !baseReachable.has(filePath),
+      ),
+    ),
+  }));
+
+  const sharedCounts = new Map<string, number>();
+  for (const closure of lazyClosures) {
+    for (const filePath of closure.reachable) {
+      if (lazyRootTargets.has(filePath)) {
+        continue;
+      }
+      sharedCounts.set(filePath, (sharedCounts.get(filePath) ?? 0) + 1);
+    }
+  }
+  const sharedLazyFiles = new Set(
+    Array.from(sharedCounts.entries())
+      .filter(([, count]) => count > 1)
+      .map(([filePath]) => filePath),
+  );
+
+  const chunks: ChunkPlanChunk[] = [
+    {
+      dependencies: [],
+      entryFiles: entryFiles.map((entry) =>
+        path.relative(workspaceDir, entry.sourcePath),
+      ),
+      files: toRelativeFiles(
+        topologicalSort(Array.from(baseReachable), graph),
+        workspaceDir,
+      ),
+      kind: "base",
+      lazyModuleIds: uniqueLazyImports
+        .filter((item) => baseReachable.has(item.targetPath))
+        .map((item) => item.moduleId),
+      name: baseChunk,
+    },
+  ];
+
+  const sharedChunkName = `${baseChunk}-shared`;
+  if (sharedLazyFiles.size > 0) {
+    chunks.push({
+      dependencies: [baseChunk],
+      files: toRelativeFiles(
+        topologicalSort(Array.from(sharedLazyFiles), graph),
+        workspaceDir,
+      ),
+      kind: "shared",
+      name: sharedChunkName,
+    });
+  }
+
+  for (const { lazyImport, reachable } of lazyClosures) {
+    if (baseReachable.has(lazyImport.targetPath)) {
+      continue;
+    }
+    const chunkFiles = Array.from(reachable).filter(
+      (filePath) => !sharedLazyFiles.has(filePath),
+    );
+    chunks.push({
+      dependencies: [
+        baseChunk,
+        ...(sharedLazyFiles.size > 0 ? [sharedChunkName] : []),
+      ],
+      files: toRelativeFiles(topologicalSort(chunkFiles, graph), workspaceDir),
+      kind: "lazy",
+      lazyModuleIds: [lazyImport.moduleId],
+      name: sanitizeChunkName(
+        `${path
+          .relative(workspaceDir, lazyImport.targetPath)
+          .replace(/\.[^/.]+$/, "")
+          .replace(/[\\/]/g, "-")}-lazy`,
+      ),
+    });
+  }
+
+  return chunks;
+}
+
+function dedupeLazyImports(lazyImports: LazyImport[]) {
+  return [
+    ...new Map(lazyImports.map((item) => [item.moduleId, item])).values(),
+  ];
+}
+
+function assignLazyRuntimeBindings(lazyImports: LazyImport[]) {
+  const byModuleId = [...new Set(lazyImports.map((item) => item.moduleId))].sort(
+    (left, right) => left.localeCompare(right),
+  );
+  const bindingMap = new Map(
+    byModuleId.map((moduleId, index) => [
+      moduleId,
+      {
+        preloadBindingName: `__gcc_preload_${index}`,
+        runtimeBindingName: `__gcc_lazy_${index}`,
+      },
+    ]),
+  );
+
+  return lazyImports.map((item) => ({
+    ...item,
+    ...bindingMap.get(item.moduleId),
+  }));
 }
 
 function walkReachableFiles(
@@ -626,6 +798,7 @@ export async function getPackageSignature(packageRoot = getPackageRoot()) {
 export function getOptionsSignature(options: NormalizedBuildOptions) {
   return hashJson({
     compilationLevel: options.compilationLevel,
+    chunks: options.chunks,
     diagnostics: options.diagnostics,
     entries: options.entries.map((entry) =>
       path.relative(options.srcDir, entry),
@@ -653,6 +826,12 @@ export function normalizeBuildOptions(
     projectRoot,
     options.outDir ?? (DEFAULT_BUILD_OPTIONS.outDir || "dist"),
   );
+  const chunkPublicPath = normalizeChunkPublicPath(
+    options.chunks?.publicPath ?? DEFAULT_BUILD_OPTIONS.chunks.publicPath,
+  );
+  const chunkManifestFile = path.basename(
+    options.chunks?.manifestFile ?? DEFAULT_BUILD_OPTIONS.chunks.manifestFile,
+  );
 
   return {
     cache: {
@@ -660,6 +839,15 @@ export function normalizeBuildOptions(
         ? path.resolve(projectRoot, options.cache.dir)
         : DEFAULT_BUILD_OPTIONS.cache.dir,
       mode: options.cache?.mode ?? DEFAULT_BUILD_OPTIONS.cache.mode,
+    },
+    chunks: {
+      baseChunkName:
+        options.chunks?.baseChunkName ??
+        DEFAULT_BUILD_OPTIONS.chunks.baseChunkName,
+      manifestFile:
+        chunkManifestFile,
+      mode: options.chunks?.mode ?? DEFAULT_BUILD_OPTIONS.chunks.mode,
+      publicPath: chunkPublicPath,
     },
     compilationLevel:
       options.compilationLevel ?? DEFAULT_BUILD_OPTIONS.compilationLevel,
@@ -696,4 +884,11 @@ export function normalizeBuildOptions(
     projectRoot,
     srcDir,
   };
+}
+
+function normalizeChunkPublicPath(publicPath: string) {
+  if (publicPath.length === 0) {
+    return "./";
+  }
+  return publicPath.endsWith("/") ? publicPath : `${publicPath}/`;
 }

@@ -1,7 +1,8 @@
-import type { BuildOptions, CacheOptions, CompilationLevel, DiagnosticsOptions, LanguageOut, PackageOptions } from "../api/types";
+import type { BuildOptions, CacheOptions, ChunkOptions, CompilationLevel, DiagnosticsOptions, LanguageOut, PackageOptions } from "../api/types";
 import type { FileStateSnapshot } from "./file-state";
 export interface NormalizedBuildOptions {
     cache: Required<CacheOptions>;
+    chunks: Required<ChunkOptions>;
     compilationLevel: CompilationLevel;
     diagnostics: Required<DiagnosticsOptions>;
     entries: string[];
@@ -33,8 +34,19 @@ export interface PackageAlias {
 }
 export interface ChunkPlanChunk {
     dependencies: string[];
+    entryFiles?: string[];
     files: string[];
+    kind?: "base" | "entry" | "lazy" | "shared";
+    lazyModuleIds?: string[];
     name: string;
+}
+export interface LazyImport {
+    importerFilePath: string;
+    moduleId: string;
+    preloadBindingName?: string;
+    runtimeBindingName?: string;
+    specifier: string;
+    targetPath: string;
 }
 export interface BuildContext {
     options: NormalizedBuildOptions;
@@ -49,6 +61,7 @@ export interface ResolvedBuild {
     entryFiles: BuildEntry[];
     packageAliases: PackageAlias[];
     packageJsonFiles: string[];
+    lazyImports: LazyImport[];
     sourceFiles: string[];
     finalCacheDir: string;
     finalKey: string;

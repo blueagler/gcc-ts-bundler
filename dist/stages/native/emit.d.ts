@@ -1,5 +1,5 @@
 import ts from "typescript";
-import { NormalizedBuildOptions, PackageAlias } from "../../internal/types";
+import { LazyImport, NormalizedBuildOptions, PackageAlias } from "../../internal/types";
 export interface NativeEmitStageResult {
     diagnostics: ts.Diagnostic[];
     emitSkipped: boolean;
@@ -8,9 +8,10 @@ export interface NativeEmitStageResult {
     outDir: string;
     supportFiles: string[];
 }
-export declare function emitNativeStage({ cacheDir, fileNames, metadataPath, options, packageAliases, packageJsonFiles, tsConfigPath, workspaceDir, }: {
+export declare function emitNativeStage({ cacheDir, fileNames, lazyImports, metadataPath, options, packageAliases, packageJsonFiles, tsConfigPath, workspaceDir, }: {
     cacheDir: string;
     fileNames: string[];
+    lazyImports: LazyImport[];
     metadataPath: string;
     options: NormalizedBuildOptions;
     packageAliases: PackageAlias[];

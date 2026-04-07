@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use napi_derive::napi;
 use rayon::prelude::*;
 use swc_core::common::{sync::Lrc, Globals, Mark, SourceMap, GLOBALS};
-use swc_core::ecma::ast::{ArrowExpr, BindingIdent, BlockStmt, BlockStmtOrExpr, Bool, CallExpr, Callee, EmptyStmt, Expr, ExprStmt, Id, Ident, ImportDecl, ImportDefaultSpecifier, ImportSpecifier, Lit, MemberExpr, MemberProp, Module, ModuleItem, Pass, Pat, Program, PropName, Stmt, Str, TsEnumMemberId, UnaryExpr, UnaryOp, VarDecl, VarDeclKind, VarDeclarator};
+use swc_core::ecma::ast::{ArrowExpr, BindingIdent, BlockStmt, BlockStmtOrExpr, Bool, CallExpr, Callee, EmptyStmt, Expr, ExprStmt, Id, Ident, ImportDecl, ImportDefaultSpecifier, ImportSpecifier, Lit, MemberExpr, MemberProp, Module, ModuleItem, Pass, Pat, Program, PropName, Stmt, Str, SuperProp, TsEnumMemberId, UnaryExpr, UnaryOp, VarDecl, VarDeclKind, VarDeclarator};
 use swc_core::ecma::codegen::{text_writer::JsWriter, Config as CodegenConfig, Emitter};
 use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 use swc_ecma_transforms_base::resolver;
@@ -30,6 +30,8 @@ use crate::module_cache::{get_or_parse_cached_module, parse_module};
 use crate::pathing::{normalize_path, to_goog_module_id};
 use crate::support_files::{collect_commonjs_specifiers, emit_package_support_files};
 
+const RUNTIME_SPECIFIER: &str = "gcc-ts-bundler/runtime";
+
 #[allow(non_snake_case)]
 #[napi(object)]
 pub struct TranspileOutput {
@@ -47,11 +49,25 @@ pub struct PackageAliasInput {
     pub targetPath: String,
 }
 
+#[allow(non_snake_case)]
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct LazyImportInput {
+    pub importerFilePath: String,
+    pub moduleId: String,
+    pub preloadBindingName: Option<String>,
+    pub runtimeBindingName: Option<String>,
+    pub specifier: String,
+    pub targetPath: String,
+}
+
 #[derive(Clone, Debug)]
 struct TranspileContext {
     commonjs_specifiers: HashSet<String>,
     file_metadata: HashMap<String, ClosureFileMetadata>,
     global_property_names: HashSet<String>,
+    instance_method_names: HashSet<String>,
+    lazy_imports_by_file: HashMap<String, Vec<LazyImportInput>>,
     package_aliases: Vec<PackageAliasInput>,
     static_property_names: HashSet<String>,
     workspace_dir: PathBuf,
@@ -65,6 +81,7 @@ pub fn transpile_sources(
     workspace_dir: String,
     package_aliases: Vec<PackageAliasInput>,
     package_json_files: Vec<String>,
+    lazy_imports: Vec<LazyImportInput>,
 ) -> std::result::Result<TranspileOutput, String> {
     fs::create_dir_all(&out_dir).map_err(|error| error.to_string())?;
     if let Some(parent) = PathBuf::from(&externs_path).parent() {
@@ -79,6 +96,8 @@ pub fn transpile_sources(
             .collect(),
         file_metadata,
         global_property_names: collect_global_property_names(&file_names)?,
+        instance_method_names: collect_instance_method_names(&file_names)?,
+        lazy_imports_by_file: group_lazy_imports_by_file(lazy_imports),
         package_aliases,
         static_property_names: collect_static_property_names(&file_names)?,
         workspace_dir: workspace_dir.clone(),
@@ -211,6 +230,24 @@ fn collect_static_property_names(
     Ok(names)
 }
 
+fn collect_instance_method_names(
+    file_names: &[String],
+) -> std::result::Result<HashSet<String>, String> {
+    let mut names = HashSet::new();
+    for file_name in file_names {
+        if file_name.ends_with(".d.ts") {
+            continue;
+        }
+        let file_path = PathBuf::from(file_name);
+        if let Ok(module) = get_or_parse_cached_module(&file_path) {
+            let mut collector = InstanceMethodNameCollector::default();
+            module.visit_with(&mut collector);
+            names.extend(collector.names);
+        }
+    }
+    Ok(names)
+}
+
 fn collect_static_property_names_from_text(source_text: &str) -> HashSet<String> {
     let mut names = HashSet::new();
     for (_, property_name) in collect_class_static_assignments(source_text) {
@@ -315,6 +352,33 @@ impl Visit for StaticPropertyNameCollector {
             }
         }
         member_expr.visit_children_with(self);
+    }
+}
+
+#[derive(Default)]
+struct InstanceMethodNameCollector {
+    names: HashSet<String>,
+}
+
+impl InstanceMethodNameCollector {
+    fn insert_prop_name(&mut self, prop_name: Option<String>) {
+        if let Some(prop_name) = prop_name {
+            self.names.insert(prop_name);
+        }
+    }
+}
+
+impl Visit for InstanceMethodNameCollector {
+    fn visit_class_member(&mut self, member: &swc_core::ecma::ast::ClassMember) {
+        match member {
+            swc_core::ecma::ast::ClassMember::Method(method) => {
+                if !method.is_static {
+                    self.insert_prop_name(prop_name_to_string(&method.key));
+                }
+                method.visit_children_with(self);
+            }
+            _ => member.visit_children_with(self),
+        }
     }
 }
 
@@ -603,7 +667,7 @@ fn transform_source_file(
     let program = if should_run_resolver(file_path) {
         transform_program(module, file_path, context, file_metadata.as_ref())?
     } else {
-        transform_js_pass_through_program(module, source_text, context)
+        transform_js_pass_through_program(module, source_text, file_path, context)
     };
     emit_goog_module_program(
         file_path,
@@ -670,7 +734,7 @@ fn normalize_commonjs_module(
     });
     let has_t_declaration = false;
     program.visit_mut_with(&mut JsCompatAstVisitor::new(has_t_declaration));
-    apply_program_compat_transforms(&mut program, context);
+    apply_file_compat_transforms(&mut program, file_path, context);
 
     emit_goog_module_program(
         file_path,
@@ -779,7 +843,7 @@ fn apply_js_compat_text_fixes(source_text: String) -> String {
 
 fn rewrite_typescript_helper_this_fallbacks(source_text: String) -> String {
     regex::Regex::new(
-        r#"(?m)\b(var|let|const)\s+(__[A-Za-z0-9_$]+)\s*=\s*\(this\s*&&\s*this\.__[A-Za-z0-9_$]+\)\s*\|\|\s*function"#,
+        r#"(?m)\b(var|let|const)\s+(__[A-Za-z0-9_$]+)\s*=\s*\(this\s*&&\s*this(?:\.__[A-Za-z0-9_$]+|\s*\[\s*"__[A-Za-z0-9_$]+"\s*\])\)\s*\|\|\s*function"#,
     )
     .map(|regex| regex.replace_all(&source_text, "$1 $2 = function").into_owned())
     .unwrap_or(source_text)
@@ -844,11 +908,12 @@ fn annotate_nocollapse_static_members(mut source_text: String) -> String {
 fn transform_js_pass_through_module(
     module: Module,
     source_text: String,
-    _file_path: &Path,
+    file_path: &Path,
     context: &TranspileContext,
 ) -> std::result::Result<String, String> {
     GLOBALS.set(&Globals::new(), || {
-        let program = transform_js_pass_through_program(module, source_text.clone(), context);
+        let program =
+            transform_js_pass_through_program(module, source_text.clone(), file_path, context);
         print_program(&program)
             .map(apply_js_compat_text_fixes)
             .or_else(|_| Ok(apply_js_compat_text_fixes(source_text)))
@@ -858,6 +923,7 @@ fn transform_js_pass_through_module(
 fn transform_js_pass_through_program(
     module: Module,
     source_text: String,
+    file_path: &Path,
     context: &TranspileContext,
 ) -> Program {
     let mut program = Program::Module(module);
@@ -874,7 +940,7 @@ fn transform_js_pass_through_program(
     }
     let has_t_declaration = source_declares_ident(&source_text, "T");
     program.visit_mut_with(&mut JsCompatAstVisitor::new(has_t_declaration));
-    apply_program_compat_transforms(&mut program, context);
+    apply_file_compat_transforms(&mut program, file_path, context);
     program
 }
 
@@ -1293,6 +1359,10 @@ fn create_string_computed_prop(property_name: &str) -> MemberProp {
     MemberProp::Computed(create_string_computed_name(property_name))
 }
 
+fn create_string_computed_super_prop(property_name: &str) -> SuperProp {
+    SuperProp::Computed(create_string_computed_name(property_name))
+}
+
 fn create_string_computed_name(property_name: &str) -> swc_core::ecma::ast::ComputedPropName {
     swc_core::ecma::ast::ComputedPropName {
         span: Default::default(),
@@ -1438,10 +1508,141 @@ fn apply_program_compat_transforms(program: &mut Program, context: &TranspileCon
             context.static_property_names.clone(),
         ));
     }
+    if !context.instance_method_names.is_empty() {
+        program.visit_mut_with(&mut InstanceMethodCompatVisitor::new(
+            context.instance_method_names.clone(),
+        ));
+    }
+    program.visit_mut_with(&mut InternalProtocolMemberCompatVisitor);
     program.visit_mut_with(&mut DerivedClassMethodKeyCompatVisitor);
     program.visit_mut_with(&mut ConstantLikePropertyCompatVisitor);
     program.visit_mut_with(&mut UppercaseStaticMemberCompatVisitor);
     program.visit_mut_with(&mut ObjectPatternParamVisitor::default());
+}
+
+fn apply_file_compat_transforms(
+    program: &mut Program,
+    file_path: &Path,
+    context: &TranspileContext,
+) {
+    apply_program_compat_transforms(program, context);
+    if let Some(lazy_imports) = context
+        .lazy_imports_by_file
+        .get(&file_path.to_string_lossy().to_string())
+    {
+        program.visit_mut_with(&mut ExplicitLazyImportVisitor::new(
+            file_path,
+            lazy_imports,
+        ));
+    }
+}
+
+fn group_lazy_imports_by_file(
+    lazy_imports: Vec<LazyImportInput>,
+) -> HashMap<String, Vec<LazyImportInput>> {
+    let mut grouped = HashMap::<String, Vec<LazyImportInput>>::new();
+    for entry in lazy_imports {
+        grouped
+            .entry(entry.importerFilePath.clone())
+            .or_default()
+            .push(entry);
+    }
+    for entries in grouped.values_mut() {
+        entries.sort_by(|left, right| left.specifier.cmp(&right.specifier));
+    }
+    grouped
+}
+
+fn lazy_lookup_key(importer_file_path: &str, specifier: &str) -> String {
+    format!("{importer_file_path}\0{specifier}")
+}
+
+struct ExplicitLazyImportVisitor {
+    importer_file_path: String,
+    lazy_imports: HashMap<String, LazyImportInput>,
+}
+
+impl ExplicitLazyImportVisitor {
+    fn new(file_path: &Path, lazy_imports: &[LazyImportInput]) -> Self {
+        Self {
+            importer_file_path: file_path.to_string_lossy().to_string(),
+            lazy_imports: lazy_imports
+                .iter()
+                .cloned()
+                .map(|entry| (lazy_lookup_key(&entry.importerFilePath, &entry.specifier), entry))
+                .collect(),
+        }
+    }
+}
+
+impl VisitMut for ExplicitLazyImportVisitor {
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        expr.visit_mut_children_with(self);
+
+        let Expr::Call(call_expr) = expr else {
+            return;
+        };
+        let rewrite_kind = match &call_expr.callee {
+            Callee::Import(_) => Some("import"),
+            Callee::Expr(callee) => {
+                let Expr::Ident(ident) = &**callee else {
+                    return;
+                };
+                if ident.sym == *"lazyModule" {
+                    Some("lazyModule")
+                } else if ident.sym == *"preloadModule" {
+                    Some("preloadModule")
+                } else {
+                    None
+                }
+            }
+            Callee::Super(_) => None,
+        };
+        let Some(rewrite_kind) = rewrite_kind else {
+            return;
+        };
+        if call_expr.args.len() != 1 {
+            return;
+        }
+        let specifier = match &*call_expr.args[0].expr {
+            Expr::Lit(Lit::Str(string)) => string.value.to_string_lossy().to_string(),
+            Expr::Tpl(template) if template.exprs.is_empty() && template.quasis.len() == 1 => {
+                template.quasis[0].raw.to_string()
+            }
+            _ => return,
+        };
+        let key = lazy_lookup_key(&self.importer_file_path, &specifier);
+        let Some(lazy_import) = self.lazy_imports.get(&key) else {
+            return;
+        };
+        *expr = if rewrite_kind == "preloadModule" {
+            Expr::Call(CallExpr {
+                span: Default::default(),
+                ctxt: Default::default(),
+                callee: Callee::Expr(Box::new(Expr::Ident(create_ident(
+                    lazy_import
+                        .preloadBindingName
+                        .as_deref()
+                        .unwrap_or("__gcc_missing_preload"),
+                )))),
+                args: Vec::new(),
+                type_args: None,
+            })
+        } else {
+            Expr::Call(CallExpr {
+                span: Default::default(),
+                ctxt: Default::default(),
+                callee: Callee::Expr(Box::new(Expr::Ident(create_ident(
+                    lazy_import
+                        .runtimeBindingName
+                        .as_deref()
+                        .unwrap_or("__gcc_missing_lazy"),
+                )))),
+                args: Vec::new(),
+                type_args: None,
+            })
+        };
+    }
 }
 
 struct StaticPropertyCompatVisitor {
@@ -1472,6 +1673,52 @@ impl VisitMut for StaticPropertyCompatVisitor {
         }
 
         member.prop = create_string_computed_prop(prop_ident.sym.as_ref());
+    }
+}
+
+struct InstanceMethodCompatVisitor {
+    method_names: HashSet<String>,
+}
+
+impl InstanceMethodCompatVisitor {
+    fn new(method_names: HashSet<String>) -> Self {
+        Self { method_names }
+    }
+}
+
+impl VisitMut for InstanceMethodCompatVisitor {
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        expr.visit_mut_children_with(self);
+
+        match expr {
+            Expr::Member(member) => {
+                if member.prop.is_computed() {
+                    return;
+                }
+                let Expr::This(_) = &*member.obj else {
+                    return;
+                };
+                let MemberProp::Ident(prop_ident) = &member.prop else {
+                    return;
+                };
+                if !self.method_names.contains(prop_ident.sym.as_ref()) {
+                    return;
+                }
+
+                member.prop = create_string_computed_prop(prop_ident.sym.as_ref());
+            }
+            Expr::SuperProp(super_prop) => {
+                let SuperProp::Ident(prop_ident) = &super_prop.prop else {
+                    return;
+                };
+                if !self.method_names.contains(prop_ident.sym.as_ref()) {
+                    return;
+                }
+
+                super_prop.prop = create_string_computed_super_prop(prop_ident.sym.as_ref());
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1545,6 +1792,56 @@ impl VisitMut for GlobalThisPropertyCompatVisitor {
 }
 
 struct ConstantLikePropertyCompatVisitor;
+
+struct InternalProtocolMemberCompatVisitor;
+
+fn is_internal_protocol_name(name: &str) -> bool {
+    name.starts_with('_') || name.contains('$')
+}
+
+impl VisitMut for InternalProtocolMemberCompatVisitor {
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        expr.visit_mut_children_with(self);
+
+        let Expr::Member(member) = expr else {
+            return;
+        };
+        if member.prop.is_computed() {
+            return;
+        }
+        let MemberProp::Ident(prop_ident) = &member.prop else {
+            return;
+        };
+        if !is_internal_protocol_name(prop_ident.sym.as_ref()) {
+            return;
+        }
+
+        member.prop = create_string_computed_prop(prop_ident.sym.as_ref());
+    }
+
+    fn visit_mut_class(&mut self, class: &mut swc_core::ecma::ast::Class) {
+        class.visit_mut_children_with(self);
+        for member in &mut class.body {
+            match member {
+                swc_core::ecma::ast::ClassMember::Method(method)
+                    if prop_name_to_string(&method.key)
+                        .map(|name| is_internal_protocol_name(&name))
+                        .unwrap_or(false) =>
+                {
+                    method.key = quote_prop_name(method.key.clone());
+                }
+                swc_core::ecma::ast::ClassMember::ClassProp(prop)
+                    if prop_name_to_string(&prop.key)
+                        .map(|name| is_internal_protocol_name(&name))
+                        .unwrap_or(false) =>
+                {
+                    prop.key = quote_prop_name(prop.key.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+}
 
 impl VisitMut for ConstantLikePropertyCompatVisitor {
     fn visit_mut_expr(&mut self, expr: &mut Expr) {
@@ -2269,7 +2566,7 @@ fn transform_program(
     if !enum_literal_values.is_empty() {
         program.visit_mut_with(&mut EnumValueInlineVisitor::new(enum_literal_values));
     }
-    apply_program_compat_transforms(&mut program, context);
+    apply_file_compat_transforms(&mut program, file_path, context);
     Ok(program)
 }
 
@@ -2349,6 +2646,24 @@ fn emit_goog_module_program(
     };
     let module_id = to_goog_module_id(file_path, &context.workspace_dir);
     let mut output = vec![format!("goog.module({module_id:?});")];
+    if let Some(lazy_imports) = context
+        .lazy_imports_by_file
+        .get(&file_path.to_string_lossy().to_string())
+    {
+        output.push("const __gcc_chunk_runtime = goog.require(\"gcc.__gcc_chunk_runtime\");".to_string());
+        for lazy_import in lazy_imports {
+            if let Some(binding_name) = &lazy_import.runtimeBindingName {
+                output.push(format!(
+                    "const {binding_name} = __gcc_chunk_runtime.{binding_name};"
+                ));
+            }
+            if let Some(binding_name) = &lazy_import.preloadBindingName {
+                output.push(format!(
+                    "const {binding_name} = __gcc_chunk_runtime.{binding_name};"
+                ));
+            }
+        }
+    }
 
     if let Some(metadata) = file_metadata {
         for type_decl in &metadata.type_declarations {
@@ -2494,6 +2809,9 @@ fn convert_import_decl(
     context: &TranspileContext,
     import_counter: &mut usize,
 ) -> std::result::Result<Vec<String>, String> {
+    if import_decl.src.value == *RUNTIME_SPECIFIER {
+        return Ok(Vec::new());
+    }
     let module_id = resolve_module_id_for_specifier(
         file_path,
         &import_decl.src.value.to_string_lossy(),
@@ -3183,6 +3501,8 @@ mod tests {
             commonjs_specifiers: HashSet::new(),
             file_metadata: HashMap::new(),
             global_property_names: HashSet::new(),
+            instance_method_names: HashSet::new(),
+            lazy_imports_by_file: HashMap::new(),
             package_aliases: Vec::new(),
             static_property_names: HashSet::new(),
             workspace_dir: PathBuf::from("/tmp"),
@@ -3238,6 +3558,8 @@ mod tests {
                         commonjs_specifiers: HashSet::new(),
                         file_metadata: HashMap::new(),
                         global_property_names: HashSet::new(),
+                        instance_method_names: HashSet::new(),
+                        lazy_imports_by_file: HashMap::new(),
                         package_aliases: vec![super::PackageAliasInput {
                             packageName: "react".to_string(),
                             subpath: ".".to_string(),
@@ -3286,6 +3608,8 @@ mod tests {
                         commonjs_specifiers: HashSet::new(),
                         file_metadata: HashMap::new(),
                         global_property_names: HashSet::new(),
+                        instance_method_names: HashSet::new(),
+                        lazy_imports_by_file: HashMap::new(),
                         package_aliases: vec![super::PackageAliasInput {
                             packageName: "react".to_string(),
                             subpath: ".".to_string(),
@@ -3336,6 +3660,8 @@ mod tests {
                         commonjs_specifiers: HashSet::new(),
                         file_metadata: HashMap::new(),
                         global_property_names: HashSet::new(),
+                        instance_method_names: HashSet::new(),
+                        lazy_imports_by_file: HashMap::new(),
                         package_aliases: vec![super::PackageAliasInput {
                             packageName: "react".to_string(),
                             subpath: ".".to_string(),
@@ -3495,6 +3821,8 @@ mod tests {
                 commonjs_specifiers: HashSet::from(["demo-pkg".to_string()]),
                 file_metadata: HashMap::new(),
                 global_property_names: HashSet::new(),
+                instance_method_names: HashSet::new(),
+                lazy_imports_by_file: HashMap::new(),
                 package_aliases: Vec::new(),
                 static_property_names: HashSet::new(),
                 workspace_dir: PathBuf::from("/tmp"),
@@ -3549,6 +3877,8 @@ mod tests {
             commonjs_specifiers: HashSet::new(),
             file_metadata: HashMap::new(),
             global_property_names: HashSet::new(),
+            instance_method_names: HashSet::new(),
+            lazy_imports_by_file: HashMap::new(),
             package_aliases: vec![super::PackageAliasInput {
                 packageName: "react".to_string(),
                 subpath: ".".to_string(),
@@ -3666,6 +3996,28 @@ mod tests {
     }
 
     #[test]
+    fn preserves_internal_protocol_class_methods_and_calls() {
+        let source =
+            "class Demo { constructor(){ this.__initialize(); this._$changeProperty(); this.$createRenderRoot$(); } __initialize(){ this.__save(); } __save(){} _$changeProperty(){} $createRenderRoot$(){} }\n";
+        let transformed = transform_js_pass_through_module(
+            parse_module(std::path::Path::new("fixture.js"), source).expect("module"),
+            source.to_string(),
+            std::path::Path::new("fixture.js"),
+            &empty_context(),
+        )
+        .expect("transform");
+
+        assert!(transformed.contains("this[\"__initialize\"]()"), "{transformed}");
+        assert!(transformed.contains("\"__initialize\"()"), "{transformed}");
+        assert!(transformed.contains("this[\"__save\"]()"), "{transformed}");
+        assert!(transformed.contains("\"__save\"()"), "{transformed}");
+        assert!(transformed.contains("this[\"_$changeProperty\"]()"), "{transformed}");
+        assert!(transformed.contains("\"_$changeProperty\"()"), "{transformed}");
+        assert!(transformed.contains("this[\"$createRenderRoot$\"]()"), "{transformed}");
+        assert!(transformed.contains("\"$createRenderRoot$\"()"), "{transformed}");
+    }
+
+    #[test]
     fn rewrites_collected_global_property_reads_to_bracket_access() {
         let source = "const root = globalThis;\nroot.sharedRegistry = root.sharedRegistry || new WeakMap();\nexport const value = sharedRegistry.get(meta) ?? globalThis.sharedRegistry ?? root.sharedRegistry;\n";
         let transformed = transform_js_pass_through_module(
@@ -3676,6 +4028,8 @@ mod tests {
                 commonjs_specifiers: HashSet::new(),
                 file_metadata: HashMap::new(),
                 global_property_names: HashSet::from(["sharedRegistry".to_string()]),
+                instance_method_names: HashSet::new(),
+                lazy_imports_by_file: HashMap::new(),
                 package_aliases: vec![],
                 static_property_names: HashSet::new(),
                 workspace_dir: PathBuf::from("/tmp"),
@@ -3699,6 +4053,8 @@ mod tests {
                 commonjs_specifiers: HashSet::new(),
                 file_metadata: HashMap::new(),
                 global_property_names: HashSet::new(),
+                instance_method_names: HashSet::new(),
+                lazy_imports_by_file: HashMap::new(),
                 package_aliases: vec![],
                 static_property_names: HashSet::from([
                     "styles".to_string(),

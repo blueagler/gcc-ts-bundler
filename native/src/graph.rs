@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -8,9 +8,13 @@ use napi_derive::napi;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use swc_core::ecma::ast::*;
+use swc_core::ecma::visit::{Visit, VisitWith};
 
 use crate::commonjs::{analyze_commonjs_module, CommonJsAnalysis};
 use crate::module_cache::{get_or_parse_cached_module, parse_and_cache_module};
+use crate::pathing::to_goog_module_id;
+
+const RUNTIME_SPECIFIER: &str = "gcc-ts-bundler/runtime";
 
 #[allow(non_snake_case)]
 #[napi(object)]
@@ -48,11 +52,22 @@ pub struct PackageAliasEntry {
 
 #[allow(non_snake_case)]
 #[napi(object)]
+#[derive(Clone, Debug)]
+pub struct LazyImportEntry {
+    pub importerFilePath: String,
+    pub moduleId: String,
+    pub specifier: String,
+    pub targetPath: String,
+}
+
+#[allow(non_snake_case)]
+#[napi(object)]
 #[derive(Debug)]
 pub struct ResolveGraphOutput {
     pub entries: Vec<EntryExportMetadata>,
     pub fileHashes: Vec<FileHashEntry>,
     pub graph: Vec<DependencyGraphEntry>,
+    pub lazyImports: Vec<LazyImportEntry>,
     pub packageAliases: Vec<PackageAliasEntry>,
     pub packageJsonFiles: Vec<String>,
     pub sourceFiles: Vec<String>,
@@ -101,6 +116,7 @@ pub fn resolve_graph(
     let mut commonjs_cache = HashMap::<PathBuf, CommonJsAnalysis>::new();
     let mut file_hashes = BTreeMap::new();
     let mut graph = BTreeMap::new();
+    let mut lazy_imports = BTreeMap::<String, LazyImportEntry>::new();
     let mut module_cache = HashMap::new();
     let mut package_aliases = BTreeMap::<String, PackageAliasEntry>::new();
     let mut pending = entries.clone();
@@ -128,6 +144,11 @@ pub fn resolve_graph(
         } else {
             extract_dependencies(&module)
         };
+        let lazy_specifiers = if commonjs_analysis.has_commonjs {
+            Vec::new()
+        } else {
+            collect_lazy_runtime_specifiers(&module)?
+        };
 
         let mut dependencies = BTreeSet::new();
         for specifier in specifiers {
@@ -140,6 +161,28 @@ pub fn resolve_graph(
                     );
                 }
                 dependencies.insert(resolved.path);
+            }
+        }
+        for specifier in lazy_specifiers {
+            if let Some(resolved) = resolve_module_specifier(&specifier, &current_file, &context)? {
+                consulted_package_jsons.extend(resolved.package_json_files.iter().cloned());
+                if let Some(package_alias) = resolved.package_alias.clone() {
+                    package_aliases.insert(
+                        format!("{}\0{}", package_alias.packageName, package_alias.subpath),
+                        package_alias,
+                    );
+                }
+                pending.push(resolved.path.clone());
+                let key = format!("{}\0{}", current_file.to_string_lossy(), specifier);
+                lazy_imports.insert(
+                    key,
+                    LazyImportEntry {
+                        importerFilePath: current_file.to_string_lossy().to_string(),
+                        moduleId: to_goog_module_id(&resolved.path, context.workspace_dir),
+                        specifier,
+                        targetPath: resolved.path.to_string_lossy().to_string(),
+                    },
+                );
             }
         }
 
@@ -205,6 +248,7 @@ pub fn resolve_graph(
                 filePath: file_path,
             })
             .collect(),
+        lazyImports: lazy_imports.into_values().collect(),
         packageAliases: package_aliases.into_values().collect(),
         packageJsonFiles: package_json_files,
         sourceFiles: source_files,
@@ -428,7 +472,7 @@ fn extract_dependencies(module: &Module) -> Vec<String> {
     for item in &module.body {
         match item {
             ModuleItem::ModuleDecl(ModuleDecl::Import(import_decl)) => {
-                if !import_decl.type_only {
+                if !import_decl.type_only && import_decl.src.value != *RUNTIME_SPECIFIER {
                     dependencies.push(import_decl.src.value.to_string_lossy().to_string());
                 }
             }
@@ -451,11 +495,124 @@ fn extract_dependencies(module: &Module) -> Vec<String> {
     dependencies
 }
 
+fn collect_lazy_runtime_specifiers(module: &Module) -> std::result::Result<Vec<String>, String> {
+    let mut collector = LazyRuntimeCallCollector {
+        errors: Vec::new(),
+        helpers: collect_runtime_lazy_helpers(module),
+        specifiers: Vec::new(),
+    };
+    module.visit_with(&mut collector);
+    if !collector.errors.is_empty() {
+        return Err(collector.errors.join("\n"));
+    }
+    Ok(collector.specifiers)
+}
+
+#[derive(Default)]
+struct RuntimeLazyHelpers {
+    lazy_names: HashSet<String>,
+    preload_names: HashSet<String>,
+}
+
+fn collect_runtime_lazy_helpers(module: &Module) -> RuntimeLazyHelpers {
+    let mut helpers = RuntimeLazyHelpers::default();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::Import(import_decl)) = item else {
+            continue;
+        };
+        if import_decl.src.value != *RUNTIME_SPECIFIER {
+            continue;
+        }
+        for specifier in &import_decl.specifiers {
+            let ImportSpecifier::Named(named) = specifier else {
+                continue;
+            };
+            let imported_name = match &named.imported {
+                Some(ModuleExportName::Ident(ident)) => ident.sym.as_ref(),
+                Some(ModuleExportName::Str(string)) => {
+                    if string.value.to_string_lossy() == "lazyModule" {
+                        "lazyModule"
+                    } else if string.value.to_string_lossy() == "preloadModule" {
+                        "preloadModule"
+                    } else {
+                        ""
+                    }
+                }
+                None => named.local.sym.as_ref(),
+            };
+            match imported_name {
+                "lazyModule" => {
+                    helpers.lazy_names.insert(named.local.sym.to_string());
+                }
+                "preloadModule" => {
+                    helpers.preload_names.insert(named.local.sym.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+    helpers
+}
+
+struct LazyRuntimeCallCollector {
+    errors: Vec<String>,
+    helpers: RuntimeLazyHelpers,
+    specifiers: Vec<String>,
+}
+
+impl Visit for LazyRuntimeCallCollector {
+    fn visit_call_expr(&mut self, call_expr: &CallExpr) {
+        call_expr.visit_children_with(self);
+
+        let helper_name = match &call_expr.callee {
+            Callee::Import(_) => Some("import"),
+            Callee::Expr(callee) => {
+                let Expr::Ident(ident) = &**callee else {
+                    return;
+                };
+                if self.helpers.lazy_names.contains(ident.sym.as_ref()) {
+                    Some("lazyModule")
+                } else if self.helpers.preload_names.contains(ident.sym.as_ref()) {
+                    Some("preloadModule")
+                } else {
+                    None
+                }
+            }
+            Callee::Super(_) => None,
+        };
+        let Some(helper_name) = helper_name else {
+            return;
+        };
+        if call_expr.args.len() != 1 {
+            self.errors.push(format!(
+                "{}() requires exactly one string literal argument",
+                helper_name
+            ));
+            return;
+        }
+        match &*call_expr.args[0].expr {
+            Expr::Lit(Lit::Str(string)) => {
+                self.specifiers.push(string.value.to_string_lossy().to_string());
+            }
+            Expr::Tpl(template) if template.exprs.is_empty() && template.quasis.len() == 1 => {
+                self.specifiers.push(template.quasis[0].raw.to_string());
+            }
+            _ => self.errors.push(format!(
+                "{}() requires a string literal module specifier",
+                helper_name
+            )),
+        }
+    }
+}
+
 fn resolve_module_specifier(
     specifier: &str,
     importer: &Path,
     context: &ResolveContext,
 ) -> std::result::Result<Option<ResolvedModule>, String> {
+    if specifier == RUNTIME_SPECIFIER {
+        return Ok(None);
+    }
     if is_node_builtin(specifier) {
         return Err(format!(
             "Unsupported Node builtin import \"{specifier}\" in {}",

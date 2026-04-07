@@ -97,21 +97,42 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       };
     }
 
-    writeEntryShims({
-      entries: resolvedBuild.entryFiles.map((entry) => ({
-        exportNames: entry.exportNames,
-        hasDefaultExport: entry.hasDefaultExport,
-        importPath: toImportPath(
-          path.relative(
-            path.dirname(
-              path.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`),
-            ),
-            entry.sourcePath,
+    if (
+      context.options.chunks.mode === "closure-library" &&
+      resolvedBuild.entryFiles.some(
+        (entry) => entry.exportNames.length > 0 || entry.hasDefaultExport,
+      )
+    ) {
+      return {
+        cacheHit: false,
+        diagnostics: [
+          createBuildDiagnostic(
+            "Chunk mode is application-oriented and does not emit exported library entry files. Remove entry exports or disable chunks.mode.",
           ),
-        ),
-        shimPath: path.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`),
-      })),
-    });
+        ],
+        emitSkipped: true,
+        exitCode: 1,
+        outputFiles: [],
+      };
+    }
+
+    if (context.options.chunks.mode !== "closure-library") {
+      writeEntryShims({
+        entries: resolvedBuild.entryFiles.map((entry) => ({
+          exportNames: entry.exportNames,
+          hasDefaultExport: entry.hasDefaultExport,
+          importPath: toImportPath(
+            path.relative(
+              path.dirname(
+                path.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`),
+              ),
+              entry.sourcePath,
+            ),
+          ),
+          shimPath: path.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`),
+        })),
+      });
+    }
 
     const nativeEmitMetadataPath = path.join(
       resolvedBuild.nativeEmitCacheDir,
@@ -119,7 +140,11 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     );
     const nativeEmitResult = await emitNativeStage({
       cacheDir: resolvedBuild.nativeEmitCacheDir,
-      fileNames: [...resolvedBuild.sourceFiles, ...resolvedBuild.shimFiles],
+      fileNames:
+        context.options.chunks.mode === "closure-library"
+          ? resolvedBuild.sourceFiles
+          : [...resolvedBuild.sourceFiles, ...resolvedBuild.shimFiles],
+      lazyImports: resolvedBuild.lazyImports,
       metadataPath: nativeEmitMetadataPath,
       options: context.options,
       packageAliases: resolvedBuild.packageAliases,
@@ -150,6 +175,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
         nativeEmitResult.externsPath,
       ],
       finalCacheDir: resolvedBuild.finalCacheDir,
+      lazyImports: resolvedBuild.lazyImports,
       options: context.options,
       outDir: context.options.outDir,
       supportFiles: nativeEmitResult.supportFiles,

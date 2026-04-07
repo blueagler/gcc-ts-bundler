@@ -50,6 +50,7 @@ Programmatic options:
 - `packages`
 - `languageOut`
 - `compilationLevel`
+- `chunks`
 - `cache`
 - `diagnostics`
 - `externs`
@@ -58,6 +59,8 @@ Programmatic options:
 Defaults:
 
 - `cache.mode = "persistent"`
+- `chunks.mode = "off"`
+- `chunks.manifestFile` is off by default
 - `packages.mode = "esm-only"`
 - persistent cache lives outside the user project
 - `diagnostics.preflight = "errors-only"`
@@ -65,6 +68,20 @@ Defaults:
 The runtime path uses a native Rust addon for graph resolution, shim emission, and GCC export rewriting. Closure Compiler remains the final aggressive optimizer.
 
 `packages.mode = "esm-only"` supports browser-safe ESM dependencies from `node_modules`, plus statically analyzable CommonJS package entrypoints and internal package modules. Dynamic `require()`, Node builtins, JSON modules, and native addons are still rejected.
+
+`chunks.mode = "closure-library"` switches output to app-oriented Closure script chunks. In that mode entries are treated as bootstrap scripts, not exported library bundles.
+
+For explicit lazy loading, import the compile-time helpers from `gcc-ts-bundler/runtime`:
+
+```ts
+import { lazyModule, preloadModule } from "gcc-ts-bundler/runtime";
+
+const loadFeature = lazyModule<typeof import("./feature")>("./feature");
+void preloadModule("./feature");
+```
+
+The specifier must be a string literal. In chunk mode the bundler rewrites these calls to the generated chunk loader runtime and emits a `chunks.manifest.json` file next to the output chunks.
+The specifier must be a string literal. In chunk mode the bundler rewrites these calls to generated internal chunk-loader bindings. No manifest file is emitted unless `chunks.manifestFile` or `--chunk-manifest` is explicitly set.
 
 ## CLI
 
@@ -84,6 +101,10 @@ gcc-ts-bundler clean-cache --project-root=.
 - `--language-out`: ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT
 - `--compilation-level`: WHITESPACE_ONLY | SIMPLE | ADVANCED
 - `--packages`: `off | esm-only`
+- `--chunks`: `off | closure-library`
+- `--chunk-public-path`: public URL prefix used to load chunk files
+- `--chunk-base-name`: base chunk output name
+- `--chunk-manifest`: output filename for the generated chunk manifest
 - `--cache-mode`: `off | temp | persistent`
 - `--cache-dir`: Explicit cache directory
 - `--preflight`: `off | errors-only | full`
@@ -95,6 +116,7 @@ gcc-ts-bundler clean-cache --project-root=.
 
 - `examples/lit-playground` is a copied Lit motion playground with its own package and build wrapper.
 - `examples/react-spa` is a real React 19 SPA fixture with its own `package.json` and `node_modules`.
+- `examples/lazy-chunks-demo` is a minimal browser fixture that uses `gcc-ts-bundler/runtime` to lazy load a feature chunk.
 
 ## License
 

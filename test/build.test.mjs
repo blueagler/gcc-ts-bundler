@@ -365,3 +365,117 @@ test("unsupported CommonJS packages surface actionable diagnostics", async (t) =
   assert.ok(result.diagnostics.length > 0);
   assert.match(String(result.diagnostics[0].messageText), /Unsupported CommonJS/);
 });
+
+test("emits smaller Closure script chunks for explicit lazy modules", async (t) => {
+  const fixture = await createFixture(t);
+  await fixture.write(
+    "src/main.ts",
+    [
+      'const loadFeature = () => import("./feature");',
+      "globalThis.__lazyLoader = loadFeature;",
+      'document.body.textContent = "base";',
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "src/feature.ts",
+    [
+      'export const marker = "LAZY_FEATURE";',
+      "export function render() {",
+      "  return marker;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  const result = await build({
+    cache: { mode: "off" },
+    chunks: { mode: "closure-library" },
+    entries: ["./main.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(
+    result.outputFiles
+      .map((filePath) => path.basename(filePath))
+      .sort((left, right) => left.localeCompare(right)),
+    ["main.js", "src-feature-lazy.js"],
+  );
+
+  const baseOutput = await fixture.read("dist/main.js");
+  const lazyOutput = await fixture.read("dist/src-feature-lazy.js");
+
+  assert.doesNotMatch(baseOutput, /\bexport\s*\{/);
+  assert.doesNotMatch(baseOutput, /globalThis\.__gccChunkRuntime/);
+  assert.doesNotMatch(baseOutput, /gcc\.src\.feature/);
+  assert.doesNotMatch(baseOutput, /LAZY_FEATURE/);
+  assert.match(lazyOutput, /LAZY_FEATURE/);
+});
+
+test("emits an optional chunk manifest when requested", async (t) => {
+  const fixture = await createFixture(t);
+  await fixture.write(
+    "src/main.ts",
+    [
+      'const loadFeature = () => import("./feature");',
+      "globalThis.__lazyLoader = loadFeature;",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "src/feature.ts",
+    'export const marker = "LAZY_FEATURE";\n',
+  );
+
+  const result = await build({
+    cache: { mode: "off" },
+    chunks: { manifestFile: "chunk-map.json", mode: "closure-library" },
+    entries: ["./main.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(
+    result.outputFiles
+      .map((filePath) => path.basename(filePath))
+      .sort((left, right) => left.localeCompare(right)),
+    ["chunk-map.json", "main.js", "src-feature-lazy.js"],
+  );
+
+  const manifest = JSON.parse(await fixture.read("dist/chunk-map.json"));
+  assert.equal(manifest.baseChunkName, "main");
+  assert.equal(manifest.lazyModules["gcc.src.feature"], "src-feature-lazy");
+});
+
+test("rejects non-literal dynamic import specifiers", async (t) => {
+  const fixture = await createFixture(t);
+  await fixture.write(
+    "src/main.ts",
+    [
+      'const target = "./feature";',
+      "void import(target);",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write("src/feature.ts", "export const value = 1;\n");
+
+  const result = await build({
+    cache: { mode: "off" },
+    chunks: { mode: "closure-library" },
+    entries: ["./main.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(
+    String(result.diagnostics[0]?.messageText ?? ""),
+    /import\(\) requires a string literal module specifier/,
+  );
+});

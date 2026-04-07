@@ -16,6 +16,10 @@ Build flags:
   --out-dir             Output directory
   --language-out        ECMASCRIPT3 | ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT_NEXT
   --compilation-level   WHITESPACE_ONLY | SIMPLE | ADVANCED
+  --chunks              off | closure-library
+  --chunk-public-path   Public URL prefix for chunk files in chunk mode
+  --chunk-base-name     Base chunk output name in chunk mode
+  --chunk-manifest      Relative manifest path in chunk mode
   --packages            off | esm-only
   --cache-mode          off | temp | persistent
   --cache-dir           Explicit cache directory

@@ -25,10 +25,18 @@ interface NativePackageAliasEntry {
   targetPath: string;
 }
 
+interface NativeLazyImportEntry {
+  importerFilePath: string;
+  moduleId: string;
+  specifier: string;
+  targetPath: string;
+}
+
 interface NativeResolveGraphOutput {
   entries: NativeEntryExportMetadata[];
   fileHashes: NativeFileHashEntry[];
   graph: NativeDependencyGraphEntry[];
+  lazyImports: NativeLazyImportEntry[];
   packageAliases: NativePackageAliasEntry[];
   packageJsonFiles: string[];
   sourceFiles: string[];
@@ -55,6 +63,15 @@ interface NativeTranspileOutput {
   supportFiles: string[];
 }
 
+interface NativeLazyImportInput {
+  importerFilePath: string;
+  moduleId: string;
+  preloadBindingName?: string;
+  runtimeBindingName?: string;
+  specifier: string;
+  targetPath: string;
+}
+
 interface NativeTranspilePackageAlias {
   packageName: string;
   subpath: string;
@@ -79,6 +96,7 @@ interface NativeBinding {
     workspaceDir: string,
     packageAliases: NativeTranspilePackageAlias[],
     packageJsonFiles: string[],
+    lazyImports: NativeLazyImportInput[],
   ): NativeTranspileOutput;
   writeEntryShims(entries: NativeShimEntry[]): string[];
 }
@@ -121,6 +139,7 @@ export function resolveGraph(input: {
     graph: Object.fromEntries(
       result.graph.map((entry) => [entry.filePath, entry.dependencies]),
     ) as Record<string, string[]>,
+    lazyImports: result.lazyImports,
     packageAliases: result.packageAliases,
     packageJsonFiles: result.packageJsonFiles,
     sourceFiles: result.sourceFiles,
@@ -139,6 +158,7 @@ export function transpileSources(input: {
   outDir: string;
   packageAliases?: NativeTranspilePackageAlias[];
   packageJsonFiles?: string[];
+  lazyImports?: NativeLazyImportInput[];
   workspaceDir: string;
 }) {
   return loadBinding().transpileSources(
@@ -149,6 +169,7 @@ export function transpileSources(input: {
     input.workspaceDir,
     input.packageAliases ?? [],
     input.packageJsonFiles ?? [],
+    input.lazyImports ?? [],
   );
 }
 

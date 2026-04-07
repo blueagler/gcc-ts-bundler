@@ -8,6 +8,12 @@ interface NativePackageAliasEntry {
     subpath: string;
     targetPath: string;
 }
+interface NativeLazyImportEntry {
+    importerFilePath: string;
+    moduleId: string;
+    specifier: string;
+    targetPath: string;
+}
 export interface NativeFileStateEntry {
     exists: boolean;
     filePath: string;
@@ -18,6 +24,14 @@ interface NativeTranspileOutput {
     emittedFiles: string[];
     externsPath: string;
     supportFiles: string[];
+}
+interface NativeLazyImportInput {
+    importerFilePath: string;
+    moduleId: string;
+    preloadBindingName?: string;
+    runtimeBindingName?: string;
+    specifier: string;
+    targetPath: string;
 }
 interface NativeTranspilePackageAlias {
     packageName: string;
@@ -33,6 +47,7 @@ export declare function resolveGraph(input: {
     entries: NativeEntryExportMetadata[];
     fileHashes: Record<string, string>;
     graph: Record<string, string[]>;
+    lazyImports: NativeLazyImportEntry[];
     packageAliases: NativePackageAliasEntry[];
     packageJsonFiles: string[];
     sourceFiles: string[];
@@ -46,6 +61,7 @@ export declare function transpileSources(input: {
     outDir: string;
     packageAliases?: NativeTranspilePackageAlias[];
     packageJsonFiles?: string[];
+    lazyImports?: NativeLazyImportInput[];
     workspaceDir: string;
 }): NativeTranspileOutput;
 export declare function writeEntryShims(input: {

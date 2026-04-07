@@ -7,6 +7,7 @@ export type LanguageOut =
 export type CacheMode = "off" | "temp" | "persistent";
 export type DiagnosticsPreflight = "off" | "errors-only" | "full";
 export type PackageMode = "off" | "esm-only";
+export type ChunkMode = "off" | "closure-library";
 
 export interface CacheOptions {
   dir?: string;
@@ -23,6 +24,13 @@ export interface PackageOptions {
   mode?: PackageMode;
 }
 
+export interface ChunkOptions {
+  baseChunkName?: string;
+  manifestFile?: string;
+  mode?: ChunkMode;
+  publicPath?: string;
+}
+
 export interface BuildOptions {
   cache?: CacheOptions;
   compilationLevel?: CompilationLevel;
@@ -31,6 +39,7 @@ export interface BuildOptions {
   externs?: string[];
   js?: string[];
   languageOut?: LanguageOut;
+  chunks?: ChunkOptions;
   outDir?: string;
   outputNames?: string[];
   packages?: PackageOptions;
@@ -57,6 +66,12 @@ export const DEFAULT_BUILD_OPTIONS = Object.freeze({
     mode: "persistent" as CacheMode,
   },
   compilationLevel: "ADVANCED" as CompilationLevel,
+  chunks: {
+    baseChunkName: "main",
+    manifestFile: "",
+    mode: "off" as ChunkMode,
+    publicPath: "./",
+  },
   diagnostics: {
     fatalWarnings: false,
     preflight: "errors-only" as DiagnosticsPreflight,

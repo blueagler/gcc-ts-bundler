@@ -48,6 +48,7 @@ pub fn transpile_sources(
     workspace_dir: String,
     package_aliases: Vec<transpile::PackageAliasInput>,
     package_json_files: Vec<String>,
+    lazy_imports: Vec<transpile::LazyImportInput>,
 ) -> Result<transpile::TranspileOutput> {
     into_napi(transpile::transpile_sources(
         file_names,
@@ -57,6 +58,7 @@ pub fn transpile_sources(
         workspace_dir,
         package_aliases,
         package_json_files,
+        lazy_imports,
     ))
 }
 

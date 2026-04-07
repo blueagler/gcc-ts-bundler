@@ -6,7 +6,11 @@ import ts from "typescript";
 import { DiagnosticsPreflight } from "../../api/types";
 import { filesExist } from "../../internal/file-state";
 import { collectFileStates } from "../../native/load";
-import { NormalizedBuildOptions, PackageAlias } from "../../internal/types";
+import {
+  LazyImport,
+  NormalizedBuildOptions,
+  PackageAlias,
+} from "../../internal/types";
 import { resolveGraph } from "../../native/load";
 import { transpileSources } from "../../native/load";
 import { loadCompilerOptions } from "./compiler-options";
@@ -36,6 +40,7 @@ const NATIVE_EMIT_METADATA_VERSION = 6;
 export async function emitNativeStage({
   cacheDir,
   fileNames,
+  lazyImports,
   metadataPath,
   options,
   packageAliases,
@@ -45,6 +50,7 @@ export async function emitNativeStage({
 }: {
   cacheDir: string;
   fileNames: string[];
+  lazyImports: LazyImport[];
   metadataPath: string;
   options: NormalizedBuildOptions;
   packageAliases: PackageAlias[];
@@ -139,6 +145,7 @@ export async function emitNativeStage({
     metadataPath: metadataPathForNative,
     externsPath,
     fileNames: combinedFileNames,
+    lazyImports,
     outDir,
     packageAliases: combinedPackageAliases,
     packageJsonFiles: combinedPackageJsonFiles,

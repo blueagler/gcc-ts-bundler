@@ -5,6 +5,8 @@ export type {
   BuildResult,
   CacheMode,
   CacheOptions,
+  ChunkMode,
+  ChunkOptions,
   CleanCacheOptions,
   CompilationLevel,
   DiagnosticsOptions,

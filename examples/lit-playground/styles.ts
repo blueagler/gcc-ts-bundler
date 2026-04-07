@@ -1,153 +1,204 @@
-import {css} from 'lit';
-
-export const styles = [
-  css`
+export const stylesText = `
     :host {
-      display: flex;
-      color: #040424;
-      height: 100%;
-      overflow: hidden;
-      justify-content: center;
-      --card-color: #546e7a;
-      --card-text-color: white;
-      --detail-color: #819ca9;
-      --detail-text-color: black;
-      --accent-color: #29434e;
-      --divider: 2px solid var(--accent-color);
-      --border: 8px solid var(--accent-color);
-      --border-radius: 8px;
+      display: block;
+      color: #102032;
+      --surface: rgba(255, 255, 255, 0.9);
+      --surface-strong: rgba(255, 255, 255, 0.96);
+      --text-muted: rgba(16, 32, 50, 0.72);
+      --accent-color: #1f4e6d;
+      --accent-soft: #6f95ae;
+      --border: 1px solid rgba(31, 78, 109, 0.12);
+      --divider: 1px solid rgba(31, 78, 109, 0.12);
+      --shadow: 0 24px 48px rgba(19, 45, 66, 0.14);
+      --radius-large: 28px;
+      --radius-medium: 22px;
     }
 
     * {
       box-sizing: border-box;
-      -webkit-user-select: none;
-      -moz-user-select: none;
-      user-select: none;
     }
 
-    .fit {
-      position: absolute;
-      inset: 0;
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    h1,
+    h2,
+    p {
+      margin: 0;
     }
 
     .icon {
-      font-family: 'Material Icons';
+      font-family: "Material Icons";
       font-style: normal;
+      font-weight: 400;
+      line-height: 1;
       color: var(--accent-color);
     }
 
-    .divider {
-      will-change: opacity;
-      border-bottom: var(--divider);
+    .app-shell,
+    .page-shell {
+      display: flex;
+      flex-direction: column;
+      gap: 22px;
+      min-height: 100vh;
+      padding: 28px;
+      background:
+        radial-gradient(circle at top left, rgba(156, 203, 220, 0.45), transparent 32%),
+        linear-gradient(180deg, #f3f8fb 0%, #edf4f7 100%);
     }
 
-    .divider-top {
-      will-change: opacity;
-      border-top: var(--divider);
+    .hero {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      align-items: end;
+      padding: 28px;
+      border-radius: var(--radius-large);
+      background: var(--surface-strong);
+      border: var(--border);
+      box-shadow: var(--shadow);
     }
 
-    .container {
-      width: 800px;
-      position: relative;
+    .hero-copy {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-width: 720px;
+    }
+
+    .eyebrow {
+      color: var(--accent-soft);
+      font-size: 0.82rem;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    .hero-title {
+      font-size: clamp(2rem, 4vw, 3.4rem);
+      line-height: 0.98;
+    }
+
+    .hero-copy p {
+      color: var(--text-muted);
+      line-height: 1.7;
+      max-width: 56ch;
+    }
+
+    .route-nav,
+    .detail-actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .nav-link,
+    .action-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 10px 16px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.74);
+      border: var(--border);
+      box-shadow: var(--shadow);
+      color: var(--accent-color);
+      font-weight: 600;
+    }
+
+    .route-panel {
+      display: block;
     }
 
     .cards {
       list-style: none;
       padding: 0;
       margin: 0;
-      display: flex;
-      flex-wrap: wrap;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      gap: 18px;
     }
 
-    li {
-      will-change: transform;
-      position: relative;
-      overflow: hidden;
+    .card {
       display: flex;
       flex-direction: column;
-      flex: 1;
-      flex-basis: 30%;
-      cursor: pointer;
-      margin: 8px;
-      padding: 16px;
-      border-radius: var(--border-radius);
-      background: var(--card-color);
-      color: var(--card-text-color);
-    }
-
-    .card-background {
-      will-change: opacity;
-      border-radius: var(--border-radius);
+      gap: 16px;
+      min-height: 250px;
+      padding: 22px;
+      border-radius: var(--radius-medium);
+      background: var(--surface);
       border: var(--border);
+      box-shadow: var(--shadow);
     }
 
     .card-icon {
-      will-change: transform;
-      font-size: 9em;
-      text-align: center;
-      margin: 8px 0;
+      font-size: 4.5rem;
     }
 
-    .card-content {
-      flex: 1;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+    .card-title {
+      font-size: 1.45rem;
+      font-weight: 700;
     }
 
-    .card-header {
-      padding-top: 8px;
-      min-height: 40px;
+    .card-summary,
+    .page-shell p {
+      color: var(--text-muted);
+      line-height: 1.7;
     }
 
-    .card-header-title {
-      font-weight: 800;
-    }
-
-    .detail {
-      will-change: transform;
+    .detail-card,
+    .about-card,
+    .not-found-card {
       display: flex;
       flex-direction: column;
-      flex: 1;
-      color: var(--detail-text-color);
-      margin: 8px;
-      padding: 16px;
-      border-radius: 8px;
-      overflow: hidden;
-      background: var(--detail-color);
-      border-radius: var(--border-radius);
+      gap: 18px;
+      padding: 28px;
+      border-radius: var(--radius-large);
+      background: var(--surface-strong);
+      border: var(--border);
+      box-shadow: var(--shadow);
+    }
+
+    .detail-card .icon {
+      font-size: 5rem;
+    }
+
+    .detail-badge {
+      color: var(--accent-soft);
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    .detail-body,
+    .about-grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .about-grid {
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+
+    .about-panel {
+      padding: 18px;
+      border-radius: 20px;
+      background: rgba(244, 249, 252, 0.92);
       border: var(--border);
     }
 
-    .detail-header {
-      display: flex;
-      align-items: center;
-    }
+    @media (max-width: 720px) {
+      .app-shell,
+      .page-shell {
+        padding: 18px;
+      }
 
-    .detail-header-title {
-      font-weight: 800;
+      .hero {
+        flex-direction: column;
+        align-items: start;
+      }
     }
-
-    .hero-text {
-      will-change: transform;
-      display: inline-block;
-      width: 218px;
-    }
-
-    .detail-header-text {
-      margin-left: 8px;
-    }
-
-    .detail-header-icon {
-      will-change: transform;
-      font-size: 3em;
-      min-width: 48px;
-    }
-
-    .detail-content {
-      padding: 16px;
-      font-size: 1.1em;
-      line-height: 200%;
-    }
-  `,
-];
+`;

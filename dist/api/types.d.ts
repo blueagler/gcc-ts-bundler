@@ -3,6 +3,7 @@ export type LanguageOut = "ECMASCRIPT3" | "ECMASCRIPT5" | "ECMASCRIPT6" | "ECMAS
 export type CacheMode = "off" | "temp" | "persistent";
 export type DiagnosticsPreflight = "off" | "errors-only" | "full";
 export type PackageMode = "off" | "esm-only";
+export type ChunkMode = "off" | "closure-library";
 export interface CacheOptions {
     dir?: string;
     mode?: CacheMode;
@@ -15,6 +16,12 @@ export interface DiagnosticsOptions {
 export interface PackageOptions {
     mode?: PackageMode;
 }
+export interface ChunkOptions {
+    baseChunkName?: string;
+    manifestFile?: string;
+    mode?: ChunkMode;
+    publicPath?: string;
+}
 export interface BuildOptions {
     cache?: CacheOptions;
     compilationLevel?: CompilationLevel;
@@ -23,6 +30,7 @@ export interface BuildOptions {
     externs?: string[];
     js?: string[];
     languageOut?: LanguageOut;
+    chunks?: ChunkOptions;
     outDir?: string;
     outputNames?: string[];
     packages?: PackageOptions;
@@ -46,6 +54,12 @@ export declare const DEFAULT_BUILD_OPTIONS: Readonly<{
         mode: CacheMode;
     };
     compilationLevel: CompilationLevel;
+    chunks: {
+        baseChunkName: string;
+        manifestFile: string;
+        mode: ChunkMode;
+        publicPath: string;
+    };
     diagnostics: {
         fatalWarnings: boolean;
         preflight: DiagnosticsPreflight;
