@@ -32,6 +32,15 @@ use crate::support_files::{collect_commonjs_specifiers, emit_package_support_fil
 
 const RUNTIME_SPECIFIER: &str = "gcc-ts-bundler/runtime";
 
+fn parse_chunk_mode(value: &str) -> std::result::Result<ChunkMode, String> {
+    match value {
+        "off" => Ok(ChunkMode::Off),
+        "closure-library" => Ok(ChunkMode::ClosureLibrary),
+        "bundler-runtime" => Ok(ChunkMode::BundlerRuntime),
+        _ => Err(format!("Unsupported chunk mode: {value}")),
+    }
+}
+
 #[allow(non_snake_case)]
 #[napi(object)]
 pub struct TranspileOutput {
@@ -63,6 +72,7 @@ pub struct LazyImportInput {
 
 #[derive(Clone, Debug)]
 struct TranspileContext {
+    chunk_mode: ChunkMode,
     commonjs_specifiers: HashSet<String>,
     file_metadata: HashMap<String, ClosureFileMetadata>,
     global_property_names: HashSet<String>,
@@ -73,11 +83,19 @@ struct TranspileContext {
     workspace_dir: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChunkMode {
+    Off,
+    ClosureLibrary,
+    BundlerRuntime,
+}
+
 pub fn transpile_sources(
     file_names: Vec<String>,
     out_dir: String,
     externs_path: String,
     metadata_path: String,
+    chunk_mode: String,
     workspace_dir: String,
     package_aliases: Vec<PackageAliasInput>,
     package_json_files: Vec<String>,
@@ -89,8 +107,10 @@ pub fn transpile_sources(
     }
     let workspace_dir = PathBuf::from(workspace_dir);
     let out_dir = PathBuf::from(out_dir);
+    let chunk_mode = parse_chunk_mode(&chunk_mode)?;
     let file_metadata = load_closure_metadata(&metadata_path)?;
     let context = TranspileContext {
+        chunk_mode,
         commonjs_specifiers: collect_commonjs_specifiers(&package_aliases)?
             .into_iter()
             .collect(),
@@ -142,6 +162,7 @@ pub fn transpile_sources(
     let support_files = emit_package_support_files(
         &out_dir,
         &workspace_dir,
+        chunk_mode,
         &context.package_aliases,
         &package_json_files,
     )?;
@@ -669,13 +690,7 @@ fn transform_source_file(
     } else {
         transform_js_pass_through_program(module, source_text, file_path, context)
     };
-    emit_goog_module_program(
-        file_path,
-        program,
-        context,
-        file_metadata.as_ref(),
-        None,
-    )
+    emit_module_program(file_path, program, context, file_metadata.as_ref(), None)
 }
 
 fn should_normalize_commonjs(file_path: &Path, analysis: &crate::commonjs::CommonJsAnalysis) -> bool {
@@ -736,13 +751,7 @@ fn normalize_commonjs_module(
     program.visit_mut_with(&mut JsCompatAstVisitor::new(has_t_declaration));
     apply_file_compat_transforms(&mut program, file_path, context);
 
-    emit_goog_module_program(
-        file_path,
-        program,
-        context,
-        file_metadata,
-        Some("__cjsExports"),
-    )
+    emit_module_program(file_path, program, context, file_metadata, Some("__cjsExports"))
 }
 
 fn to_emitted_commonjs_specifier(specifier: &str) -> String {
@@ -1532,6 +1541,7 @@ fn apply_file_compat_transforms(
     {
         program.visit_mut_with(&mut ExplicitLazyImportVisitor::new(
             file_path,
+            context.chunk_mode,
             lazy_imports,
         ));
     }
@@ -1558,13 +1568,15 @@ fn lazy_lookup_key(importer_file_path: &str, specifier: &str) -> String {
 }
 
 struct ExplicitLazyImportVisitor {
+    chunk_mode: ChunkMode,
     importer_file_path: String,
     lazy_imports: HashMap<String, LazyImportInput>,
 }
 
 impl ExplicitLazyImportVisitor {
-    fn new(file_path: &Path, lazy_imports: &[LazyImportInput]) -> Self {
+    fn new(file_path: &Path, chunk_mode: ChunkMode, lazy_imports: &[LazyImportInput]) -> Self {
         Self {
+            chunk_mode,
             importer_file_path: file_path.to_string_lossy().to_string(),
             lazy_imports: lazy_imports
                 .iter()
@@ -1615,8 +1627,40 @@ impl VisitMut for ExplicitLazyImportVisitor {
         let Some(lazy_import) = self.lazy_imports.get(&key) else {
             return;
         };
-        *expr = if rewrite_kind == "preloadModule" {
-            Expr::Call(CallExpr {
+        *expr = match (self.chunk_mode, rewrite_kind) {
+            (ChunkMode::BundlerRuntime, "preloadModule") => Expr::Call(CallExpr {
+                span: Default::default(),
+                ctxt: Default::default(),
+                callee: Callee::Expr(Box::new(Expr::Ident(create_ident(
+                    "__preloadDynamicImport",
+                )))),
+                args: vec![swc_core::ecma::ast::ExprOrSpread {
+                    spread: None,
+                    expr: Box::new(Expr::Lit(Lit::Str(Str {
+                        raw: None,
+                        span: Default::default(),
+                        value: lazy_import.moduleId.clone().into(),
+                    }))),
+                }],
+                type_args: None,
+            }),
+            (ChunkMode::BundlerRuntime, _) => Expr::Call(CallExpr {
+                span: Default::default(),
+                ctxt: Default::default(),
+                callee: Callee::Expr(Box::new(Expr::Ident(create_ident(
+                    "__dynamicImport",
+                )))),
+                args: vec![swc_core::ecma::ast::ExprOrSpread {
+                    spread: None,
+                    expr: Box::new(Expr::Lit(Lit::Str(Str {
+                        raw: None,
+                        span: Default::default(),
+                        value: lazy_import.moduleId.clone().into(),
+                    }))),
+                }],
+                type_args: None,
+            }),
+            (_, "preloadModule") => Expr::Call(CallExpr {
                 span: Default::default(),
                 ctxt: Default::default(),
                 callee: Callee::Expr(Box::new(Expr::Ident(create_ident(
@@ -1627,9 +1671,8 @@ impl VisitMut for ExplicitLazyImportVisitor {
                 )))),
                 args: Vec::new(),
                 type_args: None,
-            })
-        } else {
-            Expr::Call(CallExpr {
+            }),
+            _ => Expr::Call(CallExpr {
                 span: Default::default(),
                 ctxt: Default::default(),
                 callee: Callee::Expr(Box::new(Expr::Ident(create_ident(
@@ -1640,7 +1683,7 @@ impl VisitMut for ExplicitLazyImportVisitor {
                 )))),
                 args: Vec::new(),
                 type_args: None,
-            })
+            }),
         };
     }
 }
@@ -1800,6 +1843,22 @@ fn is_internal_protocol_name(name: &str) -> bool {
 }
 
 impl VisitMut for InternalProtocolMemberCompatVisitor {
+    fn visit_mut_member_expr(&mut self, member: &mut MemberExpr) {
+        member.visit_mut_children_with(self);
+
+        if member.prop.is_computed() {
+            return;
+        }
+        let MemberProp::Ident(prop_ident) = &member.prop else {
+            return;
+        };
+        if !is_internal_protocol_name(prop_ident.sym.as_ref()) {
+            return;
+        }
+
+        member.prop = create_string_computed_prop(prop_ident.sym.as_ref());
+    }
+
     fn visit_mut_expr(&mut self, expr: &mut Expr) {
         expr.visit_mut_children_with(self);
 
@@ -1817,6 +1876,23 @@ impl VisitMut for InternalProtocolMemberCompatVisitor {
         }
 
         member.prop = create_string_computed_prop(prop_ident.sym.as_ref());
+    }
+
+    fn visit_mut_prop_name(&mut self, prop_name: &mut PropName) {
+        prop_name.visit_mut_children_with(self);
+
+        let PropName::Ident(ident) = prop_name else {
+            return;
+        };
+        if !is_internal_protocol_name(ident.sym.as_ref()) {
+            return;
+        }
+
+        *prop_name = PropName::Str(Str {
+            span: Default::default(),
+            value: ident.sym.to_string().into(),
+            raw: None,
+        });
     }
 
     fn visit_mut_class(&mut self, class: &mut swc_core::ecma::ast::Class) {
@@ -2634,6 +2710,31 @@ fn print_expression(expression: Expr) -> std::result::Result<String, String> {
     Ok(printed.trim().trim_end_matches(';').to_string())
 }
 
+fn emit_module_program(
+    file_path: &Path,
+    program: Program,
+    context: &TranspileContext,
+    file_metadata: Option<&ClosureFileMetadata>,
+    commonjs_export_name: Option<&str>,
+) -> std::result::Result<String, String> {
+    match context.chunk_mode {
+        ChunkMode::BundlerRuntime => emit_bundler_runtime_module_program(
+            file_path,
+            program,
+            context,
+            file_metadata,
+            commonjs_export_name,
+        ),
+        ChunkMode::Off | ChunkMode::ClosureLibrary => emit_goog_module_program(
+            file_path,
+            program,
+            context,
+            file_metadata,
+            commonjs_export_name,
+        ),
+    }
+}
+
 fn emit_goog_module_program(
     file_path: &Path,
     program: Program,
@@ -2803,6 +2904,167 @@ fn emit_goog_module_program(
     Ok(apply_js_compat_text_fixes(source_text))
 }
 
+fn emit_bundler_runtime_module_program(
+    file_path: &Path,
+    program: Program,
+    context: &TranspileContext,
+    file_metadata: Option<&ClosureFileMetadata>,
+    commonjs_export_name: Option<&str>,
+) -> std::result::Result<String, String> {
+    let Program::Module(module) = program else {
+        return Err("Expected module program".to_string());
+    };
+    let module_id = to_goog_module_id(file_path, &context.workspace_dir);
+    let mut output = Vec::new();
+    let mut dependency_ids = Vec::new();
+    let mut import_counter = 0usize;
+    let mut export_counter = 0usize;
+
+    if let Some(metadata) = file_metadata {
+        for type_decl in &metadata.type_declarations {
+            output.push(type_decl.snippet.trim().to_string());
+        }
+        for enum_decl in &metadata.enum_declarations {
+            output.push(render_closure_enum(enum_decl));
+            if enum_decl.exported {
+                output.push(render_module_export(&enum_decl.name, &enum_decl.name));
+            }
+        }
+    }
+
+    for item in module.body {
+        match item {
+            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import_decl)) => {
+                let (lines, deps) = convert_bundler_import_decl(
+                    file_path,
+                    &import_decl,
+                    context,
+                    &mut import_counter,
+                )?;
+                output.extend(lines);
+                dependency_ids.extend(deps);
+            }
+            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDecl(export_decl)) => {
+                let exported_names = exported_decl_names(&export_decl.decl);
+                output.push(print_statement(Stmt::Decl(export_decl.decl))?);
+                for export_name in exported_names {
+                    output.push(render_module_export(&export_name, &export_name));
+                }
+            }
+            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportNamed(named_export)) => {
+                let (lines, deps) = convert_bundler_named_export(
+                    file_path,
+                    &named_export,
+                    context,
+                    &mut export_counter,
+                )?;
+                output.extend(lines);
+                dependency_ids.extend(deps);
+            }
+            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDefaultExpr(default_expr)) => {
+                let local_name = format!("__gcc_default_export_{export_counter}");
+                export_counter += 1;
+                output.push(format!(
+                    "const {local_name} = {};",
+                    print_expression(*default_expr.expr)?
+                ));
+                output.push(render_module_export("default", &local_name));
+            }
+            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDefaultDecl(default_decl)) => {
+                match default_decl.decl {
+                    swc_core::ecma::ast::DefaultDecl::Fn(function_expr) => {
+                        let local_name = function_expr
+                            .ident
+                            .as_ref()
+                            .map(|ident| ident.sym.to_string())
+                            .unwrap_or_else(|| format!("__gcc_default_export_{export_counter}"));
+                        export_counter += 1;
+                        if function_expr.ident.is_some() {
+                            output.push(print_statement(Stmt::Decl(swc_core::ecma::ast::Decl::Fn(
+                                swc_core::ecma::ast::FnDecl {
+                                    declare: false,
+                                    function: function_expr.function,
+                                    ident: Ident::new(local_name.clone().into(), Default::default(), Default::default()),
+                                },
+                            )))?);
+                        } else {
+                            output.push(format!(
+                                "const {local_name} = {};",
+                                print_expression(Expr::Fn(function_expr))?
+                            ));
+                        }
+                        output.push(render_module_export("default", &local_name));
+                    }
+                    swc_core::ecma::ast::DefaultDecl::Class(class_expr) => {
+                        let local_name = class_expr
+                            .ident
+                            .as_ref()
+                            .map(|ident| ident.sym.to_string())
+                            .unwrap_or_else(|| format!("__gcc_default_export_{export_counter}"));
+                        export_counter += 1;
+                        if class_expr.ident.is_some() {
+                            output.push(print_statement(Stmt::Decl(swc_core::ecma::ast::Decl::Class(
+                                swc_core::ecma::ast::ClassDecl {
+                                    class: class_expr.class,
+                                    declare: false,
+                                    ident: Ident::new(local_name.clone().into(), Default::default(), Default::default()),
+                                },
+                            )))?);
+                        } else {
+                            output.push(format!(
+                                "const {local_name} = {};",
+                                print_expression(Expr::Class(class_expr))?
+                            ));
+                        }
+                        output.push(render_module_export("default", &local_name));
+                    }
+                    _ => {}
+                }
+            }
+            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportAll(export_all)) => {
+                let require_name = format!("__gcc_export_all_{export_counter}");
+                export_counter += 1;
+                let export_module_id = resolve_module_id_for_specifier(
+                    file_path,
+                    &export_all.src.value.to_string_lossy(),
+                    context,
+                )?;
+                dependency_ids.push(export_module_id.clone());
+                output.push(format!(
+                    "const {require_name} = __require({export_module_id:?});"
+                ));
+                output.push(format!(
+                    "for (const key in {require_name}) {{ if (key !== \"default\") {{ __exports[key] = {require_name}[key]; }} }}"
+                ));
+            }
+            ModuleItem::Stmt(statement) => output.push(print_statement(statement)?),
+            _ => {}
+        }
+    }
+
+    if let Some(export_name) = commonjs_export_name {
+        output.push(render_module_export(export_name, export_name));
+        output.push(render_module_export("default", export_name));
+    }
+
+    let dependency_ids = dependency_ids
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let body = output
+        .into_iter()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source_text = format!(
+        "globalThis[\"__gcc_runtime__\"][\"registerModule\"]({module_id:?}, {}, function(__require, __exports, __dynamicImport, __preloadDynamicImport) {{\n{}\n}});",
+        serde_json::to_string(&dependency_ids).map_err(|error| error.to_string())?,
+        indent_block(&body)
+    );
+    Ok(apply_js_compat_text_fixes(source_text))
+}
+
 fn convert_import_decl(
     file_path: &Path,
     import_decl: &ImportDecl,
@@ -2851,6 +3113,48 @@ fn convert_import_decl(
     Ok(lines)
 }
 
+fn convert_bundler_import_decl(
+    file_path: &Path,
+    import_decl: &ImportDecl,
+    context: &TranspileContext,
+    import_counter: &mut usize,
+) -> std::result::Result<(Vec<String>, Vec<String>), String> {
+    if import_decl.src.value == *RUNTIME_SPECIFIER {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let module_id = resolve_module_id_for_specifier(
+        file_path,
+        &import_decl.src.value.to_string_lossy(),
+        context,
+    )?;
+    let mut lines = Vec::new();
+    let mut dependency_ids = Vec::new();
+    if import_decl.specifiers.is_empty() {
+        lines.push(format!("__require({module_id:?});"));
+        dependency_ids.push(module_id);
+        return Ok((lines, dependency_ids));
+    }
+
+    let mut value_specifiers = Vec::new();
+    for specifier in &import_decl.specifiers {
+        match specifier {
+            ImportSpecifier::Named(named) if import_decl.type_only || named.is_type_only => {}
+            _ if import_decl.type_only => {}
+            _ => value_specifiers.push(specifier),
+        }
+    }
+
+    if !value_specifiers.is_empty() {
+        let local_name = format!("__gcc_import_{}", *import_counter);
+        *import_counter += 1;
+        lines.push(format!("const {local_name} = __require({module_id:?});"));
+        lines.extend(bind_bundler_import_specifiers(&local_name, &value_specifiers));
+        dependency_ids.push(module_id);
+    }
+
+    Ok((lines, dependency_ids))
+}
+
 fn bind_import_specifiers(local_name: &str, specifiers: &[&ImportSpecifier]) -> Vec<String> {
     specifiers
         .iter()
@@ -2873,6 +3177,35 @@ fn bind_import_specifiers(local_name: &str, specifiers: &[&ImportSpecifier]) -> 
                     "const {} = {};",
                     named_specifier.local.sym,
                     member_access(local_name, &imported_name)
+                )
+            }
+        })
+        .collect()
+}
+
+fn bind_bundler_import_specifiers(local_name: &str, specifiers: &[&ImportSpecifier]) -> Vec<String> {
+    specifiers
+        .iter()
+        .map(|specifier| match specifier {
+            ImportSpecifier::Default(default_specifier) => format!(
+                "const {} = {};",
+                default_specifier.local.sym,
+                stable_member_access(local_name, "default")
+            ),
+            ImportSpecifier::Namespace(namespace_specifier) => format!(
+                "const {} = {};",
+                namespace_specifier.local.sym, local_name
+            ),
+            ImportSpecifier::Named(named_specifier) => {
+                let imported_name = named_specifier
+                    .imported
+                    .as_ref()
+                    .map(module_export_name_to_string)
+                    .unwrap_or_else(|| named_specifier.local.sym.to_string());
+                format!(
+                    "const {} = {};",
+                    named_specifier.local.sym,
+                    stable_member_access(local_name, &imported_name)
                 )
             }
         })
@@ -2928,6 +3261,57 @@ fn convert_named_export(
     Ok(lines)
 }
 
+fn convert_bundler_named_export(
+    file_path: &Path,
+    named_export: &swc_core::ecma::ast::NamedExport,
+    context: &TranspileContext,
+    export_counter: &mut usize,
+) -> std::result::Result<(Vec<String>, Vec<String>), String> {
+    let mut lines = Vec::new();
+    let mut dependency_ids = Vec::new();
+    if let Some(src) = &named_export.src {
+        let require_name = format!("__gcc_export_{}", *export_counter);
+        *export_counter += 1;
+        let module_id = resolve_module_id_for_specifier(
+            file_path,
+            &src.value.to_string_lossy(),
+            context,
+        )?;
+        dependency_ids.push(module_id.clone());
+        lines.push(format!("const {require_name} = __require({module_id:?});"));
+        for specifier in &named_export.specifiers {
+            let swc_core::ecma::ast::ExportSpecifier::Named(named) = specifier else {
+                continue;
+            };
+            let local_name = module_export_name_to_string(&named.orig);
+            let export_name = named
+                .exported
+                .as_ref()
+                .map(module_export_name_to_string)
+                .unwrap_or_else(|| local_name.clone());
+            lines.push(render_module_export(
+                &export_name,
+                &stable_member_access(&require_name, &local_name),
+            ));
+        }
+        return Ok((lines, dependency_ids));
+    }
+
+    for specifier in &named_export.specifiers {
+        let swc_core::ecma::ast::ExportSpecifier::Named(named) = specifier else {
+            continue;
+        };
+        let local_name = module_export_name_to_string(&named.orig);
+        let export_name = named
+            .exported
+            .as_ref()
+            .map(module_export_name_to_string)
+            .unwrap_or_else(|| local_name.clone());
+        lines.push(render_module_export(&export_name, &local_name));
+    }
+    Ok((lines, dependency_ids))
+}
+
 fn exported_decl_names(decl: &swc_core::ecma::ast::Decl) -> Vec<String> {
     match decl {
         swc_core::ecma::ast::Decl::Fn(function_decl) => vec![function_decl.ident.sym.to_string()],
@@ -2971,6 +3355,25 @@ fn member_access(object_name: &str, property_name: &str) -> String {
     } else {
         format!("{object_name}[{property_name:?}]")
     }
+}
+
+fn stable_member_access(object_name: &str, property_name: &str) -> String {
+    format!("{object_name}[{property_name:?}]")
+}
+
+fn render_module_export(export_name: &str, value_expression: &str) -> String {
+    format!("__exports[{export_name:?}] = {value_expression};")
+}
+
+fn indent_block(source: &str) -> String {
+    if source.is_empty() {
+        return String::new();
+    }
+    source
+        .lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn module_export_name_to_string(name: &swc_core::ecma::ast::ModuleExportName) -> String {
@@ -3498,6 +3901,7 @@ mod tests {
 
     fn empty_context() -> super::TranspileContext {
         super::TranspileContext {
+            chunk_mode: super::ChunkMode::Off,
             commonjs_specifiers: HashSet::new(),
             file_metadata: HashMap::new(),
             global_property_names: HashSet::new(),
@@ -3555,6 +3959,7 @@ mod tests {
                 transform_source_file(
                     &file_path,
                     &super::TranspileContext {
+                        chunk_mode: super::ChunkMode::Off,
                         commonjs_specifiers: HashSet::new(),
                         file_metadata: HashMap::new(),
                         global_property_names: HashSet::new(),
@@ -3605,6 +4010,7 @@ mod tests {
                 transform_source_file(
                     &file_path,
                     &super::TranspileContext {
+                        chunk_mode: super::ChunkMode::Off,
                         commonjs_specifiers: HashSet::new(),
                         file_metadata: HashMap::new(),
                         global_property_names: HashSet::new(),
@@ -3657,6 +4063,7 @@ mod tests {
                 transform_source_file(
                     &file_path,
                     &super::TranspileContext {
+                        chunk_mode: super::ChunkMode::Off,
                         commonjs_specifiers: HashSet::new(),
                         file_metadata: HashMap::new(),
                         global_property_names: HashSet::new(),
@@ -3818,6 +4225,7 @@ mod tests {
             source.to_string(),
             &file_path,
             &super::TranspileContext {
+                chunk_mode: super::ChunkMode::Off,
                 commonjs_specifiers: HashSet::from(["demo-pkg".to_string()]),
                 file_metadata: HashMap::new(),
                 global_property_names: HashSet::new(),
@@ -3874,6 +4282,7 @@ mod tests {
         fs::write(&file_path, source_text).unwrap();
 
         let context = super::TranspileContext {
+            chunk_mode: super::ChunkMode::Off,
             commonjs_specifiers: HashSet::new(),
             file_metadata: HashMap::new(),
             global_property_names: HashSet::new(),
@@ -4025,6 +4434,7 @@ mod tests {
             source.to_string(),
             std::path::Path::new("fixture.js"),
             &super::TranspileContext {
+                chunk_mode: super::ChunkMode::Off,
                 commonjs_specifiers: HashSet::new(),
                 file_metadata: HashMap::new(),
                 global_property_names: HashSet::from(["sharedRegistry".to_string()]),
@@ -4050,6 +4460,7 @@ mod tests {
             source.to_string(),
             std::path::Path::new("fixture.js"),
             &super::TranspileContext {
+                chunk_mode: super::ChunkMode::Off,
                 commonjs_specifiers: HashSet::new(),
                 file_metadata: HashMap::new(),
                 global_property_names: HashSet::new(),

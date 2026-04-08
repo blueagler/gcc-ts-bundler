@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::pathing::{normalize_path, to_goog_module_id};
-use crate::transpile::PackageAliasInput;
+use crate::transpile::{ChunkMode, PackageAliasInput};
 
 pub fn collect_commonjs_specifiers(
     package_aliases: &[PackageAliasInput],
@@ -26,9 +26,14 @@ pub fn collect_commonjs_specifiers(
 pub fn emit_package_support_files(
     out_dir: &Path,
     workspace_dir: &Path,
+    chunk_mode: ChunkMode,
     package_aliases: &[PackageAliasInput],
     package_json_files: &[String],
 ) -> std::result::Result<Vec<String>, String> {
+    if chunk_mode == ChunkMode::BundlerRuntime {
+        return Ok(Vec::new());
+    }
+
     let mut support_files = BTreeSet::new();
     let root_package_names = package_aliases
         .iter()

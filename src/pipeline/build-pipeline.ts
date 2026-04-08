@@ -105,7 +105,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     }
 
     if (
-      context.options.chunks.mode === "closure-library" &&
+      context.options.chunks.mode !== "off" &&
       resolvedBuild.entryFiles.some(
         (entry) => entry.exportNames.length > 0 || entry.hasDefaultExport,
       )
@@ -123,7 +123,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       };
     }
 
-    if (context.options.chunks.mode !== "closure-library") {
+    if (context.options.chunks.mode === "off") {
       writeEntryShims({
         entries: resolvedBuild.entryFiles.map((entry) => ({
           exportNames: entry.exportNames,
@@ -148,7 +148,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     const nativeEmitResult = await emitNativeStage({
       cacheDir: resolvedBuild.nativeEmitCacheDir,
       fileNames:
-        context.options.chunks.mode === "closure-library"
+        context.options.chunks.mode !== "off"
           ? resolvedBuild.sourceFiles
           : [...resolvedBuild.sourceFiles, ...resolvedBuild.shimFiles],
       lazyImports: resolvedBuild.lazyImports,

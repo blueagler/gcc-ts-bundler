@@ -101,6 +101,7 @@ interface NativeBinding {
     outDir: string,
     externsPath: string,
     metadataPath: string,
+    chunkMode: string,
     workspaceDir: string,
     packageAliases: NativeTranspilePackageAlias[],
     packageJsonFiles: string[],
@@ -153,6 +154,7 @@ export function rewriteGccExports(code: string) {
 }
 
 export function transpileSources(input: {
+  chunkMode: string;
   externsPath: string;
   fileNames: string[];
   metadataPath: string;
@@ -167,6 +169,7 @@ export function transpileSources(input: {
     input.outDir,
     input.externsPath,
     input.metadataPath,
+    input.chunkMode,
     input.workspaceDir,
     input.packageAliases ?? [],
     input.packageJsonFiles ?? [],

@@ -161,6 +161,7 @@ export async function emitNativeStage({
     "utf-8",
   );
   const result = transpileSources({
+    chunkMode: options.chunks.mode,
     metadataPath: metadataPathForNative,
     externsPath,
     fileNames: combinedFileNames,

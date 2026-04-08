@@ -461,7 +461,10 @@ function buildChunkPlan({
   shimFiles: string[];
   workspaceDir: string;
 }): ChunkPlanChunk[] {
-  if (chunkOptions.mode === "closure-library") {
+  if (
+    chunkOptions.mode === "closure-library" ||
+    chunkOptions.mode === "bundler-runtime"
+  ) {
     return buildClosureChunkPlan({
       baseChunkName: chunkOptions.baseChunkName,
       entryFiles,
@@ -865,6 +868,9 @@ export function normalizeBuildOptions(
       baseChunkName:
         options.chunks?.baseChunkName ??
         DEFAULT_BUILD_OPTIONS.chunks.baseChunkName,
+      loader:
+        options.chunks?.loader ??
+        DEFAULT_BUILD_OPTIONS.chunks.loader,
       manifestFile:
         chunkManifestFile,
       mode: options.chunks?.mode ?? DEFAULT_BUILD_OPTIONS.chunks.mode,

@@ -59,6 +59,7 @@ export declare function resolveGraph(input: {
 };
 export declare function rewriteGccExports(code: string): string;
 export declare function transpileSources(input: {
+    chunkMode: string;
     externsPath: string;
     fileNames: string[];
     metadataPath: string;

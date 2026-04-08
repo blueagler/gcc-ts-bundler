@@ -21,6 +21,7 @@ export function parseCliArgs(args: string[]): CliParseResult {
       "cache-dir",
       "cache-mode",
       "chunk-base-name",
+      "chunk-loader",
       "chunk-manifest",
       "chunk-public-path",
       "chunks",
@@ -56,6 +57,8 @@ export function parseCliArgs(args: string[]): CliParseResult {
       chunks: {
         baseChunkName:
           parsedArgs["chunk-base-name"] ?? parsedArgs.chunk_base_name,
+        loader:
+          parsedArgs["chunk-loader"] ?? parsedArgs.chunk_loader,
         manifestFile:
           parsedArgs["chunk-manifest"] ?? parsedArgs.chunk_manifest,
         mode: parsedArgs.chunks ?? DEFAULT_BUILD_OPTIONS.chunks.mode,

@@ -675,6 +675,56 @@ test.serial("emits smaller Closure script chunks for explicit lazy modules", asy
   expect(lazyOutput).toMatch(/LAZY_FEATURE/);
 });
 
+test.serial("emits bundler-runtime chunks for explicit lazy modules", async () => {
+  const fixture = await createFixture();
+  await fixture.write(
+    "src/main.ts",
+    [
+      'const loadFeature = () => import("./feature");',
+      "globalThis.__lazyLoader = loadFeature;",
+      'document.body.textContent = "base";',
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "src/feature.ts",
+    [
+      'export const marker = "LAZY_FEATURE";',
+      "export function renderMessage() {",
+      "  return marker;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  const result = await build({
+    cache: { mode: "off" },
+    chunks: { loader: "script", mode: "bundler-runtime" },
+    entries: ["./main.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  expect(result.exitCode).toBe(0);
+  expect(
+    result.outputFiles
+      .map((filePath) => path.basename(filePath))
+      .sort((left, right) => left.localeCompare(right)),
+  ).toEqual(["main.js", "src-feature-lazy.js"]);
+
+  const baseOutput = await fixture.read("dist/main.js");
+  const lazyOutput = await fixture.read("dist/src-feature-lazy.js");
+
+  expect(baseOutput).toContain("__gcc_runtime__");
+  expect(baseOutput).toContain("__lazyLoader");
+  expect(baseOutput).not.toMatch(/goog\.module/);
+  expect(baseOutput).not.toMatch(/ModuleManager/);
+  expect(lazyOutput).toContain("__gcc_runtime__");
+  expect(lazyOutput).toContain("renderMessage");
+  expect(lazyOutput).not.toMatch(/goog\.module/);
+});
+
 test.serial("generateExterns follows declaration dependencies and emits stable property externs", async () => {
   const fixture = await createExternFixture();
 
@@ -861,6 +911,41 @@ test.serial("emits an optional chunk manifest when requested", async () => {
   const manifest = JSON.parse(await fixture.read("dist/chunk-map.json"));
   expect(manifest.baseChunkName).toBe("main");
   expect(manifest.lazyModules["gcc.src.feature"]).toBe("src-feature-lazy");
+});
+
+test.serial("emits a bundler-runtime chunk manifest when requested", async () => {
+  const fixture = await createFixture();
+  await fixture.write(
+    "src/main.ts",
+    [
+      'const loadFeature = () => import("./feature");',
+      "globalThis.__lazyLoader = loadFeature;",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "src/feature.ts",
+    'export const marker = "LAZY_FEATURE";\n',
+  );
+
+  const result = await build({
+    cache: { mode: "off" },
+    chunks: {
+      loader: "script",
+      manifestFile: "chunk-map.json",
+      mode: "bundler-runtime",
+    },
+    entries: ["./main.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  expect(result.exitCode).toBe(0);
+  const manifest = JSON.parse(await fixture.read("dist/chunk-map.json"));
+  expect(manifest.baseChunk).toBe("main");
+  expect(manifest.chunks["src-feature-lazy"].deps).toEqual(["main"]);
+  expect(manifest.modules["gcc.src.feature"]).toBe("src-feature-lazy");
 });
 
 test.serial("rejects non-literal dynamic import specifiers", async () => {
