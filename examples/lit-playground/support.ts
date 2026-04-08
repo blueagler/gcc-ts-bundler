@@ -66,6 +66,14 @@ export const data = [
 
 export type DataItem = (typeof data)[number];
 
+export const HOME_PATH = "/";
+export const INDEX_PATH = "/index.html";
+export const ABOUT_PATH = "/about";
+
 export function findItemById(id: string | undefined): DataItem | undefined {
   return data.find((item) => item.id === id);
+}
+
+export function animalPath(id: string) {
+  return `/animals/${id}`;
 }

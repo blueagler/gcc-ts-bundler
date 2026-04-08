@@ -19,6 +19,8 @@ import { collectClosureIrMetadata } from "./closure-ir";
 const require = createBundleRequire();
 
 export interface NativeEmitStageResult {
+  dependencyModules: string[];
+  dependencyRuntimeFiles: string[];
   diagnostics: ts.Diagnostic[];
   emitSkipped: boolean;
   emittedFiles: string[];
@@ -28,6 +30,8 @@ export interface NativeEmitStageResult {
 }
 
 interface NativeEmitMetadata {
+  dependencyModules: string[];
+  dependencyRuntimeFiles: string[];
   emittedFiles: string[];
   externsPath: string;
   metadataPath: string;
@@ -35,7 +39,7 @@ interface NativeEmitMetadata {
   version: number;
 }
 
-const NATIVE_EMIT_METADATA_VERSION = 6;
+const NATIVE_EMIT_METADATA_VERSION = 7;
 
 export async function emitNativeStage({
   cacheDir,
@@ -82,6 +86,12 @@ export async function emitNativeStage({
     ...packageJsonFiles,
     ...runtimePackageInputs.packageJsonFiles,
   ]);
+  const dependencyModules = collectDependencyModules(combinedPackageAliases);
+  const dependencyRuntimeFiles = collectDependencyRuntimeFiles({
+    outDir,
+    sourceFiles: combinedFileNames,
+    workspaceDir,
+  });
   const cachedMetadata = usesPersistentCache
     ? await readMetadata(metadataPath)
     : null;
@@ -95,6 +105,8 @@ export async function emitNativeStage({
     ]))
   ) {
     return {
+      dependencyModules: cachedMetadata.dependencyModules,
+      dependencyRuntimeFiles: cachedMetadata.dependencyRuntimeFiles,
       diagnostics: [],
       emitSkipped: false,
       emittedFiles: cachedMetadata.emittedFiles,
@@ -115,6 +127,8 @@ export async function emitNativeStage({
   });
   if (diagnostics.length > 0) {
     return {
+      dependencyModules,
+      dependencyRuntimeFiles,
       diagnostics,
       emitSkipped: true,
       emittedFiles: [],
@@ -131,6 +145,8 @@ export async function emitNativeStage({
   });
   if (closureIr.diagnostics.length > 0) {
     return {
+      dependencyModules,
+      dependencyRuntimeFiles,
       diagnostics: closureIr.diagnostics,
       emitSkipped: true,
       emittedFiles: [],
@@ -164,6 +180,8 @@ export async function emitNativeStage({
       metadataPath,
       JSON.stringify(
         {
+          dependencyModules,
+          dependencyRuntimeFiles,
           emittedFiles: result.emittedFiles,
           externsPath: result.externsPath,
           metadataPath: metadataPathForNative,
@@ -178,6 +196,8 @@ export async function emitNativeStage({
   }
 
   return {
+    dependencyModules,
+    dependencyRuntimeFiles,
     diagnostics: [],
     emitSkipped: false,
     emittedFiles: result.emittedFiles,
@@ -338,6 +358,8 @@ async function readMetadata(
       return null;
     }
     return {
+      dependencyModules: parsed.dependencyModules ?? [],
+      dependencyRuntimeFiles: parsed.dependencyRuntimeFiles ?? [],
       emittedFiles: parsed.emittedFiles ?? [],
       externsPath: parsed.externsPath ?? "",
       metadataPath: parsed.metadataPath ?? "",
@@ -361,6 +383,40 @@ function toEmittedPath(
   return path
     .join(outDir, path.relative(workspaceDir, sourcePath))
     .replace(/\.[^/.]+$/, ".js");
+}
+
+function collectDependencyModules(packageAliases: PackageAlias[]) {
+  return uniqueSorted(
+    packageAliases
+      .filter((alias) => isDependencyFile(alias.targetPath))
+      .map((alias) =>
+        alias.subpath === "."
+          ? alias.packageName
+          : `${alias.packageName}/${alias.subpath.replace(/^\.\//, "")}`,
+      ),
+  );
+}
+
+function collectDependencyRuntimeFiles({
+  outDir,
+  sourceFiles,
+  workspaceDir,
+}: {
+  outDir: string;
+  sourceFiles: string[];
+  workspaceDir: string;
+}) {
+  return uniqueSorted(
+    sourceFiles
+      .filter((filePath) => isDependencyFile(filePath))
+      .map((filePath) => toEmittedPath(filePath, outDir, workspaceDir)),
+  );
+}
+
+function isDependencyFile(filePath: string) {
+  return path
+    .resolve(filePath)
+    .includes(`${path.sep}node_modules${path.sep}`);
 }
 
 function uniqueSorted(values: string[]) {

@@ -1,9 +1,14 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { expect, onTestFinished, test } from "bun:test";
 
-import { build } from "../dist/index.mjs";
+import { build, generateExterns } from "../dist/index.mjs";
+
+const execFileAsync = promisify(execFile);
 
 async function createFixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "gcc-ts-bundler-test-"));
@@ -40,6 +45,229 @@ async function createFixture() {
       await fs.writeFile(filePath, contents, "utf8");
     },
   };
+}
+
+async function createExternFixture() {
+  const fixture = await createFixture();
+  await fixture.write(
+    "src/main.ts",
+    [
+      'import { Controller, RouterLike } from "contract-pkg";',
+      "",
+      "class Host {",
+      "  updateComplete = Promise.resolve(true);",
+      "  readonly controller = new Controller(this);",
+      '  readonly router = new RouterLike(this, { attribute: "demo", reflect: true });',
+      "  addController(_controller: unknown) {}",
+      "  removeController(_controller: unknown) {}",
+      "  requestUpdate() {}",
+      "  click() {",
+      "    if (this.controller.isAnimating) {",
+      "      this.controller.togglePlay();",
+      "    }",
+      '    return this.router.link("/home");',
+      "  }",
+      "}",
+      "",
+      "new Host().click();",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "node_modules/base-host/package.json",
+    JSON.stringify(
+      {
+        name: "base-host",
+        types: "./index.d.ts",
+      },
+      null,
+      2,
+    ),
+  );
+  await fixture.write(
+    "node_modules/base-host/index.d.ts",
+    [
+      "export interface BaseHost {",
+      "  addController(controller: unknown): void;",
+      "  removeController(controller: unknown): void;",
+      "  requestUpdate(): void;",
+      "  readonly updateComplete: Promise<boolean>;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "node_modules/contract-pkg/package.json",
+    JSON.stringify(
+      {
+        exports: {
+          ".": "./index.js",
+          "./decorators.js": "./decorators.js",
+        },
+        name: "contract-pkg",
+        types: "./index.d.ts",
+      },
+      null,
+      2,
+    ),
+  );
+  await fixture.write(
+    "node_modules/contract-pkg/index.js",
+    [
+      "export class RouterLike {",
+      "  constructor(host, options) {",
+      "    this.host = host;",
+      "    this.options = options;",
+      "  }",
+      "  link(pathname) {",
+      "    return pathname ?? \"/\";",
+      "  }",
+      "  hostConnected() {}",
+      "  hostDisconnected() {}",
+      "}",
+      "",
+      "export class Controller {",
+      "  constructor(host) {",
+      "    this.host = host;",
+      "    this.isAnimating = false;",
+      "  }",
+      "  togglePlay() {",
+      "    this.isAnimating = !this.isAnimating;",
+      "  }",
+      "  hostConnected() {}",
+      "  hostDisconnected() {}",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "node_modules/contract-pkg/index.d.ts",
+    [
+      'import type { BaseHost } from "base-host";',
+      "export interface ReactiveControllerLike {",
+      "  hostConnected(): void;",
+      "  hostDisconnected(): void;",
+      "}",
+      "export interface PropertyOptions {",
+      "  attribute?: boolean | string;",
+      "  reflect?: boolean;",
+      "}",
+      "export declare class RouterLike implements ReactiveControllerLike {",
+      "  constructor(host: BaseHost, options?: PropertyOptions);",
+      "  link(pathname?: string): string;",
+      "}",
+      "export declare class Controller {",
+      "  constructor(host: BaseHost);",
+      "  pause(): void;",
+      "  play(): void;",
+      "  togglePlay(): void;",
+      "  get isAnimating(): boolean;",
+      "  hostConnected(): void;",
+      "  hostDisconnected(): void;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write("node_modules/contract-pkg/decorators.js", "export {};\n");
+  await fixture.write(
+    "node_modules/contract-pkg/decorators.d.ts",
+    [
+      "export declare function customElement(tagName: string): ClassDecorator;",
+      "export interface PropertyOptions {",
+      "  attribute?: boolean | string;",
+      "  reflect?: boolean;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  return fixture;
+}
+
+async function createRuntimeExternFixture() {
+  const fixture = await createFixture();
+  await fixture.write(
+    "src/index.ts",
+    [
+      'import { Counter } from "runtime-pkg";',
+      "const counter = new Counter();",
+      'export const first = counter.bump("demo");',
+      'export const second = counter.bump("demo");',
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "node_modules/runtime-pkg/package.json",
+    JSON.stringify(
+      {
+        name: "runtime-pkg",
+        module: "./index.js",
+        types: "./index.d.ts",
+      },
+      null,
+      2,
+    ),
+  );
+  await fixture.write(
+    "node_modules/runtime-pkg/index.js",
+    [
+      "const __defProp = Object.defineProperty;",
+      "const __defNormalProp = (obj, key, value) =>",
+      "  key in obj",
+      "    ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value })",
+      "    : (obj[key] = value);",
+      "const __publicField = (obj, key, value) =>",
+      '  __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);',
+      "",
+      "const node = { addEventListener() {} };",
+      'node.addEventListener("click", () => {});',
+      "(function invoke(fn) {",
+      "  return fn.apply(null, []);",
+      "})(() => 1);",
+      "const list = [1, 2, 3];",
+      "void list.length;",
+      "",
+      "export class Counter {",
+      "  constructor() {",
+      '    __publicField(this, "counts", new Map());',
+      '    Object.defineProperty(this, "label", {',
+      '      value: "demo",',
+      "      enumerable: true,",
+      "      configurable: true,",
+      "      writable: true,",
+      "    });",
+      "  }",
+      "  bump(key) {",
+      "    const next = (this.counts.get(key) ?? 0) + 1;",
+      "    this.counts.set(key, next);",
+      '    return `${this.label}:${next}`;',
+      "  }",
+      "}",
+      'Object.defineProperty(Counter.prototype, "reset", {',
+      "  value: function () {",
+      "    this.counts.clear();",
+      "  },",
+      "});",
+      'Object.defineProperty(Counter, "from", {',
+      "  value: function () {",
+      "    return new Counter();",
+      "  },",
+      "});",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "node_modules/runtime-pkg/index.d.ts",
+    [
+      "export declare class Counter {",
+      "  constructor();",
+      "  bump(key: string): string;",
+      "  reset(): void;",
+      "  static from(): Counter;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  return fixture;
 }
 
 test.serial("builds an ESM package from node_modules in ADVANCED mode", async () => {
@@ -445,6 +673,158 @@ test.serial("emits smaller Closure script chunks for explicit lazy modules", asy
   expect(baseOutput).not.toMatch(/gcc\.src\.feature/);
   expect(baseOutput).not.toMatch(/LAZY_FEATURE/);
   expect(lazyOutput).toMatch(/LAZY_FEATURE/);
+});
+
+test.serial("generateExterns follows declaration dependencies and emits stable property externs", async () => {
+  const fixture = await createExternFixture();
+
+  const result = await generateExterns({
+    appEntryFiles: ["./main.ts"],
+    modules: ["contract-pkg"],
+    mode: "boundary-aware",
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  expect(result.scannedFiles.some((filePath) => filePath.endsWith("/base-host/index.d.ts"))).toBe(true);
+  expect(result.mode).toBe("boundary-aware");
+  expect(result.text).toContain("Object.prototype.addController;");
+  expect(result.text).toContain("Object.prototype.removeController;");
+  expect(result.text).toContain("Object.prototype.requestUpdate;");
+  expect(result.text).toContain("Object.prototype.updateComplete;");
+  expect(result.text).toContain("Object.prototype.hostConnected;");
+  expect(result.text).toContain("Object.prototype.hostDisconnected;");
+  expect(result.text).toContain("Object.prototype.togglePlay;");
+  expect(result.text).toContain("Object.prototype.isAnimating;");
+  expect(result.text).toContain("Object.prototype.link;");
+  expect(result.text).not.toContain("Object.prototype.attribute;");
+  expect(result.text).not.toContain("Object.prototype.reflect;");
+  expect(result.text).not.toContain("Object.prototype.map;");
+  expect(result.text).not.toContain("__gcc_extern_");
+});
+
+test.serial("generateExterns candidates mode resolves package subpaths that ship sibling declaration files", async () => {
+  const fixture = await createExternFixture();
+
+  const result = await generateExterns({
+    includeDependencies: false,
+    mode: "candidates",
+    modules: ["contract-pkg/decorators.js"],
+    projectRoot: fixture.projectRoot,
+  });
+
+  expect(result.scannedFiles).toHaveLength(1);
+  expect(result.mode).toBe("candidates");
+  expect(result.text).toContain("Object.prototype.attribute;");
+  expect(result.text).toContain("Object.prototype.reflect;");
+});
+
+test.serial("generateExterns runtime-aware mode captures helper-lowered dependency fields without noise", async () => {
+  const fixture = await createRuntimeExternFixture();
+
+  const result = await generateExterns({
+    appEntryFiles: ["./index.ts"],
+    mode: "runtime-aware",
+    modules: ["runtime-pkg"],
+    projectRoot: fixture.projectRoot,
+    runtimeEntryFiles: ["./node_modules/runtime-pkg/index.js"],
+    srcDir: fixture.srcDir,
+  });
+
+  expect(result.mode).toBe("runtime-aware");
+  expect(result.text).toContain("Object.prototype.bump;");
+  expect(result.text).toContain("Object.prototype.counts;");
+  expect(result.text).toContain("Object.prototype.label;");
+  expect(result.text).toContain("Object.prototype.reset;");
+  expect(result.text).toContain("Object.prototype.from;");
+  expect(result.text).not.toContain("Object.prototype.addEventListener;");
+  expect(result.text).not.toContain("Object.prototype.apply;");
+  expect(result.text).not.toContain("Object.prototype.length;");
+});
+
+test.serial("externs CLI writes generated output with bun-compatible tests", async () => {
+  const fixture = await createExternFixture();
+  const outputFile = path.join(
+    fixture.projectRoot,
+    "closure-externs",
+    "contract.generated.js",
+  );
+
+  await execFileAsync(process.execPath, [
+    path.join(process.cwd(), "bin", "gcc-ts-bundler.cjs"),
+    "externs",
+    "--entry",
+    "./main.ts",
+    "--project-root",
+    fixture.projectRoot,
+    "--src-dir",
+    fixture.srcDir,
+    "--module",
+    "contract-pkg",
+    "--output-file",
+    outputFile,
+  ]);
+
+  const externsOutput = await fs.readFile(outputFile, "utf8");
+  expect(externsOutput).toContain("/** @externs */");
+  expect(externsOutput).toContain("Object.prototype.addController;");
+  expect(externsOutput).toContain("Object.prototype.togglePlay;");
+  expect(externsOutput).not.toContain("Object.prototype.attribute;");
+});
+
+test.serial("externs CLI runtime-aware mode accepts runtime-entry files", async () => {
+  const fixture = await createRuntimeExternFixture();
+  const outputFile = path.join(
+    fixture.projectRoot,
+    "closure-externs",
+    "runtime.generated.js",
+  );
+
+  await execFileAsync(process.execPath, [
+    path.join(process.cwd(), "bin", "gcc-ts-bundler.cjs"),
+    "externs",
+    "--entry",
+    "./index.ts",
+    "--project-root",
+    fixture.projectRoot,
+    "--src-dir",
+    fixture.srcDir,
+    "--runtime-entry",
+    "./node_modules/runtime-pkg/index.js",
+    "--mode",
+    "runtime-aware",
+    "--module",
+    "runtime-pkg",
+    "--output-file",
+    outputFile,
+  ]);
+
+  const externsOutput = await fs.readFile(outputFile, "utf8");
+  expect(externsOutput).toContain("Object.prototype.counts;");
+  expect(externsOutput).toContain("Object.prototype.label;");
+  expect(externsOutput).not.toContain("Object.prototype.addEventListener;");
+});
+
+test.serial("build auto-generates runtime-aware dependency externs for helper-lowered fields", async () => {
+  const fixture = await createRuntimeExternFixture();
+
+  const result = await build({
+    cache: { mode: "off" },
+    entries: ["./index.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  expect(result.exitCode).toBe(0);
+  const output = await fixture.read("dist/index.js");
+  expect(output).not.toMatch(/runtime-pkg/);
+
+  const builtModule = await import(
+    `${pathToFileURL(path.join(fixture.outDir, "index.js")).href}?runtime=${Date.now()}`
+  );
+  expect(builtModule.first).toBe("demo:1");
+  expect(builtModule.second).toBe("demo:2");
 });
 
 test.serial("emits an optional chunk manifest when requested", async () => {

@@ -1,10 +1,13 @@
 import { BuildOptions, BuildResult } from "./types";
+import { generateExterns } from "./externs";
 import { usage } from "../cli/usage";
 import { parseCliArgs } from "../cli/parse-options";
+import { parseExternsCliArgs } from "../cli/parse-externs-options";
 import { build as runBuild, cleanCache } from "../pipeline/build-pipeline";
 export { cleanCache };
 export const build = (options: BuildOptions): Promise<BuildResult> =>
   runBuild(options);
+export { generateExterns };
 
 export async function runCli(args: string[]): Promise<number> {
   const [firstArg, ...restArgs] = args;
@@ -24,6 +27,20 @@ export async function runCli(args: string[]): Promise<number> {
       cacheDir: options.cache?.dir,
       projectRoot: options.projectRoot,
     });
+    return 0;
+  }
+
+  if (firstArg === "externs" || firstArg === "generate-externs") {
+    const { options, showHelp } = parseExternsCliArgs(restArgs);
+    if (showHelp || options.modules.length === 0) {
+      usage();
+      return showHelp ? 0 : 1;
+    }
+
+    const result = await generateExterns(options);
+    if (!result.outputFile) {
+      process.stdout.write(result.text);
+    }
     return 0;
   }
 

@@ -43,6 +43,20 @@ if (result.exitCode !== 0) {
 await cleanCache({ projectRoot: process.cwd() });
 ```
 
+You can also generate Closure externs from package TypeScript hints:
+
+```ts
+import { generateExterns } from "gcc-ts-bundler";
+
+const result = await generateExterns({
+  modules: ["lit", "@lit-labs/router", "@lit-labs/motion"],
+  outputFile: "./closure-externs/lit.generated.js",
+  projectRoot: process.cwd(),
+});
+
+console.log(result.scannedFiles);
+```
+
 Programmatic options:
 
 - `projectRoot`
@@ -92,6 +106,7 @@ Use subcommands:
 ```sh
 gcc-ts-bundler build --project-root=. --src-dir=./src --entry=./index.ts --out-dir=./dist
 gcc-ts-bundler clean-cache --project-root=.
+gcc-ts-bundler externs --project-root=. --module=lit --module=@lit-labs/router --output-file=./closure-externs/lit.generated.js
 ```
 
 ### Build Flags
@@ -114,11 +129,21 @@ gcc-ts-bundler clean-cache --project-root=.
 - `--verbose`: Print diagnostics to the console.
 - `-h, --help`: Show this help message.
 
+### Extern Generation Flags
+
+- `--project-root`: Project root used to resolve `node_modules` and `tsconfig.json`
+- `--module`: Package or package subpath to scan. May be repeated
+- `--output-file`: Write generated externs to a file instead of stdout
+- `--include-dependencies`: Follow imported declaration files across dependent packages
+- `--tsconfig`: Explicit tsconfig path relative to `--project-root`
+
 ## Examples
 
 - `examples/lit-playground` is a copied Lit motion playground with its own package and build wrapper.
 - `examples/react-spa` is a real React 19 SPA fixture with its own `package.json` and `node_modules`.
-- `examples/lazy-chunks-demo` is a minimal browser fixture that uses `gcc-ts-bundler/runtime` to lazy load a feature chunk.
+- `examples/lazy-chunks-demo` is a minimal browser fixture that uses native `import()` to lazy load a feature chunk.
+- `examples/jquery-externs-demo` is a small browser fixture that uses `jquery` and `@types/jquery` to exercise boundary-aware extern generation.
+- `examples/svelte-spa` uses the latest Svelte compiler, then prebundles the Svelte runtime with `esbuild` before running the result through gcc-ts-bundler.
 
 ## License
 

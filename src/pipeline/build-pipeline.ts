@@ -1,6 +1,7 @@
 import path from "path";
 import fs from "fs";
 
+import { generateExterns } from "../api/externs";
 import { BuildOptions, BuildResult, CleanCacheOptions } from "../api/types";
 import { hashContent } from "../cache/hash";
 import {
@@ -172,12 +173,22 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     }
 
     const bundledExterns = await collectBundledExterns(context.packageRoot);
+    const runtimeDependencyExterns = await generateRuntimeDependencyExterns({
+      appEntryFiles: context.options.entries,
+      cacheDir: resolvedBuild.nativeEmitCacheDir,
+      dependencyModules: nativeEmitResult.dependencyModules,
+      dependencyRuntimeFiles: nativeEmitResult.dependencyRuntimeFiles,
+      projectRoot: context.options.projectRoot,
+      srcDir: context.options.srcDir,
+      tsConfigPath: resolvedBuild.tsConfigPath,
+    });
     const closureResult = await runClosureStage({
       chunkPlan: resolvedBuild.chunkPlan,
       emittedOutDir: nativeEmitResult.outDir,
       externPaths: [
         ...context.options.externs,
         ...bundledExterns,
+        ...(runtimeDependencyExterns ? [runtimeDependencyExterns] : []),
         nativeEmitResult.externsPath,
       ],
       finalCacheDir: resolvedBuild.finalCacheDir,
@@ -239,6 +250,41 @@ export async function cleanCache(options: CleanCacheOptions = {}) {
   );
   const projectCacheDir = path.join(cacheRoot, hashContent(projectRoot));
   await fs.promises.rm(projectCacheDir, { force: true, recursive: true });
+}
+
+async function generateRuntimeDependencyExterns({
+  appEntryFiles,
+  cacheDir,
+  dependencyModules,
+  dependencyRuntimeFiles,
+  projectRoot,
+  srcDir,
+  tsConfigPath,
+}: {
+  appEntryFiles: string[];
+  cacheDir: string;
+  dependencyModules: string[];
+  dependencyRuntimeFiles: string[];
+  projectRoot: string;
+  srcDir: string;
+  tsConfigPath: string;
+}) {
+  if (dependencyModules.length === 0 || dependencyRuntimeFiles.length === 0) {
+    return null;
+  }
+
+  const outputFile = path.join(cacheDir, "runtime-dependency-externs.js");
+  await generateExterns({
+    appEntryFiles,
+    mode: "runtime-aware",
+    modules: dependencyModules,
+    outputFile,
+    projectRoot,
+    runtimeEntryFiles: dependencyRuntimeFiles,
+    srcDir,
+    tsConfigPath,
+  });
+  return outputFile;
 }
 
 async function collectBundledExterns(packageRoot: string) {

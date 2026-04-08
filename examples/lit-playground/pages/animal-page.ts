@@ -1,30 +1,38 @@
-import type { DataItem } from "../support.js";
+import { html } from "lit";
+import { customElement, property } from "lit/decorators.js";
 
-export function renderAnimalPage(
-  item: DataItem,
-  homeHref: string,
-  aboutHref: string,
-) {
-  return `
-    <div class="page-shell">
-      <div class="detail-card">
-        <div class="detail-badge">Detail Route</div>
-        <span class="icon">pets</span>
-        <h2>${item.value}</h2>
-        <p>${item.summary}</p>
-        <div class="detail-body">
-          <p>${item.detail}</p>
-          <p>
-            This detail view stays readable after ADVANCED optimization and
-            gives the playground a second route without relying on framework
-            lifecycle magic.
-          </p>
-        </div>
-        <div class="detail-actions">
-          <a class="action-link" href="${homeHref}">Back to cards</a>
-          <a class="action-link" href="${aboutHref}">About this demo</a>
+import type { DataItem } from "../support.js";
+import { PageViewBase } from "./page-view-base.js";
+
+@customElement("animal-page-view")
+export class AnimalPageView extends PageViewBase {
+  @property({ attribute: false }) accessor aboutHref = "/about";
+  @property({ attribute: false }) accessor homeHref = "/";
+  @property({ attribute: false }) accessor item!: DataItem;
+
+  override render() {
+    return html`
+      <div class="page-shell">
+        <div class="detail-card">
+          <div class="detail-badge">Lazy Detail Component</div>
+          <span class="icon">pets</span>
+          <h2>${this.item.value}</h2>
+          <p>${this.item.summary}</p>
+          <div class="detail-body">
+            <p>${this.item.detail}</p>
+            <p>
+              This page module is a Lit component loaded by native ESM dynamic
+              import, then rewritten into a Closure lazy chunk at build time.
+            </p>
+          </div>
+          <div class="detail-actions">
+            <a class="action-link" href=${this.homeHref}>Back to cards</a>
+            <a class="action-link" href=${this.aboutHref}>
+              About this demo
+            </a>
+          </div>
         </div>
       </div>
-    </div>
-  `;
+    `;
+  }
 }

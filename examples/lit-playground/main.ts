@@ -1,9 +1,10 @@
-import { mountMotionPlaygroundApp } from "./motion-playground-app.js";
+import "./motion-playground-app.js";
 
 void Promise.all([
   waitForDocumentBody(),
 ]).then(() => {
-  mountMotionPlaygroundApp(document.body);
+  const app = document.createElement("motion-playground-app");
+  document.body.replaceChildren(app);
 });
 
 function waitForDocumentBody() {

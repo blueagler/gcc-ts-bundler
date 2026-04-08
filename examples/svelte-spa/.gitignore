@@ -1,0 +1,3 @@
+dist
+.prebundle
+src/**/*.svelte.js

@@ -1,0 +1,13 @@
+{
+  "name": "jquery-externs-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ./build.mjs"
+  },
+  "dependencies": {
+    "@types/jquery": "^3.5.33",
+    "gcc-ts-bundler": "file:../..",
+    "jquery": "^3.7.1"
+  }
+}

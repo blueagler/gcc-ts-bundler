@@ -1,0 +1,13 @@
+{
+  "name": "svelte-spa-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ./build.mjs"
+  },
+  "dependencies": {
+    "esbuild": "0.28.0",
+    "gcc-ts-bundler": "file:../..",
+    "svelte": "5.55.2"
+  }
+}

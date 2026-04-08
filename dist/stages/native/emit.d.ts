@@ -1,6 +1,8 @@
 import ts from "typescript";
 import { LazyImport, NormalizedBuildOptions, PackageAlias } from "../../internal/types";
 export interface NativeEmitStageResult {
+    dependencyModules: string[];
+    dependencyRuntimeFiles: string[];
     diagnostics: ts.Diagnostic[];
     emitSkipped: boolean;
     emittedFiles: string[];

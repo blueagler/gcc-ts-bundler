@@ -11,3 +11,4 @@ dist/
 npm/
 examples/**/dist/
 examples/**/node_modules/
+examples/**/*.generated.externs.js

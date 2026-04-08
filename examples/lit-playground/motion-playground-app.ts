@@ -1,144 +1,137 @@
-import { Routes } from "@lit-labs/router";
+import { Router } from "@lit-labs/router";
+import { LitElement, html, nothing } from "lit";
+import { customElement } from "lit/decorators.js";
 
-import { renderAboutPage } from "./pages/about-page.js";
-import { renderAnimalPage } from "./pages/animal-page.js";
-import { data, findItemById } from "./support.js";
-import { stylesText } from "./styles.js";
+import "./motion-lit.js";
 
-interface ReactiveController {
-  hostConnected?(): void;
-  hostDisconnected?(): void;
-}
+import {
+  ABOUT_PATH,
+  HOME_PATH,
+  INDEX_PATH,
+  animalPath,
+  data,
+  findItemById,
+  type DataItem,
+} from "./support.js";
+import { appStyles } from "./styles.js";
 
-interface RouterHost extends HTMLElement {
-  addController(controller: ReactiveController): void;
-  removeController(controller: ReactiveController): void;
-  requestUpdate(): void;
-  updateComplete: Promise<boolean>;
-}
+@customElement("motion-playground-app")
+export class MotionPlaygroundApp extends LitElement {
+  static styles = [appStyles];
 
-export function mountMotionPlaygroundApp(container: HTMLElement) {
-  const controllers = new Set<ReactiveController>();
-
-  const host = container as RouterHost;
-  let routes!: Routes;
-
-  host.addController = (controller: ReactiveController) => {
-    controllers.add(controller);
-  };
-  host.removeController = (controller: ReactiveController) => {
-    controllers.delete(controller);
-  };
-  host.requestUpdate = () => {
-    renderApp(host, routes);
-  };
-  host.updateComplete = Promise.resolve(true);
-
-  routes = new Routes(host, [
+  private readonly router = new Router(this, [
     {
-      path: "/",
-      render: (): string => renderHome(),
+      path: HOME_PATH,
+      render: () => this.renderHomeRoute(),
     },
     {
-      path: "/about",
-      render: (): string => renderAboutPage(routeHref("/")),
+      path: INDEX_PATH,
+      render: () => this.renderHomeRoute(),
+    },
+    {
+      path: ABOUT_PATH,
+      enter: async () => {
+        await import("./pages/about-page.js");
+        return true;
+      },
+      render: () =>
+        html`<about-page-view .homeHref=${HOME_PATH}></about-page-view>`,
     },
     {
       path: "/animals/:id",
-      render: ({ id }: { id?: string }): string => {
-        const item = findItemById(id ?? "");
-        return item
-          ? renderAnimalPage(item, routeHref("/"), routeHref("/about"))
-          : renderNotFound(routeHref("/"));
+      enter: async () => {
+        await import("./pages/animal-page.js");
+        return true;
       },
+      render: ({ id }: { id?: string }) => this.renderAnimalRoute(id),
     },
   ], {
     fallback: {
-      render: (): string => renderNotFound(routeHref("/")),
+      render: () => this.renderNotFound(),
     },
   });
 
-  renderApp(host, routes);
-  controllers.forEach((controller) => controller.hostConnected?.());
-  void routes.goto(normalizeHashPath(location.hash));
+  override render() {
+    return html`
+      <div class="app-shell">
+        <header class="hero">
+          <div class="hero-copy">
+            <div class="eyebrow">Closure Chunks + Lit</div>
+            <h1 class="hero-title">Native ESM route chunks with Lit router.</h1>
+            <p>
+              The shell stays eager, while route modules are loaded only when
+              navigation needs them. The authoring model stays native ESM, and
+              the bundler still emits Closure lazy chunks.
+            </p>
+          </div>
+          <motion-lit></motion-lit>
+          <nav class="route-nav" aria-label="Primary">
+            <a class="nav-link" href=${HOME_PATH}>Home</a>
+            <a class="nav-link" href=${ABOUT_PATH}>About</a>
+          </nav>
+        </header>
+        <section class="route-panel">${this.router.outlet() ?? nothing}</section>
+      </div>
+    `;
+  }
 
-  const syncRoute = () => {
-    void routes.goto(normalizeHashPath(location.hash));
-  };
-  window.addEventListener("hashchange", syncRoute);
-
-  return () => {
-    window.removeEventListener("hashchange", syncRoute);
-    controllers.forEach((controller) => controller.hostDisconnected?.());
-    host.innerHTML = "";
-  };
-}
-
-function renderApp(host: HTMLElement, routes: Routes) {
-  host.innerHTML = `
-    <style>${stylesText}</style>
-    <div class="app-shell">
-      <header class="hero">
-        <div class="hero-copy">
-          <div class="eyebrow">Closure Chunks + Lit</div>
-          <h1 class="hero-title">Router views with full ADVANCED mode.</h1>
+  private renderHomeRoute() {
+    return html`
+      <div class="page-shell">
+        <div class="route-intro">
+          <span class="detail-badge">Eager Shell</span>
           <p>
-            This playground uses @lit-labs/router for in-app navigation while
-            keeping the browser demo stable under full Closure optimization.
+            This route is in the initial chunk. The detail and about routes are
+            plain dynamic imports, so they split naturally and still work
+            through Closure chunk loading.
           </p>
         </div>
-        <nav class="route-nav" aria-label="Primary">
-          <a class="nav-link" href="${routeHref("/")}">Home</a>
-          <a class="nav-link" href="${routeHref("/about")}">About</a>
-        </nav>
-      </header>
-      <section class="route-panel">${routes.outlet() ?? ""}</section>
-    </div>
-  `;
-}
+        <ul class="cards">
+          ${data.map((item) => this.renderAnimalCard(item))}
+        </ul>
+      </div>
+    `;
+  }
 
-function renderHome() {
-  return `
-    <div class="page-shell">
-      <ul class="cards">
-        ${data
-          .map(
-            (item) => `
-              <li>
-                <a class="card" href="${routeHref(`/animals/${item.id}`)}">
-                  <span class="icon card-icon">pets</span>
-                  <div class="card-title">${item.value}</div>
-                  <p class="card-summary">${item.summary}</p>
-                </a>
-              </li>
-            `,
-          )
-          .join("")}
-      </ul>
-    </div>
-  `;
-}
+  private renderAnimalRoute(id: string | undefined) {
+    const item = findItemById(id ?? "");
+    if (!item) {
+      return this.renderNotFound();
+    }
 
-function renderNotFound(homeHref: string) {
-  return `
-    <div class="page-shell">
-      <div class="not-found-card">
-        <div class="eyebrow">Not Found</div>
-        <h2>That route does not map to a page.</h2>
-        <p>Use the home route to select an animal card.</p>
-        <div class="detail-actions">
-          <a class="action-link" href="${homeHref}">Return Home</a>
+    return html`
+      <animal-page-view
+        .aboutHref=${ABOUT_PATH}
+        .homeHref=${HOME_PATH}
+        .item=${item}
+      ></animal-page-view>
+    `;
+  }
+
+  private renderAnimalCard(item: DataItem) {
+    return html`
+      <li>
+        <a class="card" href=${animalPath(item.id)}>
+          <span class="icon card-icon">pets</span>
+          <div class="card-title">${item.value}</div>
+          <p class="card-summary">${item.summary}</p>
+        </a>
+      </li>
+    `;
+  }
+
+  private renderNotFound() {
+    return html`
+      <div class="page-shell">
+        <div class="not-found-card">
+          <div class="eyebrow">Not Found</div>
+          <h2>That route does not map to a page.</h2>
+          <p>Use the home route to select an animal card.</p>
+          <div class="detail-actions">
+            <a class="action-link" href=${HOME_PATH}>Return Home</a>
+          </div>
         </div>
       </div>
-    </div>
-  `;
-}
-
-function normalizeHashPath(hash: string) {
-  const pathname = hash.replace(/^#/, "") || "/";
-  return pathname.startsWith("/") ? pathname : `/${pathname}`;
-}
-
-function routeHref(pathname: string) {
-  return `#${pathname}`;
+    `;
+  }
 }

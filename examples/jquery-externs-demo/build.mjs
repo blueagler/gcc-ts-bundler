@@ -1,28 +1,32 @@
-import path from "path";
+import path from "node:path";
 import ts from "typescript";
-import { fileURLToPath } from "url";
+import { fileURLToPath } from "node:url";
+
 import { build, generateExterns } from "../../dist/index.mjs";
 
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
-const generatedExternsFile = path.join(projectRoot, "react.generated.externs.js");
+const generatedExternsFile = path.join(
+  projectRoot,
+  "jquery.generated.externs.js",
+);
 
 await generateExterns({
-  appEntryFiles: ["./main.tsx"],
-  modules: ["react", "react-dom", "@tanstack/react-router"],
+  appEntryFiles: ["./main.ts"],
+  modules: ["jquery"],
   mode: "boundary-aware",
   outputFile: generatedExternsFile,
   projectRoot,
-  srcDir: "./src",
+  srcDir: ".",
 });
 
 const result = await build({
   cache: { mode: "off" },
   diagnostics: { preflight: "full" },
-  entries: ["./main.tsx"],
-  externs: ["./react.generated.externs.js"],
+  entries: ["./main.ts"],
+  externs: ["./jquery.generated.externs.js"],
   outDir: "./dist",
   projectRoot,
-  srcDir: "./src",
+  srcDir: ".",
 });
 
 if (result.exitCode !== 0) {
@@ -30,13 +34,18 @@ if (result.exitCode !== 0) {
     const message =
       typeof diagnostic?.messageText === "string"
         ? diagnostic.messageText
-        : ts.flattenDiagnosticMessageText(diagnostic?.messageText ?? diagnostic, "\n");
+        : ts.flattenDiagnosticMessageText(
+            diagnostic?.messageText ?? diagnostic,
+            "\n",
+          );
     console.error(message);
   }
   process.exit(result.exitCode);
 }
 
 console.log(
-  `Built React SPA to ${path.relative(projectRoot, result.outputFiles[0] ?? "./dist/main.js")}`,
+  `Built jQuery extern demo to ${path.relative(projectRoot, result.outputFiles[0] ?? "./dist/main.js")}`,
 );
-console.log(`Generated externs at ${path.relative(projectRoot, generatedExternsFile)}`);
+console.log(
+  `Generated externs at ${path.relative(projectRoot, generatedExternsFile)}`,
+);
