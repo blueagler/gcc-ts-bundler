@@ -38,7 +38,10 @@ pub fn to_goog_module_id(file_path: &Path, root_dir: &Path) -> String {
         without_extension
             .split('/')
             .map(|segment| {
-                segment.replace(|char: char| !(char.is_ascii_alphanumeric() || char == '_' || char == '$'), "_")
+                segment.replace(
+                    |char: char| !(char.is_ascii_alphanumeric() || char == '_' || char == '$'),
+                    "_",
+                )
             })
             .collect::<Vec<_>>()
             .join(".")

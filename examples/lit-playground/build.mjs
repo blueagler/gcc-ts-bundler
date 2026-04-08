@@ -17,8 +17,7 @@ await generateExterns({
 
 const result = await build({
   cache: { mode: "off" },
-  chunks: { mode: "closure-library", publicPath: "./" },
-  diagnostics: { preflight: "full" },
+  chunks: { loader: "script", mode: "bundler-runtime" },
   entries: ["./main.ts"],
   externs: ["./lit.generated.externs.js"],
   outDir: "./dist",

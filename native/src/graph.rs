@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -13,8 +13,6 @@ use swc_core::ecma::visit::{Visit, VisitWith};
 use crate::commonjs::{analyze_commonjs_module, CommonJsAnalysis};
 use crate::module_cache::{get_or_parse_cached_module, parse_and_cache_module};
 use crate::pathing::to_goog_module_id;
-
-const RUNTIME_SPECIFIER: &str = "gcc-ts-bundler/runtime";
 
 #[allow(non_snake_case)]
 #[napi(object)]
@@ -147,7 +145,7 @@ pub fn resolve_graph(
         let lazy_specifiers = if commonjs_analysis.has_commonjs {
             Vec::new()
         } else {
-            collect_lazy_runtime_specifiers(&module)?
+            collect_dynamic_import_specifiers(&module)?
         };
 
         let mut dependencies = BTreeSet::new();
@@ -319,23 +317,25 @@ fn collect_exports(
 
     for item in module.body.iter() {
         match item {
-            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export_decl)) => match &export_decl.decl {
-                Decl::Class(class_decl) => {
-                    export_names.insert(class_decl.ident.sym.to_string());
-                }
-                Decl::Fn(fn_decl) => {
-                    export_names.insert(fn_decl.ident.sym.to_string());
-                }
-                Decl::Var(var_decl) => {
-                    for declarator in &var_decl.decls {
-                        collect_pattern_idents(&declarator.name, &mut export_names);
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export_decl)) => {
+                match &export_decl.decl {
+                    Decl::Class(class_decl) => {
+                        export_names.insert(class_decl.ident.sym.to_string());
                     }
+                    Decl::Fn(fn_decl) => {
+                        export_names.insert(fn_decl.ident.sym.to_string());
+                    }
+                    Decl::Var(var_decl) => {
+                        for declarator in &var_decl.decls {
+                            collect_pattern_idents(&declarator.name, &mut export_names);
+                        }
+                    }
+                    Decl::TsEnum(enum_decl) => {
+                        export_names.insert(enum_decl.id.sym.to_string());
+                    }
+                    _ => {}
                 }
-                Decl::TsEnum(enum_decl) => {
-                    export_names.insert(enum_decl.id.sym.to_string());
-                }
-                _ => {}
-            },
+            }
             ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(_))
             | ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(_)) => {
                 has_default_export = true;
@@ -389,7 +389,10 @@ fn collect_exports(
                     for specifier in &named.specifiers {
                         if let ExportSpecifier::Named(named_specifier) = specifier {
                             let exported_name = export_name_from_module_export_name(
-                                named_specifier.exported.as_ref().unwrap_or(&named_specifier.orig),
+                                named_specifier
+                                    .exported
+                                    .as_ref()
+                                    .unwrap_or(&named_specifier.orig),
                             );
                             if exported_name == "default" {
                                 has_default_export = true;
@@ -405,9 +408,11 @@ fn collect_exports(
                     continue;
                 }
 
-                if let Some(resolved) =
-                    resolve_module_specifier(&export_all.src.value.to_string_lossy(), file_path, context)?
-                {
+                if let Some(resolved) = resolve_module_specifier(
+                    &export_all.src.value.to_string_lossy(),
+                    file_path,
+                    context,
+                )? {
                     let target_exports = collect_exports(
                         &resolved.path,
                         commonjs_cache,
@@ -472,7 +477,7 @@ fn extract_dependencies(module: &Module) -> Vec<String> {
     for item in &module.body {
         match item {
             ModuleItem::ModuleDecl(ModuleDecl::Import(import_decl)) => {
-                if !import_decl.type_only && import_decl.src.value != *RUNTIME_SPECIFIER {
+                if !import_decl.type_only {
                     dependencies.push(import_decl.src.value.to_string_lossy().to_string());
                 }
             }
@@ -495,10 +500,9 @@ fn extract_dependencies(module: &Module) -> Vec<String> {
     dependencies
 }
 
-fn collect_lazy_runtime_specifiers(module: &Module) -> std::result::Result<Vec<String>, String> {
-    let mut collector = LazyRuntimeCallCollector {
+fn collect_dynamic_import_specifiers(module: &Module) -> std::result::Result<Vec<String>, String> {
+    let mut collector = DynamicImportCallCollector {
         errors: Vec::new(),
-        helpers: collect_runtime_lazy_helpers(module),
         specifiers: Vec::new(),
     };
     module.visit_with(&mut collector);
@@ -508,99 +512,34 @@ fn collect_lazy_runtime_specifiers(module: &Module) -> std::result::Result<Vec<S
     Ok(collector.specifiers)
 }
 
-#[derive(Default)]
-struct RuntimeLazyHelpers {
-    lazy_names: HashSet<String>,
-    preload_names: HashSet<String>,
-}
-
-fn collect_runtime_lazy_helpers(module: &Module) -> RuntimeLazyHelpers {
-    let mut helpers = RuntimeLazyHelpers::default();
-    for item in &module.body {
-        let ModuleItem::ModuleDecl(ModuleDecl::Import(import_decl)) = item else {
-            continue;
-        };
-        if import_decl.src.value != *RUNTIME_SPECIFIER {
-            continue;
-        }
-        for specifier in &import_decl.specifiers {
-            let ImportSpecifier::Named(named) = specifier else {
-                continue;
-            };
-            let imported_name = match &named.imported {
-                Some(ModuleExportName::Ident(ident)) => ident.sym.as_ref(),
-                Some(ModuleExportName::Str(string)) => {
-                    if string.value.to_string_lossy() == "lazyModule" {
-                        "lazyModule"
-                    } else if string.value.to_string_lossy() == "preloadModule" {
-                        "preloadModule"
-                    } else {
-                        ""
-                    }
-                }
-                None => named.local.sym.as_ref(),
-            };
-            match imported_name {
-                "lazyModule" => {
-                    helpers.lazy_names.insert(named.local.sym.to_string());
-                }
-                "preloadModule" => {
-                    helpers.preload_names.insert(named.local.sym.to_string());
-                }
-                _ => {}
-            }
-        }
-    }
-    helpers
-}
-
-struct LazyRuntimeCallCollector {
+struct DynamicImportCallCollector {
     errors: Vec<String>,
-    helpers: RuntimeLazyHelpers,
     specifiers: Vec<String>,
 }
 
-impl Visit for LazyRuntimeCallCollector {
+impl Visit for DynamicImportCallCollector {
     fn visit_call_expr(&mut self, call_expr: &CallExpr) {
         call_expr.visit_children_with(self);
 
-        let helper_name = match &call_expr.callee {
-            Callee::Import(_) => Some("import"),
-            Callee::Expr(callee) => {
-                let Expr::Ident(ident) = &**callee else {
-                    return;
-                };
-                if self.helpers.lazy_names.contains(ident.sym.as_ref()) {
-                    Some("lazyModule")
-                } else if self.helpers.preload_names.contains(ident.sym.as_ref()) {
-                    Some("preloadModule")
-                } else {
-                    None
-                }
-            }
-            Callee::Super(_) => None,
-        };
-        let Some(helper_name) = helper_name else {
+        let Callee::Import(_) = &call_expr.callee else {
             return;
         };
         if call_expr.args.len() != 1 {
-            self.errors.push(format!(
-                "{}() requires exactly one string literal argument",
-                helper_name
-            ));
+            self.errors
+                .push("import() requires exactly one string literal argument".to_string());
             return;
         }
         match &*call_expr.args[0].expr {
             Expr::Lit(Lit::Str(string)) => {
-                self.specifiers.push(string.value.to_string_lossy().to_string());
+                self.specifiers
+                    .push(string.value.to_string_lossy().to_string());
             }
             Expr::Tpl(template) if template.exprs.is_empty() && template.quasis.len() == 1 => {
                 self.specifiers.push(template.quasis[0].raw.to_string());
             }
-            _ => self.errors.push(format!(
-                "{}() requires a string literal module specifier",
-                helper_name
-            )),
+            _ => self
+                .errors
+                .push("import() requires a string literal module specifier".to_string()),
         }
     }
 }
@@ -610,9 +549,6 @@ fn resolve_module_specifier(
     importer: &Path,
     context: &ResolveContext,
 ) -> std::result::Result<Option<ResolvedModule>, String> {
-    if specifier == RUNTIME_SPECIFIER {
-        return Ok(None);
-    }
     if is_node_builtin(specifier) {
         return Err(format!(
             "Unsupported Node builtin import \"{specifier}\" in {}",
@@ -683,13 +619,14 @@ fn resolve_package_import(
     context: &ResolveContext,
 ) -> std::result::Result<ResolvedModule, String> {
     let package_import = parse_package_import(specifier)?;
-    let package_dir = find_package_dir(importer, &package_import.package_name).ok_or_else(|| {
-        format!(
-            "Failed to resolve package \"{}\" from {}",
-            package_import.package_name,
-            importer.to_string_lossy()
-        )
-    })?;
+    let package_dir =
+        find_package_dir(importer, &package_import.package_name).ok_or_else(|| {
+            format!(
+                "Failed to resolve package \"{}\" from {}",
+                package_import.package_name,
+                importer.to_string_lossy()
+            )
+        })?;
     let package_json_path = package_dir.join("package.json");
     let mut package_json_files = Vec::new();
     let package_json = if package_json_path.exists() {
@@ -761,7 +698,8 @@ fn resolve_package_path(
                     }
                 }
             }
-        } else if let Some(target) = resolve_browser_subpath(package_json, &package_import.subpath)? {
+        } else if let Some(target) = resolve_browser_subpath(package_json, &package_import.subpath)?
+        {
             if let Some(path) = resolve_package_target(
                 &target,
                 package_dir,
@@ -774,14 +712,20 @@ fn resolve_package_path(
         }
     }
 
-    resolve_package_local_path(package_dir, &package_import.subpath, importer, &package_import.package_name, context)?
-        .ok_or_else(|| {
-            format!(
-                "Failed to resolve package import \"{}\" from {}",
-                format_package_specifier(package_import),
-                importer.to_string_lossy()
-            )
-        })
+    resolve_package_local_path(
+        package_dir,
+        &package_import.subpath,
+        importer,
+        &package_import.package_name,
+        context,
+    )?
+    .ok_or_else(|| {
+        format!(
+            "Failed to resolve package import \"{}\" from {}",
+            format_package_specifier(package_import),
+            importer.to_string_lossy()
+        )
+    })
 }
 
 fn select_package_export_target(
@@ -947,14 +891,11 @@ fn should_prefer_development_target(
     let development_path_name = development_path.to_string_lossy();
     let default_path_name = default_path.to_string_lossy();
 
-    Ok(
-        (contains_closure_protocol_hints(&development_source)
-            && !contains_closure_protocol_hints(&default_source))
-            || (default_path_name.contains("/production/")
-                && development_path_name.contains("/development/"))
-            || (looks_minified_source(&default_source)
-                && !looks_minified_source(&development_source)),
-    )
+    Ok((contains_closure_protocol_hints(&development_source)
+        && !contains_closure_protocol_hints(&default_source))
+        || (default_path_name.contains("/production/")
+            && development_path_name.contains("/development/"))
+        || (looks_minified_source(&default_source) && !looks_minified_source(&development_source)))
 }
 
 fn contains_closure_protocol_hints(source: &str) -> bool {
@@ -1195,8 +1136,7 @@ fn find_package_dir(importer: &Path, package_name: &str) -> Option<PathBuf> {
 
 fn read_package_json(path: &Path) -> std::result::Result<Value, String> {
     let contents = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    serde_json::from_str(&contents)
-        .map_err(|error| format!("{}: {error}", path.to_string_lossy()))
+    serde_json::from_str(&contents).map_err(|error| format!("{}: {error}", path.to_string_lossy()))
 }
 
 fn match_exports_pattern<'a>(
@@ -1326,18 +1266,13 @@ fn module_candidates(base: &Path) -> Vec<PathBuf> {
     } else {
         candidates.push(base.to_path_buf());
         for extension in [
-            ".ts",
-            ".tsx",
-            ".js",
-            ".jsx",
-            ".mjs",
-            ".mts",
-            ".cjs",
-            ".cts",
-            ".json",
-            ".node",
+            ".ts", ".tsx", ".js", ".jsx", ".mjs", ".mts", ".cjs", ".cts", ".json", ".node",
         ] {
-            candidates.push(PathBuf::from(format!("{}{}", base.to_string_lossy(), extension)));
+            candidates.push(PathBuf::from(format!(
+                "{}{}",
+                base.to_string_lossy(),
+                extension
+            )));
         }
         for extension in [
             "index.ts",
@@ -1459,7 +1394,10 @@ mod tests {
     #[test]
     fn resolves_package_root_from_exports_browser_condition() {
         let temp_dir = TestDir::new();
-        temp_dir.write("src/index.ts", "import pkg from \"demo-pkg\";\nexport default pkg;\n");
+        temp_dir.write(
+            "src/index.ts",
+            "import pkg from \"demo-pkg\";\nexport default pkg;\n",
+        );
         temp_dir.write(
             "node_modules/demo-pkg/package.json",
             r#"{"name":"demo-pkg","exports":{"browser":"./browser.js","import":"./import.js"}}"#,
@@ -1492,7 +1430,10 @@ mod tests {
             "node_modules/demo-pkg/package.json",
             r#"{"name":"demo-pkg","exports":{"./features/*":{"browser":"./dist/features/*.js"}}}"#,
         );
-        temp_dir.write("node_modules/demo-pkg/dist/features/button.js", "export default 1;\n");
+        temp_dir.write(
+            "node_modules/demo-pkg/dist/features/button.js",
+            "export default 1;\n",
+        );
 
         let result = resolve_graph(
             vec![temp_dir.join("src/index.ts").to_string_lossy().to_string()],
@@ -1511,7 +1452,10 @@ mod tests {
     #[test]
     fn falls_back_to_browser_then_module_then_main() {
         let temp_dir = TestDir::new();
-        temp_dir.write("src/index.ts", "import pkg from \"demo-pkg\";\nexport default pkg;\n");
+        temp_dir.write(
+            "src/index.ts",
+            "import pkg from \"demo-pkg\";\nexport default pkg;\n",
+        );
         temp_dir.write(
             "node_modules/demo-pkg/package.json",
             r#"{"name":"demo-pkg","browser":"./browser.js","module":"./module.js","main":"./main.cjs"}"#,
@@ -1537,13 +1481,19 @@ mod tests {
     #[test]
     fn resolves_package_relative_module_field_without_dot_prefix() {
         let temp_dir = TestDir::new();
-        temp_dir.write("src/index.ts", "import pkg from \"demo-pkg\";\nexport default pkg;\n");
+        temp_dir.write(
+            "src/index.ts",
+            "import pkg from \"demo-pkg\";\nexport default pkg;\n",
+        );
         temp_dir.write(
             "node_modules/demo-pkg/package.json",
             r#"{"name":"demo-pkg","module":"es/index.js","main":"lib/index.js"}"#,
         );
         temp_dir.write("node_modules/demo-pkg/es/index.js", "export default 1;\n");
-        temp_dir.write("node_modules/demo-pkg/lib/index.js", "module.exports = 2;\n");
+        temp_dir.write(
+            "node_modules/demo-pkg/lib/index.js",
+            "module.exports = 2;\n",
+        );
 
         let result = resolve_graph(
             vec![temp_dir.join("src/index.ts").to_string_lossy().to_string()],
@@ -1562,7 +1512,10 @@ mod tests {
     #[test]
     fn tracks_package_json_hash_changes() {
         let temp_dir = TestDir::new();
-        temp_dir.write("src/index.ts", "import pkg from \"demo-pkg\";\nexport default pkg;\n");
+        temp_dir.write(
+            "src/index.ts",
+            "import pkg from \"demo-pkg\";\nexport default pkg;\n",
+        );
         temp_dir.write(
             "node_modules/demo-pkg/package.json",
             r#"{"name":"demo-pkg","module":"./index.js"}"#,
@@ -1609,12 +1562,18 @@ mod tests {
     #[test]
     fn rejects_unsupported_commonjs_package_patterns() {
         let temp_dir = TestDir::new();
-        temp_dir.write("src/index.ts", "import pkg from \"demo-pkg\";\nexport default pkg;\n");
+        temp_dir.write(
+            "src/index.ts",
+            "import pkg from \"demo-pkg\";\nexport default pkg;\n",
+        );
         temp_dir.write(
             "node_modules/demo-pkg/package.json",
             r#"{"name":"demo-pkg","main":"./index.cjs"}"#,
         );
-        temp_dir.write("node_modules/demo-pkg/index.cjs", "module.exports = require(name);\n");
+        temp_dir.write(
+            "node_modules/demo-pkg/index.cjs",
+            "module.exports = require(name);\n",
+        );
 
         let error = resolve_graph(
             vec![temp_dir.join("src/index.ts").to_string_lossy().to_string()],
@@ -1649,10 +1608,7 @@ mod tests {
     #[test]
     fn resolves_js_specifier_to_ts_source() {
         let temp_dir = TestDir::new();
-        temp_dir.write(
-            "src/index.ts",
-            "export { value } from \"./support.js\";\n",
-        );
+        temp_dir.write("src/index.ts", "export { value } from \"./support.js\";\n");
         temp_dir.write("src/support.ts", "export const value = 1;\n");
 
         let result = resolve_graph(

@@ -64,7 +64,7 @@ export async function emitNativeStage({
 }): Promise<NativeEmitStageResult> {
   const usesPersistentCache = options.cache.mode === "persistent";
   const outDir = path.join(cacheDir, "out");
-  const externsPath = path.join(cacheDir, "modules-externs.js");
+  const externsPath = path.join(cacheDir, "native-generated.externs.js");
   const metadataPathForNative = path.join(cacheDir, "closure-ir.json");
   const runtimePackageInputs = await collectTsxRuntimePackageInputs({
     fileNames,
@@ -415,9 +415,7 @@ function collectDependencyRuntimeFiles({
 }
 
 function isDependencyFile(filePath: string) {
-  return path
-    .resolve(filePath)
-    .includes(`${path.sep}node_modules${path.sep}`);
+  return path.resolve(filePath).includes(`${path.sep}node_modules${path.sep}`);
 }
 
 function uniqueSorted(values: string[]) {

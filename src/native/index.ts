@@ -28,9 +28,8 @@ function detectLinuxLibc(): "gnu" | "musl" {
   }
 
   try {
-    const { execFileSync } = require(
-      "node:child_process",
-    ) as typeof import("node:child_process");
+    const { execFileSync } =
+      require("node:child_process") as typeof import("node:child_process");
     const output = execFileSync("ldd", ["--version"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],

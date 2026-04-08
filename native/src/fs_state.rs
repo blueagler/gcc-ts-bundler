@@ -36,8 +36,7 @@ pub fn match_file_states(expected: Vec<FileStateEntry>) -> bool {
     expected.into_iter().all(|entry| {
         let current = collect_file_state(&entry.filePath);
         current.exists == entry.exists
-            && (!entry.exists
-                || (current.size == entry.size && current.mtimeMs == entry.mtimeMs))
+            && (!entry.exists || (current.size == entry.size && current.mtimeMs == entry.mtimeMs))
     })
 }
 
@@ -74,7 +73,8 @@ pub fn published_outputs_match(output_files: Vec<String>, out_dir: String) -> bo
             None => return false,
         };
         let source = collect_file_state(&output_file);
-        let destination = collect_file_state(&Path::new(&out_dir).join(output_name).to_string_lossy());
+        let destination =
+            collect_file_state(&Path::new(&out_dir).join(output_name).to_string_lossy());
         source.exists && destination.exists && source.size == destination.size
     })
 }

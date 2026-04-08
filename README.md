@@ -85,19 +85,18 @@ The runtime path uses a native Rust addon for graph resolution, shim emission, a
 
 `packages.mode = "esm-only"` supports browser-safe ESM dependencies from `node_modules`, plus statically analyzable CommonJS package entrypoints and internal package modules. Dynamic `require()`, Node builtins, JSON modules, and native addons are still rejected.
 
-`chunks.mode = "closure-library"` switches output to app-oriented Closure script chunks. In that mode entries are treated as bootstrap scripts, not exported library bundles.
+`chunks.mode = "bundler-runtime"` switches output to app-oriented script chunks owned by `gcc-ts-bundler`. In that mode entries are treated as bootstrap scripts, not exported library bundles.
 
-For explicit lazy loading, import the compile-time helpers from `gcc-ts-bundler/runtime`:
+Use native `import()` for explicit lazy loading:
 
 ```ts
-import { lazyModule, preloadModule } from "gcc-ts-bundler/runtime";
-
-const loadFeature = lazyModule<typeof import("./feature")>("./feature");
-void preloadModule("./feature");
+const loadFeature = () => import("./feature");
 ```
 
-The specifier must be a string literal. In chunk mode the bundler rewrites these calls to the generated chunk loader runtime and emits a `chunks.manifest.json` file next to the output chunks.
-The specifier must be a string literal. In chunk mode the bundler rewrites these calls to generated internal chunk-loader bindings. No manifest file is emitted unless `chunks.manifestFile` or `--chunk-manifest` is explicitly set.
+The specifier must be a string literal. In chunk mode the bundler rewrites lazy imports to its internal chunk-loader runtime. No manifest file is emitted unless `chunks.manifestFile` or `--chunk-manifest` is explicitly set.
+
+Compatibility stays generic and syntax-driven. The bundler preserves runtime contracts that are discoverable from emitted JavaScript patterns, but it does not expose framework-specific helper APIs or package-name-based special cases.
+There is no separate lazy-loading helper package surface; chunked lazy loading is `import()`-driven.
 
 ## CLI
 
@@ -118,7 +117,7 @@ gcc-ts-bundler externs --project-root=. --module=lit --module=@lit-labs/router -
 - `--language-out`: ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT
 - `--compilation-level`: WHITESPACE_ONLY | SIMPLE | ADVANCED
 - `--packages`: `off | esm-only`
-- `--chunks`: `off | closure-library`
+- `--chunks`: `off | bundler-runtime`
 - `--chunk-public-path`: public URL prefix used to load chunk files
 - `--chunk-base-name`: base chunk output name
 - `--chunk-manifest`: output filename for the generated chunk manifest
@@ -128,6 +127,8 @@ gcc-ts-bundler externs --project-root=. --module=lit --module=@lit-labs/router -
 - `--fatal-warnings`: Whether typed transpile warnings should be fatal
 - `--verbose`: Print diagnostics to the console.
 - `-h, --help`: Show this help message.
+
+Only the documented dashed CLI flags are supported. Deprecated underscore and camelCase aliases are not recognized.
 
 ### Extern Generation Flags
 

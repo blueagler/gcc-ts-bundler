@@ -19,7 +19,10 @@ static MODULE_CACHE: OnceLock<Mutex<HashMap<String, CachedModule>>> = OnceLock::
 
 pub fn parse_module(file_path: &Path, source: &str) -> std::result::Result<Module, String> {
     let cm: Lrc<SourceMap> = Default::default();
-    let fm = cm.new_source_file(FileName::Real(file_path.to_path_buf()).into(), source.to_string());
+    let fm = cm.new_source_file(
+        FileName::Real(file_path.to_path_buf()).into(),
+        source.to_string(),
+    );
     let syntax = match file_path.extension().and_then(|ext| ext.to_str()) {
         Some("ts") | Some("mts") | Some("d.ts") => Syntax::Typescript(TsSyntax {
             tsx: false,
@@ -33,7 +36,10 @@ pub fn parse_module(file_path: &Path, source: &str) -> std::result::Result<Modul
             ..Default::default()
         }),
         _ => Syntax::Es(EsSyntax {
-            jsx: matches!(file_path.extension().and_then(|ext| ext.to_str()), Some("jsx")),
+            jsx: matches!(
+                file_path.extension().and_then(|ext| ext.to_str()),
+                Some("jsx")
+            ),
             ..Default::default()
         }),
     };

@@ -32,13 +32,13 @@ var __toESM = (mod, isNodeMode, target) => {
 };
 
 // src/api/externs.ts
-var import_fs3 = __toESM(require("fs"));
-var import_path3 = __toESM(require("path"));
+var import_fs2 = __toESM(require("fs"));
+var import_path2 = __toESM(require("path"));
 var import_typescript2 = __toESM(require("typescript"));
 
 // src/stages/native/compiler-options.ts
-var import_fs2 = __toESM(require("fs"));
-var import_path2 = __toESM(require("path"));
+var import_fs = __toESM(require("fs"));
+var import_path = __toESM(require("path"));
 var import_typescript = __toESM(require("typescript"));
 
 // src/cache/hash.ts
@@ -59,44 +59,10 @@ function hashJson(value) {
   return hashContent(JSON.stringify(normalizeValue(value)));
 }
 
-// src/internal/bundle-location.ts
-var import_fs = __toESM(require("fs"));
-var import_path = __toESM(require("path"));
-var import_module = require("module");
-var import_url = require("url");
-var bundleRequire = null;
-var packageRoot = null;
-function getBundleFilePath() {
-  return import_url.fileURLToPath(__gcc_current_module_url);
-}
-function createBundleRequire() {
-  bundleRequire ??= import_module.createRequire(__gcc_current_module_url);
-  return bundleRequire;
-}
-function getPackageRootFromBundle() {
-  if (packageRoot) {
-    return packageRoot;
-  }
-  let currentDir = import_path.default.dirname(getBundleFilePath());
-  while (true) {
-    if (import_fs.default.existsSync(import_path.default.join(currentDir, "package.json"))) {
-      packageRoot = currentDir;
-      return currentDir;
-    }
-    const parentDir = import_path.default.dirname(currentDir);
-    if (parentDir === currentDir) {
-      throw new Error(`Unable to locate package.json from bundled module path ${getBundleFilePath()}`);
-    }
-    currentDir = parentDir;
-  }
-}
-
 // src/stages/native/compiler-options.ts
-var RUNTIME_SPECIFIER = "gcc-ts-bundler/runtime";
-var PACKAGE_ROOT = getPackageRootFromBundle();
 var compilerOptionsCache = new Map;
 async function loadCompilerOptions(configPath, extraOptions = {}) {
-  const configStat = await import_fs2.default.promises.stat(configPath);
+  const configStat = await import_fs.default.promises.stat(configPath);
   const cacheKey = hashJson({
     configPath,
     extraOptions,
@@ -107,10 +73,7 @@ async function loadCompilerOptions(configPath, extraOptions = {}) {
   if (cached) {
     return cached;
   }
-  const configDir = import_path2.default.dirname(configPath);
-  const runtimePaths = await shouldInjectRuntimePaths(configDir) ? {
-    [RUNTIME_SPECIFIER]: [import_path2.default.join(PACKAGE_ROOT, "src", "runtime", "index.ts")]
-  } : {};
+  const configDir = import_path.default.dirname(configPath);
   const configFile = import_typescript.default.readConfigFile(configPath, import_typescript.default.sys.readFile);
   if (configFile.error) {
     throw new Error(import_typescript.default.flattenDiagnosticMessageText(configFile.error.messageText, `
@@ -122,8 +85,7 @@ async function loadCompilerOptions(configPath, extraOptions = {}) {
     ignoreDeprecations: extraOptions.ignoreDeprecations ?? configFile.config.compilerOptions?.ignoreDeprecations ?? "6.0",
     paths: {
       ...configFile.config.compilerOptions?.paths ?? {},
-      ...extraOptions.paths ?? {},
-      ...runtimePaths
+      ...extraOptions.paths ?? {}
     }
   }, configPath);
   if (parsedConfig.errors.length > 0) {
@@ -131,26 +93,6 @@ async function loadCompilerOptions(configPath, extraOptions = {}) {
   }
   compilerOptionsCache.set(cacheKey, parsedConfig.options);
   return parsedConfig.options;
-}
-async function shouldInjectRuntimePaths(configDir) {
-  let currentDir = configDir;
-  while (true) {
-    const packageJsonPath = import_path2.default.join(currentDir, "package.json");
-    try {
-      const raw = await import_fs2.default.promises.readFile(packageJsonPath, "utf8");
-      const parsed = JSON.parse(raw);
-      return parsed.name === "gcc-ts-bundler";
-    } catch (error) {
-      if (error.code !== "ENOENT") {
-        throw error;
-      }
-    }
-    const parentDir = import_path2.default.dirname(currentDir);
-    if (parentDir === currentDir) {
-      return false;
-    }
-    currentDir = parentDir;
-  }
 }
 
 // src/api/externs.ts
@@ -196,9 +138,9 @@ async function generateExterns(options) {
     throw new Error("generateExterns requires at least one module specifier.");
   }
   const mode = options.mode ?? "boundary-aware";
-  const projectRoot = import_path3.default.resolve(options.projectRoot ?? process.cwd());
-  const srcDir = import_path3.default.resolve(projectRoot, options.srcDir ?? ".");
-  const tsConfigPath = options.tsConfigPath && import_path3.default.resolve(projectRoot, options.tsConfigPath);
+  const projectRoot = import_path2.default.resolve(options.projectRoot ?? process.cwd());
+  const srcDir = import_path2.default.resolve(projectRoot, options.srcDir ?? ".");
+  const tsConfigPath = options.tsConfigPath && import_path2.default.resolve(projectRoot, options.tsConfigPath);
   const compilerOptions = await loadExternCompilerOptions({
     projectRoot,
     tsConfigPath
@@ -258,10 +200,10 @@ async function generateExterns(options) {
     }),
     scannedFiles
   });
-  const outputFile = options.outputFile && import_path3.default.resolve(projectRoot, options.outputFile);
+  const outputFile = options.outputFile && import_path2.default.resolve(projectRoot, options.outputFile);
   if (outputFile) {
-    await import_fs3.default.promises.mkdir(import_path3.default.dirname(outputFile), { recursive: true });
-    await import_fs3.default.promises.writeFile(outputFile, text, "utf8");
+    await import_fs2.default.promises.mkdir(import_path2.default.dirname(outputFile), { recursive: true });
+    await import_fs2.default.promises.writeFile(outputFile, text, "utf8");
   }
   return {
     mode,
@@ -282,9 +224,9 @@ async function loadExternCompilerOptions({
     moduleResolution: import_typescript2.default.ModuleResolutionKind.Bundler,
     target: import_typescript2.default.ScriptTarget.ESNext
   };
-  const resolvedConfigPath = tsConfigPath ?? import_path3.default.join(projectRoot, "tsconfig.json");
+  const resolvedConfigPath = tsConfigPath ?? import_path2.default.join(projectRoot, "tsconfig.json");
   try {
-    await import_fs3.default.promises.access(resolvedConfigPath, import_fs3.default.constants.R_OK);
+    await import_fs2.default.promises.access(resolvedConfigPath, import_fs2.default.constants.R_OK);
     try {
       return await loadCompilerOptions(resolvedConfigPath, {
         allowJs: true,
@@ -307,7 +249,7 @@ async function resolveModuleTypeEntry({
   projectRoot,
   specifier
 }) {
-  const containingFile = import_path3.default.join(projectRoot, "__gcc_externs_entry__.ts");
+  const containingFile = import_path2.default.join(projectRoot, "__gcc_externs_entry__.ts");
   const resolution = import_typescript2.default.resolveModuleName(specifier, containingFile, compilerOptions, import_typescript2.default.sys).resolvedModule;
   const resolvedFromTypescript = resolution && normalizeResolvedTypeFile(resolution.resolvedFileName);
   if (resolvedFromTypescript) {
@@ -352,14 +294,14 @@ function createEmptyContractRegistry() {
   };
 }
 function normalizeResolvedTypeFile(resolvedFileName) {
-  const normalizedPath = import_path3.default.resolve(resolvedFileName);
+  const normalizedPath = import_path2.default.resolve(resolvedFileName);
   if (isTypeSourceFile(normalizedPath)) {
     return normalizedPath;
   }
   for (const extension of DECLARATION_EXTENSIONS) {
     const candidate = withTypeExtension(normalizedPath, extension);
     if (import_typescript2.default.sys.fileExists(candidate)) {
-      return import_path3.default.resolve(candidate);
+      return import_path2.default.resolve(candidate);
     }
   }
   return null;
@@ -368,7 +310,7 @@ function withTypeExtension(filePath, nextExtension) {
   if (filePath.endsWith(".d.ts") || filePath.endsWith(".d.mts") || filePath.endsWith(".d.cts")) {
     return filePath;
   }
-  const extension = import_path3.default.extname(filePath);
+  const extension = import_path2.default.extname(filePath);
   return `${filePath.slice(0, filePath.length - extension.length)}${nextExtension}`;
 }
 async function collectReachableTypeFiles({
@@ -384,7 +326,7 @@ async function collectReachableTypeFiles({
     if (!nextFile) {
       continue;
     }
-    const resolvedFile = import_path3.default.resolve(nextFile);
+    const resolvedFile = import_path2.default.resolve(nextFile);
     if (seen.has(resolvedFile) || !isTypeSourceFile(resolvedFile)) {
       continue;
     }
@@ -392,7 +334,7 @@ async function collectReachableTypeFiles({
       continue;
     }
     seen.add(resolvedFile);
-    const sourceText = await import_fs3.default.promises.readFile(resolvedFile, "utf8");
+    const sourceText = await import_fs2.default.promises.readFile(resolvedFile, "utf8");
     const sourceFile = import_typescript2.default.createSourceFile(resolvedFile, sourceText, import_typescript2.default.ScriptTarget.Latest, true);
     for (const specifier of collectReferencedSpecifiers(sourceFile)) {
       const resolvedModule = import_typescript2.default.resolveModuleName(specifier, resolvedFile, compilerOptions, import_typescript2.default.sys).resolvedModule;
@@ -439,12 +381,12 @@ function collectReferencedSpecifiers(sourceFile) {
 }
 function collectContracts(program, scannedFiles) {
   const checker = program.getTypeChecker();
-  const scannedFileSet = new Set(scannedFiles.map((filePath) => import_path3.default.resolve(filePath)));
+  const scannedFileSet = new Set(scannedFiles.map((filePath) => import_path2.default.resolve(filePath)));
   const interfaceContracts = new Map;
   const typeAliasContracts = new Map;
   const classContracts = new Map;
   for (const sourceFile of program.getSourceFiles()) {
-    if (!scannedFileSet.has(import_path3.default.resolve(sourceFile.fileName))) {
+    if (!scannedFileSet.has(import_path2.default.resolve(sourceFile.fileName))) {
       continue;
     }
     for (const statement of sourceFile.statements) {
@@ -657,20 +599,20 @@ function resolveAnalysisEntryFiles({
   srcDir
 }) {
   return entryFiles.map((entry) => {
-    if (import_path3.default.isAbsolute(entry)) {
+    if (import_path2.default.isAbsolute(entry)) {
       return entry;
     }
-    const fromSrcDir = import_path3.default.resolve(srcDir, entry);
+    const fromSrcDir = import_path2.default.resolve(srcDir, entry);
     if (import_typescript2.default.sys.fileExists(fromSrcDir)) {
       return fromSrcDir;
     }
-    return import_path3.default.resolve(projectRoot, entry);
+    return import_path2.default.resolve(projectRoot, entry);
   });
 }
 async function analyzeRuntimeUsage(runtimeEntryFiles) {
   const structuralMembers = new Set;
   for (const runtimeEntryFile of runtimeEntryFiles) {
-    const sourceText = await import_fs3.default.promises.readFile(runtimeEntryFile, "utf8");
+    const sourceText = await import_fs2.default.promises.readFile(runtimeEntryFile, "utf8");
     const sourceFile = import_typescript2.default.createSourceFile(runtimeEntryFile, sourceText, import_typescript2.default.ScriptTarget.Latest, true, getScriptKindForFile(runtimeEntryFile));
     const knownConstructors = collectKnownConstructorBindings(sourceFile);
     const visit = (node) => {
@@ -1147,8 +1089,8 @@ function addMapSetValue(map, key, value) {
   map.set(key, new Set([value]));
 }
 function isProjectAppSourceFile(filePath, projectRoot) {
-  const resolvedFilePath = import_path3.default.resolve(filePath);
-  return !resolvedFilePath.includes(`${import_path3.default.sep}node_modules${import_path3.default.sep}`) && !resolvedFilePath.endsWith(".d.ts") && resolvedFilePath.startsWith(import_path3.default.resolve(projectRoot) + import_path3.default.sep);
+  const resolvedFilePath = import_path2.default.resolve(filePath);
+  return !resolvedFilePath.includes(`${import_path2.default.sep}node_modules${import_path2.default.sep}`) && !resolvedFilePath.endsWith(".d.ts") && resolvedFilePath.startsWith(import_path2.default.resolve(projectRoot) + import_path2.default.sep);
 }
 function isExportedDeclaration(node) {
   return (import_typescript2.default.getCombinedModifierFlags(node) & import_typescript2.default.ModifierFlags.Export) !== 0;
@@ -1209,16 +1151,16 @@ function getScriptKindForFile(filePath) {
   return import_typescript2.default.ScriptKind.JS;
 }
 function isScannedDeclarationSymbol(symbol, scannedFiles) {
-  return (symbol.declarations ?? []).some((declaration) => scannedFiles.has(import_path3.default.resolve(declaration.getSourceFile().fileName)));
+  return (symbol.declarations ?? []).some((declaration) => scannedFiles.has(import_path2.default.resolve(declaration.getSourceFile().fileName)));
 }
 function findPackageDir(filePath) {
-  let currentDir = import_path3.default.dirname(filePath);
+  let currentDir = import_path2.default.dirname(filePath);
   while (true) {
-    const packageJsonPath = import_path3.default.join(currentDir, "package.json");
+    const packageJsonPath = import_path2.default.join(currentDir, "package.json");
     if (import_typescript2.default.sys.fileExists(packageJsonPath)) {
       return currentDir;
     }
-    const parentDir = import_path3.default.dirname(currentDir);
+    const parentDir = import_path2.default.dirname(currentDir);
     if (parentDir === currentDir) {
       return null;
     }
@@ -1229,11 +1171,11 @@ function isTypeSourceFile(filePath) {
   return DECLARATION_EXTENSIONS.some((extension) => filePath.endsWith(extension));
 }
 function isTypescriptLibFile(filePath) {
-  return filePath.includes(`${import_path3.default.sep}node_modules${import_path3.default.sep}typescript${import_path3.default.sep}lib${import_path3.default.sep}`);
+  return filePath.includes(`${import_path2.default.sep}node_modules${import_path2.default.sep}typescript${import_path2.default.sep}lib${import_path2.default.sep}`);
 }
 function symbolCacheKey(symbol) {
   const declaration = symbol.declarations?.[0];
-  return declaration ? `${import_path3.default.resolve(declaration.getSourceFile().fileName)}:${symbol.getName()}` : symbol.getName();
+  return declaration ? `${import_path2.default.resolve(declaration.getSourceFile().fileName)}:${symbol.getName()}` : symbol.getName();
 }
 function uniqueStrings(values) {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
@@ -1264,7 +1206,7 @@ Build flags:
   --out-dir             Output directory
   --language-out        ECMASCRIPT3 | ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT_NEXT
   --compilation-level   WHITESPACE_ONLY | SIMPLE | ADVANCED
-  --chunks              off | closure-library | bundler-runtime
+  --chunks              off | bundler-runtime
   --chunk-loader        auto | script | fetch (bundler-runtime only)
   --chunk-public-path   Public URL prefix for chunk files in chunk mode
   --chunk-base-name     Base chunk output name in chunk mode
@@ -1276,10 +1218,6 @@ Build flags:
   --verbose             Print verbose diagnostics
   --fatal-warnings      Treat typed transpile warnings as fatal
   -h, --help            Show this help message
-
-Deprecated aliases still accepted for one transition release:
-  --src_dir --entry_point --output_dir --language_out --compilation_level
-  --fatal_warnings --preserve_cache
 
 Extern flags:
   --project-root          Project root used to resolve node_modules and tsconfig.json
@@ -1369,36 +1307,36 @@ function parseCliArgs(args) {
   if (parsedArgs.help) {
     return { options: { entries: [] }, showHelp: true };
   }
-  const entries = asStringArray(parsedArgs.entry ?? parsedArgs.entry_point ?? parsedArgs.entryPoint);
+  const entries = asStringArray(parsedArgs.entry);
   return {
     options: {
       cache: {
-        dir: parsedArgs["cache-dir"] ?? parsedArgs.cache_dir,
-        mode: parsedArgs["cache-mode"] ?? parsedArgs.cache_mode ?? DEFAULT_BUILD_OPTIONS.cache.mode
+        dir: parsedArgs["cache-dir"],
+        mode: parsedArgs["cache-mode"] ?? DEFAULT_BUILD_OPTIONS.cache.mode
       },
       chunks: {
-        baseChunkName: parsedArgs["chunk-base-name"] ?? parsedArgs.chunk_base_name,
-        loader: parsedArgs["chunk-loader"] ?? parsedArgs.chunk_loader,
-        manifestFile: parsedArgs["chunk-manifest"] ?? parsedArgs.chunk_manifest,
+        baseChunkName: parsedArgs["chunk-base-name"],
+        loader: parsedArgs["chunk-loader"],
+        manifestFile: parsedArgs["chunk-manifest"],
         mode: parsedArgs.chunks ?? DEFAULT_BUILD_OPTIONS.chunks.mode,
-        publicPath: parsedArgs["chunk-public-path"] ?? parsedArgs.chunk_public_path
+        publicPath: parsedArgs["chunk-public-path"]
       },
-      compilationLevel: parsedArgs["compilation-level"] ?? parsedArgs.compilation_level ?? parsedArgs.compilationLevel,
+      compilationLevel: parsedArgs["compilation-level"],
       diagnostics: {
-        fatalWarnings: Boolean(parsedArgs["fatal-warnings"] ?? parsedArgs.fatal_warnings ?? parsedArgs.fatalWarnings),
+        fatalWarnings: Boolean(parsedArgs["fatal-warnings"]),
         preflight: parsedArgs.preflight ?? DEFAULT_BUILD_OPTIONS.diagnostics.preflight,
         verbose: Boolean(parsedArgs.verbose)
       },
       entries,
       externs: asStringArray(parsedArgs.externs),
       js: asStringArray(parsedArgs.js),
-      languageOut: parsedArgs["language-out"] ?? parsedArgs.language_out ?? parsedArgs.languageOut,
-      outDir: parsedArgs["out-dir"] ?? parsedArgs.output_dir ?? parsedArgs.outputDir,
-      projectRoot: parsedArgs["project-root"] ?? parsedArgs.project_root,
+      languageOut: parsedArgs["language-out"],
+      outDir: parsedArgs["out-dir"],
+      projectRoot: parsedArgs["project-root"],
       packages: {
         mode: parsedArgs.packages ?? DEFAULT_BUILD_OPTIONS.packages.mode
       },
-      srcDir: parsedArgs["src-dir"] ?? parsedArgs.src_dir ?? parsedArgs.srcDir
+      srcDir: parsedArgs["src-dir"]
     },
     showHelp: false
   };
@@ -1413,8 +1351,8 @@ function asStringArray2(value) {
   return Array.isArray(value) ? value : [value];
 }
 function parseExternsCliArgs(args) {
-  const hasIncludeDependenciesFlag = args.includes("--include-dependencies") || args.includes("--include_dependencies");
-  const hasNoIncludeDependenciesFlag = args.includes("--no-include-dependencies") || args.includes("--no-include_dependencies");
+  const hasIncludeDependenciesFlag = args.includes("--include-dependencies");
+  const hasNoIncludeDependenciesFlag = args.includes("--no-include-dependencies");
   const parsedArgs = import_minimist2.default(args, {
     alias: {
       e: "entry",
@@ -1440,19 +1378,17 @@ function parseExternsCliArgs(args) {
       showHelp: true
     };
   }
-  const modules = [
-    ...asStringArray2(parsedArgs.module ?? parsedArgs.package)
-  ];
+  const modules = [...asStringArray2(parsedArgs.module)];
   return {
     options: {
       appEntryFiles: asStringArray2(parsedArgs.entry),
       includeDependencies: hasNoIncludeDependenciesFlag ? false : hasIncludeDependenciesFlag ? true : undefined,
       mode: parsedArgs.mode,
       modules,
-      outputFile: parsedArgs["output-file"] ?? parsedArgs.output_file ?? parsedArgs.output,
-      projectRoot: parsedArgs["project-root"] ?? parsedArgs.project_root,
-      runtimeEntryFiles: asStringArray2(parsedArgs["runtime-entry"] ?? parsedArgs.runtime_entry),
-      srcDir: parsedArgs["src-dir"] ?? parsedArgs.src_dir,
+      outputFile: parsedArgs["output-file"],
+      projectRoot: parsedArgs["project-root"],
+      runtimeEntryFiles: asStringArray2(parsedArgs["runtime-entry"]),
+      srcDir: parsedArgs["src-dir"],
       tsConfigPath: parsedArgs.tsconfig
     },
     showHelp: false
@@ -1464,17 +1400,17 @@ var import_path10 = __toESM(require("path"));
 var import_fs9 = __toESM(require("fs"));
 
 // src/cache/store.ts
-var import_fs4 = __toESM(require("fs"));
+var import_fs3 = __toESM(require("fs"));
 var import_os = __toESM(require("os"));
-var import_path4 = __toESM(require("path"));
+var import_path3 = __toESM(require("path"));
 function getDefaultPersistentCacheRoot() {
   if (process.platform === "darwin") {
-    return import_path4.default.join(import_os.default.homedir(), "Library", "Caches", "gcc-ts-bundler");
+    return import_path3.default.join(import_os.default.homedir(), "Library", "Caches", "gcc-ts-bundler");
   }
   if (process.platform === "win32") {
-    return import_path4.default.join(process.env.LOCALAPPDATA ?? import_path4.default.join(import_os.default.homedir(), "AppData", "Local"), "gcc-ts-bundler");
+    return import_path3.default.join(process.env.LOCALAPPDATA ?? import_path3.default.join(import_os.default.homedir(), "AppData", "Local"), "gcc-ts-bundler");
   }
-  return import_path4.default.join(process.env.XDG_CACHE_HOME ?? import_path4.default.join(import_os.default.homedir(), ".cache"), "gcc-ts-bundler");
+  return import_path3.default.join(process.env.XDG_CACHE_HOME ?? import_path3.default.join(import_os.default.homedir(), ".cache"), "gcc-ts-bundler");
 }
 async function createCacheStore({
   cacheDir,
@@ -1482,12 +1418,12 @@ async function createCacheStore({
   projectRoot
 }) {
   if (mode === "off" || mode === "temp") {
-    const rootDir2 = await import_fs4.default.promises.mkdtemp(import_path4.default.join(import_os.default.tmpdir(), "gcc-ts-bundler-"));
-    const workspaceDir2 = import_path4.default.join(rootDir2, "workspace");
-    await import_fs4.default.promises.mkdir(workspaceDir2, { recursive: true });
+    const rootDir2 = await import_fs3.default.promises.mkdtemp(import_path3.default.join(import_os.default.tmpdir(), "gcc-ts-bundler-"));
+    const workspaceDir2 = import_path3.default.join(rootDir2, "workspace");
+    await import_fs3.default.promises.mkdir(workspaceDir2, { recursive: true });
     return {
       async cleanup() {
-        await import_fs4.default.promises.rm(rootDir2, { force: true, recursive: true });
+        await import_fs3.default.promises.rm(rootDir2, { force: true, recursive: true });
       },
       mode,
       projectCacheDir: rootDir2,
@@ -1495,10 +1431,10 @@ async function createCacheStore({
       workspaceDir: workspaceDir2
     };
   }
-  const rootDir = import_path4.default.resolve(cacheDir || getDefaultPersistentCacheRoot());
-  const projectCacheDir = import_path4.default.join(rootDir, hashContent(projectRoot));
-  const workspaceDir = import_path4.default.join(projectCacheDir, "workspace");
-  await import_fs4.default.promises.mkdir(workspaceDir, { recursive: true });
+  const rootDir = import_path3.default.resolve(cacheDir || getDefaultPersistentCacheRoot());
+  const projectCacheDir = import_path3.default.join(rootDir, hashContent(projectRoot));
+  const workspaceDir = import_path3.default.join(projectCacheDir, "workspace");
+  await import_fs3.default.promises.mkdir(workspaceDir, { recursive: true });
   return {
     async cleanup() {},
     mode,
@@ -1509,7 +1445,7 @@ async function createCacheStore({
 }
 async function readJsonIfExists(filePath) {
   try {
-    const raw = await import_fs4.default.promises.readFile(filePath, "utf-8");
+    const raw = await import_fs3.default.promises.readFile(filePath, "utf-8");
     return JSON.parse(raw);
   } catch (error) {
     if (error.code === "ENOENT") {
@@ -1520,10 +1456,10 @@ async function readJsonIfExists(filePath) {
 }
 async function writeJson(filePath, value) {
   await ensureDirectoryExistence(filePath);
-  await import_fs4.default.promises.writeFile(filePath, JSON.stringify(value, null, 2), "utf-8");
+  await import_fs3.default.promises.writeFile(filePath, JSON.stringify(value, null, 2), "utf-8");
 }
 async function ensureDirectoryExistence(filePath) {
-  await import_fs4.default.promises.mkdir(import_path4.default.dirname(filePath), { recursive: true });
+  await import_fs3.default.promises.mkdir(import_path3.default.dirname(filePath), { recursive: true });
 }
 
 // src/internal/file-state.ts
@@ -1533,6 +1469,40 @@ var import_path6 = __toESM(require("path"));
 // src/native/index.ts
 var import_fs5 = __toESM(require("fs"));
 var import_path5 = __toESM(require("path"));
+
+// src/internal/bundle-location.ts
+var import_fs4 = __toESM(require("fs"));
+var import_path4 = __toESM(require("path"));
+var import_module = require("module");
+var import_url = require("url");
+var bundleRequire = null;
+var packageRoot = null;
+function getBundleFilePath() {
+  return import_url.fileURLToPath(__gcc_current_module_url);
+}
+function createBundleRequire() {
+  bundleRequire ??= import_module.createRequire(__gcc_current_module_url);
+  return bundleRequire;
+}
+function getPackageRootFromBundle() {
+  if (packageRoot) {
+    return packageRoot;
+  }
+  let currentDir = import_path4.default.dirname(getBundleFilePath());
+  while (true) {
+    if (import_fs4.default.existsSync(import_path4.default.join(currentDir, "package.json"))) {
+      packageRoot = currentDir;
+      return currentDir;
+    }
+    const parentDir = import_path4.default.dirname(currentDir);
+    if (parentDir === currentDir) {
+      throw new Error(`Unable to locate package.json from bundled module path ${getBundleFilePath()}`);
+    }
+    currentDir = parentDir;
+  }
+}
+
+// src/native/index.ts
 var require2 = createBundleRequire();
 var SUPPORTED_TARGETS = {
   "darwin-arm64": "gcc-ts-bundler-darwin-arm64",
@@ -1751,7 +1721,7 @@ async function resolveBuild(context) {
     workspaceDir: cacheStore.workspaceDir
   });
   const outputNames = resolveOutputNames(entryRelativePaths, options.outputNames);
-  const resolvedLazyImports = assignLazyRuntimeBindings(graphResult.lazyImports);
+  const resolvedLazyImports = graphResult.lazyImports;
   const resolveKey = usesPersistentCache ? hashJson({
     compilerOptionsHash,
     entries: entryRelativePaths,
@@ -1965,7 +1935,7 @@ function buildChunkPlan({
   shimFiles,
   workspaceDir
 }) {
-  if (chunkOptions.mode === "closure-library" || chunkOptions.mode === "bundler-runtime") {
+  if (chunkOptions.mode === "bundler-runtime") {
     return buildClosureChunkPlan({
       baseChunkName: chunkOptions.baseChunkName,
       entryFiles,
@@ -2097,20 +2067,6 @@ function dedupeLazyImports(lazyImports) {
   return [
     ...new Map(lazyImports.map((item) => [item.moduleId, item])).values()
   ];
-}
-function assignLazyRuntimeBindings(lazyImports) {
-  const byModuleId = [...new Set(lazyImports.map((item) => item.moduleId))].sort((left, right) => left.localeCompare(right));
-  const bindingMap = new Map(byModuleId.map((moduleId, index) => [
-    moduleId,
-    {
-      preloadBindingName: `__gcc_preload_${index}`,
-      runtimeBindingName: `__gcc_lazy_${index}`
-    }
-  ]));
-  return lazyImports.map((item) => ({
-    ...item,
-    ...bindingMap.get(item.moduleId)
-  }));
 }
 function walkReachableFiles(entryFile, graph) {
   const reachable = new Set;
@@ -2727,7 +2683,7 @@ async function emitNativeStage({
 }) {
   const usesPersistentCache = options.cache.mode === "persistent";
   const outDir = import_path8.default.join(cacheDir, "out");
-  const externsPath = import_path8.default.join(cacheDir, "modules-externs.js");
+  const externsPath = import_path8.default.join(cacheDir, "native-generated.externs.js");
   const metadataPathForNative = import_path8.default.join(cacheDir, "closure-ir.json");
   const runtimePackageInputs = await collectTsxRuntimePackageInputs({
     fileNames,
@@ -3029,8 +2985,6 @@ var import_path9 = __toESM(require("path"));
 var closureCompilerPackage = __toESM(require("google-closure-compiler"));
 var import_utils = require("google-closure-compiler/lib/utils.js");
 var closureLibFilesCache = new Map;
-var CHUNK_NAMESPACE = "__gcc$chunks";
-var CHUNK_MANAGER_JUSTIFICATION = "Generated by gcc-ts-bundler chunk runtime.";
 var BUNDLER_RUNTIME_GLOBAL = "__gcc_runtime__";
 async function runClosureStage({
   chunkPlan,
@@ -3040,24 +2994,18 @@ async function runClosureStage({
   options,
   outDir,
   supportFiles,
-  lazyImports,
   packageRoot: packageRoot2
 }) {
   await import_promises.default.rm(finalCacheDir, { force: true, recursive: true });
   await import_promises.default.mkdir(finalCacheDir, { recursive: true });
   const rawDir = import_path9.default.join(finalCacheDir, "raw");
   const cacheOutputDir = import_path9.default.join(finalCacheDir, "outputs");
-  const supportDir = import_path9.default.join(emittedOutDir, "__gcc_chunk_support");
   await import_promises.default.mkdir(rawDir, { recursive: true });
   await import_promises.default.mkdir(cacheOutputDir, { recursive: true });
-  await import_promises.default.rm(supportDir, { force: true, recursive: true });
-  await import_promises.default.mkdir(supportDir, { recursive: true });
   await import_promises.default.rm(outDir, { force: true, recursive: true });
   await import_promises.default.mkdir(outDir, { recursive: true });
   const resolvedChunks = resolveChunkPlan(chunkPlan, emittedOutDir);
-  let finalSupportFiles = [...supportFiles];
   let manifestOutputPath = null;
-  let runtimeEntryPoint = null;
   if (options.chunks.mode === "bundler-runtime") {
     const bundlerAssets = await createBundlerRuntimeAssets({
       chunkPlan: resolvedChunks,
@@ -3084,40 +3032,16 @@ async function runClosureStage({
     const cacheOutputFiles2 = publishedFiles2.map((outputFile) => import_path9.default.join(cacheOutputDir, import_path9.default.relative(outDir, outputFile)));
     return { cacheOutputFiles: cacheOutputFiles2, exitCode: 0, outputFiles: publishedFiles2 };
   }
-  if (options.chunks.mode === "closure-library") {
-    const chunkAssets = await createChunkRuntimeAssets({
-      chunkPlan: resolvedChunks,
-      emittedOutDir,
-      lazyImports,
-      options,
-      supportDir
-    });
-    finalSupportFiles = uniquePaths([
-      ...supportFiles,
-      chunkAssets.runtimeSupportFile
-    ]);
-    runtimeEntryPoint = chunkAssets.runtimeModuleId;
-    applyChunkBridgesToResolvedChunks(resolvedChunks, chunkAssets.bridgeFiles);
-    if (options.chunks.manifestFile) {
-      manifestOutputPath = import_path9.default.join(outDir, options.chunks.manifestFile);
-      await import_promises.default.mkdir(import_path9.default.dirname(manifestOutputPath), { recursive: true });
-      await import_promises.default.writeFile(manifestOutputPath, chunkAssets.manifestText, "utf-8");
-      await import_promises.default.mkdir(import_path9.default.join(cacheOutputDir, import_path9.default.dirname(options.chunks.manifestFile)), {
-        recursive: true
-      });
-      await import_promises.default.writeFile(import_path9.default.join(cacheOutputDir, options.chunks.manifestFile), chunkAssets.manifestText, "utf-8");
-    }
-  }
   const closureLibFiles = await collectClosureLibFiles(packageRoot2, [
-    ...finalSupportFiles,
+    ...supportFiles,
     ...resolvedChunks.flatMap((chunk) => chunk.files)
   ]);
-  const exitCode = resolvedChunks.length === 1 && options.chunks.mode !== "closure-library" ? await runSingleClosureCompilation({
+  const exitCode = resolvedChunks.length === 1 ? await runSingleClosureCompilation({
     closureLibFiles,
     entryChunk: resolvedChunks[0],
     externPaths,
     options,
-    supportFiles: finalSupportFiles,
+    supportFiles,
     rawOutputPath: import_path9.default.join(rawDir, `${resolvedChunks[0].name}.js`)
   }) : await runChunkedClosureCompilation({
     chunkPlan: resolvedChunks,
@@ -3125,27 +3049,18 @@ async function runClosureStage({
     externPaths,
     options,
     outputDir: rawDir,
-    runtimeEntryPoint,
-    supportFiles: finalSupportFiles,
-    wrapperNamespace: toChunkWrapperNamespace(options.chunks.baseChunkName || resolvedChunks[0]?.name || "main")
+    supportFiles
   });
   if (exitCode !== 0) {
     return { cacheOutputFiles: [], exitCode, outputFiles: [] };
   }
   const rawOutputs = resolvedChunks.map((chunk) => import_path9.default.join(rawDir, `${chunk.name}.js`));
   const outputFiles = resolvedChunks.map((chunk) => import_path9.default.join(outDir, `${chunk.name}.js`));
-  if (options.chunks.mode === "closure-library") {
-    await Promise.all(rawOutputs.map(async (rawFile, index) => {
-      const contents = await import_promises.default.readFile(rawFile, "utf-8");
-      await import_promises.default.writeFile(outputFiles[index], contents);
-    }));
-  } else {
-    await Promise.all(rawOutputs.map(async (rawFile, index) => {
-      const contents = await import_promises.default.readFile(rawFile, "utf-8");
-      const transformed = rewriteGccExports(contents);
-      await import_promises.default.writeFile(outputFiles[index], transformed);
-    }));
-  }
+  await Promise.all(rawOutputs.map(async (rawFile, index) => {
+    const contents = await import_promises.default.readFile(rawFile, "utf-8");
+    const transformed = rewriteGccExports(contents);
+    await import_promises.default.writeFile(outputFiles[index], transformed);
+  }));
   const publishedFiles = manifestOutputPath === null ? outputFiles : [...outputFiles, manifestOutputPath];
   await copyOrLinkFiles(publishedFiles, cacheOutputDir);
   const cacheOutputFiles = publishedFiles.map((outputFile) => import_path9.default.join(cacheOutputDir, import_path9.default.relative(outDir, outputFile)));
@@ -3188,9 +3103,7 @@ async function runChunkedClosureCompilation({
   externPaths,
   options,
   outputDir,
-  runtimeEntryPoint,
-  supportFiles,
-  wrapperNamespace
+  supportFiles
 }) {
   const leadingJs = uniquePaths([
     ...options.js,
@@ -3218,18 +3131,9 @@ async function runChunkedClosureCompilation({
     rewritePolyfills: false,
     warningLevel: options.diagnostics.verbose ? "VERBOSE" : "QUIET"
   };
-  const entryPoints = uniquePaths([
-    ...runtimeEntryPoint ? [runtimeEntryPoint] : [],
-    ...chunkPlan.flatMap((chunk) => chunk.entryPoints)
-  ]);
+  const entryPoints = uniquePaths(chunkPlan.flatMap((chunk) => chunk.entryPoints));
   if (entryPoints.length > 0) {
     closureOptions.entryPoint = entryPoints;
-  }
-  if (options.chunks.mode === "closure-library") {
-    const mutableOptions = closureOptions;
-    mutableOptions.chunkOutputType = "GLOBAL_NAMESPACE";
-    mutableOptions.renamePrefixNamespace = CHUNK_NAMESPACE;
-    mutableOptions.chunkWrapper = chunkPlan.map((chunk) => `${chunk.name}:${createChunkWrapper(chunk, wrapperNamespace)}`);
   }
   applyInternalClosureDebugOptions(closureOptions);
   return runClosureCompiler(closureOptions);
@@ -3325,7 +3229,7 @@ async function runBundlerRuntimeCompilation({
       throw new Error(`Missing linked chunk source for ${chunk.name}`);
     }
     const extraJs = chunk.kind === "base" ? options.js : [];
-    const closureLibFiles = await collectClosureLibFiles(packageRoot2, [
+    const closureLibFiles = await collectBundlerRuntimeClosureLibFiles(packageRoot2, [
       ...extraJs,
       chunkSource.sourcePath
     ]);
@@ -3347,6 +3251,17 @@ async function runBundlerRuntimeCompilation({
     }
   }
   return 0;
+}
+async function collectBundlerRuntimeClosureLibFiles(packageRoot2, candidateFiles) {
+  const contents = (await Promise.all(uniquePaths(candidateFiles).map((filePath) => import_promises.default.readFile(filePath, "utf-8").catch(() => "")))).join(`
+`);
+  if (!contents.includes("goog.reflect.")) {
+    return [];
+  }
+  return [
+    import_path9.default.join(packageRoot2, "closure-lib", "base.js"),
+    import_path9.default.join(packageRoot2, "closure-lib", "reflect.js")
+  ];
 }
 function renderBundlerRuntimeExterns(exportNames) {
   const lines = [
@@ -3446,197 +3361,6 @@ function renderBundlerRuntimePreamble({
   ].join(`
 `);
 }
-async function createChunkRuntimeAssets({
-  chunkPlan,
-  emittedOutDir,
-  lazyImports,
-  options,
-  supportDir
-}) {
-  const baseChunk = chunkPlan.find((chunk) => chunk.kind === "base") ?? chunkPlan[0];
-  const chunkUrls = chunkPlan.map((chunk) => `${options.chunks.publicPath}${chunk.name}.js`);
-  const uniqueLazyImports = dedupeLazyImports2(lazyImports);
-  const bridgeFiles = await Promise.all(uniqueLazyImports.map(async (lazyImport, index) => {
-    const chunkName = chunkPlan.find((chunk) => chunk.lazyModuleIds.includes(lazyImport.moduleId))?.name;
-    if (!chunkName) {
-      throw new Error(`Missing lazy chunk for ${lazyImport.moduleId}`);
-    }
-    const filePath = import_path9.default.join(supportDir, `lazy-bridge-${index}.js`);
-    const moduleId = toGoogModuleId(filePath, emittedOutDir);
-    await import_promises.default.writeFile(filePath, renderLazyBridgeModule(moduleId, lazyImport.moduleId), "utf-8");
-    return {
-      chunkName,
-      filePath,
-      moduleId,
-      preloadBindingName: lazyImport.preloadBindingName ?? `__gcc_preload_${index}`,
-      runtimeBindingName: lazyImport.runtimeBindingName ?? `__gcc_lazy_${index}`
-    };
-  }));
-  const manifest = {
-    baseChunkName: baseChunk.name,
-    chunkDependencies: Object.fromEntries(chunkPlan.map((chunk) => [chunk.name, chunk.dependencies])),
-    chunkUrls: Object.fromEntries(chunkPlan.map((chunk) => [
-      chunk.name,
-      `${options.chunks.publicPath}${chunk.name}.js`
-    ])),
-    lazyModules: Object.fromEntries(uniqueLazyImports.map((lazyImport) => [
-      lazyImport.moduleId,
-      chunkPlan.find((chunk) => chunk.lazyModuleIds.includes(lazyImport.moduleId))?.name ?? ""
-    ])),
-    namespace: CHUNK_NAMESPACE,
-    publicPath: options.chunks.publicPath
-  };
-  const runtimeSupportFile = import_path9.default.join(supportDir, "runtime.js");
-  await import_promises.default.writeFile(runtimeSupportFile, renderChunkRuntimeSupport({
-    bridgeFiles,
-    chunkNames: chunkPlan.map((chunk) => chunk.name),
-    chunkUrls,
-    publicPath: options.chunks.publicPath,
-    moduleInfoString: renderModuleInfoString(chunkPlan)
-  }), "utf-8");
-  return {
-    bridgeFiles,
-    manifestText: `${JSON.stringify(manifest, null, 2)}
-`,
-    runtimeModuleId: "gcc.__gcc_chunk_runtime",
-    runtimeSupportFile
-  };
-}
-function renderChunkRuntimeSupport({
-  bridgeFiles,
-  chunkNames,
-  chunkUrls,
-  publicPath,
-  moduleInfoString
-}) {
-  const chunkUrlMap = Object.fromEntries(chunkNames.map((chunkName, index) => [chunkName, chunkUrls[index] ?? ""]));
-  return [
-    'goog.module("gcc.__gcc_chunk_runtime");',
-    'const googModule = goog.require("goog.module");',
-    'const ModuleLoader = goog.require("goog.module.ModuleLoader");',
-    'const ModuleManager = goog.require("goog.module.ModuleManager");',
-    'const uncheckedConversions = goog.require("goog.html.uncheckedconversions");',
-    'const Const = goog.require("goog.string.Const");',
-    `const __gcc_chunk_urls = ${JSON.stringify(chunkUrlMap)};`,
-    `const __gcc_module_info = ${JSON.stringify(moduleInfoString)};`,
-    `const __gcc_public_path = ${JSON.stringify(publicPath)};`,
-    `const __gcc_justification = Const.from(${JSON.stringify(CHUNK_MANAGER_JUSTIFICATION)});`,
-    "const __gcc_loader = new ModuleLoader();",
-    "__gcc_loader.setUseScriptTags(true);",
-    "const __gcc_manager = ModuleManager.getInstance();",
-    "__gcc_manager.setLoader(__gcc_loader);",
-    "__gcc_manager.setBatchModeEnabled(false);",
-    "__gcc_manager.setConcurrentLoadingEnabled(false);",
-    "__gcc_manager.setAllModuleInfoString(__gcc_module_info);",
-    "__gcc_manager.setModuleTrustedUris((function() {",
-    "  const baseUrl = document.currentScript && document.currentScript.src ? new URL(__gcc_public_path, document.currentScript.src).toString() : __gcc_public_path;",
-    "  const trustedUris = {};",
-    "  for (const chunkId in __gcc_chunk_urls) {",
-    "    trustedUris[chunkId] = [uncheckedConversions.trustedResourceUrlFromStringKnownToSatisfyTypeContract(__gcc_justification, new URL(__gcc_chunk_urls[chunkId], baseUrl).toString())];",
-    "  }",
-    "  return trustedUris;",
-    "})());",
-    "__gcc_manager.setModuleContext(globalThis);",
-    "const __gcc_module_cache = new Map();",
-    "function __gcc_wrap_module(moduleId) {",
-    "  if (__gcc_module_cache.has(moduleId)) {",
-    "    return __gcc_module_cache.get(moduleId);",
-    "  }",
-    "  const target = googModule.get(moduleId);",
-    "  const wrapped = new Proxy(target, {",
-    "    get(moduleTarget, property, receiver) {",
-    "      if (property === 'm') {",
-    "        return function(exportName) {",
-    "          if (!Object.prototype.hasOwnProperty.call(moduleTarget, exportName)) {",
-    `            throw new Error('Missing export "' + exportName + '" from lazy module ' + moduleId);`,
-    "          }",
-    "          return moduleTarget[exportName];",
-    "        };",
-    "      }",
-    "      if (typeof property === 'string' && !Reflect.has(moduleTarget, property)) {",
-    `        throw new Error('Missing property "' + property + '" from lazy module ' + moduleId);`,
-    "      }",
-    "      return Reflect.get(moduleTarget, property, receiver);",
-    "    },",
-    "    has(moduleTarget, property) {",
-    "      return property === 'm' || Reflect.has(moduleTarget, property);",
-    "    },",
-    "  });",
-    "  __gcc_module_cache.set(moduleId, wrapped);",
-    "  return wrapped;",
-    "}",
-    "function __gcc_load(chunkId, moduleId) {",
-    "  return Promise.resolve(__gcc_manager.load(chunkId)).then(function() {",
-    "    return __gcc_wrap_module(moduleId);",
-    "  });",
-    "}",
-    "function __gcc_preload(chunkId) {",
-    "  return Promise.resolve(__gcc_manager.preloadModule(chunkId)).then(function() {});",
-    "}",
-    ...bridgeFiles.flatMap((bridge) => {
-      return [
-        `function ${bridge.runtimeBindingName}() { return __gcc_load(${JSON.stringify(bridge.chunkName)}, ${JSON.stringify(bridge.moduleId)}); }`,
-        `function ${bridge.preloadBindingName}() { return __gcc_preload(${JSON.stringify(bridge.chunkName)}); }`,
-        `exports.${bridge.runtimeBindingName} = ${bridge.runtimeBindingName};`,
-        `exports.${bridge.preloadBindingName} = ${bridge.preloadBindingName};`
-      ];
-    }),
-    ""
-  ].join(`
-`);
-}
-function renderLazyBridgeModule(moduleId, targetModuleId) {
-  return [
-    `goog.module(${JSON.stringify(moduleId)});`,
-    `const __module = goog.require(${JSON.stringify(targetModuleId)});`,
-    "for (const key in __module) {",
-    '  if (key !== "default") {',
-    "    exports[key] = __module[key];",
-    "  }",
-    "}",
-    "exports.default = __module.default;",
-    ""
-  ].join(`
-`);
-}
-function dedupeLazyImports2(lazyImports) {
-  return [
-    ...new Map(lazyImports.map((item) => [item.moduleId, item])).values()
-  ];
-}
-function applyChunkBridgesToResolvedChunks(chunkPlan, bridgeFiles) {
-  const bridgesByChunk = new Map;
-  for (const bridge of bridgeFiles) {
-    const existing = bridgesByChunk.get(bridge.chunkName) ?? [];
-    existing.push(bridge);
-    bridgesByChunk.set(bridge.chunkName, existing);
-  }
-  for (const chunk of chunkPlan) {
-    const bridges = bridgesByChunk.get(chunk.name) ?? [];
-    if (bridges.length === 0) {
-      continue;
-    }
-    chunk.files.push(...bridges.map((bridge) => bridge.filePath));
-    chunk.entryPoints = bridges.map((bridge) => bridge.moduleId);
-  }
-}
-function createChunkWrapper(chunk, wrapperNamespace) {
-  const namespaceTarget = `globalThis.${wrapperNamespace}=globalThis.${wrapperNamespace}||{}`;
-  if (chunk.kind === "base") {
-    return `(function(${CHUNK_NAMESPACE}){%output%}).call(this,${namespaceTarget});`;
-  }
-  return `(function(${CHUNK_NAMESPACE}){var __gcc_manager=goog.module.ModuleManager.getInstance();__gcc_manager.beforeLoadModuleCode(${JSON.stringify(chunk.name)});%output%__gcc_manager.setLoaded();}).call(this,${namespaceTarget});`;
-}
-function toChunkWrapperNamespace(baseChunkName) {
-  const sanitized = baseChunkName.replace(/[^A-Za-z0-9_$]/g, "_");
-  return `default_${sanitized}`;
-}
-function renderModuleInfoString(chunkPlan) {
-  return chunkPlan.map((chunk) => {
-    const dependencyIndexes = chunk.dependencies.map((dependency) => chunkPlan.findIndex((candidate) => candidate.name === dependency)).filter((index) => index >= 0).map((index) => index.toString(36));
-    return dependencyIndexes.length > 0 ? `${chunk.name}:${dependencyIndexes.join(",")}` : chunk.name;
-  }).join("/");
-}
 function resolveChunkPlan(chunkPlan, emittedOutDir) {
   return chunkPlan.map((chunk) => ({
     dependencies: chunk.dependencies,
@@ -3697,26 +3421,6 @@ async function runClosureCompiler(options) {
     });
   });
 }
-async function collectJavaScriptFiles(dir) {
-  const files = [];
-  const pending = [dir];
-  while (pending.length > 0) {
-    const currentDir = pending.pop();
-    const entries = await import_promises.default.readdir(currentDir, { withFileTypes: true });
-    for (const entry of entries) {
-      const entryPath = import_path9.default.join(currentDir, entry.name);
-      if (entry.isDirectory()) {
-        pending.push(entryPath);
-        continue;
-      }
-      if (entry.name.endsWith(".js")) {
-        files.push(entryPath);
-      }
-    }
-  }
-  files.sort((left, right) => left.localeCompare(right));
-  return files;
-}
 async function collectClosureLibFiles(packageRoot2, candidateFiles) {
   const closureLibDir = import_path9.default.join(packageRoot2, "closure-lib");
   const cacheKey = `${closureLibDir}\x00${await hashClosureLibSelection(candidateFiles)}`;
@@ -3740,21 +3444,23 @@ async function hashClosureLibSelection(filePaths) {
   return stats.sort((left, right) => left.localeCompare(right)).join("|");
 }
 async function selectClosureLibFiles(closureLibDir, candidateFiles) {
-  const usesChunkLoader = candidateFiles.some((filePath) => filePath.includes(`${import_path9.default.sep}__gcc_chunk_support${import_path9.default.sep}`));
-  if (usesChunkLoader) {
-    const vendoredLoaderFiles = await collectJavaScriptFiles(import_path9.default.join(closureLibDir, "goog"));
-    return uniquePaths([import_path9.default.join(closureLibDir, "base.js"), ...vendoredLoaderFiles]);
-  }
-  const required = [import_path9.default.join(closureLibDir, "base.js")];
+  const required = [];
   const contents = (await Promise.all(uniquePaths(candidateFiles).map((filePath) => import_promises.default.readFile(filePath, "utf-8").catch(() => "")))).join(`
 `);
+  const needsGoogBase = contents.includes("goog.module(") || contents.includes("goog.require(") || contents.includes("goog.requireType(") || contents.includes("goog.provide(") || contents.includes("goog.reflect.");
+  if (needsGoogBase) {
+    required.push(import_path9.default.join(closureLibDir, "base.js"));
+  }
   if (contents.includes("goog.reflect.")) {
     required.push(import_path9.default.join(closureLibDir, "reflect.js"));
   }
   if (contents.includes("tslib")) {
+    if (!required.includes(import_path9.default.join(closureLibDir, "base.js"))) {
+      required.push(import_path9.default.join(closureLibDir, "base.js"));
+    }
     required.push(import_path9.default.join(closureLibDir, "tslib.js"));
   }
-  return required;
+  return uniquePaths(required);
 }
 
 // src/pipeline/build-pipeline.ts
@@ -3803,6 +3509,17 @@ async function build(options) {
         outputFiles: []
       };
     }
+    if (context.options.chunks.mode === "off" && resolvedBuild.lazyImports.length > 0) {
+      return {
+        cacheHit: false,
+        diagnostics: [
+          createBuildDiagnostic('Dynamic import() requires chunks.mode = "bundler-runtime".')
+        ],
+        emitSkipped: true,
+        exitCode: 1,
+        outputFiles: []
+      };
+    }
     if (context.options.chunks.mode === "off") {
       writeEntryShims({
         entries: resolvedBuild.entryFiles.map((entry) => ({
@@ -3844,17 +3561,17 @@ async function build(options) {
       srcDir: context.options.srcDir,
       tsConfigPath: resolvedBuild.tsConfigPath
     });
+    const externPaths = await collectEffectiveExternPaths([
+      ...context.options.externs,
+      ...bundledExterns,
+      ...runtimeDependencyExterns ? [runtimeDependencyExterns] : [],
+      nativeEmitResult.externsPath
+    ]);
     const closureResult = await runClosureStage({
       chunkPlan: resolvedBuild.chunkPlan,
       emittedOutDir: nativeEmitResult.outDir,
-      externPaths: [
-        ...context.options.externs,
-        ...bundledExterns,
-        ...runtimeDependencyExterns ? [runtimeDependencyExterns] : [],
-        nativeEmitResult.externsPath
-      ],
+      externPaths,
       finalCacheDir: resolvedBuild.finalCacheDir,
-      lazyImports: resolvedBuild.lazyImports,
       options: context.options,
       outDir: context.options.outDir,
       supportFiles: nativeEmitResult.supportFiles,
@@ -3936,12 +3653,37 @@ async function collectBundledExterns(packageRoot2) {
   if (!bundledExternsPromise) {
     bundledExternsPromise = (async () => {
       const closureExternsPath = import_path10.default.join(packageRoot2, "closure-externs");
-      const entries = await import_fs9.default.promises.readdir(closureExternsPath);
+      let entries;
+      try {
+        entries = await import_fs9.default.promises.readdir(closureExternsPath);
+      } catch (error) {
+        if (error.code === "ENOENT") {
+          return [];
+        }
+        throw error;
+      }
       return entries.map((entry) => import_path10.default.join(closureExternsPath, entry)).sort((left, right) => left.localeCompare(right));
     })();
     bundledExternsCacheByRoot.set(packageRoot2, bundledExternsPromise);
   }
   return bundledExternsPromise;
+}
+async function collectEffectiveExternPaths(paths) {
+  const effectivePaths = [];
+  for (const filePath of [...new Set(paths)]) {
+    if (await externFileHasDeclarations(filePath)) {
+      effectivePaths.push(filePath);
+    }
+  }
+  return effectivePaths;
+}
+async function externFileHasDeclarations(filePath) {
+  try {
+    const sourceText = await import_fs9.default.promises.readFile(filePath, "utf-8");
+    return sourceText.split(/\r?\n/).map((line) => line.trim()).some((line) => line.length > 0 && line !== "/** @externs */" && line !== "*/" && !line.startsWith("*") && !line.startsWith("//"));
+  } catch {
+    return false;
+  }
 }
 async function publishOutputs(outputFiles, outDir) {
   if (await publishedOutputsMatch2(outputFiles, outDir)) {
@@ -3983,7 +3725,7 @@ async function runCli(args) {
     });
     return 0;
   }
-  if (firstArg === "externs" || firstArg === "generate-externs") {
+  if (firstArg === "externs") {
     const { options: options2, showHelp: showHelp2 } = parseExternsCliArgs(restArgs);
     if (showHelp2 || options2.modules.length === 0) {
       usage();

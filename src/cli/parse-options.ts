@@ -41,40 +41,24 @@ export function parseCliArgs(args: string[]): CliParseResult {
     return { options: { entries: [] }, showHelp: true };
   }
 
-  const entries = asStringArray(
-    parsedArgs.entry ?? parsedArgs.entry_point ?? parsedArgs.entryPoint,
-  );
+  const entries = asStringArray(parsedArgs.entry);
 
   return {
     options: {
       cache: {
-        dir: parsedArgs["cache-dir"] ?? parsedArgs.cache_dir,
-        mode:
-          parsedArgs["cache-mode"] ??
-          parsedArgs.cache_mode ??
-          DEFAULT_BUILD_OPTIONS.cache.mode,
+        dir: parsedArgs["cache-dir"],
+        mode: parsedArgs["cache-mode"] ?? DEFAULT_BUILD_OPTIONS.cache.mode,
       },
       chunks: {
-        baseChunkName:
-          parsedArgs["chunk-base-name"] ?? parsedArgs.chunk_base_name,
-        loader:
-          parsedArgs["chunk-loader"] ?? parsedArgs.chunk_loader,
-        manifestFile:
-          parsedArgs["chunk-manifest"] ?? parsedArgs.chunk_manifest,
+        baseChunkName: parsedArgs["chunk-base-name"],
+        loader: parsedArgs["chunk-loader"],
+        manifestFile: parsedArgs["chunk-manifest"],
         mode: parsedArgs.chunks ?? DEFAULT_BUILD_OPTIONS.chunks.mode,
-        publicPath:
-          parsedArgs["chunk-public-path"] ?? parsedArgs.chunk_public_path,
+        publicPath: parsedArgs["chunk-public-path"],
       },
-      compilationLevel:
-        parsedArgs["compilation-level"] ??
-        parsedArgs.compilation_level ??
-        parsedArgs.compilationLevel,
+      compilationLevel: parsedArgs["compilation-level"],
       diagnostics: {
-        fatalWarnings: Boolean(
-          parsedArgs["fatal-warnings"] ??
-          parsedArgs.fatal_warnings ??
-          parsedArgs.fatalWarnings,
-        ),
+        fatalWarnings: Boolean(parsedArgs["fatal-warnings"]),
         preflight:
           parsedArgs.preflight ?? DEFAULT_BUILD_OPTIONS.diagnostics.preflight,
         verbose: Boolean(parsedArgs.verbose),
@@ -82,17 +66,13 @@ export function parseCliArgs(args: string[]): CliParseResult {
       entries,
       externs: asStringArray(parsedArgs.externs),
       js: asStringArray(parsedArgs.js),
-      languageOut:
-        parsedArgs["language-out"] ??
-        parsedArgs.language_out ??
-        parsedArgs.languageOut,
-      outDir:
-        parsedArgs["out-dir"] ?? parsedArgs.output_dir ?? parsedArgs.outputDir,
-      projectRoot: parsedArgs["project-root"] ?? parsedArgs.project_root,
+      languageOut: parsedArgs["language-out"],
+      outDir: parsedArgs["out-dir"],
+      projectRoot: parsedArgs["project-root"],
       packages: {
         mode: parsedArgs.packages ?? DEFAULT_BUILD_OPTIONS.packages.mode,
       },
-      srcDir: parsedArgs["src-dir"] ?? parsedArgs.src_dir ?? parsedArgs.srcDir,
+      srcDir: parsedArgs["src-dir"],
     },
     showHelp: false,
   };

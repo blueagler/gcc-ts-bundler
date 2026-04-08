@@ -19,7 +19,7 @@ Build flags:
   --out-dir             Output directory
   --language-out        ECMASCRIPT3 | ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT_NEXT
   --compilation-level   WHITESPACE_ONLY | SIMPLE | ADVANCED
-  --chunks              off | closure-library | bundler-runtime
+  --chunks              off | bundler-runtime
   --chunk-loader        auto | script | fetch (bundler-runtime only)
   --chunk-public-path   Public URL prefix for chunk files in chunk mode
   --chunk-base-name     Base chunk output name in chunk mode
@@ -31,10 +31,6 @@ Build flags:
   --verbose             Print verbose diagnostics
   --fatal-warnings      Treat typed transpile warnings as fatal
   -h, --help            Show this help message
-
-Deprecated aliases still accepted for one transition release:
-  --src_dir --entry_point --output_dir --language_out --compilation_level
-  --fatal_warnings --preserve_cache
 
 Extern flags:
   --project-root          Project root used to resolve node_modules and tsconfig.json

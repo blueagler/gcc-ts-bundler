@@ -32,8 +32,6 @@ interface NativeTranspileOutput {
 interface NativeLazyImportInput {
     importerFilePath: string;
     moduleId: string;
-    preloadBindingName?: string;
-    runtimeBindingName?: string;
     specifier: string;
     targetPath: string;
 }

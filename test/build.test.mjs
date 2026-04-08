@@ -7,6 +7,8 @@ import { promisify } from "node:util";
 import { expect, onTestFinished, test } from "bun:test";
 
 import { build, generateExterns } from "../dist/index.mjs";
+import { parseExternsCliArgs } from "../src/cli/parse-externs-options.ts";
+import { parseCliArgs } from "../src/cli/parse-options.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -627,7 +629,7 @@ test.serial("unsupported CommonJS packages surface actionable diagnostics", asyn
   );
 });
 
-test.serial("emits smaller Closure script chunks for explicit lazy modules", async () => {
+test.serial("emits smaller script chunks for explicit lazy modules", async () => {
   const fixture = await createFixture();
   await fixture.write(
     "src/main.ts",
@@ -651,7 +653,7 @@ test.serial("emits smaller Closure script chunks for explicit lazy modules", asy
 
   const result = await build({
     cache: { mode: "off" },
-    chunks: { mode: "closure-library" },
+    chunks: { loader: "script", mode: "bundler-runtime" },
     entries: ["./main.ts"],
     outDir: fixture.outDir,
     projectRoot: fixture.projectRoot,
@@ -670,7 +672,8 @@ test.serial("emits smaller Closure script chunks for explicit lazy modules", asy
 
   expect(baseOutput).not.toMatch(/\bexport\s*\{/);
   expect(baseOutput).not.toMatch(/globalThis\.__gccChunkRuntime/);
-  expect(baseOutput).not.toMatch(/gcc\.src\.feature/);
+  expect(baseOutput).toContain("__gcc_runtime__");
+  expect(baseOutput).toContain("gcc.src.feature");
   expect(baseOutput).not.toMatch(/LAZY_FEATURE/);
   expect(lazyOutput).toMatch(/LAZY_FEATURE/);
 });
@@ -894,7 +897,11 @@ test.serial("emits an optional chunk manifest when requested", async () => {
 
   const result = await build({
     cache: { mode: "off" },
-    chunks: { manifestFile: "chunk-map.json", mode: "closure-library" },
+    chunks: {
+      loader: "script",
+      manifestFile: "chunk-map.json",
+      mode: "bundler-runtime",
+    },
     entries: ["./main.ts"],
     outDir: fixture.outDir,
     projectRoot: fixture.projectRoot,
@@ -909,8 +916,8 @@ test.serial("emits an optional chunk manifest when requested", async () => {
   ).toEqual(["chunk-map.json", "main.js", "src-feature-lazy.js"]);
 
   const manifest = JSON.parse(await fixture.read("dist/chunk-map.json"));
-  expect(manifest.baseChunkName).toBe("main");
-  expect(manifest.lazyModules["gcc.src.feature"]).toBe("src-feature-lazy");
+  expect(manifest.baseChunk).toBe("main");
+  expect(manifest.modules["gcc.src.feature"]).toBe("src-feature-lazy");
 });
 
 test.serial("emits a bundler-runtime chunk manifest when requested", async () => {
@@ -962,7 +969,7 @@ test.serial("rejects non-literal dynamic import specifiers", async () => {
 
   const result = await build({
     cache: { mode: "off" },
-    chunks: { mode: "closure-library" },
+    chunks: { loader: "script", mode: "bundler-runtime" },
     entries: ["./main.ts"],
     outDir: fixture.outDir,
     projectRoot: fixture.projectRoot,
@@ -973,4 +980,98 @@ test.serial("rejects non-literal dynamic import specifiers", async () => {
   expect(String(result.diagnostics[0]?.messageText ?? "")).toMatch(
     /import\(\) requires a string literal module specifier/,
   );
+});
+
+test.serial("rejects dynamic import when chunk mode is off", async () => {
+  const fixture = await createFixture();
+  await fixture.write(
+    "src/main.ts",
+    [
+      'const loadFeature = () => import("./feature");',
+      "void loadFeature;",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write("src/feature.ts", "export const value = 1;\n");
+
+  const result = await build({
+    cache: { mode: "off" },
+    entries: ["./main.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  expect(result.exitCode).toBe(1);
+  expect(String(result.diagnostics[0]?.messageText ?? "")).toMatch(
+    /chunks\.mode = "bundler-runtime"/,
+  );
+});
+
+test.serial("rejects the removed runtime helper API", async () => {
+  const fixture = await createFixture();
+  await fixture.write(
+    "src/main.ts",
+    [
+      'import { lazyModule } from "gcc-ts-bundler/runtime";',
+      'const loadFeature = lazyModule("./feature");',
+      "void loadFeature;",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write("src/feature.ts", "export const value = 1;\n");
+
+  const result = await build({
+    cache: { mode: "off" },
+    entries: ["./main.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  expect(result.exitCode).toBe(1);
+  expect(String(result.diagnostics[0]?.messageText ?? "")).toMatch(
+    /gcc-ts-bundler\/runtime|Cannot find module|Failed to resolve package/,
+  );
+});
+
+test("does not accept deprecated build flag aliases", () => {
+  const parsed = parseCliArgs([
+    "--project-root",
+    "/tmp/demo",
+    "--src_dir",
+    "./src",
+    "--entry_point",
+    "./main.ts",
+    "--output_dir",
+    "./dist",
+  ]);
+
+  expect(parsed.options.projectRoot).toBe("/tmp/demo");
+  expect(parsed.options.srcDir).toBeUndefined();
+  expect(parsed.options.entries).toEqual([]);
+  expect(parsed.options.outDir).toBeUndefined();
+});
+
+test("does not accept deprecated extern flag aliases", () => {
+  const parsed = parseExternsCliArgs([
+    "--project-root",
+    "/tmp/demo",
+    "--project_root",
+    "/tmp/legacy",
+    "--src_dir",
+    "./src",
+    "--runtime_entry",
+    "./runtime.js",
+    "--output_file",
+    "./externs.js",
+    "--package",
+    "lit",
+  ]);
+
+  expect(parsed.options.projectRoot).toBe("/tmp/demo");
+  expect(parsed.options.srcDir).toBeUndefined();
+  expect(parsed.options.runtimeEntryFiles).toEqual([]);
+  expect(parsed.options.outputFile).toBeUndefined();
+  expect(parsed.options.modules).toEqual([]);
 });

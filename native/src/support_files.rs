@@ -16,7 +16,11 @@ pub fn collect_commonjs_specifiers(
         let specifier = if alias.subpath == "." {
             alias.packageName.clone()
         } else {
-            format!("{}/{}", alias.packageName, alias.subpath.trim_start_matches("./"))
+            format!(
+                "{}/{}",
+                alias.packageName,
+                alias.subpath.trim_start_matches("./")
+            )
         };
         specifiers.insert(specifier);
     }
@@ -165,6 +169,10 @@ fn to_alias_file_path(package_dir: &Path, subpath: &str) -> PathBuf {
 
 fn to_emitted_path(source_path: &Path, out_dir: &Path, workspace_dir: &Path) -> PathBuf {
     out_dir
-        .join(source_path.strip_prefix(workspace_dir).unwrap_or(source_path))
+        .join(
+            source_path
+                .strip_prefix(workspace_dir)
+                .unwrap_or(source_path),
+        )
         .with_extension("js")
 }

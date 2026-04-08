@@ -43,8 +43,6 @@ export interface ChunkPlanChunk {
 export interface LazyImport {
     importerFilePath: string;
     moduleId: string;
-    preloadBindingName?: string;
-    runtimeBindingName?: string;
     specifier: string;
     targetPath: string;
 }

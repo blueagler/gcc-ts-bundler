@@ -96,5 +96,8 @@ pub fn published_output_snapshot_matches(
     published_outputs: Vec<fs_state::PublishedOutputEntry>,
     out_dir: String,
 ) -> Result<bool> {
-    Ok(fs_state::published_output_snapshot_matches(published_outputs, out_dir))
+    Ok(fs_state::published_output_snapshot_matches(
+        published_outputs,
+        out_dir,
+    ))
 }

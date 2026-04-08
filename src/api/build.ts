@@ -30,7 +30,7 @@ export async function runCli(args: string[]): Promise<number> {
     return 0;
   }
 
-  if (firstArg === "externs" || firstArg === "generate-externs") {
+  if (firstArg === "externs") {
     const { options, showHelp } = parseExternsCliArgs(restArgs);
     if (showHelp || options.modules.length === 0) {
       usage();

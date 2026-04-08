@@ -116,8 +116,7 @@ export async function generateExterns(
   const projectRoot = path.resolve(options.projectRoot ?? process.cwd());
   const srcDir = path.resolve(projectRoot, options.srcDir ?? ".");
   const tsConfigPath =
-    options.tsConfigPath &&
-    path.resolve(projectRoot, options.tsConfigPath);
+    options.tsConfigPath && path.resolve(projectRoot, options.tsConfigPath);
   const compilerOptions = await loadExternCompilerOptions({
     projectRoot,
     tsConfigPath,
@@ -129,7 +128,10 @@ export async function generateExterns(
       "generateExterns in boundary-aware mode requires appEntryFiles.",
     );
   }
-  if (mode === "runtime-aware" && (options.runtimeEntryFiles?.length ?? 0) === 0) {
+  if (
+    mode === "runtime-aware" &&
+    (options.runtimeEntryFiles?.length ?? 0) === 0
+  ) {
     throw new Error(
       "generateExterns in runtime-aware mode requires runtimeEntryFiles.",
     );
@@ -424,7 +426,10 @@ async function collectReachableTypeFiles({
 
       if (!includeDependencies) {
         const dependencyPackageDir = findPackageDir(normalizedDependency);
-        if (dependencyPackageDir && !rootPackageDirs.has(dependencyPackageDir)) {
+        if (
+          dependencyPackageDir &&
+          !rootPackageDirs.has(dependencyPackageDir)
+        ) {
           continue;
         }
       }
@@ -477,7 +482,9 @@ function collectContracts(
   scannedFiles: string[],
 ): ContractRegistry {
   const checker = program.getTypeChecker();
-  const scannedFileSet = new Set(scannedFiles.map((filePath) => path.resolve(filePath)));
+  const scannedFileSet = new Set(
+    scannedFiles.map((filePath) => path.resolve(filePath)),
+  );
   const interfaceContracts = new Map<ts.Symbol, InterfaceContract>();
   const typeAliasContracts = new Map<ts.Symbol, TypeAliasContract>();
   const classContracts = new Map<ts.Symbol, ClassContract>();
@@ -488,7 +495,10 @@ function collectContracts(
     }
 
     for (const statement of sourceFile.statements) {
-      if (ts.isInterfaceDeclaration(statement) && isExportedDeclaration(statement)) {
+      if (
+        ts.isInterfaceDeclaration(statement) &&
+        isExportedDeclaration(statement)
+      ) {
         const symbol = checker.getSymbolAtLocation(statement.name);
         if (!symbol) {
           continue;
@@ -506,7 +516,10 @@ function collectContracts(
         continue;
       }
 
-      if (ts.isTypeAliasDeclaration(statement) && isExportedDeclaration(statement)) {
+      if (
+        ts.isTypeAliasDeclaration(statement) &&
+        isExportedDeclaration(statement)
+      ) {
         const symbol = checker.getSymbolAtLocation(statement.name);
         if (!symbol) {
           continue;
@@ -523,7 +536,11 @@ function collectContracts(
         continue;
       }
 
-      if (ts.isClassDeclaration(statement) && statement.name && isExportedDeclaration(statement)) {
+      if (
+        ts.isClassDeclaration(statement) &&
+        statement.name &&
+        isExportedDeclaration(statement)
+      ) {
         const symbol = checker.getSymbolAtLocation(statement.name);
         if (!symbol) {
           continue;
@@ -663,7 +680,10 @@ async function renderRuntimeAwareExterns({
 function collectCandidateExternLines(registry: ContractRegistry) {
   const properties = new Set<string>();
   for (const contract of registry.interfaceContracts.values()) {
-    for (const member of collectStructuralContractMembers(contract.symbol, registry)) {
+    for (const member of collectStructuralContractMembers(
+      contract.symbol,
+      registry,
+    )) {
       properties.add(member);
     }
   }
@@ -729,7 +749,7 @@ function collectBoundaryAwareExternLines({
         nominalTarget
           ? renderNominalStaticExternLine(nominalTarget, member)
           : renderStructuralExternLine(member),
-        );
+      );
     }
   }
 
@@ -829,7 +849,10 @@ async function analyzeRuntimeUsage(runtimeEntryFiles: string[]) {
         ) {
           structuralMembers.add(memberName);
         }
-      } else if (ts.isBinaryExpression(node) && isAssignmentOperator(node.operatorToken.kind)) {
+      } else if (
+        ts.isBinaryExpression(node) &&
+        isAssignmentOperator(node.operatorToken.kind)
+      ) {
         collectRuntimeAssignmentMembers(
           node.left,
           knownConstructors,
@@ -968,9 +991,11 @@ function analyzeAppUsage({
     structuralContracts: new Set(),
     structuralMembers: new Set(),
   };
-  const sourceFiles = program.getSourceFiles().filter((sourceFile) =>
-    isProjectAppSourceFile(sourceFile.fileName, projectRoot),
-  );
+  const sourceFiles = program
+    .getSourceFiles()
+    .filter((sourceFile) =>
+      isProjectAppSourceFile(sourceFile.fileName, projectRoot),
+    );
 
   for (const sourceFile of sourceFiles) {
     const importBindings = collectImportedClassBindings(sourceFile, registry);
@@ -1041,7 +1066,10 @@ function analyzeAppUsage({
           localBindings,
           new Map(),
         );
-      } else if (ts.isElementAccessExpression(node) && ts.isStringLiteral(node.argumentExpression)) {
+      } else if (
+        ts.isElementAccessExpression(node) &&
+        ts.isStringLiteral(node.argumentExpression)
+      ) {
         analyzeElementAccess(
           node,
           checker,
@@ -1069,7 +1097,12 @@ function analyzeNewExpression(
   localBindings: Map<string, ts.Symbol>,
 ) {
   const calleeSymbol =
-    resolveBoundClassSymbol(node.expression, importBindings, localBindings, new Map()) ??
+    resolveBoundClassSymbol(
+      node.expression,
+      importBindings,
+      localBindings,
+      new Map(),
+    ) ??
     resolveValueSymbol(node.expression, checker) ??
     resolveTypeSymbol(checker.getTypeAtLocation(node.expression), checker);
   if (!calleeSymbol) {
@@ -1084,7 +1117,10 @@ function analyzeNewExpression(
     usage.structuralContracts.add(symbol);
   }
 
-  for (const [index, contractSymbols] of classContract.constructorParamContracts.entries()) {
+  for (const [
+    index,
+    contractSymbols,
+  ] of classContract.constructorParamContracts.entries()) {
     const argument = node.arguments?.[index];
     if (!argument || !isStructuralBoundaryArgument(argument)) {
       continue;
@@ -1109,7 +1145,10 @@ function analyzePropertyAccess(
     return;
   }
 
-  if (ts.isIdentifier(node.expression) && importBindings.has(node.expression.text)) {
+  if (
+    ts.isIdentifier(node.expression) &&
+    importBindings.has(node.expression.text)
+  ) {
     const targetSymbol = importBindings.get(node.expression.text);
     if (targetSymbol) {
       const classContract = registry.classContracts.get(targetSymbol);
@@ -1127,11 +1166,18 @@ function analyzePropertyAccess(
     fieldBindings,
   );
   if (boundInstanceSymbol && registry.classContracts.has(boundInstanceSymbol)) {
-    addMapSetValue(usage.nominalInstanceMembers, boundInstanceSymbol, propertyName);
+    addMapSetValue(
+      usage.nominalInstanceMembers,
+      boundInstanceSymbol,
+      propertyName,
+    );
     return;
   }
 
-  const typeSymbol = resolveTypeSymbol(checker.getTypeAtLocation(node.expression), checker);
+  const typeSymbol = resolveTypeSymbol(
+    checker.getTypeAtLocation(node.expression),
+    checker,
+  );
   if (!typeSymbol) {
     return;
   }
@@ -1140,7 +1186,10 @@ function analyzePropertyAccess(
     addMapSetValue(usage.nominalInstanceMembers, typeSymbol, propertyName);
     return;
   }
-  if (registry.interfaceContracts.has(typeSymbol) || registry.typeAliasContracts.has(typeSymbol)) {
+  if (
+    registry.interfaceContracts.has(typeSymbol) ||
+    registry.typeAliasContracts.has(typeSymbol)
+  ) {
     usage.structuralMembers.add(propertyName);
   }
 }
@@ -1173,7 +1222,10 @@ function analyzeElementAccess(
     return;
   }
 
-  const typeSymbol = resolveTypeSymbol(checker.getTypeAtLocation(node.expression), checker);
+  const typeSymbol = resolveTypeSymbol(
+    checker.getTypeAtLocation(node.expression),
+    checker,
+  );
   if (!typeSymbol) {
     return;
   }
@@ -1181,7 +1233,10 @@ function analyzeElementAccess(
     addMapSetValue(usage.nominalInstanceMembers, typeSymbol, propertyName);
     return;
   }
-  if (registry.interfaceContracts.has(typeSymbol) || registry.typeAliasContracts.has(typeSymbol)) {
+  if (
+    registry.interfaceContracts.has(typeSymbol) ||
+    registry.typeAliasContracts.has(typeSymbol)
+  ) {
     usage.structuralMembers.add(propertyName);
   }
 }
@@ -1258,7 +1313,9 @@ function registerVariableBinding(
   ) {
     return;
   }
-  const classSymbol = importBindings.get(declaration.initializer.expression.text);
+  const classSymbol = importBindings.get(
+    declaration.initializer.expression.text,
+  );
   if (classSymbol) {
     localBindings.set(declaration.name.text, classSymbol);
   }
@@ -1271,7 +1328,11 @@ function resolveBoundClassSymbol(
   fieldBindings: Map<string, ts.Symbol>,
 ) {
   if (ts.isIdentifier(expression)) {
-    return localBindings.get(expression.text) ?? importBindings.get(expression.text) ?? null;
+    return (
+      localBindings.get(expression.text) ??
+      importBindings.get(expression.text) ??
+      null
+    );
   }
 
   if (
@@ -1284,10 +1345,7 @@ function resolveBoundClassSymbol(
   return null;
 }
 
-function findClassContractByName(
-  name: string,
-  registry: ContractRegistry,
-) {
+function findClassContractByName(name: string, registry: ContractRegistry) {
   for (const [symbol, contract] of registry.classContracts) {
     if (contract.name === name) {
       return symbol;
@@ -1432,10 +1490,9 @@ function getContractSymbolsFromEntityName(
   checker: ts.TypeChecker,
   scannedFiles: Set<string>,
 ): Set<ts.Symbol> {
-  const symbol =
-    ts.isIdentifier(entityName)
-      ? checker.getSymbolAtLocation(entityName)
-      : checker.getSymbolAtLocation(entityName.right);
+  const symbol = ts.isIdentifier(entityName)
+    ? checker.getSymbolAtLocation(entityName)
+    : checker.getSymbolAtLocation(entityName.right);
   const resolved = resolveAliasedSymbol(symbol, checker);
   if (!resolved) {
     return new Set<ts.Symbol>();
@@ -1453,7 +1510,10 @@ function collectConstructorParamContracts(
   const constructorDeclaration = statement.members.find((member) =>
     ts.isConstructorDeclaration(member),
   );
-  if (!constructorDeclaration || !ts.isConstructorDeclaration(constructorDeclaration)) {
+  if (
+    !constructorDeclaration ||
+    !ts.isConstructorDeclaration(constructorDeclaration)
+  ) {
     return [];
   }
 
@@ -1471,7 +1531,8 @@ function getClassImplementedContracts(
   seen = new Set<string>(),
 ) {
   const contracts = new Set<ts.Symbol>();
-  const classSymbol = statement.name && checker.getSymbolAtLocation(statement.name);
+  const classSymbol =
+    statement.name && checker.getSymbolAtLocation(statement.name);
   const classKey = classSymbol ? symbolCacheKey(classSymbol) : "";
   if (classKey && seen.has(classKey)) {
     return contracts;
@@ -1675,7 +1736,8 @@ function getStringLiteralMemberName(expression: ts.Expression | undefined) {
   if (!expression) {
     return null;
   }
-  return ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)
+  return ts.isStringLiteral(expression) ||
+    ts.isNoSubstitutionTemplateLiteral(expression)
     ? expression.text
     : null;
 }
@@ -1750,7 +1812,11 @@ function getScriptKindForFile(filePath: string) {
   if (filePath.endsWith(".tsx")) {
     return ts.ScriptKind.TSX;
   }
-  if (filePath.endsWith(".ts") || filePath.endsWith(".mts") || filePath.endsWith(".cts")) {
+  if (
+    filePath.endsWith(".ts") ||
+    filePath.endsWith(".mts") ||
+    filePath.endsWith(".cts")
+  ) {
     return ts.ScriptKind.TS;
   }
   if (filePath.endsWith(".jsx")) {
@@ -1759,7 +1825,10 @@ function getScriptKindForFile(filePath: string) {
   return ts.ScriptKind.JS;
 }
 
-function isScannedDeclarationSymbol(symbol: ts.Symbol, scannedFiles: Set<string>) {
+function isScannedDeclarationSymbol(
+  symbol: ts.Symbol,
+  scannedFiles: Set<string>,
+) {
   return (symbol.declarations ?? []).some((declaration) =>
     scannedFiles.has(path.resolve(declaration.getSourceFile().fileName)),
   );
@@ -1783,7 +1852,9 @@ function findPackageDir(filePath: string) {
 }
 
 function isTypeSourceFile(filePath: string) {
-  return DECLARATION_EXTENSIONS.some((extension) => filePath.endsWith(extension));
+  return DECLARATION_EXTENSIONS.some((extension) =>
+    filePath.endsWith(extension),
+  );
 }
 
 function isTypescriptLibFile(filePath: string) {

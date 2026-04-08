@@ -11,12 +11,10 @@ function asStringArray(value: string | string[] | undefined) {
 }
 
 export function parseExternsCliArgs(args: string[]) {
-  const hasIncludeDependenciesFlag =
-    args.includes("--include-dependencies") ||
-    args.includes("--include_dependencies");
-  const hasNoIncludeDependenciesFlag =
-    args.includes("--no-include-dependencies") ||
-    args.includes("--no-include_dependencies");
+  const hasIncludeDependenciesFlag = args.includes("--include-dependencies");
+  const hasNoIncludeDependenciesFlag = args.includes(
+    "--no-include-dependencies",
+  );
   const parsedArgs = minimist(args, {
     alias: {
       e: "entry",
@@ -44,9 +42,7 @@ export function parseExternsCliArgs(args: string[]) {
     };
   }
 
-  const modules = [
-    ...asStringArray(parsedArgs.module ?? parsedArgs.package),
-  ];
+  const modules = [...asStringArray(parsedArgs.module)];
 
   return {
     options: {
@@ -58,15 +54,10 @@ export function parseExternsCliArgs(args: string[]) {
           : undefined,
       mode: parsedArgs.mode,
       modules,
-      outputFile:
-        parsedArgs["output-file"] ??
-        parsedArgs.output_file ??
-        parsedArgs.output,
-      projectRoot: parsedArgs["project-root"] ?? parsedArgs.project_root,
-      runtimeEntryFiles: asStringArray(
-        parsedArgs["runtime-entry"] ?? parsedArgs.runtime_entry,
-      ),
-      srcDir: parsedArgs["src-dir"] ?? parsedArgs.src_dir,
+      outputFile: parsedArgs["output-file"],
+      projectRoot: parsedArgs["project-root"],
+      runtimeEntryFiles: asStringArray(parsedArgs["runtime-entry"]),
+      srcDir: parsedArgs["src-dir"],
       tsConfigPath: parsedArgs.tsconfig,
     } satisfies GenerateExternsOptions,
     showHelp: false,

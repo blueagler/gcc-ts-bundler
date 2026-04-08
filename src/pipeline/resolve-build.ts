@@ -161,7 +161,7 @@ export async function resolveBuild(
     entryRelativePaths,
     options.outputNames,
   );
-  const resolvedLazyImports = assignLazyRuntimeBindings(graphResult.lazyImports);
+  const resolvedLazyImports = graphResult.lazyImports;
   const resolveKey = usesPersistentCache
     ? hashJson({
         compilerOptionsHash,
@@ -223,8 +223,8 @@ export async function resolveBuild(
     }
   }
 
-  const entryFiles = resolveMetadata.entryFiles.map((entry): BuildEntry =>
-    toBuildEntry(entry, sourceRoot),
+  const entryFiles = resolveMetadata.entryFiles.map(
+    (entry): BuildEntry => toBuildEntry(entry, sourceRoot),
   );
   const shimDir = path.join(cacheStore.workspaceDir, "entries");
   const shimFiles = toShimFiles(entryFiles, shimDir);
@@ -461,10 +461,7 @@ function buildChunkPlan({
   shimFiles: string[];
   workspaceDir: string;
 }): ChunkPlanChunk[] {
-  if (
-    chunkOptions.mode === "closure-library" ||
-    chunkOptions.mode === "bundler-runtime"
-  ) {
+  if (chunkOptions.mode === "bundler-runtime") {
     return buildClosureChunkPlan({
       baseChunkName: chunkOptions.baseChunkName,
       entryFiles,
@@ -575,7 +572,9 @@ function buildClosureChunkPlan({
     ];
   }
 
-  const lazyRootTargets = new Set(uniqueLazyImports.map((item) => item.targetPath));
+  const lazyRootTargets = new Set(
+    uniqueLazyImports.map((item) => item.targetPath),
+  );
   const lazyClosures = uniqueLazyImports.map((lazyImport) => ({
     lazyImport,
     reachable: new Set(
@@ -662,26 +661,6 @@ function dedupeLazyImports(lazyImports: LazyImport[]) {
   return [
     ...new Map(lazyImports.map((item) => [item.moduleId, item])).values(),
   ];
-}
-
-function assignLazyRuntimeBindings(lazyImports: LazyImport[]) {
-  const byModuleId = [...new Set(lazyImports.map((item) => item.moduleId))].sort(
-    (left, right) => left.localeCompare(right),
-  );
-  const bindingMap = new Map(
-    byModuleId.map((moduleId, index) => [
-      moduleId,
-      {
-        preloadBindingName: `__gcc_preload_${index}`,
-        runtimeBindingName: `__gcc_lazy_${index}`,
-      },
-    ]),
-  );
-
-  return lazyImports.map((item) => ({
-    ...item,
-    ...bindingMap.get(item.moduleId),
-  }));
 }
 
 function walkReachableFiles(
@@ -868,11 +847,8 @@ export function normalizeBuildOptions(
       baseChunkName:
         options.chunks?.baseChunkName ??
         DEFAULT_BUILD_OPTIONS.chunks.baseChunkName,
-      loader:
-        options.chunks?.loader ??
-        DEFAULT_BUILD_OPTIONS.chunks.loader,
-      manifestFile:
-        chunkManifestFile,
+      loader: options.chunks?.loader ?? DEFAULT_BUILD_OPTIONS.chunks.loader,
+      manifestFile: chunkManifestFile,
       mode: options.chunks?.mode ?? DEFAULT_BUILD_OPTIONS.chunks.mode,
       publicPath: chunkPublicPath,
     },

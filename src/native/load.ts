@@ -68,8 +68,6 @@ interface NativeTranspileOutput {
 interface NativeLazyImportInput {
   importerFilePath: string;
   moduleId: string;
-  preloadBindingName?: string;
-  runtimeBindingName?: string;
   specifier: string;
   targetPath: string;
 }
@@ -82,7 +80,9 @@ interface NativeTranspilePackageAlias {
 
 interface NativeBinding {
   collectFileStates(filePaths: string[]): NativeFileStateEntry[];
-  collectPublishedOutputStats(filePaths: string[]): NativePublishedOutputEntry[];
+  collectPublishedOutputStats(
+    filePaths: string[],
+  ): NativePublishedOutputEntry[];
   matchFileStates(expected: NativeFileStateEntry[]): boolean;
   publishedOutputSnapshotMatches(
     publishedOutputs: NativePublishedOutputEntry[],

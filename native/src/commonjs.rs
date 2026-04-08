@@ -125,8 +125,9 @@ impl CommonJsCollector {
         self.has_default_export = true;
         self.export_names.insert(export_name);
         if self.proxy_export.is_some() {
-            self.unsupported
-                .push("CommonJS proxy exports cannot be mixed with local export assignments.".to_string());
+            self.unsupported.push(
+                "CommonJS proxy exports cannot be mixed with local export assignments.".to_string(),
+            );
         }
     }
 
@@ -139,16 +140,16 @@ impl CommonJsCollector {
         self.record_default_export();
         if let Some(existing) = &self.proxy_export {
             if existing != &specifier {
-                self.unsupported.push(
-                    "Multiple CommonJS proxy export targets are not supported.".to_string(),
-                );
+                self.unsupported
+                    .push("Multiple CommonJS proxy export targets are not supported.".to_string());
             }
         } else {
             self.proxy_export = Some(specifier);
         }
         if !self.export_names.is_empty() {
-            self.unsupported
-                .push("CommonJS proxy exports cannot be mixed with local export assignments.".to_string());
+            self.unsupported.push(
+                "CommonJS proxy exports cannot be mixed with local export assignments.".to_string(),
+            );
         }
     }
 }
@@ -169,8 +170,7 @@ impl Visit for CommonJsCollector {
                             self.record_dependency(specifier.clone());
                             self.record_proxy_export(specifier);
                         }
-                    } else if let Some(object_keys) =
-                        object_literal_export_names(&expression.right)
+                    } else if let Some(object_keys) = object_literal_export_names(&expression.right)
                     {
                         for key in object_keys {
                             self.record_named_export(key);
@@ -226,12 +226,12 @@ pub fn evaluate_boolean_expr(expression: &Expr) -> Option<bool> {
             evaluate_boolean_expr(&unary.arg).map(|value| !value)
         }
         Expr::Bin(binary) => match binary.op {
-            BinaryOp::LogicalAnd => Some(
-                evaluate_boolean_expr(&binary.left)? && evaluate_boolean_expr(&binary.right)?,
-            ),
-            BinaryOp::LogicalOr => Some(
-                evaluate_boolean_expr(&binary.left)? || evaluate_boolean_expr(&binary.right)?,
-            ),
+            BinaryOp::LogicalAnd => {
+                Some(evaluate_boolean_expr(&binary.left)? && evaluate_boolean_expr(&binary.right)?)
+            }
+            BinaryOp::LogicalOr => {
+                Some(evaluate_boolean_expr(&binary.left)? || evaluate_boolean_expr(&binary.right)?)
+            }
             BinaryOp::EqEq | BinaryOp::EqEqEq => {
                 Some(compare_literal_exprs(&binary.left, &binary.right)? == 0)
             }
@@ -370,9 +370,7 @@ fn object_literal_export_names(expression: &Expr) -> Option<Vec<String>> {
         };
         match &key_value.key {
             PropName::Ident(ident) => export_names.push(ident.sym.to_string()),
-            PropName::Str(string) => {
-                export_names.push(string.value.to_string_lossy().to_string())
-            }
+            PropName::Str(string) => export_names.push(string.value.to_string_lossy().to_string()),
             _ => return None,
         }
     }
@@ -412,7 +410,10 @@ mod tests {
     #[test]
     fn collects_named_exports() {
         let analysis = analyze("exports.foo = 1; module.exports.bar = 2;");
-        assert_eq!(analysis.export_names, vec!["bar".to_string(), "foo".to_string()]);
+        assert_eq!(
+            analysis.export_names,
+            vec!["bar".to_string(), "foo".to_string()]
+        );
         assert!(analysis.has_default_export);
     }
 

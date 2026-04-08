@@ -3,7 +3,7 @@ export type LanguageOut = "ECMASCRIPT3" | "ECMASCRIPT5" | "ECMASCRIPT6" | "ECMAS
 export type CacheMode = "off" | "temp" | "persistent";
 export type DiagnosticsPreflight = "off" | "errors-only" | "full";
 export type PackageMode = "off" | "esm-only";
-export type ChunkMode = "off" | "closure-library" | "bundler-runtime";
+export type ChunkMode = "off" | "bundler-runtime";
 export type ChunkLoader = "auto" | "script" | "fetch";
 export interface CacheOptions {
     dir?: string;

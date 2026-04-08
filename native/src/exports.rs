@@ -32,7 +32,10 @@ pub fn rewrite_gcc_exports(code: String) -> std::result::Result<String, String> 
                 for specifier in &named.specifiers {
                     if let ExportSpecifier::Named(named_specifier) = specifier {
                         existing_export_names.insert(export_name_from_module_export_name(
-                            named_specifier.exported.as_ref().unwrap_or(&named_specifier.orig),
+                            named_specifier
+                                .exported
+                                .as_ref()
+                                .unwrap_or(&named_specifier.orig),
                         ));
                     }
                 }
@@ -204,7 +207,8 @@ fn is_gcc_bootstrap_statement(item: &ModuleItem) -> bool {
 }
 
 fn is_global_gcc_member(object: &Expr, prop: &MemberProp) -> bool {
-    matches!(object, Expr::Ident(ident) if ident.sym == "globalThis") && member_prop_name(prop).as_deref() == Some("GCC")
+    matches!(object, Expr::Ident(ident) if ident.sym == "globalThis")
+        && member_prop_name(prop).as_deref() == Some("GCC")
 }
 
 fn bare_identifier_name(expression: &Expr) -> Option<String> {
@@ -327,9 +331,8 @@ fn is_valid_identifier(name: &str) -> bool {
         _ => return false,
     }
 
-    characters.all(|character| {
-        character.is_ascii_alphanumeric() || character == '_' || character == '$'
-    })
+    characters
+        .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '$')
 }
 
 fn print_module_minified(module: &Module) -> std::result::Result<String, String> {
@@ -343,7 +346,9 @@ fn print_module_minified(module: &Module) -> std::result::Result<String, String>
             comments: None,
             wr: writer,
         };
-        emitter.emit_module(module).map_err(|error| error.to_string())?;
+        emitter
+            .emit_module(module)
+            .map_err(|error| error.to_string())?;
     }
     String::from_utf8(output).map_err(|error| error.to_string())
 }
@@ -544,7 +549,7 @@ mod tests {
     fn rewrites_member_expression_exports_to_named_binding_without_gcc_temp() {
         let output = rewrite_gcc_exports(
             "const Y={tb:1};globalThis.GCC=globalThis.GCC||{};globalThis.GCC.MotionHero=Y.tb;"
-        .to_string(),
+                .to_string(),
         )
         .unwrap();
 
@@ -564,7 +569,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(output.contains("export{A as First,B as Second};"), "{output}");
+        assert!(
+            output.contains("export{A as First,B as Second};"),
+            "{output}"
+        );
         assert_eq!(output.matches("export{").count(), 1, "{output}");
     }
 }

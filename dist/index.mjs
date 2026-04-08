@@ -1,13 +1,13 @@
 const __gcc_current_module_url = import.meta.url;
 
 // src/api/externs.ts
-import fs3 from "fs";
-import path3 from "path";
+import fs2 from "fs";
+import path2 from "path";
 import ts2 from "typescript";
 
 // src/stages/native/compiler-options.ts
-import fs2 from "fs";
-import path2 from "path";
+import fs from "fs";
+import path from "path";
 import ts from "typescript";
 
 // src/cache/hash.ts
@@ -28,44 +28,10 @@ function hashJson(value) {
   return hashContent(JSON.stringify(normalizeValue(value)));
 }
 
-// src/internal/bundle-location.ts
-import fs from "fs";
-import path from "path";
-import { createRequire } from "module";
-import { fileURLToPath } from "url";
-var bundleRequire = null;
-var packageRoot = null;
-function getBundleFilePath() {
-  return fileURLToPath(__gcc_current_module_url);
-}
-function createBundleRequire() {
-  bundleRequire ??= createRequire(__gcc_current_module_url);
-  return bundleRequire;
-}
-function getPackageRootFromBundle() {
-  if (packageRoot) {
-    return packageRoot;
-  }
-  let currentDir = path.dirname(getBundleFilePath());
-  while (true) {
-    if (fs.existsSync(path.join(currentDir, "package.json"))) {
-      packageRoot = currentDir;
-      return currentDir;
-    }
-    const parentDir = path.dirname(currentDir);
-    if (parentDir === currentDir) {
-      throw new Error(`Unable to locate package.json from bundled module path ${getBundleFilePath()}`);
-    }
-    currentDir = parentDir;
-  }
-}
-
 // src/stages/native/compiler-options.ts
-var RUNTIME_SPECIFIER = "gcc-ts-bundler/runtime";
-var PACKAGE_ROOT = getPackageRootFromBundle();
 var compilerOptionsCache = new Map;
 async function loadCompilerOptions(configPath, extraOptions = {}) {
-  const configStat = await fs2.promises.stat(configPath);
+  const configStat = await fs.promises.stat(configPath);
   const cacheKey = hashJson({
     configPath,
     extraOptions,
@@ -76,10 +42,7 @@ async function loadCompilerOptions(configPath, extraOptions = {}) {
   if (cached) {
     return cached;
   }
-  const configDir = path2.dirname(configPath);
-  const runtimePaths = await shouldInjectRuntimePaths(configDir) ? {
-    [RUNTIME_SPECIFIER]: [path2.join(PACKAGE_ROOT, "src", "runtime", "index.ts")]
-  } : {};
+  const configDir = path.dirname(configPath);
   const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
   if (configFile.error) {
     throw new Error(ts.flattenDiagnosticMessageText(configFile.error.messageText, `
@@ -91,8 +54,7 @@ async function loadCompilerOptions(configPath, extraOptions = {}) {
     ignoreDeprecations: extraOptions.ignoreDeprecations ?? configFile.config.compilerOptions?.ignoreDeprecations ?? "6.0",
     paths: {
       ...configFile.config.compilerOptions?.paths ?? {},
-      ...extraOptions.paths ?? {},
-      ...runtimePaths
+      ...extraOptions.paths ?? {}
     }
   }, configPath);
   if (parsedConfig.errors.length > 0) {
@@ -100,26 +62,6 @@ async function loadCompilerOptions(configPath, extraOptions = {}) {
   }
   compilerOptionsCache.set(cacheKey, parsedConfig.options);
   return parsedConfig.options;
-}
-async function shouldInjectRuntimePaths(configDir) {
-  let currentDir = configDir;
-  while (true) {
-    const packageJsonPath = path2.join(currentDir, "package.json");
-    try {
-      const raw = await fs2.promises.readFile(packageJsonPath, "utf8");
-      const parsed = JSON.parse(raw);
-      return parsed.name === "gcc-ts-bundler";
-    } catch (error) {
-      if (error.code !== "ENOENT") {
-        throw error;
-      }
-    }
-    const parentDir = path2.dirname(currentDir);
-    if (parentDir === currentDir) {
-      return false;
-    }
-    currentDir = parentDir;
-  }
 }
 
 // src/api/externs.ts
@@ -165,9 +107,9 @@ async function generateExterns(options) {
     throw new Error("generateExterns requires at least one module specifier.");
   }
   const mode = options.mode ?? "boundary-aware";
-  const projectRoot = path3.resolve(options.projectRoot ?? process.cwd());
-  const srcDir = path3.resolve(projectRoot, options.srcDir ?? ".");
-  const tsConfigPath = options.tsConfigPath && path3.resolve(projectRoot, options.tsConfigPath);
+  const projectRoot = path2.resolve(options.projectRoot ?? process.cwd());
+  const srcDir = path2.resolve(projectRoot, options.srcDir ?? ".");
+  const tsConfigPath = options.tsConfigPath && path2.resolve(projectRoot, options.tsConfigPath);
   const compilerOptions = await loadExternCompilerOptions({
     projectRoot,
     tsConfigPath
@@ -227,10 +169,10 @@ async function generateExterns(options) {
     }),
     scannedFiles
   });
-  const outputFile = options.outputFile && path3.resolve(projectRoot, options.outputFile);
+  const outputFile = options.outputFile && path2.resolve(projectRoot, options.outputFile);
   if (outputFile) {
-    await fs3.promises.mkdir(path3.dirname(outputFile), { recursive: true });
-    await fs3.promises.writeFile(outputFile, text, "utf8");
+    await fs2.promises.mkdir(path2.dirname(outputFile), { recursive: true });
+    await fs2.promises.writeFile(outputFile, text, "utf8");
   }
   return {
     mode,
@@ -251,9 +193,9 @@ async function loadExternCompilerOptions({
     moduleResolution: ts2.ModuleResolutionKind.Bundler,
     target: ts2.ScriptTarget.ESNext
   };
-  const resolvedConfigPath = tsConfigPath ?? path3.join(projectRoot, "tsconfig.json");
+  const resolvedConfigPath = tsConfigPath ?? path2.join(projectRoot, "tsconfig.json");
   try {
-    await fs3.promises.access(resolvedConfigPath, fs3.constants.R_OK);
+    await fs2.promises.access(resolvedConfigPath, fs2.constants.R_OK);
     try {
       return await loadCompilerOptions(resolvedConfigPath, {
         allowJs: true,
@@ -276,7 +218,7 @@ async function resolveModuleTypeEntry({
   projectRoot,
   specifier
 }) {
-  const containingFile = path3.join(projectRoot, "__gcc_externs_entry__.ts");
+  const containingFile = path2.join(projectRoot, "__gcc_externs_entry__.ts");
   const resolution = ts2.resolveModuleName(specifier, containingFile, compilerOptions, ts2.sys).resolvedModule;
   const resolvedFromTypescript = resolution && normalizeResolvedTypeFile(resolution.resolvedFileName);
   if (resolvedFromTypescript) {
@@ -321,14 +263,14 @@ function createEmptyContractRegistry() {
   };
 }
 function normalizeResolvedTypeFile(resolvedFileName) {
-  const normalizedPath = path3.resolve(resolvedFileName);
+  const normalizedPath = path2.resolve(resolvedFileName);
   if (isTypeSourceFile(normalizedPath)) {
     return normalizedPath;
   }
   for (const extension of DECLARATION_EXTENSIONS) {
     const candidate = withTypeExtension(normalizedPath, extension);
     if (ts2.sys.fileExists(candidate)) {
-      return path3.resolve(candidate);
+      return path2.resolve(candidate);
     }
   }
   return null;
@@ -337,7 +279,7 @@ function withTypeExtension(filePath, nextExtension) {
   if (filePath.endsWith(".d.ts") || filePath.endsWith(".d.mts") || filePath.endsWith(".d.cts")) {
     return filePath;
   }
-  const extension = path3.extname(filePath);
+  const extension = path2.extname(filePath);
   return `${filePath.slice(0, filePath.length - extension.length)}${nextExtension}`;
 }
 async function collectReachableTypeFiles({
@@ -353,7 +295,7 @@ async function collectReachableTypeFiles({
     if (!nextFile) {
       continue;
     }
-    const resolvedFile = path3.resolve(nextFile);
+    const resolvedFile = path2.resolve(nextFile);
     if (seen.has(resolvedFile) || !isTypeSourceFile(resolvedFile)) {
       continue;
     }
@@ -361,7 +303,7 @@ async function collectReachableTypeFiles({
       continue;
     }
     seen.add(resolvedFile);
-    const sourceText = await fs3.promises.readFile(resolvedFile, "utf8");
+    const sourceText = await fs2.promises.readFile(resolvedFile, "utf8");
     const sourceFile = ts2.createSourceFile(resolvedFile, sourceText, ts2.ScriptTarget.Latest, true);
     for (const specifier of collectReferencedSpecifiers(sourceFile)) {
       const resolvedModule = ts2.resolveModuleName(specifier, resolvedFile, compilerOptions, ts2.sys).resolvedModule;
@@ -408,12 +350,12 @@ function collectReferencedSpecifiers(sourceFile) {
 }
 function collectContracts(program, scannedFiles) {
   const checker = program.getTypeChecker();
-  const scannedFileSet = new Set(scannedFiles.map((filePath) => path3.resolve(filePath)));
+  const scannedFileSet = new Set(scannedFiles.map((filePath) => path2.resolve(filePath)));
   const interfaceContracts = new Map;
   const typeAliasContracts = new Map;
   const classContracts = new Map;
   for (const sourceFile of program.getSourceFiles()) {
-    if (!scannedFileSet.has(path3.resolve(sourceFile.fileName))) {
+    if (!scannedFileSet.has(path2.resolve(sourceFile.fileName))) {
       continue;
     }
     for (const statement of sourceFile.statements) {
@@ -626,20 +568,20 @@ function resolveAnalysisEntryFiles({
   srcDir
 }) {
   return entryFiles.map((entry) => {
-    if (path3.isAbsolute(entry)) {
+    if (path2.isAbsolute(entry)) {
       return entry;
     }
-    const fromSrcDir = path3.resolve(srcDir, entry);
+    const fromSrcDir = path2.resolve(srcDir, entry);
     if (ts2.sys.fileExists(fromSrcDir)) {
       return fromSrcDir;
     }
-    return path3.resolve(projectRoot, entry);
+    return path2.resolve(projectRoot, entry);
   });
 }
 async function analyzeRuntimeUsage(runtimeEntryFiles) {
   const structuralMembers = new Set;
   for (const runtimeEntryFile of runtimeEntryFiles) {
-    const sourceText = await fs3.promises.readFile(runtimeEntryFile, "utf8");
+    const sourceText = await fs2.promises.readFile(runtimeEntryFile, "utf8");
     const sourceFile = ts2.createSourceFile(runtimeEntryFile, sourceText, ts2.ScriptTarget.Latest, true, getScriptKindForFile(runtimeEntryFile));
     const knownConstructors = collectKnownConstructorBindings(sourceFile);
     const visit = (node) => {
@@ -1116,8 +1058,8 @@ function addMapSetValue(map, key, value) {
   map.set(key, new Set([value]));
 }
 function isProjectAppSourceFile(filePath, projectRoot) {
-  const resolvedFilePath = path3.resolve(filePath);
-  return !resolvedFilePath.includes(`${path3.sep}node_modules${path3.sep}`) && !resolvedFilePath.endsWith(".d.ts") && resolvedFilePath.startsWith(path3.resolve(projectRoot) + path3.sep);
+  const resolvedFilePath = path2.resolve(filePath);
+  return !resolvedFilePath.includes(`${path2.sep}node_modules${path2.sep}`) && !resolvedFilePath.endsWith(".d.ts") && resolvedFilePath.startsWith(path2.resolve(projectRoot) + path2.sep);
 }
 function isExportedDeclaration(node) {
   return (ts2.getCombinedModifierFlags(node) & ts2.ModifierFlags.Export) !== 0;
@@ -1178,16 +1120,16 @@ function getScriptKindForFile(filePath) {
   return ts2.ScriptKind.JS;
 }
 function isScannedDeclarationSymbol(symbol, scannedFiles) {
-  return (symbol.declarations ?? []).some((declaration) => scannedFiles.has(path3.resolve(declaration.getSourceFile().fileName)));
+  return (symbol.declarations ?? []).some((declaration) => scannedFiles.has(path2.resolve(declaration.getSourceFile().fileName)));
 }
 function findPackageDir(filePath) {
-  let currentDir = path3.dirname(filePath);
+  let currentDir = path2.dirname(filePath);
   while (true) {
-    const packageJsonPath = path3.join(currentDir, "package.json");
+    const packageJsonPath = path2.join(currentDir, "package.json");
     if (ts2.sys.fileExists(packageJsonPath)) {
       return currentDir;
     }
-    const parentDir = path3.dirname(currentDir);
+    const parentDir = path2.dirname(currentDir);
     if (parentDir === currentDir) {
       return null;
     }
@@ -1198,11 +1140,11 @@ function isTypeSourceFile(filePath) {
   return DECLARATION_EXTENSIONS.some((extension) => filePath.endsWith(extension));
 }
 function isTypescriptLibFile(filePath) {
-  return filePath.includes(`${path3.sep}node_modules${path3.sep}typescript${path3.sep}lib${path3.sep}`);
+  return filePath.includes(`${path2.sep}node_modules${path2.sep}typescript${path2.sep}lib${path2.sep}`);
 }
 function symbolCacheKey(symbol) {
   const declaration = symbol.declarations?.[0];
-  return declaration ? `${path3.resolve(declaration.getSourceFile().fileName)}:${symbol.getName()}` : symbol.getName();
+  return declaration ? `${path2.resolve(declaration.getSourceFile().fileName)}:${symbol.getName()}` : symbol.getName();
 }
 function uniqueStrings(values) {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
@@ -1254,17 +1196,17 @@ import path10 from "path";
 import fs10 from "fs";
 
 // src/cache/store.ts
-import fs4 from "fs";
+import fs3 from "fs";
 import os from "os";
-import path4 from "path";
+import path3 from "path";
 function getDefaultPersistentCacheRoot() {
   if (process.platform === "darwin") {
-    return path4.join(os.homedir(), "Library", "Caches", "gcc-ts-bundler");
+    return path3.join(os.homedir(), "Library", "Caches", "gcc-ts-bundler");
   }
   if (process.platform === "win32") {
-    return path4.join(process.env.LOCALAPPDATA ?? path4.join(os.homedir(), "AppData", "Local"), "gcc-ts-bundler");
+    return path3.join(process.env.LOCALAPPDATA ?? path3.join(os.homedir(), "AppData", "Local"), "gcc-ts-bundler");
   }
-  return path4.join(process.env.XDG_CACHE_HOME ?? path4.join(os.homedir(), ".cache"), "gcc-ts-bundler");
+  return path3.join(process.env.XDG_CACHE_HOME ?? path3.join(os.homedir(), ".cache"), "gcc-ts-bundler");
 }
 async function createCacheStore({
   cacheDir,
@@ -1272,12 +1214,12 @@ async function createCacheStore({
   projectRoot
 }) {
   if (mode === "off" || mode === "temp") {
-    const rootDir2 = await fs4.promises.mkdtemp(path4.join(os.tmpdir(), "gcc-ts-bundler-"));
-    const workspaceDir2 = path4.join(rootDir2, "workspace");
-    await fs4.promises.mkdir(workspaceDir2, { recursive: true });
+    const rootDir2 = await fs3.promises.mkdtemp(path3.join(os.tmpdir(), "gcc-ts-bundler-"));
+    const workspaceDir2 = path3.join(rootDir2, "workspace");
+    await fs3.promises.mkdir(workspaceDir2, { recursive: true });
     return {
       async cleanup() {
-        await fs4.promises.rm(rootDir2, { force: true, recursive: true });
+        await fs3.promises.rm(rootDir2, { force: true, recursive: true });
       },
       mode,
       projectCacheDir: rootDir2,
@@ -1285,10 +1227,10 @@ async function createCacheStore({
       workspaceDir: workspaceDir2
     };
   }
-  const rootDir = path4.resolve(cacheDir || getDefaultPersistentCacheRoot());
-  const projectCacheDir = path4.join(rootDir, hashContent(projectRoot));
-  const workspaceDir = path4.join(projectCacheDir, "workspace");
-  await fs4.promises.mkdir(workspaceDir, { recursive: true });
+  const rootDir = path3.resolve(cacheDir || getDefaultPersistentCacheRoot());
+  const projectCacheDir = path3.join(rootDir, hashContent(projectRoot));
+  const workspaceDir = path3.join(projectCacheDir, "workspace");
+  await fs3.promises.mkdir(workspaceDir, { recursive: true });
   return {
     async cleanup() {},
     mode,
@@ -1299,7 +1241,7 @@ async function createCacheStore({
 }
 async function readJsonIfExists(filePath) {
   try {
-    const raw = await fs4.promises.readFile(filePath, "utf-8");
+    const raw = await fs3.promises.readFile(filePath, "utf-8");
     return JSON.parse(raw);
   } catch (error) {
     if (error.code === "ENOENT") {
@@ -1310,10 +1252,10 @@ async function readJsonIfExists(filePath) {
 }
 async function writeJson(filePath, value) {
   await ensureDirectoryExistence(filePath);
-  await fs4.promises.writeFile(filePath, JSON.stringify(value, null, 2), "utf-8");
+  await fs3.promises.writeFile(filePath, JSON.stringify(value, null, 2), "utf-8");
 }
 async function ensureDirectoryExistence(filePath) {
-  await fs4.promises.mkdir(path4.dirname(filePath), { recursive: true });
+  await fs3.promises.mkdir(path3.dirname(filePath), { recursive: true });
 }
 
 // src/internal/file-state.ts
@@ -1323,6 +1265,40 @@ import path6 from "path";
 // src/native/index.ts
 import fs5 from "fs";
 import path5 from "path";
+
+// src/internal/bundle-location.ts
+import fs4 from "fs";
+import path4 from "path";
+import { createRequire } from "module";
+import { fileURLToPath } from "url";
+var bundleRequire = null;
+var packageRoot = null;
+function getBundleFilePath() {
+  return fileURLToPath(__gcc_current_module_url);
+}
+function createBundleRequire() {
+  bundleRequire ??= createRequire(__gcc_current_module_url);
+  return bundleRequire;
+}
+function getPackageRootFromBundle() {
+  if (packageRoot) {
+    return packageRoot;
+  }
+  let currentDir = path4.dirname(getBundleFilePath());
+  while (true) {
+    if (fs4.existsSync(path4.join(currentDir, "package.json"))) {
+      packageRoot = currentDir;
+      return currentDir;
+    }
+    const parentDir = path4.dirname(currentDir);
+    if (parentDir === currentDir) {
+      throw new Error(`Unable to locate package.json from bundled module path ${getBundleFilePath()}`);
+    }
+    currentDir = parentDir;
+  }
+}
+
+// src/native/index.ts
 var require2 = createBundleRequire();
 var SUPPORTED_TARGETS = {
   "darwin-arm64": "gcc-ts-bundler-darwin-arm64",
@@ -1541,7 +1517,7 @@ async function resolveBuild(context) {
     workspaceDir: cacheStore.workspaceDir
   });
   const outputNames = resolveOutputNames(entryRelativePaths, options.outputNames);
-  const resolvedLazyImports = assignLazyRuntimeBindings(graphResult.lazyImports);
+  const resolvedLazyImports = graphResult.lazyImports;
   const resolveKey = usesPersistentCache ? hashJson({
     compilerOptionsHash,
     entries: entryRelativePaths,
@@ -1755,7 +1731,7 @@ function buildChunkPlan({
   shimFiles,
   workspaceDir
 }) {
-  if (chunkOptions.mode === "closure-library" || chunkOptions.mode === "bundler-runtime") {
+  if (chunkOptions.mode === "bundler-runtime") {
     return buildClosureChunkPlan({
       baseChunkName: chunkOptions.baseChunkName,
       entryFiles,
@@ -1887,20 +1863,6 @@ function dedupeLazyImports(lazyImports) {
   return [
     ...new Map(lazyImports.map((item) => [item.moduleId, item])).values()
   ];
-}
-function assignLazyRuntimeBindings(lazyImports) {
-  const byModuleId = [...new Set(lazyImports.map((item) => item.moduleId))].sort((left, right) => left.localeCompare(right));
-  const bindingMap = new Map(byModuleId.map((moduleId, index) => [
-    moduleId,
-    {
-      preloadBindingName: `__gcc_preload_${index}`,
-      runtimeBindingName: `__gcc_lazy_${index}`
-    }
-  ]));
-  return lazyImports.map((item) => ({
-    ...item,
-    ...bindingMap.get(item.moduleId)
-  }));
 }
 function walkReachableFiles(entryFile, graph) {
   const reachable = new Set;
@@ -2517,7 +2479,7 @@ async function emitNativeStage({
 }) {
   const usesPersistentCache = options.cache.mode === "persistent";
   const outDir = path8.join(cacheDir, "out");
-  const externsPath = path8.join(cacheDir, "modules-externs.js");
+  const externsPath = path8.join(cacheDir, "native-generated.externs.js");
   const metadataPathForNative = path8.join(cacheDir, "closure-ir.json");
   const runtimePackageInputs = await collectTsxRuntimePackageInputs({
     fileNames,
@@ -2819,8 +2781,6 @@ import path9 from "path";
 import * as closureCompilerPackage from "google-closure-compiler";
 import { getNativeImagePath } from "google-closure-compiler/lib/utils.js";
 var closureLibFilesCache = new Map;
-var CHUNK_NAMESPACE = "__gcc$chunks";
-var CHUNK_MANAGER_JUSTIFICATION = "Generated by gcc-ts-bundler chunk runtime.";
 var BUNDLER_RUNTIME_GLOBAL = "__gcc_runtime__";
 async function runClosureStage({
   chunkPlan,
@@ -2830,24 +2790,18 @@ async function runClosureStage({
   options,
   outDir,
   supportFiles,
-  lazyImports,
   packageRoot: packageRoot2
 }) {
   await fs9.rm(finalCacheDir, { force: true, recursive: true });
   await fs9.mkdir(finalCacheDir, { recursive: true });
   const rawDir = path9.join(finalCacheDir, "raw");
   const cacheOutputDir = path9.join(finalCacheDir, "outputs");
-  const supportDir = path9.join(emittedOutDir, "__gcc_chunk_support");
   await fs9.mkdir(rawDir, { recursive: true });
   await fs9.mkdir(cacheOutputDir, { recursive: true });
-  await fs9.rm(supportDir, { force: true, recursive: true });
-  await fs9.mkdir(supportDir, { recursive: true });
   await fs9.rm(outDir, { force: true, recursive: true });
   await fs9.mkdir(outDir, { recursive: true });
   const resolvedChunks = resolveChunkPlan(chunkPlan, emittedOutDir);
-  let finalSupportFiles = [...supportFiles];
   let manifestOutputPath = null;
-  let runtimeEntryPoint = null;
   if (options.chunks.mode === "bundler-runtime") {
     const bundlerAssets = await createBundlerRuntimeAssets({
       chunkPlan: resolvedChunks,
@@ -2874,40 +2828,16 @@ async function runClosureStage({
     const cacheOutputFiles2 = publishedFiles2.map((outputFile) => path9.join(cacheOutputDir, path9.relative(outDir, outputFile)));
     return { cacheOutputFiles: cacheOutputFiles2, exitCode: 0, outputFiles: publishedFiles2 };
   }
-  if (options.chunks.mode === "closure-library") {
-    const chunkAssets = await createChunkRuntimeAssets({
-      chunkPlan: resolvedChunks,
-      emittedOutDir,
-      lazyImports,
-      options,
-      supportDir
-    });
-    finalSupportFiles = uniquePaths([
-      ...supportFiles,
-      chunkAssets.runtimeSupportFile
-    ]);
-    runtimeEntryPoint = chunkAssets.runtimeModuleId;
-    applyChunkBridgesToResolvedChunks(resolvedChunks, chunkAssets.bridgeFiles);
-    if (options.chunks.manifestFile) {
-      manifestOutputPath = path9.join(outDir, options.chunks.manifestFile);
-      await fs9.mkdir(path9.dirname(manifestOutputPath), { recursive: true });
-      await fs9.writeFile(manifestOutputPath, chunkAssets.manifestText, "utf-8");
-      await fs9.mkdir(path9.join(cacheOutputDir, path9.dirname(options.chunks.manifestFile)), {
-        recursive: true
-      });
-      await fs9.writeFile(path9.join(cacheOutputDir, options.chunks.manifestFile), chunkAssets.manifestText, "utf-8");
-    }
-  }
   const closureLibFiles = await collectClosureLibFiles(packageRoot2, [
-    ...finalSupportFiles,
+    ...supportFiles,
     ...resolvedChunks.flatMap((chunk) => chunk.files)
   ]);
-  const exitCode = resolvedChunks.length === 1 && options.chunks.mode !== "closure-library" ? await runSingleClosureCompilation({
+  const exitCode = resolvedChunks.length === 1 ? await runSingleClosureCompilation({
     closureLibFiles,
     entryChunk: resolvedChunks[0],
     externPaths,
     options,
-    supportFiles: finalSupportFiles,
+    supportFiles,
     rawOutputPath: path9.join(rawDir, `${resolvedChunks[0].name}.js`)
   }) : await runChunkedClosureCompilation({
     chunkPlan: resolvedChunks,
@@ -2915,27 +2845,18 @@ async function runClosureStage({
     externPaths,
     options,
     outputDir: rawDir,
-    runtimeEntryPoint,
-    supportFiles: finalSupportFiles,
-    wrapperNamespace: toChunkWrapperNamespace(options.chunks.baseChunkName || resolvedChunks[0]?.name || "main")
+    supportFiles
   });
   if (exitCode !== 0) {
     return { cacheOutputFiles: [], exitCode, outputFiles: [] };
   }
   const rawOutputs = resolvedChunks.map((chunk) => path9.join(rawDir, `${chunk.name}.js`));
   const outputFiles = resolvedChunks.map((chunk) => path9.join(outDir, `${chunk.name}.js`));
-  if (options.chunks.mode === "closure-library") {
-    await Promise.all(rawOutputs.map(async (rawFile, index) => {
-      const contents = await fs9.readFile(rawFile, "utf-8");
-      await fs9.writeFile(outputFiles[index], contents);
-    }));
-  } else {
-    await Promise.all(rawOutputs.map(async (rawFile, index) => {
-      const contents = await fs9.readFile(rawFile, "utf-8");
-      const transformed = rewriteGccExports(contents);
-      await fs9.writeFile(outputFiles[index], transformed);
-    }));
-  }
+  await Promise.all(rawOutputs.map(async (rawFile, index) => {
+    const contents = await fs9.readFile(rawFile, "utf-8");
+    const transformed = rewriteGccExports(contents);
+    await fs9.writeFile(outputFiles[index], transformed);
+  }));
   const publishedFiles = manifestOutputPath === null ? outputFiles : [...outputFiles, manifestOutputPath];
   await copyOrLinkFiles(publishedFiles, cacheOutputDir);
   const cacheOutputFiles = publishedFiles.map((outputFile) => path9.join(cacheOutputDir, path9.relative(outDir, outputFile)));
@@ -2978,9 +2899,7 @@ async function runChunkedClosureCompilation({
   externPaths,
   options,
   outputDir,
-  runtimeEntryPoint,
-  supportFiles,
-  wrapperNamespace
+  supportFiles
 }) {
   const leadingJs = uniquePaths([
     ...options.js,
@@ -3008,18 +2927,9 @@ async function runChunkedClosureCompilation({
     rewritePolyfills: false,
     warningLevel: options.diagnostics.verbose ? "VERBOSE" : "QUIET"
   };
-  const entryPoints = uniquePaths([
-    ...runtimeEntryPoint ? [runtimeEntryPoint] : [],
-    ...chunkPlan.flatMap((chunk) => chunk.entryPoints)
-  ]);
+  const entryPoints = uniquePaths(chunkPlan.flatMap((chunk) => chunk.entryPoints));
   if (entryPoints.length > 0) {
     closureOptions.entryPoint = entryPoints;
-  }
-  if (options.chunks.mode === "closure-library") {
-    const mutableOptions = closureOptions;
-    mutableOptions.chunkOutputType = "GLOBAL_NAMESPACE";
-    mutableOptions.renamePrefixNamespace = CHUNK_NAMESPACE;
-    mutableOptions.chunkWrapper = chunkPlan.map((chunk) => `${chunk.name}:${createChunkWrapper(chunk, wrapperNamespace)}`);
   }
   applyInternalClosureDebugOptions(closureOptions);
   return runClosureCompiler(closureOptions);
@@ -3115,7 +3025,7 @@ async function runBundlerRuntimeCompilation({
       throw new Error(`Missing linked chunk source for ${chunk.name}`);
     }
     const extraJs = chunk.kind === "base" ? options.js : [];
-    const closureLibFiles = await collectClosureLibFiles(packageRoot2, [
+    const closureLibFiles = await collectBundlerRuntimeClosureLibFiles(packageRoot2, [
       ...extraJs,
       chunkSource.sourcePath
     ]);
@@ -3137,6 +3047,17 @@ async function runBundlerRuntimeCompilation({
     }
   }
   return 0;
+}
+async function collectBundlerRuntimeClosureLibFiles(packageRoot2, candidateFiles) {
+  const contents = (await Promise.all(uniquePaths(candidateFiles).map((filePath) => fs9.readFile(filePath, "utf-8").catch(() => "")))).join(`
+`);
+  if (!contents.includes("goog.reflect.")) {
+    return [];
+  }
+  return [
+    path9.join(packageRoot2, "closure-lib", "base.js"),
+    path9.join(packageRoot2, "closure-lib", "reflect.js")
+  ];
 }
 function renderBundlerRuntimeExterns(exportNames) {
   const lines = [
@@ -3236,197 +3157,6 @@ function renderBundlerRuntimePreamble({
   ].join(`
 `);
 }
-async function createChunkRuntimeAssets({
-  chunkPlan,
-  emittedOutDir,
-  lazyImports,
-  options,
-  supportDir
-}) {
-  const baseChunk = chunkPlan.find((chunk) => chunk.kind === "base") ?? chunkPlan[0];
-  const chunkUrls = chunkPlan.map((chunk) => `${options.chunks.publicPath}${chunk.name}.js`);
-  const uniqueLazyImports = dedupeLazyImports2(lazyImports);
-  const bridgeFiles = await Promise.all(uniqueLazyImports.map(async (lazyImport, index) => {
-    const chunkName = chunkPlan.find((chunk) => chunk.lazyModuleIds.includes(lazyImport.moduleId))?.name;
-    if (!chunkName) {
-      throw new Error(`Missing lazy chunk for ${lazyImport.moduleId}`);
-    }
-    const filePath = path9.join(supportDir, `lazy-bridge-${index}.js`);
-    const moduleId = toGoogModuleId(filePath, emittedOutDir);
-    await fs9.writeFile(filePath, renderLazyBridgeModule(moduleId, lazyImport.moduleId), "utf-8");
-    return {
-      chunkName,
-      filePath,
-      moduleId,
-      preloadBindingName: lazyImport.preloadBindingName ?? `__gcc_preload_${index}`,
-      runtimeBindingName: lazyImport.runtimeBindingName ?? `__gcc_lazy_${index}`
-    };
-  }));
-  const manifest = {
-    baseChunkName: baseChunk.name,
-    chunkDependencies: Object.fromEntries(chunkPlan.map((chunk) => [chunk.name, chunk.dependencies])),
-    chunkUrls: Object.fromEntries(chunkPlan.map((chunk) => [
-      chunk.name,
-      `${options.chunks.publicPath}${chunk.name}.js`
-    ])),
-    lazyModules: Object.fromEntries(uniqueLazyImports.map((lazyImport) => [
-      lazyImport.moduleId,
-      chunkPlan.find((chunk) => chunk.lazyModuleIds.includes(lazyImport.moduleId))?.name ?? ""
-    ])),
-    namespace: CHUNK_NAMESPACE,
-    publicPath: options.chunks.publicPath
-  };
-  const runtimeSupportFile = path9.join(supportDir, "runtime.js");
-  await fs9.writeFile(runtimeSupportFile, renderChunkRuntimeSupport({
-    bridgeFiles,
-    chunkNames: chunkPlan.map((chunk) => chunk.name),
-    chunkUrls,
-    publicPath: options.chunks.publicPath,
-    moduleInfoString: renderModuleInfoString(chunkPlan)
-  }), "utf-8");
-  return {
-    bridgeFiles,
-    manifestText: `${JSON.stringify(manifest, null, 2)}
-`,
-    runtimeModuleId: "gcc.__gcc_chunk_runtime",
-    runtimeSupportFile
-  };
-}
-function renderChunkRuntimeSupport({
-  bridgeFiles,
-  chunkNames,
-  chunkUrls,
-  publicPath,
-  moduleInfoString
-}) {
-  const chunkUrlMap = Object.fromEntries(chunkNames.map((chunkName, index) => [chunkName, chunkUrls[index] ?? ""]));
-  return [
-    'goog.module("gcc.__gcc_chunk_runtime");',
-    'const googModule = goog.require("goog.module");',
-    'const ModuleLoader = goog.require("goog.module.ModuleLoader");',
-    'const ModuleManager = goog.require("goog.module.ModuleManager");',
-    'const uncheckedConversions = goog.require("goog.html.uncheckedconversions");',
-    'const Const = goog.require("goog.string.Const");',
-    `const __gcc_chunk_urls = ${JSON.stringify(chunkUrlMap)};`,
-    `const __gcc_module_info = ${JSON.stringify(moduleInfoString)};`,
-    `const __gcc_public_path = ${JSON.stringify(publicPath)};`,
-    `const __gcc_justification = Const.from(${JSON.stringify(CHUNK_MANAGER_JUSTIFICATION)});`,
-    "const __gcc_loader = new ModuleLoader();",
-    "__gcc_loader.setUseScriptTags(true);",
-    "const __gcc_manager = ModuleManager.getInstance();",
-    "__gcc_manager.setLoader(__gcc_loader);",
-    "__gcc_manager.setBatchModeEnabled(false);",
-    "__gcc_manager.setConcurrentLoadingEnabled(false);",
-    "__gcc_manager.setAllModuleInfoString(__gcc_module_info);",
-    "__gcc_manager.setModuleTrustedUris((function() {",
-    "  const baseUrl = document.currentScript && document.currentScript.src ? new URL(__gcc_public_path, document.currentScript.src).toString() : __gcc_public_path;",
-    "  const trustedUris = {};",
-    "  for (const chunkId in __gcc_chunk_urls) {",
-    "    trustedUris[chunkId] = [uncheckedConversions.trustedResourceUrlFromStringKnownToSatisfyTypeContract(__gcc_justification, new URL(__gcc_chunk_urls[chunkId], baseUrl).toString())];",
-    "  }",
-    "  return trustedUris;",
-    "})());",
-    "__gcc_manager.setModuleContext(globalThis);",
-    "const __gcc_module_cache = new Map();",
-    "function __gcc_wrap_module(moduleId) {",
-    "  if (__gcc_module_cache.has(moduleId)) {",
-    "    return __gcc_module_cache.get(moduleId);",
-    "  }",
-    "  const target = googModule.get(moduleId);",
-    "  const wrapped = new Proxy(target, {",
-    "    get(moduleTarget, property, receiver) {",
-    "      if (property === 'm') {",
-    "        return function(exportName) {",
-    "          if (!Object.prototype.hasOwnProperty.call(moduleTarget, exportName)) {",
-    `            throw new Error('Missing export "' + exportName + '" from lazy module ' + moduleId);`,
-    "          }",
-    "          return moduleTarget[exportName];",
-    "        };",
-    "      }",
-    "      if (typeof property === 'string' && !Reflect.has(moduleTarget, property)) {",
-    `        throw new Error('Missing property "' + property + '" from lazy module ' + moduleId);`,
-    "      }",
-    "      return Reflect.get(moduleTarget, property, receiver);",
-    "    },",
-    "    has(moduleTarget, property) {",
-    "      return property === 'm' || Reflect.has(moduleTarget, property);",
-    "    },",
-    "  });",
-    "  __gcc_module_cache.set(moduleId, wrapped);",
-    "  return wrapped;",
-    "}",
-    "function __gcc_load(chunkId, moduleId) {",
-    "  return Promise.resolve(__gcc_manager.load(chunkId)).then(function() {",
-    "    return __gcc_wrap_module(moduleId);",
-    "  });",
-    "}",
-    "function __gcc_preload(chunkId) {",
-    "  return Promise.resolve(__gcc_manager.preloadModule(chunkId)).then(function() {});",
-    "}",
-    ...bridgeFiles.flatMap((bridge) => {
-      return [
-        `function ${bridge.runtimeBindingName}() { return __gcc_load(${JSON.stringify(bridge.chunkName)}, ${JSON.stringify(bridge.moduleId)}); }`,
-        `function ${bridge.preloadBindingName}() { return __gcc_preload(${JSON.stringify(bridge.chunkName)}); }`,
-        `exports.${bridge.runtimeBindingName} = ${bridge.runtimeBindingName};`,
-        `exports.${bridge.preloadBindingName} = ${bridge.preloadBindingName};`
-      ];
-    }),
-    ""
-  ].join(`
-`);
-}
-function renderLazyBridgeModule(moduleId, targetModuleId) {
-  return [
-    `goog.module(${JSON.stringify(moduleId)});`,
-    `const __module = goog.require(${JSON.stringify(targetModuleId)});`,
-    "for (const key in __module) {",
-    '  if (key !== "default") {',
-    "    exports[key] = __module[key];",
-    "  }",
-    "}",
-    "exports.default = __module.default;",
-    ""
-  ].join(`
-`);
-}
-function dedupeLazyImports2(lazyImports) {
-  return [
-    ...new Map(lazyImports.map((item) => [item.moduleId, item])).values()
-  ];
-}
-function applyChunkBridgesToResolvedChunks(chunkPlan, bridgeFiles) {
-  const bridgesByChunk = new Map;
-  for (const bridge of bridgeFiles) {
-    const existing = bridgesByChunk.get(bridge.chunkName) ?? [];
-    existing.push(bridge);
-    bridgesByChunk.set(bridge.chunkName, existing);
-  }
-  for (const chunk of chunkPlan) {
-    const bridges = bridgesByChunk.get(chunk.name) ?? [];
-    if (bridges.length === 0) {
-      continue;
-    }
-    chunk.files.push(...bridges.map((bridge) => bridge.filePath));
-    chunk.entryPoints = bridges.map((bridge) => bridge.moduleId);
-  }
-}
-function createChunkWrapper(chunk, wrapperNamespace) {
-  const namespaceTarget = `globalThis.${wrapperNamespace}=globalThis.${wrapperNamespace}||{}`;
-  if (chunk.kind === "base") {
-    return `(function(${CHUNK_NAMESPACE}){%output%}).call(this,${namespaceTarget});`;
-  }
-  return `(function(${CHUNK_NAMESPACE}){var __gcc_manager=goog.module.ModuleManager.getInstance();__gcc_manager.beforeLoadModuleCode(${JSON.stringify(chunk.name)});%output%__gcc_manager.setLoaded();}).call(this,${namespaceTarget});`;
-}
-function toChunkWrapperNamespace(baseChunkName) {
-  const sanitized = baseChunkName.replace(/[^A-Za-z0-9_$]/g, "_");
-  return `default_${sanitized}`;
-}
-function renderModuleInfoString(chunkPlan) {
-  return chunkPlan.map((chunk) => {
-    const dependencyIndexes = chunk.dependencies.map((dependency) => chunkPlan.findIndex((candidate) => candidate.name === dependency)).filter((index) => index >= 0).map((index) => index.toString(36));
-    return dependencyIndexes.length > 0 ? `${chunk.name}:${dependencyIndexes.join(",")}` : chunk.name;
-  }).join("/");
-}
 function resolveChunkPlan(chunkPlan, emittedOutDir) {
   return chunkPlan.map((chunk) => ({
     dependencies: chunk.dependencies,
@@ -3487,26 +3217,6 @@ async function runClosureCompiler(options) {
     });
   });
 }
-async function collectJavaScriptFiles(dir) {
-  const files = [];
-  const pending = [dir];
-  while (pending.length > 0) {
-    const currentDir = pending.pop();
-    const entries = await fs9.readdir(currentDir, { withFileTypes: true });
-    for (const entry of entries) {
-      const entryPath = path9.join(currentDir, entry.name);
-      if (entry.isDirectory()) {
-        pending.push(entryPath);
-        continue;
-      }
-      if (entry.name.endsWith(".js")) {
-        files.push(entryPath);
-      }
-    }
-  }
-  files.sort((left, right) => left.localeCompare(right));
-  return files;
-}
 async function collectClosureLibFiles(packageRoot2, candidateFiles) {
   const closureLibDir = path9.join(packageRoot2, "closure-lib");
   const cacheKey = `${closureLibDir}\x00${await hashClosureLibSelection(candidateFiles)}`;
@@ -3530,21 +3240,23 @@ async function hashClosureLibSelection(filePaths) {
   return stats.sort((left, right) => left.localeCompare(right)).join("|");
 }
 async function selectClosureLibFiles(closureLibDir, candidateFiles) {
-  const usesChunkLoader = candidateFiles.some((filePath) => filePath.includes(`${path9.sep}__gcc_chunk_support${path9.sep}`));
-  if (usesChunkLoader) {
-    const vendoredLoaderFiles = await collectJavaScriptFiles(path9.join(closureLibDir, "goog"));
-    return uniquePaths([path9.join(closureLibDir, "base.js"), ...vendoredLoaderFiles]);
-  }
-  const required = [path9.join(closureLibDir, "base.js")];
+  const required = [];
   const contents = (await Promise.all(uniquePaths(candidateFiles).map((filePath) => fs9.readFile(filePath, "utf-8").catch(() => "")))).join(`
 `);
+  const needsGoogBase = contents.includes("goog.module(") || contents.includes("goog.require(") || contents.includes("goog.requireType(") || contents.includes("goog.provide(") || contents.includes("goog.reflect.");
+  if (needsGoogBase) {
+    required.push(path9.join(closureLibDir, "base.js"));
+  }
   if (contents.includes("goog.reflect.")) {
     required.push(path9.join(closureLibDir, "reflect.js"));
   }
   if (contents.includes("tslib")) {
+    if (!required.includes(path9.join(closureLibDir, "base.js"))) {
+      required.push(path9.join(closureLibDir, "base.js"));
+    }
     required.push(path9.join(closureLibDir, "tslib.js"));
   }
-  return required;
+  return uniquePaths(required);
 }
 
 // src/pipeline/build-pipeline.ts
@@ -3593,6 +3305,17 @@ async function build(options) {
         outputFiles: []
       };
     }
+    if (context.options.chunks.mode === "off" && resolvedBuild.lazyImports.length > 0) {
+      return {
+        cacheHit: false,
+        diagnostics: [
+          createBuildDiagnostic('Dynamic import() requires chunks.mode = "bundler-runtime".')
+        ],
+        emitSkipped: true,
+        exitCode: 1,
+        outputFiles: []
+      };
+    }
     if (context.options.chunks.mode === "off") {
       writeEntryShims({
         entries: resolvedBuild.entryFiles.map((entry) => ({
@@ -3634,17 +3357,17 @@ async function build(options) {
       srcDir: context.options.srcDir,
       tsConfigPath: resolvedBuild.tsConfigPath
     });
+    const externPaths = await collectEffectiveExternPaths([
+      ...context.options.externs,
+      ...bundledExterns,
+      ...runtimeDependencyExterns ? [runtimeDependencyExterns] : [],
+      nativeEmitResult.externsPath
+    ]);
     const closureResult = await runClosureStage({
       chunkPlan: resolvedBuild.chunkPlan,
       emittedOutDir: nativeEmitResult.outDir,
-      externPaths: [
-        ...context.options.externs,
-        ...bundledExterns,
-        ...runtimeDependencyExterns ? [runtimeDependencyExterns] : [],
-        nativeEmitResult.externsPath
-      ],
+      externPaths,
       finalCacheDir: resolvedBuild.finalCacheDir,
-      lazyImports: resolvedBuild.lazyImports,
       options: context.options,
       outDir: context.options.outDir,
       supportFiles: nativeEmitResult.supportFiles,
@@ -3726,12 +3449,37 @@ async function collectBundledExterns(packageRoot2) {
   if (!bundledExternsPromise) {
     bundledExternsPromise = (async () => {
       const closureExternsPath = path10.join(packageRoot2, "closure-externs");
-      const entries = await fs10.promises.readdir(closureExternsPath);
+      let entries;
+      try {
+        entries = await fs10.promises.readdir(closureExternsPath);
+      } catch (error) {
+        if (error.code === "ENOENT") {
+          return [];
+        }
+        throw error;
+      }
       return entries.map((entry) => path10.join(closureExternsPath, entry)).sort((left, right) => left.localeCompare(right));
     })();
     bundledExternsCacheByRoot.set(packageRoot2, bundledExternsPromise);
   }
   return bundledExternsPromise;
+}
+async function collectEffectiveExternPaths(paths) {
+  const effectivePaths = [];
+  for (const filePath of [...new Set(paths)]) {
+    if (await externFileHasDeclarations(filePath)) {
+      effectivePaths.push(filePath);
+    }
+  }
+  return effectivePaths;
+}
+async function externFileHasDeclarations(filePath) {
+  try {
+    const sourceText = await fs10.promises.readFile(filePath, "utf-8");
+    return sourceText.split(/\r?\n/).map((line) => line.trim()).some((line) => line.length > 0 && line !== "/** @externs */" && line !== "*/" && !line.startsWith("*") && !line.startsWith("//"));
+  } catch {
+    return false;
+  }
 }
 async function publishOutputs(outputFiles, outDir) {
   if (await publishedOutputsMatch2(outputFiles, outDir)) {

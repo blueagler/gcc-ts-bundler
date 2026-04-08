@@ -16,12 +16,6 @@
       "require": "./dist/index.cjs",
       "default": "./dist/index.mjs"
     },
-    "./runtime": {
-      "types": "./dist/runtime/index.d.ts",
-      "import": "./dist/runtime/index.mjs",
-      "require": "./dist/runtime/index.cjs",
-      "default": "./dist/runtime/index.mjs"
-    },
     "./native": {
       "types": "./dist/native/index.d.ts",
       "import": "./dist/native/index.mjs",
@@ -43,7 +37,7 @@
   },
   "scripts": {
     "build:native": "node ./scripts/build-native.mjs",
-    "build:js": "bun build ./src/entry/cli.ts --outdir ./bin --format cjs --packages external --banner \"#!/usr/bin/env node\nconst __gcc_current_module_url = require('node:url').pathToFileURL(__filename).href;\" --entry-naming \"gcc-ts-bundler.cjs\" --target node && bun build ./src/index.ts --outdir ./dist --format esm --packages external --banner \"const __gcc_current_module_url = import.meta.url;\" --entry-naming \"index.mjs\" --target node && bun build ./src/index.ts --outdir ./dist --format cjs --packages external --banner \"const __gcc_current_module_url = require('node:url').pathToFileURL(__filename).href;\" --entry-naming \"index.cjs\" --target node && bun build ./src/runtime/index.ts --outdir ./dist/runtime --format esm --packages external --banner \"const __gcc_current_module_url = import.meta.url;\" --entry-naming \"index.mjs\" --target node && bun build ./src/runtime/index.ts --outdir ./dist/runtime --format cjs --packages external --banner \"const __gcc_current_module_url = require('node:url').pathToFileURL(__filename).href;\" --entry-naming \"index.cjs\" --target node && bun build ./src/native/index.ts --outdir ./dist/native --format esm --packages external --banner \"const __gcc_current_module_url = import.meta.url;\" --entry-naming \"index.mjs\" --target node && bun build ./src/native/index.ts --outdir ./dist/native --format cjs --packages external --banner \"const __gcc_current_module_url = require('node:url').pathToFileURL(__filename).href;\" --entry-naming \"index.cjs\" --target node && bun --bun tsc -p ./tsconfig.types.json",
+    "build:js": "node -e \"require('node:fs').rmSync('./dist/runtime',{recursive:true,force:true})\" && bun build ./src/entry/cli.ts --outdir ./bin --format cjs --packages external --banner \"#!/usr/bin/env node\nconst __gcc_current_module_url = require('node:url').pathToFileURL(__filename).href;\" --entry-naming \"gcc-ts-bundler.cjs\" --target node && bun build ./src/index.ts --outdir ./dist --format esm --packages external --banner \"const __gcc_current_module_url = import.meta.url;\" --entry-naming \"index.mjs\" --target node && bun build ./src/index.ts --outdir ./dist --format cjs --packages external --banner \"const __gcc_current_module_url = require('node:url').pathToFileURL(__filename).href;\" --entry-naming \"index.cjs\" --target node && bun build ./src/native/index.ts --outdir ./dist/native --format esm --packages external --banner \"const __gcc_current_module_url = import.meta.url;\" --entry-naming \"index.mjs\" --target node && bun build ./src/native/index.ts --outdir ./dist/native --format cjs --packages external --banner \"const __gcc_current_module_url = require('node:url').pathToFileURL(__filename).href;\" --entry-naming \"index.cjs\" --target node && bun --bun tsc -p ./tsconfig.types.json",
     "build": "bun run build:native && bun run build:js",
     "lint": "bun --bun tsc --noEmit && bun --bun ./scripts/format.ts && bun --bun eslint -c eslint.config.ts \"src/**/*.ts\" --fix",
     "test": "cargo test --manifest-path native/Cargo.toml && bun run build && bun test ./test/*.test.mjs",
