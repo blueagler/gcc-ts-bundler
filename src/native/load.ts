@@ -16,6 +16,21 @@ interface NativeDependencyGraphEntry {
   filePath: string;
 }
 
+interface NativeChunkPlanEntryInput {
+  chunkName: string;
+  outputName: string;
+  sourcePath: string;
+}
+
+interface NativeChunkPlanChunkOutput {
+  dependencies: string[];
+  entryFiles?: string[];
+  files: string[];
+  kind?: "base" | "entry" | "lazy" | "shared";
+  lazyModuleIds?: string[];
+  name: string;
+}
+
 interface NativePackageAliasEntry {
   packageName: string;
   subpath: string;
@@ -89,6 +104,15 @@ interface NativeBinding {
     outDir: string,
   ): boolean;
   publishedOutputsMatch(outputFiles: string[], outDir: string): boolean;
+  planChunks(
+    chunkMode: string,
+    baseChunkName: string,
+    workspaceDir: string,
+    entryFiles: NativeChunkPlanEntryInput[],
+    graphEntries: NativeDependencyGraphEntry[],
+    lazyImports: NativeLazyImportEntry[],
+    shimFiles: string[],
+  ): NativeChunkPlanChunkOutput[];
   resolveGraph(
     entries: string[],
     srcDir: string,
@@ -147,6 +171,26 @@ export function resolveGraph(input: {
     sourceFiles: result.sourceFiles,
     trackedFiles: result.trackedFiles,
   };
+}
+
+export function planChunks(input: {
+  baseChunkName: string;
+  chunkMode: string;
+  entryFiles: NativeChunkPlanEntryInput[];
+  graphEntries: NativeDependencyGraphEntry[];
+  lazyImports: NativeLazyImportEntry[];
+  shimFiles: string[];
+  workspaceDir: string;
+}) {
+  return loadBinding().planChunks(
+    input.chunkMode,
+    input.baseChunkName,
+    input.workspaceDir,
+    input.entryFiles,
+    input.graphEntries,
+    input.lazyImports,
+    input.shimFiles,
+  );
 }
 
 export function rewriteGccExports(code: string) {

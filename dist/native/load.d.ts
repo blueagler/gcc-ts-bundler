@@ -3,6 +3,23 @@ interface NativeEntryExportMetadata {
     hasDefaultExport: boolean;
     sourcePath: string;
 }
+interface NativeDependencyGraphEntry {
+    dependencies: string[];
+    filePath: string;
+}
+interface NativeChunkPlanEntryInput {
+    chunkName: string;
+    outputName: string;
+    sourcePath: string;
+}
+interface NativeChunkPlanChunkOutput {
+    dependencies: string[];
+    entryFiles?: string[];
+    files: string[];
+    kind?: "base" | "entry" | "lazy" | "shared";
+    lazyModuleIds?: string[];
+    name: string;
+}
 interface NativePackageAliasEntry {
     packageName: string;
     subpath: string;
@@ -55,6 +72,15 @@ export declare function resolveGraph(input: {
     sourceFiles: string[];
     trackedFiles: string[];
 };
+export declare function planChunks(input: {
+    baseChunkName: string;
+    chunkMode: string;
+    entryFiles: NativeChunkPlanEntryInput[];
+    graphEntries: NativeDependencyGraphEntry[];
+    lazyImports: NativeLazyImportEntry[];
+    shimFiles: string[];
+    workspaceDir: string;
+}): NativeChunkPlanChunkOutput[];
 export declare function rewriteGccExports(code: string): string;
 export declare function transpileSources(input: {
     chunkMode: string;

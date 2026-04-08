@@ -34,6 +34,29 @@ pub fn resolve_graph(
     with_globals(|| graph::resolve_graph(entries, src_dir, workspace_dir, package_mode))
 }
 
+#[napi(js_name = "planChunks")]
+pub fn plan_chunks(
+    chunk_mode: String,
+    base_chunk_name: String,
+    workspace_dir: String,
+    entry_files: Vec<graph::ChunkPlanEntryInput>,
+    graph_entries: Vec<graph::DependencyGraphEntry>,
+    lazy_imports: Vec<graph::LazyImportEntry>,
+    shim_files: Vec<String>,
+) -> Result<Vec<graph::ChunkPlanChunkOutput>> {
+    with_globals(|| {
+        graph::plan_chunks(
+            chunk_mode,
+            base_chunk_name,
+            workspace_dir,
+            entry_files,
+            graph_entries,
+            lazy_imports,
+            shim_files,
+        )
+    })
+}
+
 #[napi(js_name = "writeEntryShims")]
 pub fn write_entry_shims(entries: Vec<shims::ShimEntry>) -> Result<Vec<String>> {
     into_napi(shims::write_entry_shims(entries))

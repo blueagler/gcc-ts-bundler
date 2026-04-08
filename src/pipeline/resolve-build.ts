@@ -21,7 +21,7 @@ import {
   PackageAlias,
   ResolvedBuild,
 } from "../internal/types";
-import { resolveGraph } from "../native/load";
+import { planChunks, resolveGraph } from "../native/load";
 
 interface ResolveMetadata {
   chunkPlan: ChunkPlanChunk[];
@@ -193,18 +193,26 @@ export async function resolveBuild(
     const shimDir = path.join(cacheStore.workspaceDir, "entries");
     const shimFiles = toShimFiles(entryFiles, shimDir);
     resolveMetadata = {
-      chunkPlan: buildChunkPlan({
-        chunkOptions: options.chunks,
-        entryFiles,
-        graph: {
-          ...graphResult.graph,
-          ...Object.fromEntries(
-            shimFiles.map((shimFile, index) => [
-              shimFile,
-              [entryFiles[index].sourcePath],
-            ]),
+      chunkPlan: planChunks({
+        baseChunkName: options.chunks.baseChunkName,
+        chunkMode: options.chunks.mode,
+        entryFiles: entryFiles.map((entry) => ({
+          chunkName: entry.chunkName,
+          outputName: entry.outputName,
+          sourcePath: entry.sourcePath,
+        })),
+        graphEntries: [
+          ...Object.entries(graphResult.graph).map(
+            ([filePath, dependencies]) => ({
+              dependencies,
+              filePath,
+            }),
           ),
-        },
+          ...shimFiles.map((shimFile, index) => ({
+            dependencies: [entryFiles[index].sourcePath],
+            filePath: shimFile,
+          })),
+        ],
         lazyImports: resolvedLazyImports,
         shimFiles,
         workspaceDir: cacheStore.workspaceDir,
@@ -444,298 +452,6 @@ async function readChunkPlan(projectCacheDir: string, resolveKey: string) {
   }
 
   return metadata.chunkPlan;
-}
-
-function buildChunkPlan({
-  chunkOptions,
-  entryFiles,
-  graph,
-  lazyImports,
-  shimFiles,
-  workspaceDir,
-}: {
-  chunkOptions: NormalizedBuildOptions["chunks"];
-  entryFiles: BuildEntry[];
-  graph: Record<string, string[]>;
-  lazyImports: LazyImport[];
-  shimFiles: string[];
-  workspaceDir: string;
-}): ChunkPlanChunk[] {
-  if (chunkOptions.mode === "bundler-runtime") {
-    return buildClosureChunkPlan({
-      baseChunkName: chunkOptions.baseChunkName,
-      entryFiles,
-      graph,
-      lazyImports,
-      workspaceDir,
-    });
-  }
-
-  const shimToEntry = new Map(
-    shimFiles.map((shimFile, index) => [shimFile, entryFiles[index]]),
-  );
-  const reachability = new Map<string, Set<string>>();
-  const counts = new Map<string, number>();
-
-  for (const shimFile of shimFiles) {
-    const reachable = walkReachableFiles(shimFile, graph);
-    reachability.set(shimFile, reachable);
-    for (const filePath of reachable) {
-      counts.set(filePath, (counts.get(filePath) ?? 0) + 1);
-    }
-  }
-
-  const sharedFiles = new Set(
-    Array.from(counts.entries())
-      .filter(([, count]) => count > 1)
-      .map(([filePath]) => filePath),
-  );
-  const chunks: ChunkPlanChunk[] = [];
-
-  if (entryFiles.length === 1) {
-    const [onlyEntry] = entryFiles;
-    const [onlyShim] = shimFiles;
-    chunks.push({
-      dependencies: [],
-      files: toRelativeFiles(
-        topologicalSort(Array.from(reachability.get(onlyShim) ?? []), graph),
-        workspaceDir,
-      ),
-      name: stripExtension(onlyEntry.outputName),
-    });
-    return chunks;
-  }
-
-  if (sharedFiles.size > 0) {
-    chunks.push({
-      dependencies: [],
-      files: toRelativeFiles(
-        topologicalSort(Array.from(sharedFiles), graph),
-        workspaceDir,
-      ),
-      name: "shared",
-    });
-  }
-
-  for (const shimFile of shimFiles) {
-    const entry = shimToEntry.get(shimFile)!;
-    const reachable = reachability.get(shimFile) ?? new Set<string>();
-    const uniqueFiles = Array.from(reachable).filter(
-      (filePath) => !sharedFiles.has(filePath),
-    );
-    chunks.push({
-      dependencies: sharedFiles.size > 0 ? ["shared"] : [],
-      files: toRelativeFiles(topologicalSort(uniqueFiles, graph), workspaceDir),
-      name: stripExtension(entry.outputName),
-    });
-  }
-
-  return chunks;
-}
-
-function buildClosureChunkPlan({
-  baseChunkName,
-  entryFiles,
-  graph,
-  lazyImports,
-  workspaceDir,
-}: {
-  baseChunkName: string;
-  entryFiles: BuildEntry[];
-  graph: Record<string, string[]>;
-  lazyImports: LazyImport[];
-  workspaceDir: string;
-}): ChunkPlanChunk[] {
-  const baseChunk = sanitizeChunkName(baseChunkName);
-  const baseReachable = new Set<string>();
-  for (const entry of entryFiles) {
-    for (const filePath of walkReachableFiles(entry.sourcePath, graph)) {
-      baseReachable.add(filePath);
-    }
-  }
-
-  const uniqueLazyImports = dedupeLazyImports(lazyImports);
-  if (uniqueLazyImports.length === 0) {
-    return [
-      {
-        dependencies: [],
-        entryFiles: entryFiles.map((entry) =>
-          path.relative(workspaceDir, entry.sourcePath),
-        ),
-        files: toRelativeFiles(
-          topologicalSort(Array.from(baseReachable), graph),
-          workspaceDir,
-        ),
-        kind: "base",
-        name: baseChunk,
-      },
-    ];
-  }
-
-  const lazyRootTargets = new Set(
-    uniqueLazyImports.map((item) => item.targetPath),
-  );
-  const lazyClosures = uniqueLazyImports.map((lazyImport) => ({
-    lazyImport,
-    reachable: new Set(
-      Array.from(walkReachableFiles(lazyImport.targetPath, graph)).filter(
-        (filePath) => !baseReachable.has(filePath),
-      ),
-    ),
-  }));
-
-  const sharedCounts = new Map<string, number>();
-  for (const closure of lazyClosures) {
-    for (const filePath of closure.reachable) {
-      if (lazyRootTargets.has(filePath)) {
-        continue;
-      }
-      sharedCounts.set(filePath, (sharedCounts.get(filePath) ?? 0) + 1);
-    }
-  }
-  const sharedLazyFiles = new Set(
-    Array.from(sharedCounts.entries())
-      .filter(([, count]) => count > 1)
-      .map(([filePath]) => filePath),
-  );
-
-  const chunks: ChunkPlanChunk[] = [
-    {
-      dependencies: [],
-      entryFiles: entryFiles.map((entry) =>
-        path.relative(workspaceDir, entry.sourcePath),
-      ),
-      files: toRelativeFiles(
-        topologicalSort(Array.from(baseReachable), graph),
-        workspaceDir,
-      ),
-      kind: "base",
-      lazyModuleIds: uniqueLazyImports
-        .filter((item) => baseReachable.has(item.targetPath))
-        .map((item) => item.moduleId),
-      name: baseChunk,
-    },
-  ];
-
-  const sharedChunkName = `${baseChunk}-shared`;
-  if (sharedLazyFiles.size > 0) {
-    chunks.push({
-      dependencies: [baseChunk],
-      files: toRelativeFiles(
-        topologicalSort(Array.from(sharedLazyFiles), graph),
-        workspaceDir,
-      ),
-      kind: "shared",
-      name: sharedChunkName,
-    });
-  }
-
-  for (const { lazyImport, reachable } of lazyClosures) {
-    if (baseReachable.has(lazyImport.targetPath)) {
-      continue;
-    }
-    const chunkFiles = Array.from(reachable).filter(
-      (filePath) => !sharedLazyFiles.has(filePath),
-    );
-    chunks.push({
-      dependencies: [
-        baseChunk,
-        ...(sharedLazyFiles.size > 0 ? [sharedChunkName] : []),
-      ],
-      files: toRelativeFiles(topologicalSort(chunkFiles, graph), workspaceDir),
-      kind: "lazy",
-      lazyModuleIds: [lazyImport.moduleId],
-      name: sanitizeChunkName(
-        `${path
-          .relative(workspaceDir, lazyImport.targetPath)
-          .replace(/\.[^/.]+$/, "")
-          .replace(/[\\/]/g, "-")}-lazy`,
-      ),
-    });
-  }
-
-  return chunks;
-}
-
-function dedupeLazyImports(lazyImports: LazyImport[]) {
-  return [
-    ...new Map(lazyImports.map((item) => [item.moduleId, item])).values(),
-  ];
-}
-
-function walkReachableFiles(
-  entryFile: string,
-  graph: Record<string, string[]>,
-): Set<string> {
-  const reachable = new Set<string>();
-  const pending = [entryFile];
-
-  while (pending.length > 0) {
-    const current = pending.pop()!;
-    if (reachable.has(current)) {
-      continue;
-    }
-
-    reachable.add(current);
-    for (const dependency of graph[current] ?? []) {
-      pending.push(dependency);
-    }
-  }
-
-  return reachable;
-}
-
-function topologicalSort(
-  files: string[],
-  graph: Record<string, string[]>,
-): string[] {
-  const fileSet = new Set(files);
-  const visited = new Set<string>();
-  const ordered: string[] = [];
-
-  function visit(filePath: string) {
-    if (visited.has(filePath)) {
-      return;
-    }
-
-    visited.add(filePath);
-    for (const dependency of graph[filePath] ?? []) {
-      if (fileSet.has(dependency)) {
-        visit(dependency);
-      }
-    }
-
-    ordered.push(filePath);
-  }
-
-  [...files].sort((left, right) => left.localeCompare(right)).forEach(visit);
-  return ordered;
-}
-
-function toRelativeFiles(files: string[], workspaceDir: string): string[] {
-  const seenEmittedPaths = new Set<string>();
-  const relativeFiles: string[] = [];
-
-  for (const filePath of files) {
-    if (filePath.endsWith(".d.ts")) {
-      continue;
-    }
-
-    const relativeFile = path.relative(workspaceDir, filePath);
-    const emittedRelativeFile = relativeFile.replace(/\.[^/.]+$/, ".js");
-    if (seenEmittedPaths.has(emittedRelativeFile)) {
-      continue;
-    }
-
-    seenEmittedPaths.add(emittedRelativeFile);
-    relativeFiles.push(relativeFile);
-  }
-
-  return relativeFiles;
-}
-
-function stripExtension(filePath: string) {
-  return filePath.replace(/\.[^/.]+$/, "");
 }
 
 export function getPackageRoot() {
