@@ -770,8 +770,36 @@ test.serial("emits bundler-runtime chunks for explicit lazy modules", async () =
   expect(baseOutput).not.toMatch(/goog\.module/);
   expect(baseOutput).not.toMatch(/ModuleManager/);
   expect(lazyOutput).toContain("__gcc_runtime__");
-  expect(lazyOutput).toContain("renderMessage");
+  expect(lazyOutput).not.toContain("renderMessage");
+  expect(lazyOutput).toMatch(/\[[0-9]+\]=function/);
   expect(lazyOutput).not.toMatch(/goog\.module/);
+});
+
+test.serial("bundler-runtime rejects reflective namespace operations", async () => {
+  const fixture = await createFixture();
+  await fixture.write(
+    "src/main.ts",
+    [
+      'import * as feature from "./feature";',
+      "void Object.keys(feature);",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write("src/feature.ts", 'export const marker = "x";\n');
+
+  const result = await build({
+    cache: { mode: "off" },
+    chunks: { loader: "script", mode: "bundler-runtime" },
+    entries: ["./main.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  expect(result.exitCode).toBe(1);
+  expect(String(result.diagnostics[0]?.messageText ?? "")).toMatch(
+    /reflective Object\.\* operations on module namespace values/,
+  );
 });
 
 test.serial("generateExterns follows declaration dependencies and emits stable property externs", async () => {
@@ -964,7 +992,7 @@ test.serial("reuses cached runtime-aware dependency externs across final build v
   expect(secondStat.mtimeMs).toBe(firstStat.mtimeMs);
 });
 
-test.serial("reuses unchanged bundler-runtime compile jobs when one lazy chunk changes", async () => {
+test.serial("bundler-runtime caches one combined Closure job when one lazy chunk changes", async () => {
   const fixture = await createFixture();
   const cacheDir = path.join(fixture.projectRoot, ".cache");
   await fixture.write(
@@ -1000,7 +1028,7 @@ test.serial("reuses unchanged bundler-runtime compile jobs when one lazy chunk c
   const projectCacheDir = getProjectCacheDir(cacheDir, fixture.projectRoot);
   const closureJobCacheDir = path.join(projectCacheDir, "closure-jobs");
   const firstJobKeys = await listDirectoryNames(closureJobCacheDir);
-  expect(firstJobKeys.length).toBeGreaterThan(1);
+  expect(firstJobKeys.length).toBe(1);
 
   await fixture.write(
     "src/feature.ts",
@@ -1024,7 +1052,7 @@ test.serial("reuses unchanged bundler-runtime compile jobs when one lazy chunk c
   expect(secondResult.exitCode).toBe(0);
 
   const secondJobKeys = await listDirectoryNames(closureJobCacheDir);
-  expect(secondJobKeys.length).toBe(firstJobKeys.length + 1);
+  expect(secondJobKeys.length).toBe(2);
 });
 
 test.serial("parallel bundler-runtime Closure execution is byte-equivalent to serial execution", async () => {
