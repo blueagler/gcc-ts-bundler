@@ -23,6 +23,8 @@ use crate::pathing::to_goog_module_id;
 use self::chunk_plan::*;
 use self::deps::*;
 use self::exports::*;
+#[cfg(test)]
+pub(crate) use self::package_resolver::select_package_export_target;
 use self::package_resolver::*;
 use self::path_utils::*;
 use self::resolve::resolve_graph_impl;

@@ -276,8 +276,8 @@ mod tests {
     fn skips_metadata_without_string_literal_names() {
         let input =
             "g(null,y={value:b},A,{kind:\"class\",name:b.name,metadata:D},null,d);".to_string();
-        let output = rewrite_decorator_metadata(input.clone(), "letters:J\n".to_string())
-            .expect("rewrite");
+        let output =
+            rewrite_decorator_metadata(input.clone(), "letters:J\n".to_string()).expect("rewrite");
 
         assert_eq!(output, input);
     }

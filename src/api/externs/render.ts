@@ -1,85 +1,56 @@
-import ts from "typescript";
-
+import type { ExternAnalysisContext } from "./context";
 import { analyzeRuntimeUsage } from "./runtime-analysis";
 import {
   collectBoundaryAwareExternLines,
   collectBoundaryAwareUsageMemberNames,
   collectCandidateExternLines,
 } from "./contracts";
-import { ContractRegistry, renderStructuralExternLine } from "./shared";
+import { renderStructuralExternLine } from "./shared";
 
 type GenerateExternsMode = "boundary-aware" | "candidates" | "runtime-aware";
 
 export function renderCandidateExterns({
+  analysis,
   modules,
-  registry,
-  scannedFiles,
 }: {
+  analysis: ExternAnalysisContext;
   modules: string[];
-  registry: ContractRegistry;
-  scannedFiles: string[];
 }) {
   return renderExternText({
-    emittedLines: collectCandidateExternLines(registry),
+    emittedLines: collectCandidateExternLines(analysis.registry),
     mode: "candidates",
     modules,
-    scannedFiles,
+    scannedFiles: analysis.scannedFiles,
   });
 }
 
 export function renderBoundaryAwareExterns({
-  appEntryFiles,
-  compilerOptions,
+  analysis,
   modules,
-  projectRoot,
-  registry,
-  scannedFiles,
 }: {
-  appEntryFiles: string[];
-  compilerOptions: ts.CompilerOptions;
+  analysis: ExternAnalysisContext;
   modules: string[];
-  projectRoot: string;
-  registry: ContractRegistry;
-  scannedFiles: string[];
 }) {
   return renderExternText({
-    emittedLines: collectBoundaryAwareExternLines({
-      appEntryFiles,
-      compilerOptions,
-      projectRoot,
-      registry,
-    }),
+    emittedLines: collectBoundaryAwareExternLines(analysis),
     mode: "boundary-aware",
     modules,
-    scannedFiles,
+    scannedFiles: analysis.scannedFiles,
   });
 }
 
 export async function renderRuntimeAwareExterns({
-  appEntryFiles,
-  compilerOptions,
+  analysis,
   modules,
-  projectRoot,
-  registry,
   runtimeEntryFiles,
-  scannedFiles,
 }: {
-  appEntryFiles: string[];
-  compilerOptions: ts.CompilerOptions;
+  analysis: ExternAnalysisContext;
   modules: string[];
-  projectRoot: string;
-  registry: ContractRegistry;
   runtimeEntryFiles: string[];
-  scannedFiles: string[];
 }) {
   const appUsageMembers =
-    appEntryFiles.length > 0
-      ? collectBoundaryAwareUsageMemberNames({
-          appEntryFiles,
-          compilerOptions,
-          projectRoot,
-          registry,
-        })
+    analysis.appEntryFiles.length > 0
+      ? collectBoundaryAwareUsageMemberNames(analysis)
       : new Set<string>();
   const runtimeUsage = await analyzeRuntimeUsage(runtimeEntryFiles);
   const emittedLines = new Set<string>();
@@ -97,7 +68,7 @@ export async function renderRuntimeAwareExterns({
     mode: "runtime-aware",
     modules,
     runtimeEntryFiles,
-    scannedFiles,
+    scannedFiles: analysis.scannedFiles,
   });
 }
 

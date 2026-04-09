@@ -1,17 +1,13 @@
 import fs from "fs";
 import path from "path";
-import ts from "typescript";
 
+import { createExternAnalysisContext } from "./externs/context";
 import {
   collectReachableTypeFiles,
   loadExternCompilerOptions,
   resolveAnalysisEntryFiles,
   resolveModuleTypeEntries,
 } from "./externs/compiler";
-import {
-  collectContracts,
-  createEmptyContractRegistry,
-} from "./externs/contracts";
 import {
   renderBoundaryAwareExterns,
   renderCandidateExterns,
@@ -60,6 +56,16 @@ export async function generateExterns(
     tsConfigPath,
   });
   const includeDependencies = options.includeDependencies ?? true;
+  const resolvedAppEntryFiles = resolveAnalysisEntryFiles({
+    entryFiles: options.appEntryFiles ?? [],
+    projectRoot,
+    srcDir,
+  });
+  const resolvedRuntimeEntryFiles = resolveAnalysisEntryFiles({
+    entryFiles: options.runtimeEntryFiles ?? [],
+    projectRoot,
+    srcDir,
+  });
 
   if (mode === "boundary-aware" && (options.appEntryFiles?.length ?? 0) === 0) {
     throw new Error(
@@ -89,53 +95,27 @@ export async function generateExterns(
           entryFiles: typeEntryFiles,
           includeDependencies,
         });
-  const registry =
-    scannedFiles.length === 0
-      ? createEmptyContractRegistry()
-      : collectContracts(
-          ts.createProgram(scannedFiles, {
-            ...compilerOptions,
-            noEmit: true,
-            skipLibCheck: true,
-          }),
-          scannedFiles,
-        );
+  const analysis = createExternAnalysisContext({
+    appEntryFiles: resolvedAppEntryFiles,
+    compilerOptions,
+    projectRoot,
+    scannedFiles,
+  });
   const text =
     mode === "candidates"
       ? renderCandidateExterns({
+          analysis,
           modules: options.modules,
-          registry,
-          scannedFiles,
         })
       : mode === "boundary-aware"
         ? renderBoundaryAwareExterns({
-            appEntryFiles: resolveAnalysisEntryFiles({
-              entryFiles: options.appEntryFiles ?? [],
-              projectRoot,
-              srcDir,
-            }),
-            compilerOptions,
+            analysis,
             modules: options.modules,
-            projectRoot,
-            registry,
-            scannedFiles,
           })
         : await renderRuntimeAwareExterns({
-            appEntryFiles: resolveAnalysisEntryFiles({
-              entryFiles: options.appEntryFiles ?? [],
-              projectRoot,
-              srcDir,
-            }),
-            compilerOptions,
+            analysis,
             modules: options.modules,
-            projectRoot,
-            registry,
-            runtimeEntryFiles: resolveAnalysisEntryFiles({
-              entryFiles: options.runtimeEntryFiles ?? [],
-              projectRoot,
-              srcDir,
-            }),
-            scannedFiles,
+            runtimeEntryFiles: resolvedRuntimeEntryFiles,
           });
 
   const outputFile =

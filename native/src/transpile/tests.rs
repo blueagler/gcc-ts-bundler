@@ -1,9 +1,9 @@
 use super::{
     apply_js_compat_text_fixes, collect_commonjs_extern_names, collect_enum_extern_names,
-    collect_preserved_property_names, collect_protocol_extern_names,
+    collect_extern_property_names, collect_preserved_property_names, collect_protocol_extern_names,
     collect_static_property_names_from_text, print_program, render_externs,
     render_generated_externs, transform_js_pass_through_module, transform_program,
-    transform_source_file, StaticPropertyNameCollector,
+    transform_source_file,
 };
 use crate::module_cache::parse_module;
 use crate::pathing::to_goog_module_id;
@@ -12,7 +12,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use swc_core::common::{Globals, GLOBALS};
-use swc_core::ecma::visit::VisitWith;
 
 fn empty_context() -> super::TranspileContext {
     super::TranspileContext {
@@ -596,16 +595,25 @@ fn collects_only_hard_static_interop_names() {
 
 #[test]
 fn collects_hard_static_interop_names_from_static_method_accesses() {
-    let module = parse_module(
-            std::path::Path::new("fixture.js"),
-            "class Demo { static finalize() { return this.observedAttributes && this.formAssociated; } }",
-        )
-        .expect("module");
-    let mut collector = StaticPropertyNameCollector::default();
-    module.visit_with(&mut collector);
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let file_path = std::env::temp_dir().join(format!("gcc-ts-static-interop-{unique}.js"));
+    fs::write(
+        &file_path,
+        "class Demo { static finalize() { return this.observedAttributes && this.formAssociated; } }",
+    )
+    .unwrap();
 
-    assert!(collector.names.contains("observedAttributes"));
-    assert!(collector.names.contains("formAssociated"));
+    let analysis =
+        collect_extern_property_names(&[file_path.to_string_lossy().to_string()], &HashSet::new())
+            .expect("analysis");
+
+    assert!(analysis
+        .static_property_names
+        .contains("observedAttributes"));
+    assert!(analysis.static_property_names.contains("formAssociated"));
 }
 
 #[test]
@@ -639,22 +647,43 @@ fn leaves_non_reflective_lit_style_members_renamable() {
 
     assert!(transformed.contains("this.hostUpdated()"), "{transformed}");
     assert!(transformed.contains("hostUpdated()"), "{transformed}");
-    assert!(transformed.contains("this.createFinished()"), "{transformed}");
+    assert!(
+        transformed.contains("this.createFinished()"),
+        "{transformed}"
+    );
     assert!(transformed.contains("createFinished()"), "{transformed}");
     assert!(
         transformed.contains("this.calculateKeyframes()"),
         "{transformed}"
     );
-    assert!(transformed.contains("calculateKeyframes()"), "{transformed}");
-    assert!(transformed.contains("this.createRenderRoot()"), "{transformed}");
+    assert!(
+        transformed.contains("calculateKeyframes()"),
+        "{transformed}"
+    );
+    assert!(
+        transformed.contains("this.createRenderRoot()"),
+        "{transformed}"
+    );
     assert!(transformed.contains("createRenderRoot()"), "{transformed}");
     assert!(transformed.contains("this._$AU = 1"), "{transformed}");
     assert!(transformed.contains("this._$AM = 2"), "{transformed}");
-    assert!(transformed.contains("this._$AU + this._$AM"), "{transformed}");
+    assert!(
+        transformed.contains("this._$AU + this._$AM"),
+        "{transformed}"
+    );
     assert!(!transformed.contains("[\"hostUpdated\"]"), "{transformed}");
-    assert!(!transformed.contains("[\"createFinished\"]"), "{transformed}");
-    assert!(!transformed.contains("[\"calculateKeyframes\"]"), "{transformed}");
-    assert!(!transformed.contains("[\"createRenderRoot\"]"), "{transformed}");
+    assert!(
+        !transformed.contains("[\"createFinished\"]"),
+        "{transformed}"
+    );
+    assert!(
+        !transformed.contains("[\"calculateKeyframes\"]"),
+        "{transformed}"
+    );
+    assert!(
+        !transformed.contains("[\"createRenderRoot\"]"),
+        "{transformed}"
+    );
     assert!(!transformed.contains("[\"_$AU\"]"), "{transformed}");
     assert!(!transformed.contains("[\"_$AM\"]"), "{transformed}");
 }
@@ -984,7 +1013,9 @@ fn off_mode_keeps_namespace_import_bindings_before_top_level_destructures() {
     .unwrap();
 
     let transformed = GLOBALS
-        .set(&Globals::new(), || transform_source_file(&main_file, &empty_context()))
+        .set(&Globals::new(), || {
+            transform_source_file(&main_file, &empty_context())
+        })
         .unwrap();
 
     let import_index = transformed

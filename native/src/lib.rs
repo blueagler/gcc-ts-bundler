@@ -103,7 +103,10 @@ pub fn rewrite_gcc_exports(code: String) -> Result<String> {
 }
 
 #[napi(js_name = "rewriteDecoratorMetadata")]
-pub fn rewrite_decorator_metadata(code: String, property_renaming_report: String) -> Result<String> {
+pub fn rewrite_decorator_metadata(
+    code: String,
+    property_renaming_report: String,
+) -> Result<String> {
     with_globals(|| decorators::rewrite_decorator_metadata(code, property_renaming_report))
 }
 
