@@ -5,7 +5,7 @@ mod externs;
 mod jobs;
 mod runtime;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 

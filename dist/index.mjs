@@ -1522,10 +1522,229 @@ var init_file_state = __esm(() => {
   init_load();
 });
 
-// src/pipeline/resolve-build.ts
-import fs9 from "fs";
+// src/pipeline/resolve-build/entries.ts
 import path10 from "path";
+function resolveOutputNames(entryPaths, outputNames) {
+  if (outputNames.length > 0) {
+    if (outputNames.length !== entryPaths.length) {
+      throw new Error("outputNames length must match entries length.");
+    }
+    return outputNames;
+  }
+  const basenameCounts = new Map;
+  const basenames = entryPaths.map((entryPath) => path10.basename(entryPath).replace(/\.[^/.]+$/, ".js"));
+  for (const basename of basenames) {
+    basenameCounts.set(basename, (basenameCounts.get(basename) ?? 0) + 1);
+  }
+  return entryPaths.map((entryPath, index) => {
+    const basename = basenames[index];
+    if ((basenameCounts.get(basename) ?? 0) === 1) {
+      return basename;
+    }
+    return `${entryPath.replace(/\.[^/.]+$/, "").replace(/[\\/]/g, "__")}.js`;
+  });
+}
+function sanitizeChunkName(outputName) {
+  return outputName.replace(/\.js$/, "").replace(/[^\w-]/g, "-");
+}
+function toBuildEntry(entry, sourceRoot) {
+  return {
+    chunkName: entry.chunkName,
+    exportNames: entry.exportNames,
+    hasDefaultExport: entry.hasDefaultExport,
+    outputName: entry.outputName,
+    sourcePath: path10.join(sourceRoot, entry.sourceRelativePath),
+    sourceRelativePath: entry.sourceRelativePath
+  };
+}
+function toShimFiles(entryFiles, shimDir) {
+  return entryFiles.map((entry) => path10.join(shimDir, `${entry.chunkName}.ts`));
+}
+var init_entries = () => {};
+
+// src/pipeline/resolve-build/signatures.ts
+import fs9 from "fs";
+import path11 from "path";
+async function hashTsConfig(configPath) {
+  return hashContent(await fs9.promises.readFile(configPath, "utf-8"));
+}
+async function hashExternalInputs(filePaths) {
+  const entries = await Promise.all([...filePaths].sort((left, right) => left.localeCompare(right)).map(async (filePath) => ({
+    filePath,
+    hash: hashContent(await fs9.promises.readFile(filePath, "utf-8"))
+  })));
+  return hashJson(entries);
+}
+function getPackageRoot() {
+  return getPackageRootFromBundle();
+}
+async function getPackageSignature(packageRoot2 = getPackageRoot()) {
+  let packageSignaturePromise = packageSignaturePromises.get(packageRoot2);
+  if (!packageSignaturePromise) {
+    packageSignaturePromise = (async () => {
+      const packageJsonStat = await fs9.promises.stat(path11.join(packageRoot2, "package.json"));
+      const runtimeSignature = await readRuntimeSignature(packageRoot2);
+      const nativeSignature = await readNativeSignature(packageRoot2);
+      return hashContent(JSON.stringify({
+        nativeSignature,
+        packageJson: {
+          mtimeMs: packageJsonStat.mtimeMs,
+          size: packageJsonStat.size
+        },
+        runtimeSignature
+      }));
+    })();
+    packageSignaturePromises.set(packageRoot2, packageSignaturePromise);
+  }
+  return packageSignaturePromise;
+}
+function getOptionsSignature(options) {
+  return hashJson({
+    compilationLevel: options.compilationLevel,
+    chunks: options.chunks,
+    diagnostics: options.diagnostics,
+    entries: options.entries.map((entry) => path11.relative(options.srcDir, entry)),
+    externs: [...options.externs].sort(),
+    js: [...options.js].sort(),
+    languageOut: options.languageOut,
+    outDir: options.outDir,
+    outputNames: [...options.outputNames],
+    packages: options.packages,
+    projectRoot: options.projectRoot,
+    srcDir: options.srcDir
+  });
+}
+async function readRuntimeSignature(packageRoot2) {
+  try {
+    const stat = await fs9.promises.stat(path11.join(packageRoot2, "dist", "index.mjs"));
+    return JSON.stringify({
+      mtimeMs: stat.mtimeMs,
+      size: stat.size
+    });
+  } catch {
+    return "";
+  }
+}
+async function readNativeSignature(packageRoot2) {
+  try {
+    const stat = await fs9.promises.stat(path11.join(packageRoot2, "native", "index.node"));
+    return JSON.stringify({
+      mtimeMs: stat.mtimeMs,
+      size: stat.size
+    });
+  } catch {
+    return "";
+  }
+}
+var packageSignaturePromises;
+var init_signatures = __esm(() => {
+  init_hash();
+  init_bundle_location();
+  packageSignaturePromises = new Map;
+});
+
+// src/pipeline/resolve-build/workspace.ts
+import fs10 from "fs";
+import path12 from "path";
 import ts7 from "typescript";
+async function ensureDirectorySymlink(linkPath, targetPath) {
+  try {
+    const currentTarget = await fs10.promises.readlink(linkPath);
+    if (path12.resolve(path12.dirname(linkPath), currentTarget) === targetPath) {
+      return;
+    }
+    await fs10.promises.rm(linkPath, { force: true, recursive: true });
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      await fs10.promises.rm(linkPath, { force: true, recursive: true });
+    }
+  }
+  await fs10.promises.mkdir(path12.dirname(linkPath), { recursive: true });
+  await fs10.promises.symlink(targetPath, linkPath, process.platform === "win32" ? "junction" : "dir");
+}
+async function ensureWorkspaceNodeModules(workspaceDir, options) {
+  const linkPath = path12.join(workspaceDir, "node_modules");
+  if (options.packages.mode === "off") {
+    await removePathIfExists(linkPath);
+    return;
+  }
+  const nodeModulesPath = path12.join(options.projectRoot, "node_modules");
+  const hasNodeModules = await fs10.promises.access(nodeModulesPath).then(() => true).catch(() => false);
+  if (!hasNodeModules) {
+    await removePathIfExists(linkPath);
+    return;
+  }
+  await ensureDirectorySymlink(linkPath, nodeModulesPath);
+}
+async function resolveTsConfigPath(projectRoot) {
+  const configPath = ts7.findConfigFile(projectRoot, ts7.sys.fileExists, "tsconfig.json");
+  if (!configPath) {
+    throw new Error(`Cannot find tsconfig.json in ${projectRoot}`);
+  }
+  return configPath;
+}
+async function removePathIfExists(targetPath) {
+  try {
+    await fs10.promises.rm(targetPath, { force: true, recursive: true });
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+}
+var init_workspace = () => {};
+
+// src/pipeline/resolve-build/options.ts
+import path13 from "path";
+function normalizeBuildOptions(options) {
+  const projectRoot = path13.resolve(options.projectRoot ?? process.cwd());
+  const srcDir = path13.resolve(projectRoot, options.srcDir ?? (DEFAULT_BUILD_OPTIONS.srcDir || "src"));
+  const outDir = path13.resolve(projectRoot, options.outDir ?? (DEFAULT_BUILD_OPTIONS.outDir || "dist"));
+  const chunkPublicPath = normalizeChunkPublicPath(options.chunks?.publicPath ?? DEFAULT_BUILD_OPTIONS.chunks.publicPath);
+  const chunkManifestFile = path13.basename(options.chunks?.manifestFile ?? DEFAULT_BUILD_OPTIONS.chunks.manifestFile);
+  return {
+    cache: {
+      dir: options.cache?.dir ? path13.resolve(projectRoot, options.cache.dir) : DEFAULT_BUILD_OPTIONS.cache.dir,
+      mode: options.cache?.mode ?? DEFAULT_BUILD_OPTIONS.cache.mode
+    },
+    chunks: {
+      baseChunkName: options.chunks?.baseChunkName ?? DEFAULT_BUILD_OPTIONS.chunks.baseChunkName,
+      loader: options.chunks?.loader ?? DEFAULT_BUILD_OPTIONS.chunks.loader,
+      manifestFile: chunkManifestFile,
+      mode: options.chunks?.mode ?? DEFAULT_BUILD_OPTIONS.chunks.mode,
+      publicPath: chunkPublicPath
+    },
+    compilationLevel: options.compilationLevel ?? DEFAULT_BUILD_OPTIONS.compilationLevel,
+    diagnostics: {
+      fatalWarnings: options.diagnostics?.fatalWarnings ?? DEFAULT_BUILD_OPTIONS.diagnostics.fatalWarnings,
+      preflight: options.diagnostics?.preflight ?? DEFAULT_BUILD_OPTIONS.diagnostics.preflight,
+      verbose: options.diagnostics?.verbose ?? DEFAULT_BUILD_OPTIONS.diagnostics.verbose
+    },
+    entries: options.entries.map((entry) => path13.isAbsolute(entry) ? entry : path13.resolve(srcDir, entry)),
+    externs: [...options.externs ?? []].map((filePath) => path13.isAbsolute(filePath) ? filePath : path13.resolve(projectRoot, filePath)),
+    js: [...options.js ?? []].map((filePath) => path13.isAbsolute(filePath) ? filePath : path13.resolve(projectRoot, filePath)),
+    languageOut: options.languageOut ?? DEFAULT_BUILD_OPTIONS.languageOut,
+    outDir,
+    outputNames: [...options.outputNames ?? []],
+    packages: {
+      mode: options.packages?.mode ?? DEFAULT_BUILD_OPTIONS.packages.mode
+    },
+    projectRoot,
+    srcDir
+  };
+}
+function normalizeChunkPublicPath(publicPath) {
+  if (publicPath.length === 0) {
+    return "./";
+  }
+  return publicPath.endsWith("/") ? publicPath : `${publicPath}/`;
+}
+var init_options = __esm(() => {
+  init_types();
+});
+
+// src/pipeline/resolve-build.ts
+import path14 from "path";
 async function createBuildContext(options) {
   const packageRoot2 = getPackageRoot();
   const usesPersistentCache = options.cache.mode === "persistent";
@@ -1534,7 +1753,7 @@ async function createBuildContext(options) {
     optionsSignature: getOptionsSignature(options),
     packageRoot: packageRoot2,
     packageSignature: usesPersistentCache ? await getPackageSignature(packageRoot2) : "",
-    projectCacheDir: path10.join(path10.resolve(options.cache.dir || getDefaultPersistentCacheRoot()), hashContent(options.projectRoot))
+    projectCacheDir: path14.join(path14.resolve(options.cache.dir || getDefaultPersistentCacheRoot()), hashContent(options.projectRoot))
   };
 }
 async function resolveBuild(context) {
@@ -1548,18 +1767,18 @@ async function resolveBuild(context) {
     projectRoot: options.projectRoot
   });
   const usesPersistentCache = options.cache.mode === "persistent";
-  const sourceRoot = path10.join(cacheStore.workspaceDir, "src");
+  const sourceRoot = path14.join(cacheStore.workspaceDir, "src");
   await ensureDirectorySymlink(sourceRoot, options.srcDir);
   await ensureWorkspaceNodeModules(cacheStore.workspaceDir, options);
   const tsConfigPath = await resolveTsConfigPath(options.projectRoot);
   const compilerOptionsHash = usesPersistentCache ? await hashTsConfig(tsConfigPath) : "";
-  const entryRelativePaths = options.entries.map((entry) => path10.relative(options.srcDir, entry));
-  const overlayEntries = options.entries.map((entry) => path10.join(sourceRoot, path10.relative(options.srcDir, entry)));
-  const resolveSnapshotPath = path10.join(cacheStore.projectCacheDir, "resolve", "latest.json");
+  const entryRelativePaths = options.entries.map((entry) => path14.relative(options.srcDir, entry));
+  const overlayEntries = options.entries.map((entry) => path14.join(sourceRoot, path14.relative(options.srcDir, entry)));
+  const resolveSnapshotPath = path14.join(cacheStore.projectCacheDir, "resolve", "latest.json");
   const cachedSnapshot = usesPersistentCache ? await readJsonIfExists(resolveSnapshotPath) : null;
   if (cachedSnapshot && Array.isArray(cachedSnapshot.packageAliases) && Array.isArray(cachedSnapshot.sourceFiles) && Array.isArray(cachedSnapshot.packageJsonFiles) && cachedSnapshot.packageSignature === context.packageSignature && cachedSnapshot.compilerOptionsHash === compilerOptionsHash && cachedSnapshot.optionsSignature === context.optionsSignature && await trackedFilesMatch(cachedSnapshot.trackedFiles)) {
     const entryFiles2 = cachedSnapshot.entryFiles.map((entry) => toBuildEntry(entry, sourceRoot));
-    const shimDir2 = path10.join(cacheStore.workspaceDir, "entries");
+    const shimDir2 = path14.join(cacheStore.workspaceDir, "entries");
     const shimFiles2 = toShimFiles(entryFiles2, shimDir2);
     return {
       cleanup: cacheStore.cleanup,
@@ -1568,9 +1787,9 @@ async function resolveBuild(context) {
       lazyImports: cachedSnapshot.lazyImports ?? [],
       packageAliases: cachedSnapshot.packageAliases,
       packageJsonFiles: cachedSnapshot.packageJsonFiles,
-      finalCacheDir: path10.join(cacheStore.projectCacheDir, "final", cachedSnapshot.finalKey),
+      finalCacheDir: path14.join(cacheStore.projectCacheDir, "final", cachedSnapshot.finalKey),
       finalKey: cachedSnapshot.finalKey,
-      nativeEmitCacheDir: path10.join(cacheStore.projectCacheDir, "native-emit", cachedSnapshot.nativeEmitKey),
+      nativeEmitCacheDir: path14.join(cacheStore.projectCacheDir, "native-emit", cachedSnapshot.nativeEmitKey),
       shimDir: shimDir2,
       shimFiles: shimFiles2,
       sourceFiles: cachedSnapshot.sourceFiles,
@@ -1593,7 +1812,7 @@ async function resolveBuild(context) {
     files: graphResult.fileHashes,
     packageSignature: context.packageSignature
   }) : "active";
-  const resolveMetadataPath = path10.join(cacheStore.projectCacheDir, "resolve", `${resolveKey}.json`);
+  const resolveMetadataPath = path14.join(cacheStore.projectCacheDir, "resolve", `${resolveKey}.json`);
   let resolveMetadata = usesPersistentCache ? await readJsonIfExists(resolveMetadataPath) : null;
   if (!resolveMetadata) {
     const entryFiles2 = graphResult.entries.map((entry, index) => ({
@@ -1602,9 +1821,9 @@ async function resolveBuild(context) {
       hasDefaultExport: entry.hasDefaultExport,
       outputName: outputNames[index],
       sourcePath: entry.sourcePath,
-      sourceRelativePath: path10.relative(sourceRoot, entry.sourcePath)
+      sourceRelativePath: path14.relative(sourceRoot, entry.sourcePath)
     }));
-    const shimDir2 = path10.join(cacheStore.workspaceDir, "entries");
+    const shimDir2 = path14.join(cacheStore.workspaceDir, "entries");
     const shimFiles2 = toShimFiles(entryFiles2, shimDir2);
     resolveMetadata = {
       chunkPlan: planChunks({
@@ -1643,7 +1862,7 @@ async function resolveBuild(context) {
     }
   }
   const entryFiles = resolveMetadata.entryFiles.map((entry) => toBuildEntry(entry, sourceRoot));
-  const shimDir = path10.join(cacheStore.workspaceDir, "entries");
+  const shimDir = path14.join(cacheStore.workspaceDir, "entries");
   const shimFiles = toShimFiles(entryFiles, shimDir);
   const nativeEmitKey = usesPersistentCache ? hashJson({
     compilerOptionsHash,
@@ -1690,9 +1909,9 @@ async function resolveBuild(context) {
     lazyImports: resolvedLazyImports,
     packageAliases: graphResult.packageAliases,
     packageJsonFiles: graphResult.packageJsonFiles,
-    finalCacheDir: path10.join(cacheStore.projectCacheDir, "final", finalKey),
+    finalCacheDir: path14.join(cacheStore.projectCacheDir, "final", finalKey),
     finalKey,
-    nativeEmitCacheDir: path10.join(cacheStore.projectCacheDir, "native-emit", nativeEmitKey),
+    nativeEmitCacheDir: path14.join(cacheStore.projectCacheDir, "native-emit", nativeEmitKey),
     shimDir,
     shimFiles,
     sourceFiles: graphResult.sourceFiles,
@@ -1701,249 +1920,76 @@ async function resolveBuild(context) {
     workspaceDir: cacheStore.workspaceDir
   };
 }
-function resolveOutputNames(entryPaths, outputNames) {
-  if (outputNames.length > 0) {
-    if (outputNames.length !== entryPaths.length) {
-      throw new Error("outputNames length must match entries length.");
-    }
-    return outputNames;
-  }
-  const basenameCounts = new Map;
-  const basenames = entryPaths.map((entryPath) => path10.basename(entryPath).replace(/\.[^/.]+$/, ".js"));
-  for (const basename of basenames) {
-    basenameCounts.set(basename, (basenameCounts.get(basename) ?? 0) + 1);
-  }
-  return entryPaths.map((entryPath, index) => {
-    const basename = basenames[index];
-    if ((basenameCounts.get(basename) ?? 0) === 1) {
-      return basename;
-    }
-    return `${entryPath.replace(/\.[^/.]+$/, "").replace(/[\\/]/g, "__")}.js`;
-  });
-}
-function sanitizeChunkName(outputName) {
-  return outputName.replace(/\.js$/, "").replace(/[^\w-]/g, "-");
-}
-function toBuildEntry(entry, sourceRoot) {
-  return {
-    chunkName: entry.chunkName,
-    exportNames: entry.exportNames,
-    hasDefaultExport: entry.hasDefaultExport,
-    outputName: entry.outputName,
-    sourcePath: path10.join(sourceRoot, entry.sourceRelativePath),
-    sourceRelativePath: entry.sourceRelativePath
-  };
-}
-function toShimFiles(entryFiles, shimDir) {
-  return entryFiles.map((entry) => path10.join(shimDir, `${entry.chunkName}.ts`));
-}
-async function ensureDirectorySymlink(linkPath, targetPath) {
-  try {
-    const currentTarget = await fs9.promises.readlink(linkPath);
-    if (path10.resolve(path10.dirname(linkPath), currentTarget) === targetPath) {
-      return;
-    }
-    await fs9.promises.rm(linkPath, { force: true, recursive: true });
-  } catch (error) {
-    if (error.code !== "ENOENT") {
-      await fs9.promises.rm(linkPath, { force: true, recursive: true });
-    }
-  }
-  await fs9.promises.mkdir(path10.dirname(linkPath), { recursive: true });
-  await fs9.promises.symlink(targetPath, linkPath, process.platform === "win32" ? "junction" : "dir");
-}
-async function ensureWorkspaceNodeModules(workspaceDir, options) {
-  const linkPath = path10.join(workspaceDir, "node_modules");
-  if (options.packages.mode === "off") {
-    await removePathIfExists(linkPath);
-    return;
-  }
-  const nodeModulesPath = path10.join(options.projectRoot, "node_modules");
-  const hasNodeModules = await fs9.promises.access(nodeModulesPath).then(() => true).catch(() => false);
-  if (!hasNodeModules) {
-    await removePathIfExists(linkPath);
-    return;
-  }
-  await ensureDirectorySymlink(linkPath, nodeModulesPath);
-}
-async function removePathIfExists(targetPath) {
-  try {
-    await fs9.promises.rm(targetPath, { force: true, recursive: true });
-  } catch (error) {
-    if (error.code !== "ENOENT") {
-      throw error;
-    }
-  }
-}
-async function resolveTsConfigPath(projectRoot) {
-  const configPath = ts7.findConfigFile(projectRoot, ts7.sys.fileExists, "tsconfig.json");
-  if (!configPath) {
-    throw new Error(`Cannot find tsconfig.json in ${projectRoot}`);
-  }
-  return configPath;
-}
-async function hashTsConfig(configPath) {
-  return hashContent(await fs9.promises.readFile(configPath, "utf-8"));
-}
-async function hashExternalInputs(filePaths) {
-  const entries = await Promise.all([...filePaths].sort((left, right) => left.localeCompare(right)).map(async (filePath) => ({
-    filePath,
-    hash: hashContent(await fs9.promises.readFile(filePath, "utf-8"))
-  })));
-  return hashJson(entries);
-}
 async function readChunkPlan(projectCacheDir, resolveKey) {
-  const resolveMetadataPath = path10.join(projectCacheDir, "resolve", `${resolveKey}.json`);
+  const resolveMetadataPath = path14.join(projectCacheDir, "resolve", `${resolveKey}.json`);
   const metadata = await readJsonIfExists(resolveMetadataPath);
   if (!metadata) {
     throw new Error(`Missing resolve metadata for ${resolveKey}`);
   }
   return metadata.chunkPlan;
 }
-function getPackageRoot() {
-  return getPackageRootFromBundle();
-}
-async function readRuntimeSignature(packageRoot2) {
-  try {
-    const stat = await fs9.promises.stat(path10.join(packageRoot2, "dist", "index.mjs"));
-    return JSON.stringify({
-      mtimeMs: stat.mtimeMs,
-      size: stat.size
-    });
-  } catch {
-    return "";
-  }
-}
-async function readNativeSignature(packageRoot2) {
-  try {
-    const stat = await fs9.promises.stat(path10.join(packageRoot2, "native", "index.node"));
-    return JSON.stringify({
-      mtimeMs: stat.mtimeMs,
-      size: stat.size
-    });
-  } catch {
-    return "";
-  }
-}
-async function getPackageSignature(packageRoot2 = getPackageRoot()) {
-  let packageSignaturePromise = packageSignaturePromises.get(packageRoot2);
-  if (!packageSignaturePromise) {
-    packageSignaturePromise = (async () => {
-      const packageJsonStat = await fs9.promises.stat(path10.join(packageRoot2, "package.json"));
-      const runtimeSignature = await readRuntimeSignature(packageRoot2);
-      const nativeSignature = await readNativeSignature(packageRoot2);
-      return hashContent(JSON.stringify({
-        nativeSignature,
-        packageJson: {
-          mtimeMs: packageJsonStat.mtimeMs,
-          size: packageJsonStat.size
-        },
-        runtimeSignature
-      }));
-    })();
-    packageSignaturePromises.set(packageRoot2, packageSignaturePromise);
-  }
-  return packageSignaturePromise;
-}
-function getOptionsSignature(options) {
-  return hashJson({
-    compilationLevel: options.compilationLevel,
-    chunks: options.chunks,
-    diagnostics: options.diagnostics,
-    entries: options.entries.map((entry) => path10.relative(options.srcDir, entry)),
-    externs: [...options.externs].sort(),
-    js: [...options.js].sort(),
-    languageOut: options.languageOut,
-    outDir: options.outDir,
-    outputNames: [...options.outputNames],
-    packages: options.packages,
-    projectRoot: options.projectRoot,
-    srcDir: options.srcDir
-  });
-}
-function normalizeBuildOptions(options) {
-  const projectRoot = path10.resolve(options.projectRoot ?? process.cwd());
-  const srcDir = path10.resolve(projectRoot, options.srcDir ?? (DEFAULT_BUILD_OPTIONS.srcDir || "src"));
-  const outDir = path10.resolve(projectRoot, options.outDir ?? (DEFAULT_BUILD_OPTIONS.outDir || "dist"));
-  const chunkPublicPath = normalizeChunkPublicPath(options.chunks?.publicPath ?? DEFAULT_BUILD_OPTIONS.chunks.publicPath);
-  const chunkManifestFile = path10.basename(options.chunks?.manifestFile ?? DEFAULT_BUILD_OPTIONS.chunks.manifestFile);
-  return {
-    cache: {
-      dir: options.cache?.dir ? path10.resolve(projectRoot, options.cache.dir) : DEFAULT_BUILD_OPTIONS.cache.dir,
-      mode: options.cache?.mode ?? DEFAULT_BUILD_OPTIONS.cache.mode
-    },
-    chunks: {
-      baseChunkName: options.chunks?.baseChunkName ?? DEFAULT_BUILD_OPTIONS.chunks.baseChunkName,
-      loader: options.chunks?.loader ?? DEFAULT_BUILD_OPTIONS.chunks.loader,
-      manifestFile: chunkManifestFile,
-      mode: options.chunks?.mode ?? DEFAULT_BUILD_OPTIONS.chunks.mode,
-      publicPath: chunkPublicPath
-    },
-    compilationLevel: options.compilationLevel ?? DEFAULT_BUILD_OPTIONS.compilationLevel,
-    diagnostics: {
-      fatalWarnings: options.diagnostics?.fatalWarnings ?? DEFAULT_BUILD_OPTIONS.diagnostics.fatalWarnings,
-      preflight: options.diagnostics?.preflight ?? DEFAULT_BUILD_OPTIONS.diagnostics.preflight,
-      verbose: options.diagnostics?.verbose ?? DEFAULT_BUILD_OPTIONS.diagnostics.verbose
-    },
-    entries: options.entries.map((entry) => path10.isAbsolute(entry) ? entry : path10.resolve(srcDir, entry)),
-    externs: [...options.externs ?? []].map((filePath) => path10.isAbsolute(filePath) ? filePath : path10.resolve(projectRoot, filePath)),
-    js: [...options.js ?? []].map((filePath) => path10.isAbsolute(filePath) ? filePath : path10.resolve(projectRoot, filePath)),
-    languageOut: options.languageOut ?? DEFAULT_BUILD_OPTIONS.languageOut,
-    outDir,
-    outputNames: [...options.outputNames ?? []],
-    packages: {
-      mode: options.packages?.mode ?? DEFAULT_BUILD_OPTIONS.packages.mode
-    },
-    projectRoot,
-    srcDir
-  };
-}
-function normalizeChunkPublicPath(publicPath) {
-  if (publicPath.length === 0) {
-    return "./";
-  }
-  return publicPath.endsWith("/") ? publicPath : `${publicPath}/`;
-}
-var packageSignaturePromises;
 var init_resolve_build = __esm(() => {
-  init_types();
   init_hash();
   init_store();
   init_file_state();
-  init_bundle_location();
   init_load();
-  packageSignaturePromises = new Map;
+  init_entries();
+  init_signatures();
+  init_workspace();
+  init_options();
+  init_signatures();
 });
 
-// src/stages/native/closure-ir.ts
+// src/stages/native/closure-ir/diagnostics.ts
 import ts8 from "typescript";
-async function collectNativeTypeAnalysis({
-  fileNames,
-  preflight,
-  tsConfigPath,
-  workspaceDir
-}) {
-  const compilerOptions = await loadCompilerOptions(tsConfigPath, {
-    allowJs: true,
-    ignoreDeprecations: "6.0",
-    moduleResolution: ts8.ModuleResolutionKind.Bundler,
-    noEmit: true,
-    rootDir: workspaceDir,
-    skipLibCheck: true,
-    target: ts8.ScriptTarget.ESNext
-  });
-  const program = ts8.createProgram(fileNames, compilerOptions);
-  const preflightDiagnostics = preflight === "full" ? [...ts8.getPreEmitDiagnostics(program)].filter((diagnostic) => !shouldIgnorePreflightDiagnostic(diagnostic)) : [];
-  const { diagnostics: closureIrDiagnostics, files } = collectClosureIrFiles({
-    compilerOptions,
-    fileNames,
-    program
-  });
-  return {
-    diagnostics: [...preflightDiagnostics, ...closureIrDiagnostics],
-    files
-  };
+function shouldIgnorePreflightDiagnostic(diagnostic) {
+  if (diagnostic.code !== 7016) {
+    return false;
+  }
+  const message = ts8.flattenDiagnosticMessageText(diagnostic.messageText, `
+`);
+  return message.includes("node_modules") && message.includes("implicitly has an 'any' type");
 }
+var init_diagnostics = () => {};
+
+// src/stages/native/closure-ir/decorators.ts
+import ts9 from "typescript";
+function containsDecorators(sourceFile) {
+  let found = false;
+  const visit = (node) => {
+    if (found) {
+      return;
+    }
+    if (ts9.canHaveDecorators(node) && (ts9.getDecorators(node)?.length ?? 0) > 0) {
+      found = true;
+      return;
+    }
+    ts9.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
+}
+function transpileDecoratedSource({
+  compilerOptions,
+  fileName,
+  sourceText
+}) {
+  return ts9.transpileModule(sourceText, {
+    compilerOptions: {
+      ...compilerOptions,
+      module: ts9.ModuleKind.ESNext,
+      moduleResolution: ts9.ModuleResolutionKind.Bundler,
+      sourceMap: false,
+      target: ts9.ScriptTarget.ES2018
+    },
+    fileName,
+    reportDiagnostics: true
+  });
+}
+var init_decorators = () => {};
+
+// src/stages/native/closure-ir/metadata.ts
+import ts10 from "typescript";
 function collectClosureIrFiles({
   compilerOptions,
   fileNames,
@@ -1962,22 +2008,22 @@ function collectClosureIrFiles({
     const topLevelDocs = [];
     const enumDeclarations = [];
     for (const statement of sourceFile.statements) {
-      if (ts8.isInterfaceDeclaration(statement)) {
+      if (ts10.isInterfaceDeclaration(statement)) {
         typeDeclarations.push(buildInterfaceDeclarationSnippet(statement, checker));
         continue;
       }
-      if (ts8.isTypeAliasDeclaration(statement)) {
+      if (ts10.isTypeAliasDeclaration(statement)) {
         typeDeclarations.push(buildTypeAliasDeclarationSnippet(statement, checker));
         continue;
       }
-      if (ts8.isEnumDeclaration(statement)) {
+      if (ts10.isEnumDeclaration(statement)) {
         const enumDeclaration = buildEnumDeclarationMetadata(statement, checker, unsafeEnumSymbols);
         if (enumDeclaration) {
           enumDeclarations.push(enumDeclaration);
         }
         continue;
       }
-      if (ts8.isFunctionDeclaration(statement) && statement.name) {
+      if (ts10.isFunctionDeclaration(statement) && statement.name) {
         const objectParamRecord = buildFunctionObjectParamRecord(statement, checker);
         if (objectParamRecord) {
           typeDeclarations.push({ snippet: objectParamRecord.snippet });
@@ -1992,7 +2038,7 @@ function collectClosureIrFiles({
         }
         continue;
       }
-      if (ts8.isClassDeclaration(statement) && statement.name) {
+      if (ts10.isClassDeclaration(statement) && statement.name) {
         const jsdoc = buildClassJsDoc(statement, checker);
         if (jsdoc) {
           topLevelDocs.push({
@@ -2005,18 +2051,12 @@ function collectClosureIrFiles({
     }
     let decoratedOutputText;
     if (containsDecorators(sourceFile)) {
-      const transpiled = ts8.transpileModule(sourceFile.getFullText(), {
-        compilerOptions: {
-          ...compilerOptions,
-          module: ts8.ModuleKind.ESNext,
-          moduleResolution: ts8.ModuleResolutionKind.Bundler,
-          sourceMap: false,
-          target: ts8.ScriptTarget.ES2018
-        },
+      const transpiled = transpileDecoratedSource({
+        compilerOptions,
         fileName: sourceFile.fileName,
-        reportDiagnostics: true
+        sourceText: sourceFile.getFullText()
       });
-      diagnostics.push(...(transpiled.diagnostics ?? []).filter((diagnostic) => diagnostic.category === ts8.DiagnosticCategory.Error));
+      diagnostics.push(...(transpiled.diagnostics ?? []).filter((diagnostic) => diagnostic.category === ts10.DiagnosticCategory.Error));
       decoratedOutputText = transpiled.outputText;
     }
     files.push({
@@ -2029,55 +2069,32 @@ function collectClosureIrFiles({
   }
   return { diagnostics, files };
 }
-function shouldIgnorePreflightDiagnostic(diagnostic) {
-  if (diagnostic.code !== 7016) {
-    return false;
-  }
-  const message = ts8.flattenDiagnosticMessageText(diagnostic.messageText, `
-`);
-  return message.includes("node_modules") && message.includes("implicitly has an 'any' type");
-}
-function containsDecorators(sourceFile) {
-  let found = false;
-  const visit = (node) => {
-    if (found) {
-      return;
-    }
-    if (ts8.canHaveDecorators(node) && (ts8.getDecorators(node)?.length ?? 0) > 0) {
-      found = true;
-      return;
-    }
-    ts8.forEachChild(node, visit);
-  };
-  visit(sourceFile);
-  return found;
-}
 function collectUnsafeEnumSymbols(program, checker) {
   const unsafe = new Set;
   const mark = (node) => {
     const symbol = checker.getSymbolAtLocation(node);
     if (symbol) {
-      unsafe.add(symbol.flags & ts8.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol);
+      unsafe.add(symbol.flags & ts10.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol);
     }
   };
   for (const sourceFile of program.getSourceFiles()) {
     const visit = (node) => {
-      if (ts8.isElementAccessExpression(node) && ts8.isIdentifier(node.expression)) {
+      if (ts10.isElementAccessExpression(node) && ts10.isIdentifier(node.expression)) {
         mark(node.expression);
       }
-      if (ts8.isCallExpression(node) && ts8.isPropertyAccessExpression(node.expression) && ts8.isIdentifier(node.expression.expression) && node.expression.expression.text === "Object" && ["entries", "keys", "values"].includes(node.expression.name.text) && node.arguments.length > 0 && ts8.isIdentifier(node.arguments[0])) {
+      if (ts10.isCallExpression(node) && ts10.isPropertyAccessExpression(node.expression) && ts10.isIdentifier(node.expression.expression) && node.expression.expression.text === "Object" && ["entries", "keys", "values"].includes(node.expression.name.text) && node.arguments.length > 0 && ts10.isIdentifier(node.arguments[0])) {
         mark(node.arguments[0]);
       }
-      if (ts8.isIdentifier(node) && !ts8.isPropertyAccessExpression(node.parent) && !ts8.isElementAccessExpression(node.parent) && !ts8.isImportSpecifier(node.parent) && !ts8.isImportClause(node.parent) && !ts8.isExportSpecifier(node.parent) && !ts8.isEnumDeclaration(node.parent) && !ts8.isEnumMember(node.parent)) {
+      if (ts10.isIdentifier(node) && !ts10.isPropertyAccessExpression(node.parent) && !ts10.isElementAccessExpression(node.parent) && !ts10.isImportSpecifier(node.parent) && !ts10.isImportClause(node.parent) && !ts10.isExportSpecifier(node.parent) && !ts10.isEnumDeclaration(node.parent) && !ts10.isEnumMember(node.parent)) {
         const symbol = checker.getSymbolAtLocation(node);
         if (symbol) {
-          const resolved = symbol.flags & ts8.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
-          if (resolved.flags & ts8.SymbolFlags.Enum) {
+          const resolved = symbol.flags & ts10.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+          if (resolved.flags & ts10.SymbolFlags.Enum) {
             unsafe.add(resolved);
           }
         }
       }
-      ts8.forEachChild(node, visit);
+      ts10.forEachChild(node, visit);
     };
     visit(sourceFile);
   }
@@ -2085,7 +2102,7 @@ function collectUnsafeEnumSymbols(program, checker) {
 }
 function buildEnumDeclarationMetadata(statement, checker, unsafeEnumSymbols) {
   const symbol = checker.getSymbolAtLocation(statement.name);
-  const resolved = symbol && symbol.flags & ts8.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+  const resolved = symbol && symbol.flags & ts10.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
   if (resolved && unsafeEnumSymbols.has(resolved)) {
     return null;
   }
@@ -2141,13 +2158,13 @@ function buildInterfaceDeclarationSnippet(statement, checker) {
     if (!memberName) {
       continue;
     }
-    if (ts8.isPropertySignature(member)) {
+    if (ts10.isPropertySignature(member)) {
       const propertyType = member.type ? toClosureType(checker.getTypeFromTypeNode(member.type), checker) : "?";
       lines.push(`/** @type {${propertyType}} */`);
       lines.push(`${statement.name.text}.prototype.${renderPropertyName(memberName)};`);
       continue;
     }
-    if (ts8.isMethodSignature(member)) {
+    if (ts10.isMethodSignature(member)) {
       const signature = checker.getSignatureFromDeclaration(member);
       if (!signature) {
         continue;
@@ -2213,7 +2230,7 @@ function buildFunctionObjectParamRecord(statement, checker) {
     return null;
   }
   const firstParameter = statement.parameters[0];
-  if (!firstParameter || !ts8.isObjectBindingPattern(firstParameter.name) || hasRestElement(firstParameter.name)) {
+  if (!firstParameter || !ts10.isObjectBindingPattern(firstParameter.name) || hasRestElement(firstParameter.name)) {
     return null;
   }
   const parameterType = checker.getTypeAtLocation(firstParameter);
@@ -2252,9 +2269,9 @@ function buildClassJsDoc(statement, checker) {
     for (const clause of statement.heritageClauses) {
       for (const typeNode of clause.types) {
         const closureType = toClosureType(checker.getTypeAtLocation(typeNode), checker);
-        if (clause.token === ts8.SyntaxKind.ExtendsKeyword) {
+        if (clause.token === ts10.SyntaxKind.ExtendsKeyword) {
           lines.push(` * @extends {${closureType}}`);
-        } else if (clause.token === ts8.SyntaxKind.ImplementsKeyword) {
+        } else if (clause.token === ts10.SyntaxKind.ImplementsKeyword) {
           lines.push(` * @implements {${closureType}}`);
         }
       }
@@ -2269,16 +2286,16 @@ function getTemplateNames(typeParameters) {
   return (typeParameters ?? []).map((parameter) => parameter.name.text);
 }
 function hasExportModifier(node) {
-  return (ts8.getCombinedModifierFlags(node) & ts8.ModifierFlags.Export) !== 0;
+  return (ts10.getCombinedModifierFlags(node) & ts10.ModifierFlags.Export) !== 0;
 }
 function hasConstModifier(node) {
-  return (ts8.getCombinedModifierFlags(node) & ts8.ModifierFlags.Const) !== 0;
+  return (ts10.getCombinedModifierFlags(node) & ts10.ModifierFlags.Const) !== 0;
 }
 function getPropertyNameText2(name) {
   if (!name) {
     return null;
   }
-  if (ts8.isIdentifier(name) || ts8.isStringLiteral(name) || ts8.isNumericLiteral(name) || ts8.isPrivateIdentifier(name)) {
+  if (ts10.isIdentifier(name) || ts10.isStringLiteral(name) || ts10.isNumericLiteral(name) || ts10.isPrivateIdentifier(name)) {
     return name.text;
   }
   return null;
@@ -2287,19 +2304,19 @@ function renderPropertyName(name) {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? name : `[${JSON.stringify(name)}]`;
 }
 function literalValueFromExpression(expression) {
-  if (ts8.isStringLiteralLike(expression)) {
+  if (ts10.isStringLiteralLike(expression)) {
     return expression.text;
   }
-  if (ts8.isNumericLiteral(expression)) {
+  if (ts10.isNumericLiteral(expression)) {
     return Number(expression.text);
   }
-  if (expression.kind === ts8.SyntaxKind.TrueKeyword) {
+  if (expression.kind === ts10.SyntaxKind.TrueKeyword) {
     return true;
   }
-  if (expression.kind === ts8.SyntaxKind.FalseKeyword) {
+  if (expression.kind === ts10.SyntaxKind.FalseKeyword) {
     return false;
   }
-  if (ts8.isPrefixUnaryExpression(expression) && expression.operator === ts8.SyntaxKind.MinusToken && ts8.isNumericLiteral(expression.operand)) {
+  if (ts10.isPrefixUnaryExpression(expression) && expression.operator === ts10.SyntaxKind.MinusToken && ts10.isNumericLiteral(expression.operand)) {
     return -Number(expression.operand.text);
   }
   return;
@@ -2318,36 +2335,26 @@ function toClosureType(type, checker, seen = new Set) {
     return "?";
   }
   seen.add(type);
-  if (type.flags & ts8.TypeFlags.Any) {
+  if (type.flags & ts10.TypeFlags.Any)
     return "?";
-  }
-  if (type.flags & ts8.TypeFlags.Unknown) {
+  if (type.flags & ts10.TypeFlags.Unknown)
     return "?";
-  }
-  if (type.flags & ts8.TypeFlags.StringLike) {
+  if (type.flags & ts10.TypeFlags.StringLike)
     return "string";
-  }
-  if (type.flags & ts8.TypeFlags.NumberLike) {
+  if (type.flags & ts10.TypeFlags.NumberLike)
     return "number";
-  }
-  if (type.flags & ts8.TypeFlags.BooleanLike) {
+  if (type.flags & ts10.TypeFlags.BooleanLike)
     return "boolean";
-  }
-  if (type.flags & ts8.TypeFlags.Void) {
+  if (type.flags & ts10.TypeFlags.Void)
     return "void";
-  }
-  if (type.flags & ts8.TypeFlags.Undefined) {
+  if (type.flags & ts10.TypeFlags.Undefined)
     return "undefined";
-  }
-  if (type.flags & ts8.TypeFlags.Null) {
+  if (type.flags & ts10.TypeFlags.Null)
     return "null";
-  }
-  if (type.flags & ts8.TypeFlags.Never) {
+  if (type.flags & ts10.TypeFlags.Never)
     return "never";
-  }
-  if (type.flags & ts8.TypeFlags.TypeParameter) {
+  if (type.flags & ts10.TypeFlags.TypeParameter)
     return checker.typeToString(type);
-  }
   if (type.isUnion()) {
     return `(${type.types.map((item) => toClosureType(item, checker, seen)).join("|")})`;
   }
@@ -2373,19 +2380,54 @@ function toClosureType(type, checker, seen = new Set) {
       return symbolName;
     }
   }
-  if (type.isClassOrInterface() || type.getProperties().length > 0 && !(type.flags & ts8.TypeFlags.Object)) {
+  if (type.isClassOrInterface() || type.getProperties().length > 0 && !(type.flags & ts10.TypeFlags.Object)) {
     return "!Object";
   }
   return "?";
 }
+var init_metadata = __esm(() => {
+  init_decorators();
+});
+
+// src/stages/native/closure-ir.ts
+import ts11 from "typescript";
+async function collectNativeTypeAnalysis({
+  fileNames,
+  preflight,
+  tsConfigPath,
+  workspaceDir
+}) {
+  const compilerOptions = await loadCompilerOptions(tsConfigPath, {
+    allowJs: true,
+    ignoreDeprecations: "6.0",
+    moduleResolution: ts11.ModuleResolutionKind.Bundler,
+    noEmit: true,
+    rootDir: workspaceDir,
+    skipLibCheck: true,
+    target: ts11.ScriptTarget.ESNext
+  });
+  const program = ts11.createProgram(fileNames, compilerOptions);
+  const preflightDiagnostics = preflight === "full" ? [...ts11.getPreEmitDiagnostics(program)].filter((diagnostic) => !shouldIgnorePreflightDiagnostic(diagnostic)) : [];
+  const { diagnostics: closureIrDiagnostics, files } = collectClosureIrFiles({
+    compilerOptions,
+    fileNames,
+    program
+  });
+  return {
+    diagnostics: [...preflightDiagnostics, ...closureIrDiagnostics],
+    files
+  };
+}
 var init_closure_ir = __esm(() => {
   init_compiler_options();
+  init_diagnostics();
+  init_metadata();
 });
 
 // src/stages/native/emit.ts
-import fs10 from "fs";
-import path11 from "path";
-import ts9 from "typescript";
+import fs11 from "fs";
+import path15 from "path";
+import ts12 from "typescript";
 async function emitNativeStage({
   cacheDir,
   fileNames,
@@ -2398,9 +2440,9 @@ async function emitNativeStage({
   workspaceDir
 }) {
   const usesPersistentCache = options.cache.mode === "persistent";
-  const outDir = path11.join(cacheDir, "out");
-  const externsPath = path11.join(cacheDir, "native-generated.externs.js");
-  const metadataPathForNative = path11.join(cacheDir, "closure-ir.json");
+  const outDir = path15.join(cacheDir, "out");
+  const externsPath = path15.join(cacheDir, "native-generated.externs.js");
+  const metadataPathForNative = path15.join(cacheDir, "closure-ir.json");
   const runtimePackageInputs = await collectTsxRuntimePackageInputs({
     fileNames,
     tsConfigPath,
@@ -2443,8 +2485,8 @@ async function emitNativeStage({
       supportFiles: cachedMetadata.supportFiles
     };
   }
-  await fs10.promises.rm(outDir, { force: true, recursive: true });
-  await fs10.promises.mkdir(outDir, { recursive: true });
+  await fs11.promises.rm(outDir, { force: true, recursive: true });
+  await fs11.promises.mkdir(outDir, { recursive: true });
   const missingInputDiagnostics = await getMissingInputDiagnostics({
     fileNames: combinedFileNames,
     preflight: options.diagnostics.preflight,
@@ -2480,7 +2522,7 @@ async function emitNativeStage({
       supportFiles: []
     };
   }
-  await fs10.promises.writeFile(metadataPathForNative, JSON.stringify(analysis.files, null, 2), "utf-8");
+  await fs11.promises.writeFile(metadataPathForNative, JSON.stringify(analysis.files, null, 2), "utf-8");
   const result = transpileSources({
     chunkMode: options.chunks.mode,
     metadataPath: metadataPathForNative,
@@ -2497,7 +2539,7 @@ async function emitNativeStage({
     ...result.supportFiles
   ]);
   if (usesPersistentCache) {
-    await fs10.promises.writeFile(metadataPath, JSON.stringify({
+    await fs11.promises.writeFile(metadataPath, JSON.stringify({
       dependencyModules,
       dependencyRuntimeFiles,
       emittedFiles: result.emittedFiles,
@@ -2547,7 +2589,7 @@ async function collectTsxRuntimePackageInputs({
   const graph = resolveGraph({
     entries: [workspaceEntry],
     packageMode: "esm-only",
-    srcDir: path11.join(workspaceDir, "src"),
+    srcDir: path15.join(workspaceDir, "src"),
     workspaceDir
   });
   return {
@@ -2578,7 +2620,7 @@ async function getMissingInputDiagnostics({
 }
 function createSimpleDiagnostic(messageText) {
   return {
-    category: ts9.DiagnosticCategory.Error,
+    category: ts12.DiagnosticCategory.Error,
     code: 0,
     file: undefined,
     length: undefined,
@@ -2589,9 +2631,9 @@ function createSimpleDiagnostic(messageText) {
 function getJsxRuntimeSpecifier(compilerOptions) {
   const jsxImportSource = compilerOptions.jsxImportSource ?? "react";
   switch (compilerOptions.jsx) {
-    case ts9.JsxEmit.ReactJSX:
+    case ts12.JsxEmit.ReactJSX:
       return `${jsxImportSource}/jsx-runtime`;
-    case ts9.JsxEmit.ReactJSXDev:
+    case ts12.JsxEmit.ReactJSXDev:
       return `${jsxImportSource}/jsx-dev-runtime`;
     default:
       return null;
@@ -2599,7 +2641,7 @@ function getJsxRuntimeSpecifier(compilerOptions) {
 }
 async function readMetadata(metadataPath) {
   try {
-    const raw = await fs10.promises.readFile(metadataPath, "utf-8");
+    const raw = await fs11.promises.readFile(metadataPath, "utf-8");
     const parsed = JSON.parse(raw);
     if (parsed.version !== NATIVE_EMIT_METADATA_VERSION) {
       return null;
@@ -2621,7 +2663,7 @@ async function readMetadata(metadataPath) {
   }
 }
 function toEmittedPath(sourcePath, outDir, workspaceDir) {
-  return path11.join(outDir, path11.relative(workspaceDir, sourcePath)).replace(/\.[^/.]+$/, ".js");
+  return path15.join(outDir, path15.relative(workspaceDir, sourcePath)).replace(/\.[^/.]+$/, ".js");
 }
 function collectDependencyModules(packageAliases) {
   return uniqueSorted2(packageAliases.filter((alias) => isDependencyFile(alias.targetPath)).map((alias) => alias.subpath === "." ? alias.packageName : `${alias.packageName}/${alias.subpath.replace(/^\.\//, "")}`));
@@ -2634,7 +2676,7 @@ function collectDependencyRuntimeFiles({
   return uniqueSorted2(sourceFiles.filter((filePath) => isDependencyFile(filePath)).map((filePath) => toEmittedPath(filePath, outDir, workspaceDir)));
 }
 function isDependencyFile(filePath) {
-  return path11.resolve(filePath).includes(`${path11.sep}node_modules${path11.sep}`);
+  return path15.resolve(filePath).includes(`${path15.sep}node_modules${path15.sep}`);
 }
 function uniqueSorted2(values) {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
@@ -2651,13 +2693,13 @@ function mergePackageAliases(aliases) {
   });
 }
 function toWorkspaceNodeModulesPath(resolvedPath, workspaceDir) {
-  const marker = `${path11.sep}node_modules${path11.sep}`;
+  const marker = `${path15.sep}node_modules${path15.sep}`;
   const markerIndex = resolvedPath.lastIndexOf(marker);
   if (markerIndex === -1) {
     return resolvedPath;
   }
   const relativeNodeModulesPath = resolvedPath.slice(markerIndex + 1);
-  return path11.join(workspaceDir, relativeNodeModulesPath);
+  return path15.join(workspaceDir, relativeNodeModulesPath);
 }
 function toRuntimePackageAlias(specifier, targetPath) {
   const segments = specifier.startsWith("@") ? specifier.split("/", 3) : specifier.split("/", 2);
@@ -2743,14 +2785,14 @@ function configureClosureCompilerInstance(instance) {
 var init_compiler2 = () => {};
 
 // src/stages/closure/cache.ts
-import fs11 from "fs/promises";
-import path12 from "path";
+import fs12 from "fs/promises";
+import path16 from "path";
 function getCompileJobOutputFiles(job) {
   if (job.jsOutputFile) {
     return [job.jsOutputFile];
   }
   if (job.chunk && job.chunkOutputPathPrefix) {
-    return job.chunk.map((chunkSpec) => path12.join(job.chunkOutputPathPrefix, `${chunkSpec.split(":", 1)[0]}.js`));
+    return job.chunk.map((chunkSpec) => path16.join(job.chunkOutputPathPrefix, `${chunkSpec.split(":", 1)[0]}.js`));
   }
   throw new Error("Closure compile job is missing output configuration.");
 }
@@ -2761,18 +2803,18 @@ async function tryRestoreCachedClosureJob({
   outputFiles
 }) {
   const jobCacheDir = await getClosureJobCacheDir(cacheDir, job, compilerVersion);
-  const metadata = await readJsonIfExists(path12.join(jobCacheDir, "meta.json"));
+  const metadata = await readJsonIfExists(path16.join(jobCacheDir, "meta.json"));
   if (!metadata || metadata.version !== CLOSURE_JOB_CACHE_VERSION || metadata.outputFiles.length !== outputFiles.length) {
     return false;
   }
-  const cachedFiles = metadata.outputFiles.map((fileName) => path12.join(jobCacheDir, fileName));
-  const filesReady = await Promise.all(cachedFiles.map((filePath) => fs11.stat(filePath).then(() => true).catch(() => false)));
+  const cachedFiles = metadata.outputFiles.map((fileName) => path16.join(jobCacheDir, fileName));
+  const filesReady = await Promise.all(cachedFiles.map((filePath) => fs12.stat(filePath).then(() => true).catch(() => false)));
   if (filesReady.some((ready) => !ready)) {
     return false;
   }
   await Promise.all(outputFiles.map(async (outputFile, index) => {
-    await fs11.mkdir(path12.dirname(outputFile), { recursive: true });
-    await fs11.copyFile(cachedFiles[index], outputFile);
+    await fs12.mkdir(path16.dirname(outputFile), { recursive: true });
+    await fs12.copyFile(cachedFiles[index], outputFile);
   }));
   return true;
 }
@@ -2783,11 +2825,11 @@ async function persistCachedClosureJob({
   outputFiles
 }) {
   const jobCacheDir = await getClosureJobCacheDir(cacheDir, job, compilerVersion);
-  await fs11.rm(jobCacheDir, { force: true, recursive: true });
-  await fs11.mkdir(jobCacheDir, { recursive: true });
-  const outputNames = outputFiles.map((outputFile) => path12.basename(outputFile));
-  await Promise.all(outputFiles.map((outputFile, index) => fs11.copyFile(outputFile, path12.join(jobCacheDir, outputNames[index]))));
-  await writeJson(path12.join(jobCacheDir, "meta.json"), {
+  await fs12.rm(jobCacheDir, { force: true, recursive: true });
+  await fs12.mkdir(jobCacheDir, { recursive: true });
+  const outputNames = outputFiles.map((outputFile) => path16.basename(outputFile));
+  await Promise.all(outputFiles.map((outputFile, index) => fs12.copyFile(outputFile, path16.join(jobCacheDir, outputNames[index]))));
+  await writeJson(path16.join(jobCacheDir, "meta.json"), {
     outputFiles: outputNames,
     version: CLOSURE_JOB_CACHE_VERSION
   });
@@ -2805,7 +2847,7 @@ async function getClosureJobCacheDir(cacheDir, job, compilerVersion) {
       compilationLevel: job.compilationLevel,
       dependencyMode: job.dependencyMode ?? null,
       entryPoint: job.entryPoint ?? null,
-      jsOutputKinds: outputFiles.map((outputFile) => path12.basename(outputFile)),
+      jsOutputKinds: outputFiles.map((outputFile) => path16.basename(outputFile)),
       languageIn: job.languageIn,
       languageOut: job.languageOut,
       rewritePolyfills: job.rewritePolyfills,
@@ -2814,19 +2856,19 @@ async function getClosureJobCacheDir(cacheDir, job, compilerVersion) {
     jsHash,
     version: CLOSURE_JOB_CACHE_VERSION
   });
-  return path12.join(cacheDir, cacheKey);
+  return path16.join(cacheDir, cacheKey);
 }
 async function hashFilesInOrder(filePaths) {
   return Promise.all(filePaths.map((filePath) => hashFileInput(filePath)));
 }
 async function hashFileInput(filePath) {
-  const stat = await fs11.stat(filePath);
+  const stat = await fs12.stat(filePath);
   const cacheKey = `${filePath}:${stat.size}:${stat.mtimeMs}`;
   const cached = closureInputHashCache.get(cacheKey);
   if (cached) {
     return cached;
   }
-  const pending = fs11.readFile(filePath, "utf-8").then((contents) => hashContent(contents));
+  const pending = fs12.readFile(filePath, "utf-8").then((contents) => hashContent(contents));
   closureInputHashCache.set(cacheKey, pending);
   return pending;
 }
@@ -2871,8 +2913,8 @@ async function runWithConcurrency(items, concurrency, worker) {
 var init_concurrency = () => {};
 
 // src/stages/closure/run-closure.ts
-import fs12 from "fs/promises";
-import path13 from "path";
+import fs13 from "fs/promises";
+import path17 from "path";
 async function runClosureStage({
   chunkPlan,
   emittedOutDir,
@@ -2886,14 +2928,14 @@ async function runClosureStage({
   supportFiles,
   packageRoot: packageRoot2
 }) {
-  await fs12.rm(finalCacheDir, { force: true, recursive: true });
-  await fs12.mkdir(finalCacheDir, { recursive: true });
-  const rawDir = path13.join(finalCacheDir, "raw");
-  const cacheOutputDir = path13.join(finalCacheDir, "outputs");
-  await fs12.mkdir(rawDir, { recursive: true });
-  await fs12.mkdir(cacheOutputDir, { recursive: true });
-  await fs12.rm(outDir, { force: true, recursive: true });
-  await fs12.mkdir(outDir, { recursive: true });
+  await fs13.rm(finalCacheDir, { force: true, recursive: true });
+  await fs13.mkdir(finalCacheDir, { recursive: true });
+  const rawDir = path17.join(finalCacheDir, "raw");
+  const cacheOutputDir = path17.join(finalCacheDir, "outputs");
+  await fs13.mkdir(rawDir, { recursive: true });
+  await fs13.mkdir(cacheOutputDir, { recursive: true });
+  await fs13.rm(outDir, { force: true, recursive: true });
+  await fs13.mkdir(outDir, { recursive: true });
   const prepared = prepareClosureJobs({
     chunkLoader: options.chunks.loader,
     chunkMode: options.chunks.mode,
@@ -2914,10 +2956,10 @@ async function runClosureStage({
     supportFiles
   });
   await Promise.all(prepared.generatedAssets.map(async (asset) => {
-    await fs12.mkdir(path13.dirname(asset.path), { recursive: true });
-    await fs12.writeFile(asset.path, asset.text, "utf-8");
+    await fs13.mkdir(path17.dirname(asset.path), { recursive: true });
+    await fs13.writeFile(asset.path, asset.text, "utf-8");
   }));
-  const closureJobCacheDir = options.cache.mode === "off" ? null : path13.join(projectCacheDir, "closure-jobs");
+  const closureJobCacheDir = options.cache.mode === "off" ? null : path17.join(projectCacheDir, "closure-jobs");
   const concurrency = options.chunks.mode === "bundler-runtime" ? determineClosureConcurrency(prepared.compileJobs.length) : 1;
   const exitCodes = await runWithConcurrency(prepared.compileJobs, concurrency, async (job) => runPreparedClosureJob({
     cacheDir: closureJobCacheDir,
@@ -2928,16 +2970,16 @@ async function runClosureStage({
     return { cacheOutputFiles: [], exitCode: failedExitCode, outputFiles: [] };
   }
   await Promise.all(prepared.postprocessActions.map(async (action) => {
-    await fs12.mkdir(path13.dirname(action.outputPath), { recursive: true });
+    await fs13.mkdir(path17.dirname(action.outputPath), { recursive: true });
     if (action.kind === "rewrite-gcc-exports") {
-      const contents = await fs12.readFile(action.inputPath, "utf-8");
-      await fs12.writeFile(action.outputPath, rewriteGccExports(contents));
+      const contents = await fs13.readFile(action.inputPath, "utf-8");
+      await fs13.writeFile(action.outputPath, rewriteGccExports(contents));
       return;
     }
-    await fs12.copyFile(action.inputPath, action.outputPath);
+    await fs13.copyFile(action.inputPath, action.outputPath);
   }));
   await copyOrLinkFiles(prepared.publishedOutputs, cacheOutputDir);
-  const cacheOutputFiles = prepared.publishedOutputs.map((outputFile) => path13.join(cacheOutputDir, path13.relative(outDir, outputFile)));
+  const cacheOutputFiles = prepared.publishedOutputs.map((outputFile) => path17.join(cacheOutputDir, path17.relative(outDir, outputFile)));
   return {
     cacheOutputFiles,
     exitCode: 0,
@@ -3008,8 +3050,8 @@ var init_run_closure = __esm(() => {
 });
 
 // src/pipeline/build-helpers.ts
-import fs13 from "fs";
-import path14 from "path";
+import fs14 from "fs";
+import path18 from "path";
 async function generateRuntimeDependencyExterns({
   appEntryFiles,
   cacheMode,
@@ -3023,8 +3065,8 @@ async function generateRuntimeDependencyExterns({
   if (dependencyModules.length === 0 || dependencyRuntimeFiles.length === 0) {
     return null;
   }
-  const outputFile = path14.join(cacheDir, "runtime-dependency-externs.js");
-  const metadataPath = path14.join(cacheDir, "runtime-dependency-externs.meta.json");
+  const outputFile = path18.join(cacheDir, "runtime-dependency-externs.js");
+  const metadataPath = path18.join(cacheDir, "runtime-dependency-externs.meta.json");
   if (cacheMode !== "off") {
     const compilerOptions = await loadCompilerOptions(tsConfigPath);
     const cacheKey = hashJson({
@@ -3080,7 +3122,7 @@ function toImportPath(relativePath) {
   return normalized.startsWith(".") ? normalized : `./${normalized}`;
 }
 function toPublishedOutputPaths(publishedOutputs, outDir) {
-  return publishedOutputs.map(({ name }) => path14.join(outDir, name));
+  return publishedOutputs.map(({ name }) => path18.join(outDir, name));
 }
 function createBuildDiagnostic(error) {
   return {
@@ -3090,7 +3132,7 @@ function createBuildDiagnostic(error) {
   };
 }
 async function removeProjectCacheDir(projectCacheDir) {
-  await fs13.promises.rm(projectCacheDir, { force: true, recursive: true });
+  await fs14.promises.rm(projectCacheDir, { force: true, recursive: true });
 }
 var RUNTIME_DEPENDENCY_EXTERNS_CACHE_VERSION = 1;
 var init_build_helpers = __esm(() => {
@@ -3107,12 +3149,12 @@ __export(exports_build_pipeline, {
   cleanCache: () => cleanCache,
   build: () => build
 });
-import path15 from "path";
+import path19 from "path";
 async function build(options) {
   const context = await createBuildContext(normalizeBuildOptions(options));
   const usesPersistentCache = context.options.cache.mode === "persistent";
   if (usesPersistentCache) {
-    const fastSnapshot = await readJsonIfExists(path15.join(context.projectCacheDir, "final-fast.json"));
+    const fastSnapshot = await readJsonIfExists(path19.join(context.projectCacheDir, "final-fast.json"));
     if (fastSnapshot && fastSnapshot.optionsSignature === context.optionsSignature && fastSnapshot.packageSignature === context.packageSignature && await trackedFilesMatch(fastSnapshot.trackedFiles) && await publishedOutputsMatchSnapshot(fastSnapshot.publishedOutputs, context.options.outDir)) {
       return {
         cacheHit: true,
@@ -3127,7 +3169,7 @@ async function build(options) {
   try {
     resolved = await resolveBuild(context);
     const resolvedBuild = resolved;
-    const finalMetadataPath = path15.join(resolvedBuild.finalCacheDir, "meta.json");
+    const finalMetadataPath = path19.join(resolvedBuild.finalCacheDir, "meta.json");
     const finalMetadata = usesPersistentCache ? await readJsonIfExists(finalMetadataPath) : null;
     if (usesPersistentCache && finalMetadata && await filesExist(finalMetadata.outputFiles)) {
       await publishOutputs(finalMetadata.outputFiles, context.options.outDir);
@@ -3137,7 +3179,7 @@ async function build(options) {
         emitSkipped: false,
         exitCode: 0,
         outputFiles: toPublishedOutputPaths(finalMetadata.outputFiles.map((outputFile) => ({
-          name: path15.basename(outputFile)
+          name: path19.basename(outputFile)
         })), context.options.outDir)
       };
     }
@@ -3168,12 +3210,12 @@ async function build(options) {
         entries: resolvedBuild.entryFiles.map((entry) => ({
           exportNames: entry.exportNames,
           hasDefaultExport: entry.hasDefaultExport,
-          importPath: toImportPath(path15.relative(path15.dirname(path15.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`)), entry.sourcePath)),
-          shimPath: path15.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`)
+          importPath: toImportPath(path19.relative(path19.dirname(path19.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`)), entry.sourcePath)),
+          shimPath: path19.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`)
         }))
       });
     }
-    const nativeEmitMetadataPath = path15.join(resolvedBuild.nativeEmitCacheDir, "meta.json");
+    const nativeEmitMetadataPath = path19.join(resolvedBuild.nativeEmitCacheDir, "meta.json");
     const nativeEmitResult = await emitNativeStage({
       cacheDir: resolvedBuild.nativeEmitCacheDir,
       fileNames: context.options.chunks.mode !== "off" ? resolvedBuild.sourceFiles : [...resolvedBuild.sourceFiles, ...resolvedBuild.shimFiles],
@@ -3230,7 +3272,7 @@ async function build(options) {
       await writeJson(finalMetadataPath, {
         outputFiles: closureResult.cacheOutputFiles
       });
-      await writeJson(path15.join(context.projectCacheDir, "final-fast.json"), {
+      await writeJson(path19.join(context.projectCacheDir, "final-fast.json"), {
         finalKey: resolvedBuild.finalKey,
         optionsSignature: context.optionsSignature,
         packageSignature: context.packageSignature,
@@ -3258,9 +3300,9 @@ async function build(options) {
   }
 }
 async function cleanCache(options = {}) {
-  const projectRoot = path15.resolve(options.projectRoot ?? process.cwd());
-  const cacheRoot = path15.resolve(options.cacheDir || getDefaultPersistentCacheRoot());
-  const projectCacheDir = path15.join(cacheRoot, hashContent(projectRoot));
+  const projectRoot = path19.resolve(options.projectRoot ?? process.cwd());
+  const cacheRoot = path19.resolve(options.cacheDir || getDefaultPersistentCacheRoot());
+  const projectCacheDir = path19.join(cacheRoot, hashContent(projectRoot));
   await removeProjectCacheDir(projectCacheDir);
 }
 var init_build_pipeline = __esm(() => {

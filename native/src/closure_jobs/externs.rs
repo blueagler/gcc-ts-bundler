@@ -1,4 +1,5 @@
 use super::*;
+use crate::utils::unique_strings;
 
 pub(super) fn collect_effective_extern_paths(
     package_root: &str,
@@ -148,12 +149,5 @@ pub(super) fn read_candidate_contents(
 }
 
 pub(super) fn unique_paths(paths: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut result = Vec::new();
-    for path in paths {
-        if seen.insert(path.clone()) {
-            result.push(path);
-        }
-    }
-    result
+    unique_strings(paths)
 }

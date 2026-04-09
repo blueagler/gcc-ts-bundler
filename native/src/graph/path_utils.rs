@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) use crate::utils::{hash_content, normalize_path, path_relative_to};
+
 pub(super) fn module_candidates(base: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if base.extension().is_some() {
@@ -50,34 +52,4 @@ fn rewrite_extension_candidates(base: &Path) -> Vec<PathBuf> {
         .iter()
         .map(|alternate| base.with_extension(alternate))
         .collect()
-}
-
-pub(super) fn path_relative_to(path: &Path, root: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .to_string()
-}
-
-pub(super) fn normalize_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            Component::Normal(_) | Component::Prefix(_) | Component::RootDir => {
-                normalized.push(component.as_os_str());
-            }
-        }
-    }
-
-    normalized
-}
-
-pub(super) fn hash_content(content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    format!("{:x}", hasher.finalize())
 }

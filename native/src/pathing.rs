@@ -1,28 +1,7 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
-use sha2::{Digest, Sha256};
-
-pub fn normalize_path(path: &Path) -> PathBuf {
-    let mut normalized = if path.is_absolute() {
-        PathBuf::from(std::path::MAIN_SEPARATOR.to_string())
-    } else {
-        PathBuf::new()
-    };
-
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            Component::RootDir => normalized.push(std::path::MAIN_SEPARATOR.to_string()),
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::Normal(segment) => normalized.push(segment),
-        }
-    }
-
-    normalized
-}
+pub use crate::utils::normalize_path;
+use crate::utils::short_stable_id;
 
 pub fn to_goog_module_id(file_path: &Path, root_dir: &Path) -> String {
     let normalized_path = normalize_path(file_path);
@@ -71,14 +50,5 @@ pub fn to_bundler_runtime_chunk_id(logical_chunk_id: &str) -> String {
 }
 
 fn short_runtime_id(prefix: char, value: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update([prefix as u8]);
-    hasher.update(value.as_bytes());
-    let digest = hasher.finalize();
-    let hex = digest
-        .iter()
-        .take(4)
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("{prefix}{hex}")
+    short_stable_id(prefix, value)
 }

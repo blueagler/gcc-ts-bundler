@@ -1,17 +1,13 @@
-import fs from "fs";
 import path from "path";
-import ts from "typescript";
 
-import { BuildOptions, DEFAULT_BUILD_OPTIONS } from "../api/types";
 import { hashContent, hashJson } from "../cache/hash";
 import {
   createCacheStore,
-  getDefaultPersistentCacheRoot,
   readJsonIfExists,
   writeJson,
+  getDefaultPersistentCacheRoot,
 } from "../cache/store";
 import { collectTrackedFiles, trackedFilesMatch } from "../internal/file-state";
-import { getPackageRootFromBundle } from "../internal/bundle-location";
 import {
   BuildContext,
   BuildEntry,
@@ -22,6 +18,31 @@ import {
   ResolvedBuild,
 } from "../internal/types";
 import { planChunks, resolveGraph } from "../native/load";
+import {
+  resolveOutputNames,
+  sanitizeChunkName,
+  toBuildEntry,
+  toShimFiles,
+} from "./resolve-build/entries";
+import {
+  getOptionsSignature,
+  getPackageRoot,
+  getPackageSignature,
+  hashExternalInputs,
+  hashTsConfig,
+} from "./resolve-build/signatures";
+import {
+  ensureDirectorySymlink,
+  ensureWorkspaceNodeModules,
+  resolveTsConfigPath,
+} from "./resolve-build/workspace";
+
+export { normalizeBuildOptions } from "./resolve-build/options";
+export {
+  getOptionsSignature,
+  getPackageRoot,
+  getPackageSignature,
+} from "./resolve-build/signatures";
 
 interface ResolveMetadata {
   chunkPlan: ChunkPlanChunk[];
@@ -304,142 +325,6 @@ export async function resolveBuild(
   };
 }
 
-function resolveOutputNames(
-  entryPaths: string[],
-  outputNames: string[],
-): string[] {
-  if (outputNames.length > 0) {
-    if (outputNames.length !== entryPaths.length) {
-      throw new Error("outputNames length must match entries length.");
-    }
-
-    return outputNames;
-  }
-
-  const basenameCounts = new Map<string, number>();
-  const basenames = entryPaths.map((entryPath) =>
-    path.basename(entryPath).replace(/\.[^/.]+$/, ".js"),
-  );
-
-  for (const basename of basenames) {
-    basenameCounts.set(basename, (basenameCounts.get(basename) ?? 0) + 1);
-  }
-
-  return entryPaths.map((entryPath, index) => {
-    const basename = basenames[index];
-    if ((basenameCounts.get(basename) ?? 0) === 1) {
-      return basename;
-    }
-
-    return `${entryPath.replace(/\.[^/.]+$/, "").replace(/[\\/]/g, "__")}.js`;
-  });
-}
-
-function sanitizeChunkName(outputName: string): string {
-  return outputName.replace(/\.js$/, "").replace(/[^\w-]/g, "-");
-}
-
-function toBuildEntry(
-  entry: ResolveMetadata["entryFiles"][number],
-  sourceRoot: string,
-): BuildEntry {
-  return {
-    chunkName: entry.chunkName,
-    exportNames: entry.exportNames,
-    hasDefaultExport: entry.hasDefaultExport,
-    outputName: entry.outputName,
-    sourcePath: path.join(sourceRoot, entry.sourceRelativePath),
-    sourceRelativePath: entry.sourceRelativePath,
-  };
-}
-
-function toShimFiles(entryFiles: BuildEntry[], shimDir: string): string[] {
-  return entryFiles.map((entry) => path.join(shimDir, `${entry.chunkName}.ts`));
-}
-
-async function ensureDirectorySymlink(linkPath: string, targetPath: string) {
-  try {
-    const currentTarget = await fs.promises.readlink(linkPath);
-    if (path.resolve(path.dirname(linkPath), currentTarget) === targetPath) {
-      return;
-    }
-    await fs.promises.rm(linkPath, { force: true, recursive: true });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      await fs.promises.rm(linkPath, { force: true, recursive: true });
-    }
-  }
-
-  await fs.promises.mkdir(path.dirname(linkPath), { recursive: true });
-  await fs.promises.symlink(
-    targetPath,
-    linkPath,
-    process.platform === "win32" ? "junction" : "dir",
-  );
-}
-
-async function ensureWorkspaceNodeModules(
-  workspaceDir: string,
-  options: NormalizedBuildOptions,
-) {
-  const linkPath = path.join(workspaceDir, "node_modules");
-  if (options.packages.mode === "off") {
-    await removePathIfExists(linkPath);
-    return;
-  }
-
-  const nodeModulesPath = path.join(options.projectRoot, "node_modules");
-  const hasNodeModules = await fs.promises
-    .access(nodeModulesPath)
-    .then(() => true)
-    .catch(() => false);
-  if (!hasNodeModules) {
-    await removePathIfExists(linkPath);
-    return;
-  }
-
-  await ensureDirectorySymlink(linkPath, nodeModulesPath);
-}
-
-async function removePathIfExists(targetPath: string) {
-  try {
-    await fs.promises.rm(targetPath, { force: true, recursive: true });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw error;
-    }
-  }
-}
-
-async function resolveTsConfigPath(projectRoot: string): Promise<string> {
-  const configPath = ts.findConfigFile(
-    projectRoot,
-    ts.sys.fileExists,
-    "tsconfig.json",
-  );
-  if (!configPath) {
-    throw new Error(`Cannot find tsconfig.json in ${projectRoot}`);
-  }
-
-  return configPath;
-}
-
-async function hashTsConfig(configPath: string): Promise<string> {
-  return hashContent(await fs.promises.readFile(configPath, "utf-8"));
-}
-
-async function hashExternalInputs(filePaths: string[]): Promise<string> {
-  const entries = await Promise.all(
-    [...filePaths]
-      .sort((left, right) => left.localeCompare(right))
-      .map(async (filePath) => ({
-        filePath,
-        hash: hashContent(await fs.promises.readFile(filePath, "utf-8")),
-      })),
-  );
-  return hashJson(entries);
-}
-
 async function readChunkPlan(projectCacheDir: string, resolveKey: string) {
   const resolveMetadataPath = path.join(
     projectCacheDir,
@@ -452,162 +337,4 @@ async function readChunkPlan(projectCacheDir: string, resolveKey: string) {
   }
 
   return metadata.chunkPlan;
-}
-
-export function getPackageRoot() {
-  return getPackageRootFromBundle();
-}
-
-async function readRuntimeSignature(packageRoot: string) {
-  try {
-    const stat = await fs.promises.stat(
-      path.join(packageRoot, "dist", "index.mjs"),
-    );
-    return JSON.stringify({
-      mtimeMs: stat.mtimeMs,
-      size: stat.size,
-    });
-  } catch {
-    return "";
-  }
-}
-
-async function readNativeSignature(packageRoot: string) {
-  try {
-    const stat = await fs.promises.stat(
-      path.join(packageRoot, "native", "index.node"),
-    );
-    return JSON.stringify({
-      mtimeMs: stat.mtimeMs,
-      size: stat.size,
-    });
-  } catch {
-    return "";
-  }
-}
-
-const packageSignaturePromises = new Map<string, Promise<string>>();
-
-export async function getPackageSignature(packageRoot = getPackageRoot()) {
-  let packageSignaturePromise = packageSignaturePromises.get(packageRoot);
-  if (!packageSignaturePromise) {
-    packageSignaturePromise = (async () => {
-      const packageJsonStat = await fs.promises.stat(
-        path.join(packageRoot, "package.json"),
-      );
-      const runtimeSignature = await readRuntimeSignature(packageRoot);
-      const nativeSignature = await readNativeSignature(packageRoot);
-      return hashContent(
-        JSON.stringify({
-          nativeSignature,
-          packageJson: {
-            mtimeMs: packageJsonStat.mtimeMs,
-            size: packageJsonStat.size,
-          },
-          runtimeSignature,
-        }),
-      );
-    })();
-    packageSignaturePromises.set(packageRoot, packageSignaturePromise);
-  }
-
-  return packageSignaturePromise;
-}
-
-export function getOptionsSignature(options: NormalizedBuildOptions) {
-  return hashJson({
-    compilationLevel: options.compilationLevel,
-    chunks: options.chunks,
-    diagnostics: options.diagnostics,
-    entries: options.entries.map((entry) =>
-      path.relative(options.srcDir, entry),
-    ),
-    externs: [...options.externs].sort(),
-    js: [...options.js].sort(),
-    languageOut: options.languageOut,
-    outDir: options.outDir,
-    outputNames: [...options.outputNames],
-    packages: options.packages,
-    projectRoot: options.projectRoot,
-    srcDir: options.srcDir,
-  });
-}
-
-export function normalizeBuildOptions(
-  options: BuildOptions,
-): NormalizedBuildOptions {
-  const projectRoot = path.resolve(options.projectRoot ?? process.cwd());
-  const srcDir = path.resolve(
-    projectRoot,
-    options.srcDir ?? (DEFAULT_BUILD_OPTIONS.srcDir || "src"),
-  );
-  const outDir = path.resolve(
-    projectRoot,
-    options.outDir ?? (DEFAULT_BUILD_OPTIONS.outDir || "dist"),
-  );
-  const chunkPublicPath = normalizeChunkPublicPath(
-    options.chunks?.publicPath ?? DEFAULT_BUILD_OPTIONS.chunks.publicPath,
-  );
-  const chunkManifestFile = path.basename(
-    options.chunks?.manifestFile ?? DEFAULT_BUILD_OPTIONS.chunks.manifestFile,
-  );
-
-  return {
-    cache: {
-      dir: options.cache?.dir
-        ? path.resolve(projectRoot, options.cache.dir)
-        : DEFAULT_BUILD_OPTIONS.cache.dir,
-      mode: options.cache?.mode ?? DEFAULT_BUILD_OPTIONS.cache.mode,
-    },
-    chunks: {
-      baseChunkName:
-        options.chunks?.baseChunkName ??
-        DEFAULT_BUILD_OPTIONS.chunks.baseChunkName,
-      loader: options.chunks?.loader ?? DEFAULT_BUILD_OPTIONS.chunks.loader,
-      manifestFile: chunkManifestFile,
-      mode: options.chunks?.mode ?? DEFAULT_BUILD_OPTIONS.chunks.mode,
-      publicPath: chunkPublicPath,
-    },
-    compilationLevel:
-      options.compilationLevel ?? DEFAULT_BUILD_OPTIONS.compilationLevel,
-    diagnostics: {
-      fatalWarnings:
-        options.diagnostics?.fatalWarnings ??
-        DEFAULT_BUILD_OPTIONS.diagnostics.fatalWarnings,
-      preflight:
-        options.diagnostics?.preflight ??
-        DEFAULT_BUILD_OPTIONS.diagnostics.preflight,
-      verbose:
-        options.diagnostics?.verbose ??
-        DEFAULT_BUILD_OPTIONS.diagnostics.verbose,
-    },
-    entries: options.entries.map((entry) =>
-      path.isAbsolute(entry) ? entry : path.resolve(srcDir, entry),
-    ),
-    externs: [...(options.externs ?? [])].map((filePath) =>
-      path.isAbsolute(filePath)
-        ? filePath
-        : path.resolve(projectRoot, filePath),
-    ),
-    js: [...(options.js ?? [])].map((filePath) =>
-      path.isAbsolute(filePath)
-        ? filePath
-        : path.resolve(projectRoot, filePath),
-    ),
-    languageOut: options.languageOut ?? DEFAULT_BUILD_OPTIONS.languageOut,
-    outDir,
-    outputNames: [...(options.outputNames ?? [])],
-    packages: {
-      mode: options.packages?.mode ?? DEFAULT_BUILD_OPTIONS.packages.mode,
-    },
-    projectRoot,
-    srcDir,
-  };
-}
-
-function normalizeChunkPublicPath(publicPath: string) {
-  if (publicPath.length === 0) {
-    return "./";
-  }
-  return publicPath.endsWith("/") ? publicPath : `${publicPath}/`;
 }

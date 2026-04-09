@@ -9,6 +9,7 @@ mod pathing;
 mod shims;
 mod support_files;
 mod transpile;
+mod utils;
 
 use napi::{Error, Result};
 use napi_derive::napi;
