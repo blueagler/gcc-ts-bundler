@@ -136,6 +136,12 @@ pub(super) fn prepare_bundler_runtime_jobs(
         None,
     )?;
     effective_externs = unique_paths(effective_externs);
+    let property_renaming_report_path = (input.compilationLevel == "ADVANCED").then(|| {
+        raw_dir
+            .join("property-renaming-report.txt")
+            .to_string_lossy()
+            .to_string()
+    });
 
     if !input.manifestFile.is_empty() {
         let manifest_path = PathBuf::from(&input.outDir).join(&input.manifestFile);
@@ -269,6 +275,7 @@ pub(super) fn prepare_bundler_runtime_jobs(
         jsOutputFile: None,
         languageIn: "UNSTABLE".to_string(),
         languageOut: input.languageOut.clone(),
+        propertyRenamingReportPath: property_renaming_report_path.clone(),
         rewritePolyfills: false,
         warningLevel: warning_level.to_string(),
     });
@@ -284,8 +291,13 @@ pub(super) fn prepare_bundler_runtime_jobs(
         let final_output_path = PathBuf::from(&input.outDir).join(final_chunk_file_name);
         postprocess_actions.push(PostprocessAction {
             inputPath: output_path.to_string_lossy().to_string(),
-            kind: "copy".to_string(),
+            kind: if property_renaming_report_path.is_some() {
+                "rewrite-decorator-metadata".to_string()
+            } else {
+                "copy".to_string()
+            },
             outputPath: final_output_path.to_string_lossy().to_string(),
+            propertyRenamingReportPath: property_renaming_report_path.clone(),
         });
         published_outputs.push(final_output_path.to_string_lossy().to_string());
     }
@@ -326,6 +338,12 @@ pub(super) fn prepare_off_mode_jobs(
         Some(&input.nativeExternPath),
         None,
     )?;
+    let property_renaming_report_path = (input.compilationLevel == "ADVANCED").then(|| {
+        raw_dir
+            .join("property-renaming-report.txt")
+            .to_string_lossy()
+            .to_string()
+    });
 
     let compile_jobs = if resolved_chunks.len() == 1 {
         let entry_chunk = resolved_chunks
@@ -358,6 +376,7 @@ pub(super) fn prepare_off_mode_jobs(
             ),
             languageIn: "UNSTABLE".to_string(),
             languageOut: input.languageOut.clone(),
+            propertyRenamingReportPath: property_renaming_report_path.clone(),
             rewritePolyfills: false,
             warningLevel: warning_level.to_string(),
         }]
@@ -420,6 +439,7 @@ pub(super) fn prepare_off_mode_jobs(
             jsOutputFile: None,
             languageIn: "UNSTABLE".to_string(),
             languageOut: input.languageOut.clone(),
+            propertyRenamingReportPath: property_renaming_report_path.clone(),
             rewritePolyfills: false,
             warningLevel: warning_level.to_string(),
         }]
@@ -432,11 +452,16 @@ pub(super) fn prepare_off_mode_jobs(
                 .join(format!("{}.js", chunk.name))
                 .to_string_lossy()
                 .to_string(),
-            kind: "rewrite-gcc-exports".to_string(),
+            kind: if property_renaming_report_path.is_some() {
+                "rewrite-gcc-exports-and-decorator-metadata".to_string()
+            } else {
+                "rewrite-gcc-exports".to_string()
+            },
             outputPath: PathBuf::from(&input.outDir)
                 .join(format!("{}.js", chunk.name))
                 .to_string_lossy()
                 .to_string(),
+            propertyRenamingReportPath: property_renaming_report_path.clone(),
         })
         .collect::<Vec<_>>();
     let published_outputs = postprocess_actions

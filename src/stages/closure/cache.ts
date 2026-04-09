@@ -6,11 +6,11 @@ import { readJsonIfExists, writeJson } from "../../cache/store";
 import { ensureDirectory, hashFilesInOrder } from "../../internal/files";
 
 export interface ClosureJobCacheMetadata {
-  outputFiles: string[];
+  artifactFiles: string[];
   version: number;
 }
 
-export const CLOSURE_JOB_CACHE_VERSION = 1;
+export const CLOSURE_JOB_CACHE_VERSION = 2;
 
 export function getCompileJobOutputFiles(job: {
   chunkOutputPathPrefix?: string | null;
@@ -28,11 +28,24 @@ export function getCompileJobOutputFiles(job: {
   throw new Error("Closure compile job is missing output configuration.");
 }
 
+export function getCompileJobArtifactFiles(job: {
+  chunkOutputPathPrefix?: string | null;
+  chunk?: string[] | null;
+  jsOutputFile?: string | null;
+  propertyRenamingReportPath?: string | null;
+}) {
+  const artifacts = getCompileJobOutputFiles(job);
+  if (job.propertyRenamingReportPath) {
+    artifacts.push(job.propertyRenamingReportPath);
+  }
+  return artifacts;
+}
+
 export async function tryRestoreCachedClosureJob({
   cacheDir,
   compilerVersion,
   job,
-  outputFiles,
+  artifactFiles,
 }: {
   cacheDir: string;
   compilerVersion: string;
@@ -47,10 +60,11 @@ export async function tryRestoreCachedClosureJob({
     jsOutputFile?: string | null;
     languageIn: string;
     languageOut: string;
+    propertyRenamingReportPath?: string | null;
     rewritePolyfills: boolean;
     warningLevel: string;
   };
-  outputFiles: string[];
+  artifactFiles: string[];
 }) {
   const jobCacheDir = await getClosureJobCacheDir(
     cacheDir,
@@ -63,12 +77,12 @@ export async function tryRestoreCachedClosureJob({
   if (
     !metadata ||
     metadata.version !== CLOSURE_JOB_CACHE_VERSION ||
-    metadata.outputFiles.length !== outputFiles.length
+    metadata.artifactFiles.length !== artifactFiles.length
   ) {
     return false;
   }
 
-  const cachedFiles = metadata.outputFiles.map((fileName) =>
+  const cachedFiles = metadata.artifactFiles.map((fileName) =>
     path.join(jobCacheDir, fileName),
   );
   const filesReady = await Promise.all(
@@ -84,9 +98,9 @@ export async function tryRestoreCachedClosureJob({
   }
 
   await Promise.all(
-    outputFiles.map(async (outputFile, index) => {
-      await ensureDirectory(path.dirname(outputFile));
-      await fs.copyFile(cachedFiles[index], outputFile);
+    artifactFiles.map(async (artifactFile, index) => {
+      await ensureDirectory(path.dirname(artifactFile));
+      await fs.copyFile(cachedFiles[index], artifactFile);
     }),
   );
   return true;
@@ -96,7 +110,7 @@ export async function persistCachedClosureJob({
   cacheDir,
   compilerVersion,
   job,
-  outputFiles,
+  artifactFiles,
 }: {
   cacheDir: string;
   job: {
@@ -110,10 +124,11 @@ export async function persistCachedClosureJob({
     jsOutputFile?: string | null;
     languageIn: string;
     languageOut: string;
+    propertyRenamingReportPath?: string | null;
     rewritePolyfills: boolean;
     warningLevel: string;
   };
-  outputFiles: string[];
+  artifactFiles: string[];
   compilerVersion: string;
 }) {
   const jobCacheDir = await getClosureJobCacheDir(
@@ -123,16 +138,16 @@ export async function persistCachedClosureJob({
   );
   await fs.rm(jobCacheDir, { force: true, recursive: true });
   await ensureDirectory(jobCacheDir);
-  const outputNames = outputFiles.map((outputFile) =>
-    path.basename(outputFile),
+  const artifactNames = artifactFiles.map((artifactFile) =>
+    path.basename(artifactFile),
   );
   await Promise.all(
-    outputFiles.map((outputFile, index) =>
-      fs.copyFile(outputFile, path.join(jobCacheDir, outputNames[index])),
+    artifactFiles.map((artifactFile, index) =>
+      fs.copyFile(artifactFile, path.join(jobCacheDir, artifactNames[index])),
     ),
   );
   await writeJson(path.join(jobCacheDir, "meta.json"), {
-    outputFiles: outputNames,
+    artifactFiles: artifactNames,
     version: CLOSURE_JOB_CACHE_VERSION,
   } satisfies ClosureJobCacheMetadata);
 }
@@ -150,6 +165,7 @@ async function getClosureJobCacheDir(
     jsOutputFile?: string | null;
     languageIn: string;
     languageOut: string;
+    propertyRenamingReportPath?: string | null;
     rewritePolyfills: boolean;
     warningLevel: string;
   },
@@ -167,6 +183,7 @@ async function getClosureJobCacheDir(
       compilationLevel: job.compilationLevel,
       dependencyMode: job.dependencyMode ?? null,
       entryPoint: job.entryPoint ?? null,
+      hasPropertyRenamingReport: Boolean(job.propertyRenamingReportPath),
       jsOutputKinds: outputFiles.map((outputFile) => path.basename(outputFile)),
       languageIn: job.languageIn,
       languageOut: job.languageOut,

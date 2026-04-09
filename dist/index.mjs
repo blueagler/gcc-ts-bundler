@@ -131,34 +131,8 @@ function resolveAliasedSymbol(symbol, checker) {
   }
   return symbol.flags & ts2.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
 }
-function resolveNominalInstanceTarget(symbol, registry) {
-  const contract = registry.classContracts.get(symbol);
-  if (!contract) {
-    return null;
-  }
-  return isAmbientGlobalSymbol(symbol) ? contract.name : null;
-}
-function resolveNominalStaticTarget(symbol, registry) {
-  const contract = registry.classContracts.get(symbol);
-  if (!contract) {
-    return null;
-  }
-  return isAmbientGlobalSymbol(symbol) ? contract.name : null;
-}
-function isAmbientGlobalSymbol(symbol) {
-  return (symbol.declarations ?? []).some((declaration) => {
-    const sourceFile = declaration.getSourceFile();
-    return !ts2.isExternalModule(sourceFile);
-  });
-}
 function renderStructuralExternLine(name) {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? `Object.prototype.${name};` : `Object.prototype[${JSON.stringify(name)}];`;
-}
-function renderNominalInstanceExternLine(target, name) {
-  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? `${target}.prototype.${name};` : `${target}.prototype[${JSON.stringify(name)}];`;
-}
-function renderNominalStaticExternLine(target, name) {
-  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? `${target}.${name};` : `${target}[${JSON.stringify(name)}];`;
 }
 function addMapSetValue(map, key, value) {
   const current = map.get(key);
@@ -612,18 +586,6 @@ function collectBoundaryAwareExternLines({
   for (const member of usage.structuralMembers) {
     emittedLines.add(renderStructuralExternLine(member));
   }
-  for (const [symbol, members] of usage.nominalInstanceMembers) {
-    const nominalTarget = resolveNominalInstanceTarget(symbol, registry);
-    for (const member of members) {
-      emittedLines.add(nominalTarget ? renderNominalInstanceExternLine(nominalTarget, member) : renderStructuralExternLine(member));
-    }
-  }
-  for (const [symbol, members] of usage.nominalStaticMembers) {
-    const nominalTarget = resolveNominalStaticTarget(symbol, registry);
-    for (const member of members) {
-      emittedLines.add(nominalTarget ? renderNominalStaticExternLine(nominalTarget, member) : renderStructuralExternLine(member));
-    }
-  }
   return emittedLines;
 }
 function analyzeAppUsage({
@@ -689,9 +651,6 @@ function analyzeNewExpression(node, checker, registry, usage, importBindings, lo
   const classContract = registry.classContracts.get(calleeSymbol);
   if (!classContract) {
     return;
-  }
-  for (const symbol of classContract.usedImplementedContracts) {
-    usage.structuralContracts.add(symbol);
   }
   for (const [
     index,
@@ -1485,6 +1444,9 @@ function planChunks(input) {
 }
 function rewriteGccExports(code) {
   return loadBinding().rewriteGccExports(code);
+}
+function rewriteDecoratorMetadata(code, propertyRenamingReport) {
+  return loadBinding().rewriteDecoratorMetadata(code, propertyRenamingReport);
 }
 function transpileSources(input) {
   return loadBinding().transpileSources(input.fileNames, input.outDir, input.externsPath, input.metadataPath, input.chunkMode, input.workspaceDir, input.packageAliases ?? [], input.packageJsonFiles ?? [], input.lazyImports ?? []);
@@ -2830,25 +2792,32 @@ function getCompileJobOutputFiles(job) {
   }
   throw new Error("Closure compile job is missing output configuration.");
 }
+function getCompileJobArtifactFiles(job) {
+  const artifacts = getCompileJobOutputFiles(job);
+  if (job.propertyRenamingReportPath) {
+    artifacts.push(job.propertyRenamingReportPath);
+  }
+  return artifacts;
+}
 async function tryRestoreCachedClosureJob({
   cacheDir,
   compilerVersion,
   job,
-  outputFiles
+  artifactFiles
 }) {
   const jobCacheDir = await getClosureJobCacheDir(cacheDir, job, compilerVersion);
   const metadata = await readJsonIfExists(path17.join(jobCacheDir, "meta.json"));
-  if (!metadata || metadata.version !== CLOSURE_JOB_CACHE_VERSION || metadata.outputFiles.length !== outputFiles.length) {
+  if (!metadata || metadata.version !== CLOSURE_JOB_CACHE_VERSION || metadata.artifactFiles.length !== artifactFiles.length) {
     return false;
   }
-  const cachedFiles = metadata.outputFiles.map((fileName) => path17.join(jobCacheDir, fileName));
+  const cachedFiles = metadata.artifactFiles.map((fileName) => path17.join(jobCacheDir, fileName));
   const filesReady = await Promise.all(cachedFiles.map((filePath) => fs12.stat(filePath).then(() => true).catch(() => false)));
   if (filesReady.some((ready) => !ready)) {
     return false;
   }
-  await Promise.all(outputFiles.map(async (outputFile, index) => {
-    await ensureDirectory(path17.dirname(outputFile));
-    await fs12.copyFile(cachedFiles[index], outputFile);
+  await Promise.all(artifactFiles.map(async (artifactFile, index) => {
+    await ensureDirectory(path17.dirname(artifactFile));
+    await fs12.copyFile(cachedFiles[index], artifactFile);
   }));
   return true;
 }
@@ -2856,15 +2825,15 @@ async function persistCachedClosureJob({
   cacheDir,
   compilerVersion,
   job,
-  outputFiles
+  artifactFiles
 }) {
   const jobCacheDir = await getClosureJobCacheDir(cacheDir, job, compilerVersion);
   await fs12.rm(jobCacheDir, { force: true, recursive: true });
   await ensureDirectory(jobCacheDir);
-  const outputNames = outputFiles.map((outputFile) => path17.basename(outputFile));
-  await Promise.all(outputFiles.map((outputFile, index) => fs12.copyFile(outputFile, path17.join(jobCacheDir, outputNames[index]))));
+  const artifactNames = artifactFiles.map((artifactFile) => path17.basename(artifactFile));
+  await Promise.all(artifactFiles.map((artifactFile, index) => fs12.copyFile(artifactFile, path17.join(jobCacheDir, artifactNames[index]))));
   await writeJson(path17.join(jobCacheDir, "meta.json"), {
-    outputFiles: outputNames,
+    artifactFiles: artifactNames,
     version: CLOSURE_JOB_CACHE_VERSION
   });
 }
@@ -2881,6 +2850,7 @@ async function getClosureJobCacheDir(cacheDir, job, compilerVersion) {
       compilationLevel: job.compilationLevel,
       dependencyMode: job.dependencyMode ?? null,
       entryPoint: job.entryPoint ?? null,
+      hasPropertyRenamingReport: Boolean(job.propertyRenamingReportPath),
       jsOutputKinds: outputFiles.map((outputFile) => path17.basename(outputFile)),
       languageIn: job.languageIn,
       languageOut: job.languageOut,
@@ -2892,7 +2862,7 @@ async function getClosureJobCacheDir(cacheDir, job, compilerVersion) {
   });
   return path17.join(cacheDir, cacheKey);
 }
-var CLOSURE_JOB_CACHE_VERSION = 1;
+var CLOSURE_JOB_CACHE_VERSION = 2;
 var init_cache2 = __esm(() => {
   init_hash();
   init_store();
@@ -2989,14 +2959,22 @@ async function runClosureStage({
   if (failedExitCode !== undefined) {
     return { cacheOutputFiles: [], exitCode: failedExitCode, outputFiles: [] };
   }
+  const propertyRenamingReports = new Map;
   await Promise.all(prepared.postprocessActions.map(async (action) => {
     await ensureParentDirectory(action.outputPath);
-    if (action.kind === "rewrite-gcc-exports") {
-      const contents = await fs13.readFile(action.inputPath, "utf-8");
-      await fs13.writeFile(action.outputPath, rewriteGccExports(contents));
+    const reportText = action.propertyRenamingReportPath ? await readPropertyRenamingReport(action.propertyRenamingReportPath, propertyRenamingReports) : "";
+    if (action.kind === "copy" && !reportText) {
+      await fs13.copyFile(action.inputPath, action.outputPath);
       return;
     }
-    await fs13.copyFile(action.inputPath, action.outputPath);
+    let contents = await fs13.readFile(action.inputPath, "utf-8");
+    if (action.kind === "rewrite-gcc-exports" || action.kind === "rewrite-gcc-exports-and-decorator-metadata") {
+      contents = rewriteGccExports(contents);
+    }
+    if (reportText && (action.kind === "rewrite-decorator-metadata" || action.kind === "rewrite-gcc-exports-and-decorator-metadata")) {
+      contents = rewriteDecoratorMetadata(contents, reportText);
+    }
+    await fs13.writeFile(action.outputPath, contents);
   }));
   await copyOrLinkFiles(prepared.publishedOutputs, cacheOutputDir);
   const cacheOutputFiles = prepared.publishedOutputs.map((outputFile) => path18.join(cacheOutputDir, path18.relative(outDir, outputFile)));
@@ -3010,13 +2988,13 @@ async function runPreparedClosureJob({
   cacheDir,
   job
 }) {
-  const outputFiles = getCompileJobOutputFiles(job);
+  const artifactFiles = getCompileJobArtifactFiles(job);
   const compilerVersion = resolveClosureCompilerVersionTag();
   const cached = cacheDir ? await tryRestoreCachedClosureJob({
+    artifactFiles,
     cacheDir,
     compilerVersion,
-    job,
-    outputFiles
+    job
   }) : false;
   if (cached) {
     return 0;
@@ -3046,6 +3024,9 @@ async function runPreparedClosureJob({
   if (job.jsOutputFile) {
     closureOptions.jsOutputFile = job.jsOutputFile;
   }
+  if (job.propertyRenamingReportPath) {
+    closureOptions.propertyRenamingReport = job.propertyRenamingReportPath;
+  }
   configureClosureCompilerOptions(closureOptions);
   const exitCode = await runClosureCompiler(closureOptions);
   if (exitCode !== 0) {
@@ -3053,13 +3034,21 @@ async function runPreparedClosureJob({
   }
   if (cacheDir) {
     await persistCachedClosureJob({
+      artifactFiles,
       cacheDir,
       compilerVersion,
-      job,
-      outputFiles
+      job
     });
   }
   return 0;
+}
+async function readPropertyRenamingReport(reportPath, cache) {
+  let pending = cache.get(reportPath);
+  if (!pending) {
+    pending = fs13.readFile(reportPath, "utf-8");
+    cache.set(reportPath, pending);
+  }
+  return pending;
 }
 var init_run_closure = __esm(() => {
   init_files();

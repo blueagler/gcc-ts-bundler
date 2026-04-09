@@ -112,7 +112,6 @@ test.serial("emits bundler-runtime chunks for explicit lazy modules", async () =
   expect(baseOutput).not.toContain("unknown module");
   expect(baseOutput).not.toContain("unknown chunk");
   expect(baseOutput).toMatch(/m[0-9a-f]{8}/);
-  expect(baseOutput).toContain("__lazyLoader");
   expect(baseOutput).not.toMatch(/goog\.module/);
   expect(baseOutput).not.toMatch(/ModuleManager/);
   expect(baseOutput).not.toContain('Object.defineProperty(d,"default"');

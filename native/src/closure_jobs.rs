@@ -81,6 +81,7 @@ pub struct ClosureCompileJob {
     pub jsOutputFile: Option<String>,
     pub languageIn: String,
     pub languageOut: String,
+    pub propertyRenamingReportPath: Option<String>,
     pub rewritePolyfills: bool,
     pub warningLevel: String,
 }
@@ -92,6 +93,7 @@ pub struct PostprocessAction {
     pub inputPath: String,
     pub kind: String,
     pub outputPath: String,
+    pub propertyRenamingReportPath: Option<String>,
 }
 
 #[allow(non_snake_case)]

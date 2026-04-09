@@ -15,12 +15,8 @@ import {
   isExternPropertyName,
   isProjectAppSourceFile,
   isScannedDeclarationSymbol,
-  renderNominalInstanceExternLine,
-  renderNominalStaticExternLine,
   renderStructuralExternLine,
   resolveAliasedSymbol,
-  resolveNominalInstanceTarget,
-  resolveNominalStaticTarget,
   resolveTypeSymbol,
   resolveValueSymbol,
   symbolCacheKey,
@@ -198,26 +194,6 @@ export function collectBoundaryAwareExternLines({
   for (const member of usage.structuralMembers) {
     emittedLines.add(renderStructuralExternLine(member));
   }
-  for (const [symbol, members] of usage.nominalInstanceMembers) {
-    const nominalTarget = resolveNominalInstanceTarget(symbol, registry);
-    for (const member of members) {
-      emittedLines.add(
-        nominalTarget
-          ? renderNominalInstanceExternLine(nominalTarget, member)
-          : renderStructuralExternLine(member),
-      );
-    }
-  }
-  for (const [symbol, members] of usage.nominalStaticMembers) {
-    const nominalTarget = resolveNominalStaticTarget(symbol, registry);
-    for (const member of members) {
-      emittedLines.add(
-        nominalTarget
-          ? renderNominalStaticExternLine(nominalTarget, member)
-          : renderStructuralExternLine(member),
-      );
-    }
-  }
 
   return emittedLines;
 }
@@ -365,10 +341,6 @@ function analyzeNewExpression(
   const classContract = registry.classContracts.get(calleeSymbol);
   if (!classContract) {
     return;
-  }
-
-  for (const symbol of classContract.usedImplementedContracts) {
-    usage.structuralContracts.add(symbol);
   }
 
   for (const [

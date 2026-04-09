@@ -1,5 +1,25 @@
 use super::*;
 
+const HARD_PLATFORM_CALLBACK_PROPERTY_NAMES: &[&str] = &[
+    "adoptedCallback",
+    "attributeChangedCallback",
+    "connectedCallback",
+    "disconnectedCallback",
+    "formAssociatedCallback",
+    "formDisabledCallback",
+    "formResetCallback",
+    "formStateRestoreCallback",
+];
+const HARD_STATIC_INTEROP_PROPERTY_NAMES: &[&str] = &["formAssociated", "observedAttributes"];
+
+fn is_hard_platform_callback_name(name: &str) -> bool {
+    HARD_PLATFORM_CALLBACK_PROPERTY_NAMES.contains(&name)
+}
+
+fn is_hard_static_interop_name(name: &str) -> bool {
+    HARD_STATIC_INTEROP_PROPERTY_NAMES.contains(&name)
+}
+
 #[cfg(test)]
 pub(super) fn render_externs(
     export_names: &BTreeSet<String>,
@@ -78,7 +98,19 @@ pub(super) fn collect_static_property_names(
     Ok(names)
 }
 
-pub(super) fn collect_instance_method_names(
+pub(super) fn collect_preserved_property_names(
+    file_names: &[String],
+    global_property_names: &HashSet<String>,
+    static_property_names: &HashSet<String>,
+) -> std::result::Result<HashSet<String>, String> {
+    let mut names = global_property_names.clone();
+    names.extend(static_property_names.iter().cloned());
+    names.extend(collect_platform_callback_property_names(file_names)?);
+    names.extend(collect_reflective_property_names(file_names)?);
+    Ok(names)
+}
+
+fn collect_platform_callback_property_names(
     file_names: &[String],
 ) -> std::result::Result<HashSet<String>, String> {
     let mut names = HashSet::new();
@@ -87,11 +119,27 @@ pub(super) fn collect_instance_method_names(
             continue;
         }
         let file_path = PathBuf::from(file_name);
-        if let Ok(module) = get_or_parse_cached_module(&file_path) {
-            let mut collector = InstanceMethodNameCollector::default();
-            module.visit_with(&mut collector);
-            names.extend(collector.names);
+        let module = get_or_parse_cached_module(&file_path)?;
+        let mut collector = PlatformCallbackNameCollector::default();
+        module.visit_with(&mut collector);
+        names.extend(collector.names);
+    }
+    Ok(names)
+}
+
+fn collect_reflective_property_names(
+    file_names: &[String],
+) -> std::result::Result<HashSet<String>, String> {
+    let mut names = HashSet::new();
+    for file_name in file_names {
+        if file_name.ends_with(".d.ts") {
+            continue;
         }
+        let file_path = PathBuf::from(file_name);
+        let module = get_or_parse_cached_module(&file_path)?;
+        let mut collector = ReflectivePropertyNameCollector::default();
+        module.visit_with(&mut collector);
+        names.extend(collector.names);
     }
     Ok(names)
 }
@@ -99,12 +147,19 @@ pub(super) fn collect_instance_method_names(
 pub(super) fn collect_static_property_names_from_text(source_text: &str) -> HashSet<String> {
     let mut names = HashSet::new();
     for (_, property_name) in collect_class_static_assignments(source_text) {
-        names.insert(property_name);
+        if is_hard_static_interop_name(&property_name) {
+            names.insert(property_name);
+        }
     }
-    if let Ok(regex) = regex::Regex::new(r"\bstatic\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:=|\()") {
+    if let Ok(regex) =
+        regex::Regex::new(r"\bstatic\s+(?:get\s+|set\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:=|\()")
+    {
         for captures in regex.captures_iter(source_text) {
             if let Some(capture) = captures.get(1) {
-                names.insert(capture.as_str().to_string());
+                let property_name = capture.as_str();
+                if is_hard_static_interop_name(property_name) {
+                    names.insert(property_name.to_string());
+                }
             }
         }
     }
@@ -136,7 +191,9 @@ impl StaticPropertyNameCollector {
 
     fn insert_prop_name(&mut self, prop_name: Option<String>) {
         if let Some(prop_name) = prop_name {
-            self.names.insert(prop_name);
+            if is_hard_static_interop_name(&prop_name) {
+                self.names.insert(prop_name);
+            }
         }
     }
 }
@@ -204,29 +261,133 @@ impl Visit for StaticPropertyNameCollector {
 }
 
 #[derive(Default)]
-struct InstanceMethodNameCollector {
+struct PlatformCallbackNameCollector {
     names: HashSet<String>,
 }
 
-impl InstanceMethodNameCollector {
+impl PlatformCallbackNameCollector {
     fn insert_prop_name(&mut self, prop_name: Option<String>) {
         if let Some(prop_name) = prop_name {
-            self.names.insert(prop_name);
+            if is_hard_platform_callback_name(&prop_name) {
+                self.names.insert(prop_name);
+            }
         }
     }
 }
 
-impl Visit for InstanceMethodNameCollector {
+impl Visit for PlatformCallbackNameCollector {
     fn visit_class_member(&mut self, member: &swc_core::ecma::ast::ClassMember) {
         match member {
             swc_core::ecma::ast::ClassMember::Method(method) => {
-                if !method.is_static {
-                    self.insert_prop_name(prop_name_to_string(&method.key));
-                }
+                self.insert_prop_name(prop_name_to_string(&method.key));
                 method.visit_children_with(self);
+            }
+            swc_core::ecma::ast::ClassMember::ClassProp(prop) => {
+                self.insert_prop_name(prop_name_to_string(&prop.key));
+                prop.visit_children_with(self);
             }
             _ => member.visit_children_with(self),
         }
+    }
+
+    fn visit_member_expr(&mut self, member_expr: &MemberExpr) {
+        self.insert_prop_name(member_prop_name(&member_expr.prop));
+        member_expr.visit_children_with(self);
+    }
+
+    fn visit_super_prop_expr(&mut self, super_prop: &SuperPropExpr) {
+        match &super_prop.prop {
+            SuperProp::Ident(ident) => {
+                self.insert_prop_name(Some(ident.sym.to_string()));
+            }
+            SuperProp::Computed(computed) => {
+                if let Expr::Lit(swc_core::ecma::ast::Lit::Str(value)) = &*computed.expr {
+                    self.insert_prop_name(Some(value.value.to_string_lossy().to_string()));
+                }
+            }
+        }
+        super_prop.visit_children_with(self);
+    }
+}
+
+#[derive(Default)]
+struct ReflectivePropertyNameCollector {
+    names: HashSet<String>,
+}
+
+impl ReflectivePropertyNameCollector {
+    fn insert(&mut self, property_name: &str) {
+        if is_valid_js_identifier(property_name) {
+            self.names.insert(property_name.to_string());
+        }
+    }
+}
+
+impl Visit for ReflectivePropertyNameCollector {
+    fn visit_member_expr(&mut self, member_expr: &MemberExpr) {
+        if let MemberProp::Computed(computed) = &member_expr.prop {
+            if let Expr::Lit(swc_core::ecma::ast::Lit::Str(value)) = &*computed.expr {
+                self.insert(&value.value.to_string_lossy());
+            }
+        }
+        member_expr.visit_children_with(self);
+    }
+
+    fn visit_prop_name(&mut self, prop_name: &PropName) {
+        if let PropName::Str(value) = prop_name {
+            self.insert(&value.value.to_string_lossy());
+        }
+        prop_name.visit_children_with(self);
+    }
+
+    fn visit_bin_expr(&mut self, bin_expr: &BinExpr) {
+        if bin_expr.op == swc_core::ecma::ast::BinaryOp::In {
+            if let Expr::Lit(swc_core::ecma::ast::Lit::Str(value)) = &*bin_expr.left {
+                self.insert(&value.value.to_string_lossy());
+            }
+        }
+        bin_expr.visit_children_with(self);
+    }
+
+    fn visit_call_expr(&mut self, call_expr: &CallExpr) {
+        match &call_expr.callee {
+            Callee::Expr(callee_expr) => match &**callee_expr {
+                Expr::Ident(ident) if ident.sym == *"JSCompiler_renameProperty" => {
+                    if let Some(ExprOrSpread { expr, .. }) = call_expr.args.first() {
+                        if let Expr::Lit(swc_core::ecma::ast::Lit::Str(value)) = &**expr {
+                            self.insert(&value.value.to_string_lossy());
+                        }
+                    }
+                }
+                Expr::Member(member) => {
+                    let method_name = member_prop_name(&member.prop);
+                    let object_name = match &*member.obj {
+                        Expr::Ident(ident) => Some(ident.sym.as_ref()),
+                        _ => None,
+                    };
+                    let string_arg_index = match (object_name, method_name.as_deref()) {
+                        (Some("Object"), Some("defineProperty")) => Some(1usize),
+                        (Some("Object"), Some("hasOwn")) => Some(1usize),
+                        (Some("Reflect"), Some("defineProperty")) => Some(1usize),
+                        (Some("Reflect"), Some("deleteProperty")) => Some(1usize),
+                        (Some("Reflect"), Some("get")) => Some(1usize),
+                        (Some("Reflect"), Some("has")) => Some(1usize),
+                        (Some("Reflect"), Some("set")) => Some(1usize),
+                        _ => None,
+                    };
+                    if let Some(index) = string_arg_index {
+                        if let Some(ExprOrSpread { expr, .. }) = call_expr.args.get(index) {
+                            if let Expr::Lit(swc_core::ecma::ast::Lit::Str(value)) = &**expr {
+                                self.insert(&value.value.to_string_lossy());
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        call_expr.visit_children_with(self);
     }
 }
 

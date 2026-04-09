@@ -24,6 +24,9 @@ pub(crate) fn apply_js_compat_text_fixes(source_text: String) -> String {
     }
 
     for (class_name, property_name, initializer) in collect_static_fallbacks(&source_text) {
+        if !is_hard_static_interop_name(&property_name) {
+            continue;
+        }
         let constructor_pattern = format!(
             r"\b([A-Za-z_$][A-Za-z0-9_$]*|this)\s*\.\s*constructor\s*\.\s*{}\b",
             regex::escape(&property_name)
@@ -58,6 +61,9 @@ pub(crate) fn apply_js_compat_text_fixes(source_text: String) -> String {
     }
 
     for (class_name, property_name) in collect_class_static_assignments(&source_text) {
+        if !is_hard_static_interop_name(&property_name) {
+            continue;
+        }
         let this_pattern = format!(r"\bthis\s*\.\s*{}\b", regex::escape(&property_name));
         if let Ok(regex) = regex::Regex::new(&this_pattern) {
             source_text = regex
@@ -274,13 +280,27 @@ pub(super) fn collect_global_this_property_names(source_text: &str) -> HashSet<S
 }
 
 pub(super) fn is_global_protocol_name(name: &str) -> bool {
-    name.len() >= 8 || name.chars().any(|character| character.is_ascii_uppercase())
+    matches!(
+        name,
+        "litElementHydrateSupport"
+            | "litElementPolyfillSupport"
+            | "litElementVersions"
+            | "litHtmlPolyfillSupport"
+            | "litHtmlVersions"
+            | "litPropertyMetadata"
+            | "reactiveElementPolyfillSupport"
+            | "reactiveElementVersions"
+    )
 }
 
 pub(crate) fn collect_global_property_names(
     file_names: &[String],
 ) -> std::result::Result<HashSet<String>, String> {
     collect_names_from_files(file_names, collect_global_this_property_names)
+}
+
+fn is_hard_static_interop_name(name: &str) -> bool {
+    matches!(name, "formAssociated" | "observedAttributes")
 }
 
 pub(super) fn collect_static_fallbacks(source_text: &str) -> Vec<(String, String, String)> {

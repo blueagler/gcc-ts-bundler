@@ -43,6 +43,7 @@ interface NativeClosureCompileJob {
   jsOutputFile?: string;
   languageIn: string;
   languageOut: string;
+  propertyRenamingReportPath?: string;
   rewritePolyfills: boolean;
   warningLevel: string;
 }
@@ -54,8 +55,13 @@ interface NativeGeneratedAsset {
 
 interface NativePostprocessAction {
   inputPath: string;
-  kind: "copy" | "rewrite-gcc-exports";
+  kind:
+    | "copy"
+    | "rewrite-decorator-metadata"
+    | "rewrite-gcc-exports"
+    | "rewrite-gcc-exports-and-decorator-metadata";
   outputPath: string;
+  propertyRenamingReportPath?: string;
 }
 
 interface NativePrepareClosureJobsInput {
@@ -176,6 +182,10 @@ interface NativeBinding {
     workspaceDir: string,
     packageMode: string,
   ): NativeResolveGraphOutput;
+  rewriteDecoratorMetadata(
+    code: string,
+    propertyRenamingReport: string,
+  ): string;
   rewriteGccExports(code: string): string;
   transpileSources(
     fileNames: string[],
@@ -252,6 +262,13 @@ export function planChunks(input: {
 
 export function rewriteGccExports(code: string) {
   return loadBinding().rewriteGccExports(code);
+}
+
+export function rewriteDecoratorMetadata(
+  code: string,
+  propertyRenamingReport: string,
+) {
+  return loadBinding().rewriteDecoratorMetadata(code, propertyRenamingReport);
 }
 
 export function transpileSources(input: {

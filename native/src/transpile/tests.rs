@@ -21,7 +21,7 @@ fn empty_context() -> super::TranspileContext {
         commonjs_specifiers: HashSet::new(),
         file_metadata: HashMap::new(),
         global_property_names: HashSet::new(),
-        instance_method_names: HashSet::new(),
+        preserved_property_names: HashSet::new(),
         lazy_imports_by_file: HashMap::new(),
         package_aliases: Vec::new(),
         static_property_names: HashSet::new(),
@@ -85,7 +85,7 @@ fn preserves_js_source_verbatim() {
                     commonjs_specifiers: HashSet::new(),
                     file_metadata: HashMap::new(),
                     global_property_names: HashSet::new(),
-                    instance_method_names: HashSet::new(),
+                    preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     package_aliases: vec![super::PackageAliasInput {
                         packageName: "react".to_string(),
@@ -118,7 +118,7 @@ fn preserves_js_source_verbatim() {
 }
 
 #[test]
-fn adds_generic_static_property_fallbacks() {
+fn leaves_non_platform_static_fallbacks_renamable() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -138,7 +138,7 @@ fn adds_generic_static_property_fallbacks() {
                     commonjs_specifiers: HashSet::new(),
                     file_metadata: HashMap::new(),
                     global_property_names: HashSet::new(),
-                    instance_method_names: HashSet::new(),
+                    preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     package_aliases: vec![super::PackageAliasInput {
                         packageName: "react".to_string(),
@@ -167,7 +167,11 @@ fn adds_generic_static_property_fallbacks() {
         .unwrap();
 
     assert!(
-        output.contains("this.constructor[\"enabledWarnings\"].includes(\"x\")"),
+        output.contains("this.constructor.enabledWarnings.includes(\"x\")"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("this.constructor[\"enabledWarnings\"]"),
         "{output}"
     );
 }
@@ -193,7 +197,7 @@ fn rewrites_global_alias_property_accesses_in_js_pass_through() {
                     commonjs_specifiers: HashSet::new(),
                     file_metadata: HashMap::new(),
                     global_property_names: HashSet::new(),
-                    instance_method_names: HashSet::new(),
+                    preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     package_aliases: vec![super::PackageAliasInput {
                         packageName: "react".to_string(),
@@ -228,7 +232,7 @@ fn rewrites_global_alias_property_accesses_in_js_pass_through() {
 }
 
 #[test]
-fn preserves_class_static_property_names_via_bracket_access() {
+fn leaves_non_platform_static_property_names_renamable() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -244,7 +248,8 @@ fn preserves_class_static_property_names_via_bracket_access() {
         })
         .unwrap();
 
-    assert!(output.contains("Demo[\"styles\"] = theme;"), "{output}");
+    assert!(output.contains("Demo.styles = theme;"), "{output}");
+    assert!(!output.contains("Demo[\"styles\"] = theme;"), "{output}");
 }
 
 #[test]
@@ -258,7 +263,7 @@ fn annotates_static_class_members_with_nocollapse() {
         "{transformed}"
     );
     assert!(
-        transformed.contains("/** @nocollapse */\nDemo[\"styles\"] = theme;"),
+        transformed.contains("/** @nocollapse */\nDemo.styles = theme;"),
         "{transformed}"
     );
 }
@@ -266,27 +271,23 @@ fn annotates_static_class_members_with_nocollapse() {
 #[test]
 fn generated_externs_include_global_and_static_protocols() {
     let externs = render_generated_externs(
+        &HashSet::from(["reactiveElementVersions".to_string()]),
         &HashSet::from([
-            "sharedRegistry".to_string(),
-            "reactiveElementVersions".to_string(),
+            "formAssociated".to_string(),
+            "observedAttributes".to_string(),
         ]),
-        &HashSet::from(["finalize".to_string(), "elementProperties".to_string()]),
     );
 
-    assert!(
-        externs.contains("Window.prototype.sharedRegistry;"),
-        "{externs}"
-    );
     assert!(
         externs.contains("Window.prototype.reactiveElementVersions;"),
         "{externs}"
     );
     assert!(
-        externs.contains("Function.prototype.finalize;"),
+        externs.contains("Function.prototype.formAssociated;"),
         "{externs}"
     );
     assert!(
-        externs.contains("Function.prototype.elementProperties;"),
+        externs.contains("Function.prototype.observedAttributes;"),
         "{externs}"
     );
 }
@@ -414,7 +415,7 @@ fn rewrites_commonjs_namespace_imports_in_native_stage() {
             commonjs_specifiers: HashSet::from(["demo-pkg".to_string()]),
             file_metadata: HashMap::new(),
             global_property_names: HashSet::new(),
-            instance_method_names: HashSet::new(),
+            preserved_property_names: HashSet::new(),
             lazy_imports_by_file: HashMap::new(),
             package_aliases: Vec::new(),
             static_property_names: HashSet::new(),
@@ -484,7 +485,7 @@ fn preserves_commonjs_alias_member_reads() {
         commonjs_specifiers: HashSet::new(),
         file_metadata: HashMap::new(),
         global_property_names: HashSet::new(),
-        instance_method_names: HashSet::new(),
+        preserved_property_names: HashSet::new(),
         lazy_imports_by_file: HashMap::new(),
         package_aliases: vec![super::PackageAliasInput {
             packageName: "react".to_string(),
@@ -581,31 +582,33 @@ fn preserves_uppercase_static_member_names_with_bracket_access() {
 }
 
 #[test]
-fn collects_static_property_names_from_assignments_and_fields() {
+fn collects_only_hard_static_interop_names() {
     let names = collect_static_property_names_from_text(
-            "class Demo { static styles = theme; }\nlet Other = class Other {};\nOther.shadowRootOptions = {};\n",
+            "class Demo { static styles = theme; static get observedAttributes() { return []; } static formAssociated = true; }\nlet Other = class Other {};\nOther.shadowRootOptions = {};\n",
         );
 
-    assert!(names.contains("styles"));
-    assert!(names.contains("shadowRootOptions"));
+    assert!(names.contains("observedAttributes"));
+    assert!(names.contains("formAssociated"));
+    assert!(!names.contains("styles"));
+    assert!(!names.contains("shadowRootOptions"));
 }
 
 #[test]
-fn collects_static_property_names_from_static_method_this_access() {
+fn collects_hard_static_interop_names_from_static_method_accesses() {
     let module = parse_module(
             std::path::Path::new("fixture.js"),
-            "class Demo { static finalize() { this.__attributeToPropertyMap = new Map(); this.elementProperties.set('x', 1); } }",
+            "class Demo { static finalize() { return this.observedAttributes && this.formAssociated; } }",
         )
         .expect("module");
     let mut collector = StaticPropertyNameCollector::default();
     module.visit_with(&mut collector);
 
-    assert!(collector.names.contains("__attributeToPropertyMap"));
-    assert!(collector.names.contains("elementProperties"));
+    assert!(collector.names.contains("observedAttributes"));
+    assert!(collector.names.contains("formAssociated"));
 }
 
 #[test]
-fn preserves_constant_like_object_keys_and_member_reads() {
+fn leaves_constant_like_object_keys_and_member_reads_renamable() {
     let source = "const PartType = { ATTRIBUTE: 1, CHILD: 2, ELEMENT: 6 };\nconst alias = PartType;\nexport const value = alias.CHILD + PartType.ELEMENT;\n";
     let transformed = transform_js_pass_through_module(
         parse_module(std::path::Path::new("fixture.js"), source).expect("module"),
@@ -615,21 +618,16 @@ fn preserves_constant_like_object_keys_and_member_reads() {
     )
     .expect("transform");
 
-    assert!(
-        transformed.contains("\"ATTRIBUTE\": 1") || transformed.contains("\"ATTRIBUTE\":1"),
-        "{transformed}"
-    );
-    assert!(transformed.contains("alias[\"CHILD\"]"), "{transformed}");
-    assert!(
-        transformed.contains("PartType[\"ELEMENT\"]"),
-        "{transformed}"
-    );
+    assert!(!transformed.contains("\"ATTRIBUTE\": 1"), "{transformed}");
+    assert!(!transformed.contains("\"ATTRIBUTE\":1"), "{transformed}");
+    assert!(transformed.contains("alias.CHILD"), "{transformed}");
+    assert!(transformed.contains("PartType.ELEMENT"), "{transformed}");
 }
 
 #[test]
-fn preserves_internal_protocol_class_methods_and_calls() {
+fn leaves_non_reflective_lit_style_members_renamable() {
     let source =
-            "class Demo { constructor(){ this.__initialize(); this._$changeProperty(); this.$createRenderRoot$(); } __initialize(){ this.__save(); } __save(){} _$changeProperty(){} $createRenderRoot$(){} }\n";
+            "class Demo { constructor(){ this.hostUpdated(); this.createFinished(); this.calculateKeyframes(); this.createRenderRoot(); this._$AU = 1; this._$AM = 2; void this._$AU + this._$AM; } hostUpdated(){} createFinished(){} calculateKeyframes(){} createRenderRoot(){} }\n";
     let transformed = transform_js_pass_through_module(
         parse_module(std::path::Path::new("fixture.js"), source).expect("module"),
         source.to_string(),
@@ -638,34 +636,31 @@ fn preserves_internal_protocol_class_methods_and_calls() {
     )
     .expect("transform");
 
+    assert!(transformed.contains("this.hostUpdated()"), "{transformed}");
+    assert!(transformed.contains("hostUpdated()"), "{transformed}");
+    assert!(transformed.contains("this.createFinished()"), "{transformed}");
+    assert!(transformed.contains("createFinished()"), "{transformed}");
     assert!(
-        transformed.contains("this[\"__initialize\"]()"),
+        transformed.contains("this.calculateKeyframes()"),
         "{transformed}"
     );
-    assert!(transformed.contains("\"__initialize\"()"), "{transformed}");
-    assert!(transformed.contains("this[\"__save\"]()"), "{transformed}");
-    assert!(transformed.contains("\"__save\"()"), "{transformed}");
-    assert!(
-        transformed.contains("this[\"_$changeProperty\"]()"),
-        "{transformed}"
-    );
-    assert!(
-        transformed.contains("\"_$changeProperty\"()"),
-        "{transformed}"
-    );
-    assert!(
-        transformed.contains("this[\"$createRenderRoot$\"]()"),
-        "{transformed}"
-    );
-    assert!(
-        transformed.contains("\"$createRenderRoot$\"()"),
-        "{transformed}"
-    );
+    assert!(transformed.contains("calculateKeyframes()"), "{transformed}");
+    assert!(transformed.contains("this.createRenderRoot()"), "{transformed}");
+    assert!(transformed.contains("createRenderRoot()"), "{transformed}");
+    assert!(transformed.contains("this._$AU = 1"), "{transformed}");
+    assert!(transformed.contains("this._$AM = 2"), "{transformed}");
+    assert!(transformed.contains("this._$AU + this._$AM"), "{transformed}");
+    assert!(!transformed.contains("[\"hostUpdated\"]"), "{transformed}");
+    assert!(!transformed.contains("[\"createFinished\"]"), "{transformed}");
+    assert!(!transformed.contains("[\"calculateKeyframes\"]"), "{transformed}");
+    assert!(!transformed.contains("[\"createRenderRoot\"]"), "{transformed}");
+    assert!(!transformed.contains("[\"_$AU\"]"), "{transformed}");
+    assert!(!transformed.contains("[\"_$AM\"]"), "{transformed}");
 }
 
 #[test]
-fn rewrites_collected_global_property_reads_to_bracket_access() {
-    let source = "const root = globalThis;\nroot.sharedRegistry = root.sharedRegistry || new WeakMap();\nexport const value = sharedRegistry.get(meta) ?? globalThis.sharedRegistry ?? root.sharedRegistry;\n";
+fn rewrites_hard_global_interop_property_reads_to_bracket_access() {
+    let source = "const root = globalThis;\nroot.litElementVersions = root.litElementVersions || [];\nexport const value = globalThis.litElementVersions ?? root.litElementVersions;\n";
     let transformed = transform_js_pass_through_module(
         parse_module(std::path::Path::new("fixture.js"), source).expect("module"),
         source.to_string(),
@@ -676,8 +671,8 @@ fn rewrites_collected_global_property_reads_to_bracket_access() {
             chunk_mode: super::ChunkMode::Off,
             commonjs_specifiers: HashSet::new(),
             file_metadata: HashMap::new(),
-            global_property_names: HashSet::from(["sharedRegistry".to_string()]),
-            instance_method_names: HashSet::new(),
+            global_property_names: HashSet::from(["litElementVersions".to_string()]),
+            preserved_property_names: HashSet::from(["litElementVersions".to_string()]),
             lazy_imports_by_file: HashMap::new(),
             package_aliases: vec![],
             static_property_names: HashSet::new(),
@@ -687,22 +682,18 @@ fn rewrites_collected_global_property_reads_to_bracket_access() {
     .expect("transform");
 
     assert!(
-        transformed.contains("root[\"sharedRegistry\"]"),
+        transformed.contains("root[\"litElementVersions\"]"),
         "{transformed}"
     );
     assert!(
-        transformed.contains("globalThis[\"sharedRegistry\"].get(meta)"),
-        "{transformed}"
-    );
-    assert!(
-        transformed.contains("globalThis[\"sharedRegistry\"]"),
+        transformed.contains("globalThis[\"litElementVersions\"]"),
         "{transformed}"
     );
 }
 
 #[test]
-fn rewrites_collected_static_property_reads_to_bracket_access() {
-    let source = "class Base { static finalize(ctor) { return ctor.styles && ctor.elementStyles; } }\nclass Demo extends Base {}\nDemo.styles = theme;\n";
+fn rewrites_hard_static_interop_property_reads_to_bracket_access() {
+    let source = "class Base { static finalize(ctor) { return ctor.observedAttributes && this.formAssociated; } }\nclass Demo extends Base {}\nDemo.observedAttributes = [];\nDemo.formAssociated = true;\n";
     let transformed = transform_js_pass_through_module(
         parse_module(std::path::Path::new("fixture.js"), source).expect("module"),
         source.to_string(),
@@ -714,25 +705,35 @@ fn rewrites_collected_static_property_reads_to_bracket_access() {
             commonjs_specifiers: HashSet::new(),
             file_metadata: HashMap::new(),
             global_property_names: HashSet::new(),
-            instance_method_names: HashSet::new(),
+            preserved_property_names: HashSet::from([
+                "formAssociated".to_string(),
+                "observedAttributes".to_string(),
+            ]),
             lazy_imports_by_file: HashMap::new(),
             package_aliases: vec![],
             static_property_names: HashSet::from([
-                "styles".to_string(),
-                "elementStyles".to_string(),
+                "formAssociated".to_string(),
+                "observedAttributes".to_string(),
             ]),
             workspace_dir: PathBuf::from("/tmp"),
         },
     )
     .expect("transform");
 
-    assert!(transformed.contains("ctor[\"styles\"]"), "{transformed}");
     assert!(
-        transformed.contains("ctor[\"elementStyles\"]"),
+        transformed.contains("ctor[\"observedAttributes\"]"),
         "{transformed}"
     );
     assert!(
-        transformed.contains("Demo[\"styles\"] = theme;"),
+        transformed.contains("this[\"formAssociated\"]"),
+        "{transformed}"
+    );
+    assert!(
+        transformed.contains("Demo[\"observedAttributes\"] = []"),
+        "{transformed}"
+    );
+    assert!(
+        transformed.contains("Demo[\"formAssociated\"] = true"),
         "{transformed}"
     );
 }
@@ -905,7 +906,7 @@ fn bundler_runtime_rewrites_namespace_member_reads_to_numeric_slots() {
                     commonjs_specifiers: HashSet::new(),
                     file_metadata: HashMap::new(),
                     global_property_names: HashSet::new(),
-                    instance_method_names: HashSet::new(),
+                    preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
@@ -966,7 +967,7 @@ fn bundler_runtime_rejects_reflective_namespace_usage() {
                     commonjs_specifiers: HashSet::new(),
                     file_metadata: HashMap::new(),
                     global_property_names: HashSet::new(),
-                    instance_method_names: HashSet::new(),
+                    preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
@@ -1035,7 +1036,7 @@ fn bundler_runtime_rewrites_promise_consumer_callback_params_to_slots() {
                     commonjs_specifiers: HashSet::new(),
                     file_metadata: HashMap::new(),
                     global_property_names: HashSet::new(),
-                    instance_method_names: HashSet::new(),
+                    preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),

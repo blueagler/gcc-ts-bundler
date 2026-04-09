@@ -9,11 +9,7 @@ pub(super) use self::commonjs::{
 };
 pub(super) use self::object_patterns::ObjectPatternParamVisitor;
 pub(super) use self::properties::{
-    collect_class_static_assignments, collect_global_this_aliases, quote_prop_name,
-    ConstantLikePropertyCompatVisitor, DerivedClassMethodKeyCompatVisitor,
-    GlobalThisPropertyCompatVisitor, InstanceMethodCompatVisitor,
-    InternalProtocolMemberCompatVisitor, StaticPropertyCompatVisitor,
-    UppercaseStaticMemberCompatVisitor,
+    collect_class_static_assignments, quote_prop_name, PreservedPropertyCompatVisitor,
 };
 
 pub(super) fn apply_program_compat_transforms(program: &mut Program, context: &TranspileContext) {
@@ -28,27 +24,11 @@ pub(super) fn apply_program_compat_transforms(program: &mut Program, context: &T
             commonjs_namespace_bindings,
         ));
     }
-    if !context.global_property_names.is_empty() {
-        let aliases = collect_global_this_aliases(program);
-        program.visit_mut_with(&mut GlobalThisPropertyCompatVisitor::new(
-            context.global_property_names.clone(),
-            aliases,
+    if !context.preserved_property_names.is_empty() {
+        program.visit_mut_with(&mut PreservedPropertyCompatVisitor::new(
+            context.preserved_property_names.clone(),
         ));
     }
-    if !context.static_property_names.is_empty() {
-        program.visit_mut_with(&mut StaticPropertyCompatVisitor::new(
-            context.static_property_names.clone(),
-        ));
-    }
-    if !context.instance_method_names.is_empty() {
-        program.visit_mut_with(&mut InstanceMethodCompatVisitor::new(
-            context.instance_method_names.clone(),
-        ));
-    }
-    program.visit_mut_with(&mut InternalProtocolMemberCompatVisitor);
-    program.visit_mut_with(&mut DerivedClassMethodKeyCompatVisitor);
-    program.visit_mut_with(&mut ConstantLikePropertyCompatVisitor);
-    program.visit_mut_with(&mut UppercaseStaticMemberCompatVisitor);
     if context.chunk_mode == ChunkMode::Off {
         program.visit_mut_with(&mut GoogModuleThrowRewriteVisitor);
     }

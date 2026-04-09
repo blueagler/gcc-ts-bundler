@@ -1,6 +1,7 @@
 mod closure_jobs;
 mod closure_metadata;
 mod commonjs;
+mod decorators;
 mod exports;
 mod fs_state;
 mod graph;
@@ -99,6 +100,11 @@ pub fn transpile_sources(
 #[napi(js_name = "rewriteGccExports")]
 pub fn rewrite_gcc_exports(code: String) -> Result<String> {
     with_globals(|| exports::rewrite_gcc_exports(code))
+}
+
+#[napi(js_name = "rewriteDecoratorMetadata")]
+pub fn rewrite_decorator_metadata(code: String, property_renaming_report: String) -> Result<String> {
+    with_globals(|| decorators::rewrite_decorator_metadata(code, property_renaming_report))
 }
 
 #[napi(js_name = "collectFileStates")]

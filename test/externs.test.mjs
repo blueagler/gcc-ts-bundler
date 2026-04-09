@@ -29,11 +29,11 @@ test.serial("generateExterns follows declaration dependencies and emits stable p
   expect(result.text).toContain("Object.prototype.removeController;");
   expect(result.text).toContain("Object.prototype.requestUpdate;");
   expect(result.text).toContain("Object.prototype.updateComplete;");
-  expect(result.text).toContain("Object.prototype.hostConnected;");
-  expect(result.text).toContain("Object.prototype.hostDisconnected;");
-  expect(result.text).toContain("Object.prototype.togglePlay;");
-  expect(result.text).toContain("Object.prototype.isAnimating;");
-  expect(result.text).toContain("Object.prototype.link;");
+  expect(result.text).not.toContain("Object.prototype.hostConnected;");
+  expect(result.text).not.toContain("Object.prototype.hostDisconnected;");
+  expect(result.text).not.toContain("Object.prototype.togglePlay;");
+  expect(result.text).not.toContain("Object.prototype.isAnimating;");
+  expect(result.text).not.toContain("Object.prototype.link;");
   expect(result.text).not.toContain("Object.prototype.attribute;");
   expect(result.text).not.toContain("Object.prototype.reflect;");
   expect(result.text).not.toContain("Object.prototype.map;");
@@ -69,11 +69,11 @@ test.serial("generateExterns runtime-aware mode captures helper-lowered dependen
   });
 
   expect(result.mode).toBe("runtime-aware");
-  expect(result.text).toContain("Object.prototype.bump;");
   expect(result.text).toContain("Object.prototype.counts;");
   expect(result.text).toContain("Object.prototype.label;");
   expect(result.text).toContain("Object.prototype.reset;");
   expect(result.text).toContain("Object.prototype.from;");
+  expect(result.text).not.toContain("Object.prototype.bump;");
   expect(result.text).not.toContain("Object.prototype.addEventListener;");
   expect(result.text).not.toContain("Object.prototype.apply;");
   expect(result.text).not.toContain("Object.prototype.length;");
@@ -105,7 +105,8 @@ test.serial("externs CLI writes generated output with bun-compatible tests", asy
   const externsOutput = await fs.readFile(outputFile, "utf8");
   expect(externsOutput).toContain("/** @externs */");
   expect(externsOutput).toContain("Object.prototype.addController;");
-  expect(externsOutput).toContain("Object.prototype.togglePlay;");
+  expect(externsOutput).toContain("Object.prototype.updateComplete;");
+  expect(externsOutput).not.toContain("Object.prototype.togglePlay;");
   expect(externsOutput).not.toContain("Object.prototype.attribute;");
 });
 

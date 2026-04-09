@@ -7,7 +7,11 @@ import {
   ensureParentDirectory,
 } from "../../internal/files";
 import { ChunkPlanChunk, NormalizedBuildOptions } from "../../internal/types";
-import { prepareClosureJobs, rewriteGccExports } from "../../native/load";
+import {
+  prepareClosureJobs,
+  rewriteDecoratorMetadata,
+  rewriteGccExports,
+} from "../../native/load";
 import {
   ClosureCompilerOptions,
   configureClosureCompilerOptions,
@@ -15,7 +19,7 @@ import {
   runClosureCompiler,
 } from "./compiler";
 import {
-  getCompileJobOutputFiles,
+  getCompileJobArtifactFiles,
   persistCachedClosureJob,
   tryRestoreCachedClosureJob,
 } from "./cache";
@@ -111,15 +115,35 @@ export async function runClosureStage({
     return { cacheOutputFiles: [], exitCode: failedExitCode, outputFiles: [] };
   }
 
+  const propertyRenamingReports = new Map<string, Promise<string>>();
   await Promise.all(
     prepared.postprocessActions.map(async (action) => {
       await ensureParentDirectory(action.outputPath);
-      if (action.kind === "rewrite-gcc-exports") {
-        const contents = await fs.readFile(action.inputPath, "utf-8");
-        await fs.writeFile(action.outputPath, rewriteGccExports(contents));
+      const reportText = action.propertyRenamingReportPath
+        ? await readPropertyRenamingReport(
+            action.propertyRenamingReportPath,
+            propertyRenamingReports,
+          )
+        : "";
+      if (action.kind === "copy" && !reportText) {
+        await fs.copyFile(action.inputPath, action.outputPath);
         return;
       }
-      await fs.copyFile(action.inputPath, action.outputPath);
+      let contents = await fs.readFile(action.inputPath, "utf-8");
+      if (
+        action.kind === "rewrite-gcc-exports" ||
+        action.kind === "rewrite-gcc-exports-and-decorator-metadata"
+      ) {
+        contents = rewriteGccExports(contents);
+      }
+      if (
+        reportText &&
+        (action.kind === "rewrite-decorator-metadata" ||
+          action.kind === "rewrite-gcc-exports-and-decorator-metadata")
+      ) {
+        contents = rewriteDecoratorMetadata(contents, reportText);
+      }
+      await fs.writeFile(action.outputPath, contents);
     }),
   );
 
@@ -142,14 +166,14 @@ async function runPreparedClosureJob({
   cacheDir: string | null;
   job: ReturnType<typeof prepareClosureJobs>["compileJobs"][number];
 }) {
-  const outputFiles = getCompileJobOutputFiles(job);
+  const artifactFiles = getCompileJobArtifactFiles(job);
   const compilerVersion = resolveClosureCompilerVersionTag();
   const cached = cacheDir
     ? await tryRestoreCachedClosureJob({
+        artifactFiles,
         cacheDir,
         compilerVersion,
         job,
-        outputFiles,
       })
     : false;
   if (cached) {
@@ -181,6 +205,13 @@ async function runPreparedClosureJob({
   if (job.jsOutputFile) {
     closureOptions.jsOutputFile = job.jsOutputFile;
   }
+  if (job.propertyRenamingReportPath) {
+    (
+      closureOptions as ClosureCompilerOptions & {
+        propertyRenamingReport?: string;
+      }
+    ).propertyRenamingReport = job.propertyRenamingReportPath;
+  }
   configureClosureCompilerOptions(closureOptions);
   const exitCode = await runClosureCompiler(closureOptions);
   if (exitCode !== 0) {
@@ -189,12 +220,24 @@ async function runPreparedClosureJob({
 
   if (cacheDir) {
     await persistCachedClosureJob({
+      artifactFiles,
       cacheDir,
       compilerVersion,
       job,
-      outputFiles,
     });
   }
 
   return 0;
+}
+
+async function readPropertyRenamingReport(
+  reportPath: string,
+  cache: Map<string, Promise<string>>,
+) {
+  let pending = cache.get(reportPath);
+  if (!pending) {
+    pending = fs.readFile(reportPath, "utf-8");
+    cache.set(reportPath, pending);
+  }
+  return pending;
 }

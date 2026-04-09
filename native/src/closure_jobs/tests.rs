@@ -103,10 +103,22 @@ fn prepares_bundler_runtime_jobs_with_runtime_assets() {
             && asset.text.contains("globalThis.__g.l(")
     }));
     assert!(output.compileJobs[0].chunk.is_some());
+    assert!(output.compileJobs[0]
+        .propertyRenamingReportPath
+        .as_deref()
+        .is_some_and(|path| path.ends_with("property-renaming-report.txt")));
     assert!(!output.compileJobs[0]
         .externs
         .iter()
         .any(|file| file.ends_with("runtime-shared.externs.js")));
+    assert!(output
+        .postprocessActions
+        .iter()
+        .all(|action| action.kind == "rewrite-decorator-metadata"));
+    assert!(output.postprocessActions.iter().all(|action| action
+        .propertyRenamingReportPath
+        .as_deref()
+        .is_some_and(|path| path.ends_with("property-renaming-report.txt"))));
 }
 
 #[test]
@@ -210,8 +222,16 @@ fn prepares_off_mode_jobs_and_filters_empty_externs() {
         .iter()
         .any(|path| path == &real_extern.to_string_lossy()));
     assert_eq!(output.postprocessActions.len(), 3);
+    assert!(output.compileJobs[0]
+        .propertyRenamingReportPath
+        .as_deref()
+        .is_some_and(|path| path.ends_with("property-renaming-report.txt")));
     assert!(output
         .postprocessActions
         .iter()
-        .all(|action| action.kind == "rewrite-gcc-exports"));
+        .all(|action| action.kind == "rewrite-gcc-exports-and-decorator-metadata"));
+    assert!(output.postprocessActions.iter().all(|action| action
+        .propertyRenamingReportPath
+        .as_deref()
+        .is_some_and(|path| path.ends_with("property-renaming-report.txt"))));
 }

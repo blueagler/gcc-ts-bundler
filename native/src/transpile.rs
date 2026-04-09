@@ -23,10 +23,11 @@ use napi_derive::napi;
 use rayon::prelude::*;
 use swc_core::common::{sync::Lrc, Globals, Mark, SourceMap, GLOBALS};
 use swc_core::ecma::ast::{
-    ArrowExpr, BindingIdent, BlockStmt, BlockStmtOrExpr, Bool, CallExpr, Callee, EmptyStmt, Expr,
-    ExprStmt, Id, Ident, ImportDecl, ImportDefaultSpecifier, ImportSpecifier, Lit, MemberExpr,
-    MemberProp, Module, ModuleItem, Pass, Pat, Program, PropName, Stmt, Str, SuperProp,
-    TsEnumMemberId, UnaryExpr, UnaryOp, VarDecl, VarDeclKind, VarDeclarator,
+    ArrowExpr, BinExpr, BindingIdent, BlockStmt, BlockStmtOrExpr, Bool, CallExpr, Callee,
+    EmptyStmt, Expr, ExprOrSpread, ExprStmt, Id, Ident, ImportDecl, ImportDefaultSpecifier,
+    ImportSpecifier, Lit, MemberExpr, MemberProp, Module, ModuleItem, Pass, Pat, Program,
+    PropName, Stmt, Str, SuperProp, SuperPropExpr, TsEnumMemberId, UnaryExpr, UnaryOp, VarDecl,
+    VarDeclKind, VarDeclarator,
 };
 use swc_core::ecma::codegen::{text_writer::JsWriter, Config as CodegenConfig, Emitter};
 use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
@@ -112,6 +113,10 @@ pub fn transpile_sources(
         .map(|module_id| (to_bundler_runtime_module_id(module_id), module_id.clone()))
         .collect::<HashMap<_, _>>();
     let file_metadata = load_closure_metadata(&metadata_path)?;
+    let global_property_names = collect_global_property_names(&file_names)?;
+    let static_property_names = collect_static_property_names(&file_names)?;
+    let preserved_property_names =
+        collect_preserved_property_names(&file_names, &global_property_names, &static_property_names)?;
     let context = TranspileContext {
         bundler_module_slots,
         bundler_runtime_logical_ids,
@@ -120,11 +125,11 @@ pub fn transpile_sources(
             .into_iter()
             .collect(),
         file_metadata,
-        global_property_names: collect_global_property_names(&file_names)?,
-        instance_method_names: collect_instance_method_names(&file_names)?,
+        global_property_names,
         lazy_imports_by_file: group_lazy_imports_by_file(lazy_imports),
         package_aliases,
-        static_property_names: collect_static_property_names(&file_names)?,
+        preserved_property_names,
+        static_property_names,
         workspace_dir: workspace_dir.clone(),
     };
 

@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { expect, test } from "bun:test";
 
 import { build } from "../dist/index.mjs";
@@ -342,6 +343,11 @@ test.serial("builds decorated TypeScript sources", async () => {
   expect(result.exitCode).toBe(0);
   const output = await fixture.read("dist/index.js");
   expect(output).not.toMatch(/@increment/);
+
+  const builtModule = await import(
+    `${pathToFileURL(path.join(fixture.outDir, "index.js")).href}?decorated=${Date.now()}`
+  );
+  expect(builtModule.total).toBe(2);
 });
 
 test.serial("exported entry bundles do not retain GCC wrapper exports", async () => {

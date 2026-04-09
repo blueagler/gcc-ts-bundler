@@ -32,6 +32,7 @@ interface NativeClosureCompileJob {
     jsOutputFile?: string;
     languageIn: string;
     languageOut: string;
+    propertyRenamingReportPath?: string;
     rewritePolyfills: boolean;
     warningLevel: string;
 }
@@ -41,8 +42,9 @@ interface NativeGeneratedAsset {
 }
 interface NativePostprocessAction {
     inputPath: string;
-    kind: "copy" | "rewrite-gcc-exports";
+    kind: "copy" | "rewrite-decorator-metadata" | "rewrite-gcc-exports" | "rewrite-gcc-exports-and-decorator-metadata";
     outputPath: string;
+    propertyRenamingReportPath?: string;
 }
 interface NativePrepareClosureJobsInput {
     chunkLoader: string;
@@ -131,6 +133,7 @@ export declare function planChunks(input: {
     workspaceDir: string;
 }): NativeChunkPlanChunkOutput[];
 export declare function rewriteGccExports(code: string): string;
+export declare function rewriteDecoratorMetadata(code: string, propertyRenamingReport: string): string;
 export declare function transpileSources(input: {
     chunkMode: string;
     externsPath: string;

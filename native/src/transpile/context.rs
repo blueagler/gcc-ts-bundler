@@ -16,9 +16,9 @@ pub(super) struct TranspileContext {
     pub(super) commonjs_specifiers: HashSet<String>,
     pub(super) file_metadata: HashMap<String, ClosureFileMetadata>,
     pub(super) global_property_names: HashSet<String>,
-    pub(super) instance_method_names: HashSet<String>,
     pub(super) lazy_imports_by_file: HashMap<String, Vec<LazyImportInput>>,
     pub(super) package_aliases: Vec<PackageAliasInput>,
+    pub(super) preserved_property_names: HashSet<String>,
     pub(super) static_property_names: HashSet<String>,
     pub(super) workspace_dir: PathBuf,
 }
@@ -79,9 +79,9 @@ pub(super) fn collect_bundler_module_slots(
         commonjs_specifiers: HashSet::new(),
         file_metadata: HashMap::new(),
         global_property_names: HashSet::new(),
-        instance_method_names: HashSet::new(),
         lazy_imports_by_file: HashMap::new(),
         package_aliases: package_aliases.to_vec(),
+        preserved_property_names: HashSet::new(),
         static_property_names: HashSet::new(),
         workspace_dir: workspace_dir.to_path_buf(),
     };
