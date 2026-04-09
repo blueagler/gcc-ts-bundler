@@ -25,7 +25,7 @@ use crate::closure_metadata::{
 };
 use crate::commonjs::{analyze_commonjs_module, evaluate_boolean_expr};
 use crate::module_cache::{get_or_parse_cached_module, parse_module};
-use crate::pathing::{normalize_path, to_goog_module_id};
+use crate::pathing::{normalize_path, to_bundler_runtime_module_id, to_goog_module_id};
 use crate::support_files::{collect_commonjs_specifiers, emit_package_support_files};
 
 fn parse_chunk_mode(value: &str) -> std::result::Result<ChunkMode, String> {
@@ -66,6 +66,7 @@ pub struct LazyImportInput {
 #[derive(Clone, Debug)]
 struct TranspileContext {
     bundler_module_slots: HashMap<String, BundlerModuleSlots>,
+    bundler_runtime_logical_ids: HashMap<String, String>,
     chunk_mode: ChunkMode,
     commonjs_specifiers: HashSet<String>,
     file_metadata: HashMap<String, ClosureFileMetadata>,
@@ -144,9 +145,14 @@ pub fn transpile_sources(
     } else {
         HashMap::new()
     };
+    let bundler_runtime_logical_ids = bundler_module_slots
+        .keys()
+        .map(|module_id| (to_bundler_runtime_module_id(module_id), module_id.clone()))
+        .collect::<HashMap<_, _>>();
     let file_metadata = load_closure_metadata(&metadata_path)?;
     let context = TranspileContext {
         bundler_module_slots,
+        bundler_runtime_logical_ids,
         chunk_mode,
         commonjs_specifiers: collect_commonjs_specifiers(&package_aliases)?
             .into_iter()
@@ -217,6 +223,7 @@ fn collect_bundler_module_slots(
 ) -> std::result::Result<HashMap<String, BundlerModuleSlots>, String> {
     let resolution_context = TranspileContext {
         bundler_module_slots: HashMap::new(),
+        bundler_runtime_logical_ids: HashMap::new(),
         chunk_mode: ChunkMode::BundlerRuntime,
         commonjs_specifiers: HashSet::new(),
         file_metadata: HashMap::new(),
@@ -1936,7 +1943,7 @@ impl VisitMut for DynamicImportRewriteVisitor {
                 expr: Box::new(Expr::Lit(Lit::Str(Str {
                     raw: None,
                     span: Default::default(),
-                    value: lazy_import.moduleId.clone().into(),
+                    value: to_bundler_runtime_module_id(&lazy_import.moduleId).into(),
                 }))),
             }],
             type_args: None,
@@ -2321,7 +2328,13 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a> {
     ) -> std::result::Result<usize, String> {
         let mut resolved_slot = None::<usize>;
         for module_id in module_ids {
-            let Some(slots) = self.context.bundler_module_slots.get(module_id) else {
+            let logical_module_id = self
+                .context
+                .bundler_runtime_logical_ids
+                .get(module_id)
+                .map(|value| value.as_str())
+                .unwrap_or(module_id.as_str());
+            let Some(slots) = self.context.bundler_module_slots.get(logical_module_id) else {
                 return Err(format!(
                     "Missing bundler-runtime export slot metadata for {}",
                     module_id
@@ -4020,6 +4033,7 @@ fn emit_bundler_runtime_module_program(
         return Err("Expected module program".to_string());
     };
     let module_id = to_goog_module_id(file_path, &context.workspace_dir);
+    let runtime_module_id = to_bundler_runtime_module_id(&module_id);
     let current_slots = context
         .bundler_module_slots
         .get(&module_id)
@@ -4171,9 +4185,11 @@ fn emit_bundler_runtime_module_program(
                     &export_all.src.value.to_string_lossy(),
                     context,
                 )?;
+                let runtime_export_module_id =
+                    to_bundler_runtime_module_id(&export_module_id);
                 dependency_ids.push(export_module_id.clone());
                 output.push(format!(
-                    "const {require_name} = __require({export_module_id:?});"
+                    "const {require_name} = __require({runtime_export_module_id:?});"
                 ));
                 let target_slots = context
                     .bundler_module_slots
@@ -4237,10 +4253,18 @@ fn emit_bundler_runtime_module_program(
             .collect::<Vec<_>>()
             .join("\n"),
     );
+    let runtime_dependency_ids = serde_json::to_string(
+        &dependency_ids
+            .iter()
+            .map(|module_id| to_bundler_runtime_module_id(module_id))
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| error.to_string())?;
     let source_text = format!(
-        "globalThis[\"__gcc_runtime__\"][\"registerModule\"]({module_id:?}, {}, function(__require, __exports, __dynamicImport, __preloadDynamicImport) {{\n{}\n}});",
-        serde_json::to_string(&dependency_ids).map_err(|error| error.to_string())?,
-        indent_block(&body)
+        "__register({module_id:?}, {runtime_dependency_ids}, function(__require, __exports, __dynamicImport, __preloadDynamicImport) {{\n{}\n}});",
+        indent_block(&body),
+        module_id = runtime_module_id,
+        runtime_dependency_ids = runtime_dependency_ids,
     );
     Ok(apply_js_compat_text_fixes(source_text))
 }
@@ -4303,10 +4327,11 @@ fn convert_bundler_import_decl(
         &import_decl.src.value.to_string_lossy(),
         context,
     )?;
+    let runtime_module_id = to_bundler_runtime_module_id(&module_id);
     let mut lines = Vec::new();
     let mut dependency_ids = Vec::new();
     if import_decl.specifiers.is_empty() {
-        lines.push(format!("__require({module_id:?});"));
+        lines.push(format!("__require({runtime_module_id:?});"));
         dependency_ids.push(module_id);
         return Ok((lines, dependency_ids));
     }
@@ -4323,7 +4348,7 @@ fn convert_bundler_import_decl(
     if !value_specifiers.is_empty() {
         let local_name = format!("__gcc_import_{}", *import_counter);
         *import_counter += 1;
-        lines.push(format!("const {local_name} = __require({module_id:?});"));
+        lines.push(format!("const {local_name} = __require({runtime_module_id:?});"));
         let target_slots = context
             .bundler_module_slots
             .get(&module_id)
@@ -4472,8 +4497,9 @@ fn convert_bundler_named_export(
         *export_counter += 1;
         let module_id =
             resolve_module_id_for_specifier(file_path, &src.value.to_string_lossy(), context)?;
+        let runtime_module_id = to_bundler_runtime_module_id(&module_id);
         dependency_ids.push(module_id.clone());
-        lines.push(format!("const {require_name} = __require({module_id:?});"));
+        lines.push(format!("const {require_name} = __require({runtime_module_id:?});"));
         let target_slots = context
             .bundler_module_slots
             .get(&module_id)
@@ -5184,6 +5210,7 @@ mod tests {
     fn empty_context() -> super::TranspileContext {
         super::TranspileContext {
             bundler_module_slots: HashMap::new(),
+            bundler_runtime_logical_ids: HashMap::new(),
             chunk_mode: super::ChunkMode::Off,
             commonjs_specifiers: HashSet::new(),
             file_metadata: HashMap::new(),
@@ -5248,6 +5275,7 @@ mod tests {
                     &file_path,
                     &super::TranspileContext {
                         bundler_module_slots: HashMap::new(),
+                        bundler_runtime_logical_ids: HashMap::new(),
                         chunk_mode: super::ChunkMode::Off,
                         commonjs_specifiers: HashSet::new(),
                         file_metadata: HashMap::new(),
@@ -5300,6 +5328,7 @@ mod tests {
                     &file_path,
                     &super::TranspileContext {
                         bundler_module_slots: HashMap::new(),
+                        bundler_runtime_logical_ids: HashMap::new(),
                         chunk_mode: super::ChunkMode::Off,
                         commonjs_specifiers: HashSet::new(),
                         file_metadata: HashMap::new(),
@@ -5354,6 +5383,7 @@ mod tests {
                     &file_path,
                     &super::TranspileContext {
                         bundler_module_slots: HashMap::new(),
+                        bundler_runtime_logical_ids: HashMap::new(),
                         chunk_mode: super::ChunkMode::Off,
                         commonjs_specifiers: HashSet::new(),
                         file_metadata: HashMap::new(),
@@ -5575,6 +5605,7 @@ mod tests {
             &file_path,
             &super::TranspileContext {
                 bundler_module_slots: HashMap::new(),
+                bundler_runtime_logical_ids: HashMap::new(),
                 chunk_mode: super::ChunkMode::Off,
                 commonjs_specifiers: HashSet::from(["demo-pkg".to_string()]),
                 file_metadata: HashMap::new(),
@@ -5644,6 +5675,7 @@ mod tests {
 
         let context = super::TranspileContext {
             bundler_module_slots: HashMap::new(),
+            bundler_runtime_logical_ids: HashMap::new(),
             chunk_mode: super::ChunkMode::Off,
             commonjs_specifiers: HashSet::new(),
             file_metadata: HashMap::new(),
@@ -5837,6 +5869,7 @@ mod tests {
             std::path::Path::new("fixture.js"),
             &super::TranspileContext {
                 bundler_module_slots: HashMap::new(),
+                bundler_runtime_logical_ids: HashMap::new(),
                 chunk_mode: super::ChunkMode::Off,
                 commonjs_specifiers: HashSet::new(),
                 file_metadata: HashMap::new(),
@@ -5873,6 +5906,7 @@ mod tests {
             std::path::Path::new("fixture.js"),
             &super::TranspileContext {
                 bundler_module_slots: HashMap::new(),
+                bundler_runtime_logical_ids: HashMap::new(),
                 chunk_mode: super::ChunkMode::Off,
                 commonjs_specifiers: HashSet::new(),
                 file_metadata: HashMap::new(),
@@ -6063,6 +6097,7 @@ mod tests {
                                 ])),
                             ),
                         ]),
+                        bundler_runtime_logical_ids: HashMap::new(),
                         chunk_mode: super::ChunkMode::BundlerRuntime,
                         commonjs_specifiers: HashSet::new(),
                         file_metadata: HashMap::new(),
@@ -6120,6 +6155,7 @@ mod tests {
                                 super::BundlerModuleSlots::from_export_names(&BTreeSet::new()),
                             ),
                         ]),
+                        bundler_runtime_logical_ids: HashMap::new(),
                         chunk_mode: super::ChunkMode::BundlerRuntime,
                         commonjs_specifiers: HashSet::new(),
                         file_metadata: HashMap::new(),
@@ -6184,6 +6220,7 @@ mod tests {
                                 super::BundlerModuleSlots::from_export_names(&BTreeSet::new()),
                             ),
                         ]),
+                        bundler_runtime_logical_ids: HashMap::new(),
                         chunk_mode: super::ChunkMode::BundlerRuntime,
                         commonjs_specifiers: HashSet::new(),
                         file_metadata: HashMap::new(),

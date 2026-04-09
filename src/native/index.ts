@@ -59,6 +59,15 @@ function loadNativeBinding() {
   const packageName =
     SUPPORTED_TARGETS[targetKey as keyof typeof SUPPORTED_TARGETS];
 
+  const localFallbackPath = path.join(
+    getPackageRootFromBundle(),
+    "native",
+    "index.node",
+  );
+  if (fs.existsSync(localFallbackPath)) {
+    return require(localFallbackPath);
+  }
+
   const loadErrors: string[] = [];
 
   if (packageName) {
@@ -71,15 +80,6 @@ function loadNativeBinding() {
         }`,
       );
     }
-  }
-
-  const localFallbackPath = path.join(
-    getPackageRootFromBundle(),
-    "native",
-    "index.node",
-  );
-  if (fs.existsSync(localFallbackPath)) {
-    return require(localFallbackPath);
   }
 
   const supportedTargets = Object.keys(SUPPORTED_TARGETS).join(", ");

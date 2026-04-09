@@ -7,9 +7,11 @@ use std::path::{Path, PathBuf};
 use napi_derive::napi;
 use serde::Serialize;
 
-use crate::pathing::to_goog_module_id;
+use crate::pathing::{
+    to_bundler_runtime_chunk_id, to_bundler_runtime_module_id, to_goog_module_id,
+};
 
-const BUNDLER_RUNTIME_GLOBAL: &str = "__gcc_runtime__";
+const BUNDLER_RUNTIME_GLOBAL: &str = "__g";
 
 #[allow(non_snake_case)]
 #[napi(object)]
@@ -123,6 +125,17 @@ struct BundlerRuntimeManifestChunk {
     url: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct BundlerRuntimeInitManifest(
+    usize,
+    Vec<BundlerRuntimeInitChunk>,
+    BTreeMap<String, usize>,
+    String,
+);
+
+#[derive(Clone, Debug, Serialize)]
+struct BundlerRuntimeInitChunk(Vec<usize>, String);
+
 pub fn prepare_closure_jobs(
     input: PrepareClosureJobsInput,
 ) -> std::result::Result<PrepareClosureJobsOutput, String> {
@@ -181,45 +194,116 @@ fn prepare_bundler_runtime_jobs(
     let mut postprocess_actions = Vec::new();
     let mut published_outputs = Vec::new();
     let mut module_map = BTreeMap::new();
+    let mut runtime_module_map = BTreeMap::new();
     let mut manifest_chunks = BTreeMap::new();
     let mut module_text_by_chunk = BTreeMap::new();
+    let chunk_index_by_name = resolved_chunks
+        .iter()
+        .enumerate()
+        .map(|(index, chunk)| (chunk.name.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    let runtime_chunk_id_by_name = resolved_chunks
+        .iter()
+        .map(|chunk| {
+            (
+                chunk.name.clone(),
+                to_bundler_runtime_chunk_id(&chunk.name),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
 
     for chunk in resolved_chunks {
         let mut module_sources = Vec::with_capacity(chunk.files.len());
         let mut manifest_modules = Vec::with_capacity(chunk.files.len());
+        let chunk_index = *chunk_index_by_name
+            .get(&chunk.name)
+            .ok_or_else(|| format!("Missing chunk index for {}", chunk.name))?;
+        let runtime_chunk_id = runtime_chunk_id_by_name
+            .get(&chunk.name)
+            .cloned()
+            .ok_or_else(|| format!("Missing runtime chunk id for {}", chunk.name))?;
         for file_path in &chunk.files {
             let source_text = fs::read_to_string(file_path).map_err(|error| error.to_string())?;
             module_sources.push(source_text);
-            let module_id = to_goog_module_id(Path::new(file_path), Path::new(&input.emittedOutDir));
-            manifest_modules.push(module_id.clone());
-            module_map.insert(module_id, chunk.name.clone());
+            let module_id =
+                to_goog_module_id(Path::new(file_path), Path::new(&input.emittedOutDir));
+            let runtime_module_id = to_bundler_runtime_module_id(&module_id);
+            manifest_modules.push(runtime_module_id.clone());
+            module_map.insert(runtime_module_id.clone(), runtime_chunk_id.clone());
+            runtime_module_map.insert(runtime_module_id, chunk_index);
         }
         manifest_chunks.insert(
-            chunk.name.clone(),
+            runtime_chunk_id.clone(),
             BundlerRuntimeManifestChunk {
-                deps: chunk.dependencies.clone(),
+                deps: chunk
+                    .dependencies
+                    .iter()
+                    .map(|dependency| to_bundler_runtime_chunk_id(dependency))
+                    .collect(),
                 modules: manifest_modules,
-                url: format!("{}{}.js", input.publicPath, chunk.name),
+                url: format!(
+                    "{}{}.js",
+                    input.publicPath,
+                    if chunk.name == base_chunk.name {
+                        chunk.name.as_str()
+                    } else {
+                        runtime_chunk_id.as_str()
+                    }
+                ),
             },
         );
         module_text_by_chunk.insert(chunk.name.clone(), module_sources.join("\n"));
     }
 
     let manifest = BundlerRuntimeManifest {
-        baseChunk: base_chunk.name.clone(),
+        baseChunk: runtime_chunk_id_by_name
+            .get(&base_chunk.name)
+            .cloned()
+            .ok_or_else(|| format!("Missing runtime chunk id for {}", base_chunk.name))?,
         chunks: manifest_chunks,
         loader: input.chunkLoader.clone(),
         modules: module_map,
         publicPath: input.publicPath.clone(),
     };
-
-    let runtime_externs_path = runtime_asset_dir.join("runtime-shared.externs.js");
-    let runtime_externs_path_string = runtime_externs_path.to_string_lossy().to_string();
-    let runtime_externs_text = render_shared_bundler_runtime_externs();
-    generated_assets.push(GeneratedAsset {
-        path: runtime_externs_path_string.clone(),
-        text: runtime_externs_text.clone(),
-    });
+    let runtime_manifest = BundlerRuntimeInitManifest(
+        *chunk_index_by_name
+            .get(&base_chunk.name)
+            .ok_or_else(|| format!("Missing base chunk index for {}", base_chunk.name))?,
+        resolved_chunks
+            .iter()
+            .map(|chunk| {
+                let dependency_indices = chunk
+                    .dependencies
+                    .iter()
+                    .map(|dependency| {
+                        chunk_index_by_name
+                            .get(dependency)
+                            .copied()
+                            .ok_or_else(|| format!("Missing chunk index for dependency {}", dependency))
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok::<_, String>(BundlerRuntimeInitChunk(
+                    dependency_indices,
+                    format!(
+                        "{}{}.js",
+                        input.publicPath,
+                        if chunk.name == base_chunk.name {
+                            chunk.name.as_str()
+                        } else {
+                            runtime_chunk_id_by_name
+                                .get(&chunk.name)
+                                .map(String::as_str)
+                                .ok_or_else(|| {
+                                    format!("Missing runtime chunk id for {}", chunk.name)
+                                })?
+                        }
+                    ),
+                ))
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+        runtime_module_map,
+        input.publicPath.clone(),
+    );
 
     let mut effective_externs = collect_effective_extern_paths(
         &input.packageRoot,
@@ -228,9 +312,6 @@ fn prepare_bundler_runtime_jobs(
         Some(&input.nativeExternPath),
         None,
     )?;
-    if extern_text_has_declarations(&runtime_externs_text) {
-        effective_externs.push(runtime_externs_path_string.clone());
-    }
     effective_externs = unique_paths(effective_externs);
 
     if !input.manifestFile.is_empty() {
@@ -252,14 +333,25 @@ fn prepare_bundler_runtime_jobs(
             .ok_or_else(|| format!("Missing linked chunk source for {}", chunk.name))?;
         let source_text = if chunk.name == base_chunk.name {
             render_bundler_runtime_base_chunk(
-                &chunk.name,
-                &chunk.entry_points,
+                *chunk_index_by_name
+                    .get(&chunk.name)
+                    .ok_or_else(|| format!("Missing chunk index for {}", chunk.name))?,
+                &chunk
+                    .entry_points
+                    .iter()
+                    .map(|module_id| to_bundler_runtime_module_id(module_id))
+                    .collect::<Vec<_>>(),
                 &input.chunkLoader,
-                &manifest,
+                &runtime_manifest,
                 module_text,
             )?
         } else {
-            render_bundler_runtime_lazy_chunk(&chunk.name, module_text)
+            render_bundler_runtime_lazy_chunk(
+                *chunk_index_by_name
+                    .get(&chunk.name)
+                    .ok_or_else(|| format!("Missing chunk index for {}", chunk.name))?,
+                module_text,
+            )
         };
         let source_path = runtime_asset_dir.join(format!("{}.linked.js", chunk.name));
         generated_assets.push(GeneratedAsset {
@@ -288,23 +380,40 @@ fn prepare_bundler_runtime_jobs(
         .iter()
         .enumerate()
         .map(|(index, chunk)| {
+            let chunk_output_name = runtime_chunk_id_by_name
+                .get(&chunk.name)
+                .cloned()
+                .ok_or_else(|| format!("Missing runtime chunk id for {}", chunk.name))?;
             let dependency_suffix = if chunk.dependencies.is_empty() {
                 String::new()
             } else {
-                format!(":{}", chunk.dependencies.join(","))
+                format!(
+                    ":{}",
+                    chunk
+                        .dependencies
+                        .iter()
+                        .map(|dependency| {
+                            runtime_chunk_id_by_name
+                                .get(dependency)
+                                .cloned()
+                                .ok_or_else(|| format!("Missing runtime chunk id for {}", dependency))
+                        })
+                        .collect::<std::result::Result<Vec<_>, _>>()?
+                        .join(",")
+                )
             };
-            format!(
+            Ok::<_, String>(format!(
                 "{}:{}{}",
-                chunk.name,
+                chunk_output_name,
                 1 + if index == 0 {
                     input.explicitJsInputs.len() + closure_lib_files.len()
                 } else {
                     0
                 },
                 dependency_suffix
-            )
+            ))
         })
-        .collect::<Vec<_>>();
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     let chunk_sources = linked_chunk_paths
         .iter()
         .map(|(_, source_path)| source_path.to_string_lossy().to_string())
@@ -338,8 +447,18 @@ fn prepare_bundler_runtime_jobs(
     });
 
     for chunk in resolved_chunks {
-        let output_path = raw_dir.join(format!("{}.js", chunk.name));
-        let final_output_path = PathBuf::from(&input.outDir).join(format!("{}.js", chunk.name));
+        let internal_chunk_name = runtime_chunk_id_by_name
+            .get(&chunk.name)
+            .cloned()
+            .ok_or_else(|| format!("Missing runtime chunk id for {}", chunk.name))?;
+        let final_chunk_name = if chunk.name == base_chunk.name {
+            chunk.name.clone()
+        } else {
+            internal_chunk_name.clone()
+        };
+        let output_path = raw_dir.join(format!("{}.js", internal_chunk_name));
+        let final_output_path =
+            PathBuf::from(&input.outDir).join(format!("{}.js", final_chunk_name));
         postprocess_actions.push(PostprocessAction {
             inputPath: output_path.to_string_lossy().to_string(),
             kind: "copy".to_string(),
@@ -614,19 +733,6 @@ fn extern_file_has_declarations(file_path: &str) -> std::result::Result<bool, St
         }))
 }
 
-fn extern_text_has_declarations(source_text: &str) -> bool {
-    source_text
-        .lines()
-        .map(|line| line.trim())
-        .any(|line| {
-            !line.is_empty()
-                && line != "/** @externs */"
-                && line != "*/"
-                && !line.starts_with('*')
-                && !line.starts_with("//")
-        })
-}
-
 fn select_closure_lib_files(
     package_root: &str,
     candidate_files: &[String],
@@ -688,39 +794,23 @@ fn read_candidate_contents(candidate_files: &[String]) -> std::result::Result<St
     Ok(contents)
 }
 
-fn render_shared_bundler_runtime_externs() -> String {
-    let mut lines = vec![
-        "/** @externs */".to_string(),
-        format!("Window.prototype.{BUNDLER_RUNTIME_GLOBAL};"),
-        format!("WorkerGlobalScope.prototype.{BUNDLER_RUNTIME_GLOBAL};"),
-        "Object.prototype.markChunkFailed;".to_string(),
-        "Object.prototype.markChunkLoaded;".to_string(),
-        "Object.prototype.preloadDynamicImport;".to_string(),
-        "Object.prototype.registerModule;".to_string(),
-        "Object.prototype.require;".to_string(),
-        "Object.prototype.runEntries;".to_string(),
-        String::new(),
-    ];
-    lines.push(String::new());
-    lines.join("\n")
-}
-
 fn render_bundler_runtime_base_chunk(
-    chunk_id: &str,
+    chunk_id: usize,
     entry_points: &[String],
     loader: &str,
-    manifest: &BundlerRuntimeManifest,
+    manifest: &BundlerRuntimeInitManifest,
     module_text: &str,
 ) -> std::result::Result<String, String> {
     Ok([
         render_bundler_runtime_preamble(loader, manifest)?,
+        "var __register=globalThis.__g.r;".to_string(),
         module_text.to_string(),
         format!(
-            "globalThis[{runtime_key:?}][\"markChunkLoaded\"]({chunk_id:?});",
+            "globalThis.{runtime_key}.l({chunk_id:?});",
             runtime_key = BUNDLER_RUNTIME_GLOBAL
         ),
         format!(
-            "globalThis[{runtime_key:?}][\"runEntries\"]({entry_points});",
+            "globalThis.{runtime_key}.n({entry_points});",
             runtime_key = BUNDLER_RUNTIME_GLOBAL,
             entry_points = serde_json::to_string(entry_points).map_err(|error| error.to_string())?,
         ),
@@ -729,14 +819,15 @@ fn render_bundler_runtime_base_chunk(
     .join("\n"))
 }
 
-fn render_bundler_runtime_lazy_chunk(chunk_id: &str, module_text: &str) -> String {
+fn render_bundler_runtime_lazy_chunk(chunk_id: usize, module_text: &str) -> String {
     [
-        "(function(__gcc_runtime){".to_string(),
-        "if(!__gcc_runtime)throw new Error(\"bundler-runtime base chunk must load before lazy chunks.\");"
+        "(function(g){".to_string(),
+        "if(!g)throw new Error(\"base chunk missing\");"
             .to_string(),
+        "var __register=g.r;".to_string(),
         module_text.to_string(),
-        format!("__gcc_runtime[\"markChunkLoaded\"]({chunk_id:?});"),
-        format!("}}).call(this,globalThis[{runtime_key:?}]);", runtime_key = BUNDLER_RUNTIME_GLOBAL),
+        format!("g.l({chunk_id:?});"),
+        format!("}}).call(this,globalThis.{runtime_key});", runtime_key = BUNDLER_RUNTIME_GLOBAL),
         String::new(),
     ]
     .join("\n")
@@ -744,38 +835,38 @@ fn render_bundler_runtime_lazy_chunk(chunk_id: &str, module_text: &str) -> Strin
 
 fn render_bundler_runtime_preamble(
     loader: &str,
-    manifest: &BundlerRuntimeManifest,
+    manifest: &BundlerRuntimeInitManifest,
 ) -> std::result::Result<String, String> {
     let manifest_json = serde_json::to_string(manifest).map_err(|error| error.to_string())?;
     Ok([
         "(function(global){".to_string(),
-        format!("var runtimeKey={BUNDLER_RUNTIME_GLOBAL:?};"),
-        "var runtime=global[runtimeKey]||(global[runtimeKey]={});".to_string(),
-        "if(!runtime[\"initialized\"]){".to_string(),
-        "runtime[\"manifest\"]=null;".to_string(),
-        "runtime[\"factories\"]=Object.create(null);".to_string(),
-        "runtime[\"cache\"]=Object.create(null);".to_string(),
-        "runtime[\"chunkStates\"]=Object.create(null);".to_string(),
-        "runtime[\"chunkDeferreds\"]=Object.create(null);".to_string(),
-        "runtime[\"baseUrl\"]=\"\";".to_string(),
-        "runtime[\"loaderMode\"]=\"auto\";".to_string(),
-        "runtime[\"resolveChunkUrl\"]=function(chunkId){var manifest=runtime[\"manifest\"];var chunk=manifest&&manifest[\"chunks\"]&&manifest[\"chunks\"][chunkId];if(!chunk)throw new Error(\"Unknown chunk \" + chunkId);return new URL(chunk[\"url\"], runtime[\"baseUrl\"] || (global.location && global.location.href ? global.location.href : \"./\")).toString();};".to_string(),
-        "runtime[\"getDeferred\"]=function(chunkId){var existing=runtime[\"chunkDeferreds\"][chunkId];if(existing)return existing;var deferred={};deferred[\"promise\"]=new Promise(function(resolve,reject){deferred[\"resolve\"]=resolve;deferred[\"reject\"]=reject;});runtime[\"chunkDeferreds\"][chunkId]=deferred;return deferred;};".to_string(),
-        "runtime[\"markChunkLoaded\"]=function(chunkId){runtime[\"chunkStates\"][chunkId]=\"loaded\";var deferred=runtime[\"chunkDeferreds\"][chunkId];if(deferred){deferred[\"resolve\"]();delete runtime[\"chunkDeferreds\"][chunkId];}};".to_string(),
-        "runtime[\"markChunkFailed\"]=function(chunkId,error){runtime[\"chunkStates\"][chunkId]=\"failed\";var deferred=runtime[\"chunkDeferreds\"][chunkId];if(deferred){deferred[\"reject\"](error);delete runtime[\"chunkDeferreds\"][chunkId];}};".to_string(),
-        "runtime[\"registerModule\"]=function(moduleId,_deps,factory){runtime[\"factories\"][moduleId]=factory;};".to_string(),
-        "runtime[\"require\"]=function(moduleId){if(Object.prototype.hasOwnProperty.call(runtime[\"cache\"],moduleId))return runtime[\"cache\"][moduleId];var factory=runtime[\"factories\"][moduleId];if(!factory)throw new Error(\"Module not registered: \" + moduleId);var exports=[];runtime[\"cache\"][moduleId]=exports;factory(runtime[\"require\"], exports, runtime[\"dynamicImport\"], runtime[\"preloadDynamicImport\"]);return exports;};".to_string(),
-        "runtime[\"loadWithScript\"]=function(chunkId,url){return new Promise(function(resolve,reject){var script=global.document.createElement(\"script\");script.async=true;script.src=url;script.onload=function(){resolve();};script.onerror=function(){reject(new Error(\"Failed to load chunk \" + chunkId));};(global.document.head||global.document.documentElement).appendChild(script);});};".to_string(),
-        "runtime[\"loadWithFetch\"]=function(chunkId,url){return Promise.resolve(global.fetch(url)).then(function(response){if(!response.ok)throw new Error(\"Failed to fetch chunk \" + chunkId + \" (\" + response.status + \")\");return response.text();}).then(function(source){(0, global.eval)(source + \"\\n//# sourceURL=\" + url);});};".to_string(),
-        "runtime[\"selectLoader\"]=function(){if(runtime[\"loaderMode\"]!==\"auto\")return runtime[\"loaderMode\"];return global.document ? \"script\" : \"fetch\";};".to_string(),
-        "runtime[\"ensureChunk\"]=function(chunkId){var state=runtime[\"chunkStates\"][chunkId];if(state===\"loaded\")return Promise.resolve();if(state===\"loading\"){return runtime[\"getDeferred\"](chunkId)[\"promise\"];}var manifest=runtime[\"manifest\"];var chunk=manifest&&manifest[\"chunks\"]&&manifest[\"chunks\"][chunkId];if(!chunk)throw new Error(\"Unknown chunk \" + chunkId);runtime[\"chunkStates\"][chunkId]=\"loading\";var deferred=runtime[\"getDeferred\"](chunkId);var loader=runtime[\"selectLoader\"]();return Promise.all((chunk[\"deps\"]||[]).map(function(depId){return runtime[\"ensureChunk\"](depId);})).then(function(){var url=runtime[\"resolveChunkUrl\"](chunkId);return loader===\"fetch\"?runtime[\"loadWithFetch\"](chunkId,url):runtime[\"loadWithScript\"](chunkId,url);}).then(function(){return deferred[\"promise\"];}).catch(function(error){runtime[\"markChunkFailed\"](chunkId,error);throw error;});};".to_string(),
-        "runtime[\"dynamicImport\"]=function(moduleId){var manifest=runtime[\"manifest\"];var chunkId=manifest&&manifest[\"modules\"]&&manifest[\"modules\"][moduleId];if(!chunkId)throw new Error(\"Unknown module \" + moduleId);return runtime[\"ensureChunk\"](chunkId).then(function(){return runtime[\"require\"](moduleId);});};".to_string(),
-        "runtime[\"preloadDynamicImport\"]=function(moduleId){var manifest=runtime[\"manifest\"];var chunkId=manifest&&manifest[\"modules\"]&&manifest[\"modules\"][moduleId];if(!chunkId)throw new Error(\"Unknown module \" + moduleId);return runtime[\"ensureChunk\"](chunkId).then(function(){});};".to_string(),
-        "runtime[\"runEntries\"]=function(entryIds){for(var index=0;index<entryIds.length;index+=1)runtime[\"require\"](entryIds[index]);};".to_string(),
-        "runtime[\"init\"]=function(manifest, loaderMode){runtime[\"manifest\"]=manifest;runtime[\"loaderMode\"]=loaderMode||runtime[\"loaderMode\"];var currentScript=global.document&&global.document.currentScript&&global.document.currentScript.src?global.document.currentScript.src:(global.location&&global.location.href?global.location.href:\"./\");runtime[\"baseUrl\"]=new URL(manifest[\"publicPath\"]||\"./\", currentScript).toString();runtime[\"chunkStates\"][manifest[\"baseChunk\"]]=\"loaded\";};".to_string(),
-        "runtime[\"initialized\"]=true;".to_string(),
+        format!("var r=global.{BUNDLER_RUNTIME_GLOBAL}||(global.{BUNDLER_RUNTIME_GLOBAL}={{}});"),
+        "if(!r.i){".to_string(),
+        "r.f=Object.create(null);".to_string(),
+        "r.c=Object.create(null);".to_string(),
+        "r.s=Object.create(null);".to_string(),
+        "r.d=Object.create(null);".to_string(),
+        "r.b=\"\";".to_string(),
+        "r.o=\"auto\";".to_string(),
+        "r.k=null;".to_string(),
+        "r.m=null;".to_string(),
+        "function u(a){var b=r.k&&r.k[a];if(!b)throw new Error(\"unknown chunk \"+a);return new URL(b[1],r.b||(global.location&&global.location.href?global.location.href:\"./\")).toString();}".to_string(),
+        "function g(a){var b=r.d[a];if(b)return b;b={};b.p=new Promise(function(c,d){b.r=c;b.j=d});r.d[a]=b;return b;}".to_string(),
+        "r.l=function(a){r.s[a]=1;var b=r.d[a];if(b){b.r();delete r.d[a];}};".to_string(),
+        "function h(a,b){r.s[a]=2;var c=r.d[a];if(c){c.j(b);delete r.d[a];}}".to_string(),
+        "r.r=function(a,b,c){r.f[a]=c;};".to_string(),
+        "r.q=function(a){if(Object.prototype.hasOwnProperty.call(r.c,a))return r.c[a];var b=r.f[a];if(!b)throw new Error(\"unknown module \"+a);var c=[];r.c[a]=c;b(r.q,c,r.j,r.x);return c;};".to_string(),
+        "function p(a,b){return new Promise(function(c,d){var e=global.document.createElement(\"script\");e.async=true;e.src=b;e.onload=function(){c();};e.onerror=function(){d(new Error(\"load \"+a+\" failed\"));};(global.document.head||global.document.documentElement).appendChild(e);});}".to_string(),
+        "function w(a,b){return Promise.resolve(global.fetch(b)).then(function(c){if(!c.ok)throw new Error(\"fetch \"+a+\" failed (\"+c.status+\")\");return c.text();}).then(function(c){(0,global.eval)(c+\"\\n//# sourceURL=\"+b);});}".to_string(),
+        "function t(){return r.o!==\"auto\"?r.o:global.document?\"script\":\"fetch\";}".to_string(),
+        "function e(a){var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;var c=r.k&&r.k[a];if(!c)throw new Error(\"unknown chunk \"+a);r.s[a]=0;var d=g(a),f=t();return Promise.all((c[0]||[]).map(function(j){return e(j);})).then(function(){var j=u(a);return f===\"fetch\"?w(a,j):p(a,j);}).then(function(){return d.p;}).catch(function(j){h(a,j);throw j;});}".to_string(),
+        "r.j=function(a){var b=r.m&&r.m[a];if(!b)throw new Error(\"unknown module \"+a);return e(b).then(function(){return r.q(a);});};".to_string(),
+        "r.x=function(a){var b=r.m&&r.m[a];if(!b)throw new Error(\"unknown module \"+a);return e(b).then(function(){});};".to_string(),
+        "r.n=function(a){for(var b=0;b<a.length;b+=1)r.q(a[b]);};".to_string(),
+        "r.a=function(a,b){r.k=a[1];r.m=a[2];r.o=b||r.o;var c=global.document&&global.document.currentScript&&global.document.currentScript.src?global.document.currentScript.src:(global.location&&global.location.href?global.location.href:\"./\");r.b=new URL(a[3]||\"./\",c).toString();r.s[a[0]]=1;};".to_string(),
+        "r.i=1;".to_string(),
         "}".to_string(),
-        format!("runtime[\"init\"]({manifest_json}, {loader:?});"),
+        format!("r.a({manifest_json}, {loader:?});"),
         "}).call(this,globalThis);".to_string(),
         String::new(),
     ]
@@ -881,19 +972,18 @@ mod tests {
         .iter()
         .any(|path| path.ends_with("chunk-map.json")));
         assert!(output.generatedAssets.iter().any(|asset| {
-            asset.path.ends_with("runtime-shared.externs.js")
-                && asset.text.contains("Object.prototype.require;")
-                && !asset.text.contains("Object.prototype.default;")
-        }));
-        assert!(output.generatedAssets.iter().any(|asset| {
-            asset.path.ends_with("chunk-map.json") && asset.text.contains("\"baseChunk\": \"main\"")
+            asset.path.ends_with("chunk-map.json")
+                && asset.text.contains("\"baseChunk\": \"c")
+                && asset.text.contains("\"modules\": [")
         }));
         assert!(output.generatedAssets.iter().any(|asset| {
             asset.path.ends_with("main.linked.js")
-                && !asset.text.contains("Object.defineProperty(exports,\"default\"")
+                && !asset.text.contains("__gcc_runtime__")
+                && !asset.text.contains("initialized")
+                && asset.text.contains("globalThis.__g.l(")
         }));
         assert!(output.compileJobs[0].chunk.is_some());
-        assert!(output.compileJobs[0]
+        assert!(!output.compileJobs[0]
             .externs
             .iter()
             .any(|file| file.ends_with("runtime-shared.externs.js")));

@@ -707,19 +707,23 @@ test.serial("emits smaller script chunks for explicit lazy modules", async () =>
   });
 
   expect(result.exitCode).toBe(0);
-  expect(
-    result.outputFiles
-      .map((filePath) => path.basename(filePath))
-      .sort((left, right) => left.localeCompare(right)),
-  ).toEqual(["main.js", "src-feature-lazy.js"]);
+  const outputBasenames = result.outputFiles
+    .map((filePath) => path.basename(filePath))
+    .sort((left, right) => left.localeCompare(right));
+  expect(outputBasenames).toHaveLength(2);
+  expect(outputBasenames).toContain("main.js");
+  const lazyOutputName = outputBasenames.find((name) => name !== "main.js");
+  expect(lazyOutputName).toMatch(/^c[0-9a-f]{8}\.js$/);
 
   const baseOutput = await fixture.read("dist/main.js");
-  const lazyOutput = await fixture.read("dist/src-feature-lazy.js");
+  const lazyOutput = await fixture.read(`dist/${lazyOutputName}`);
 
   expect(baseOutput).not.toMatch(/\bexport\s*\{/);
   expect(baseOutput).not.toMatch(/globalThis\.__gccChunkRuntime/);
-  expect(baseOutput).toContain("__gcc_runtime__");
-  expect(baseOutput).toContain("gcc.src.feature");
+  expect(baseOutput).not.toContain("__gcc_runtime__");
+  expect(baseOutput).not.toContain("initialized");
+  expect(baseOutput).not.toContain("gcc.src.feature");
+  expect(baseOutput).toMatch(/m[0-9a-f]{8}/);
   expect(baseOutput).not.toMatch(/LAZY_FEATURE/);
   expect(lazyOutput).toMatch(/LAZY_FEATURE/);
 });
@@ -756,21 +760,28 @@ test.serial("emits bundler-runtime chunks for explicit lazy modules", async () =
   });
 
   expect(result.exitCode).toBe(0);
-  expect(
-    result.outputFiles
-      .map((filePath) => path.basename(filePath))
-      .sort((left, right) => left.localeCompare(right)),
-  ).toEqual(["main.js", "src-feature-lazy.js"]);
+  const outputBasenames = result.outputFiles
+    .map((filePath) => path.basename(filePath))
+    .sort((left, right) => left.localeCompare(right));
+  expect(outputBasenames).toHaveLength(2);
+  expect(outputBasenames).toContain("main.js");
+  const lazyOutputName = outputBasenames.find((name) => name !== "main.js");
+  expect(lazyOutputName).toMatch(/^c[0-9a-f]{8}\.js$/);
 
   const baseOutput = await fixture.read("dist/main.js");
-  const lazyOutput = await fixture.read("dist/src-feature-lazy.js");
+  const lazyOutput = await fixture.read(`dist/${lazyOutputName}`);
 
-  expect(baseOutput).toContain("__gcc_runtime__");
+  expect(baseOutput).not.toContain("__gcc_runtime__");
+  expect(baseOutput).not.toContain("initialized");
+  expect(baseOutput).not.toContain("gcc.src.feature");
+  expect(baseOutput).toMatch(/m[0-9a-f]{8}/);
   expect(baseOutput).toContain("__lazyLoader");
   expect(baseOutput).not.toMatch(/goog\.module/);
   expect(baseOutput).not.toMatch(/ModuleManager/);
   expect(baseOutput).not.toContain('Object.defineProperty(d,"default"');
-  expect(lazyOutput).toContain("__gcc_runtime__");
+  expect(lazyOutput).not.toContain("__gcc_runtime__");
+  expect(lazyOutput).not.toContain("gcc.src.feature");
+  expect(lazyOutput).toMatch(/m[0-9a-f]{8}/);
   expect(lazyOutput).not.toContain("renderMessage");
   expect(lazyOutput).toMatch(/\[[0-9]+\]=function/);
   expect(lazyOutput).not.toContain('["default"]');
@@ -1155,15 +1166,21 @@ test.serial("emits an optional chunk manifest when requested", async () => {
   });
 
   expect(result.exitCode).toBe(0);
-  expect(
-    result.outputFiles
-      .map((filePath) => path.basename(filePath))
-      .sort((left, right) => left.localeCompare(right)),
-  ).toEqual(["chunk-map.json", "main.js", "src-feature-lazy.js"]);
+  const outputBasenames = result.outputFiles
+    .map((filePath) => path.basename(filePath))
+    .sort((left, right) => left.localeCompare(right));
+  expect(outputBasenames).toHaveLength(3);
+  expect(outputBasenames).toContain("chunk-map.json");
+  expect(outputBasenames).toContain("main.js");
+  expect(outputBasenames.some((name) => /^c[0-9a-f]{8}\.js$/.test(name))).toBe(true);
 
   const manifest = JSON.parse(await fixture.read("dist/chunk-map.json"));
-  expect(manifest.baseChunk).toBe("main");
-  expect(manifest.modules["gcc.src.feature"]).toBe("src-feature-lazy");
+  expect(manifest.baseChunk).toMatch(/^c[0-9a-f]{8}$/);
+  const moduleEntries = Object.entries(manifest.modules);
+  expect(moduleEntries).toHaveLength(2);
+  expect(moduleEntries.every(([moduleId, chunkId]) =>
+    /^m[0-9a-f]{8}$/.test(moduleId) && /^c[0-9a-f]{8}$/.test(chunkId),
+  )).toBe(true);
 });
 
 test.serial("emits a bundler-runtime chunk manifest when requested", async () => {
@@ -1196,9 +1213,15 @@ test.serial("emits a bundler-runtime chunk manifest when requested", async () =>
 
   expect(result.exitCode).toBe(0);
   const manifest = JSON.parse(await fixture.read("dist/chunk-map.json"));
-  expect(manifest.baseChunk).toBe("main");
-  expect(manifest.chunks["src-feature-lazy"].deps).toEqual(["main"]);
-  expect(manifest.modules["gcc.src.feature"]).toBe("src-feature-lazy");
+  expect(manifest.baseChunk).toMatch(/^c[0-9a-f]{8}$/);
+  const chunkEntries = Object.entries(manifest.chunks);
+  expect(chunkEntries).toHaveLength(2);
+  expect(chunkEntries.every(([chunkId, chunkValue]) =>
+    /^c[0-9a-f]{8}$/.test(chunkId) &&
+    Array.isArray(chunkValue.deps) &&
+    Array.isArray(chunkValue.modules) &&
+    chunkValue.modules.every((moduleId) => /^m[0-9a-f]{8}$/.test(moduleId)),
+  )).toBe(true);
 });
 
 test.serial("rejects non-literal dynamic import specifiers", async () => {

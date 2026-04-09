@@ -1544,6 +1544,10 @@ function getTargetKey() {
 function loadNativeBinding() {
   const targetKey = getTargetKey();
   const packageName = SUPPORTED_TARGETS[targetKey];
+  const localFallbackPath = import_path5.default.join(getPackageRootFromBundle(), "native", "index.node");
+  if (import_fs5.default.existsSync(localFallbackPath)) {
+    return require2(localFallbackPath);
+  }
   const loadErrors = [];
   if (packageName) {
     try {
@@ -1551,10 +1555,6 @@ function loadNativeBinding() {
     } catch (error) {
       loadErrors.push(`${packageName}: ${error instanceof Error ? error.message : String(error)}`);
     }
-  }
-  const localFallbackPath = import_path5.default.join(getPackageRootFromBundle(), "native", "index.node");
-  if (import_fs5.default.existsSync(localFallbackPath)) {
-    return require2(localFallbackPath);
   }
   const supportedTargets = Object.keys(SUPPORTED_TARGETS).join(", ");
   const details = loadErrors.length > 0 ? ` Tried ${loadErrors.join("; ")}.` : "";
