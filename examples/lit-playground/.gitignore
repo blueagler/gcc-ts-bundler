@@ -1,2 +1,4 @@
 dist/
+.lit-compiled/
+lit.generated.externs.js
 node_modules/

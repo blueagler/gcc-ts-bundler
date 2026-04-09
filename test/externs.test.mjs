@@ -5,6 +5,7 @@ import { expect, test } from "bun:test";
 
 import { build, generateExterns } from "../dist/index.mjs";
 import {
+  createFixture,
   createExternFixture,
   createRuntimeExternFixture,
   execFileAsync,
@@ -54,6 +55,47 @@ test.serial("generateExterns candidates mode resolves package subpaths that ship
   expect(result.mode).toBe("candidates");
   expect(result.text).toContain("Object.prototype.attribute;");
   expect(result.text).toContain("Object.prototype.reflect;");
+});
+
+test.serial("generateExterns boundary-aware mode ignores app-only object protocol keys", async () => {
+  const fixture = await createFixture();
+  await fixture.write(
+    "src/main.ts",
+    [
+      "const tpl = {",
+      '  ["__protocol__"]: 1,',
+      "  values: [],",
+      "};",
+      "export const view = tpl;",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "node_modules/dummy-pkg/package.json",
+    JSON.stringify(
+      {
+        name: "dummy-pkg",
+        types: "./index.d.ts",
+      },
+      null,
+      2,
+    ),
+  );
+  await fixture.write(
+    "node_modules/dummy-pkg/index.d.ts",
+    "export interface Dummy {}\n",
+  );
+
+  const result = await generateExterns({
+    appEntryFiles: ["./main.ts"],
+    modules: ["dummy-pkg"],
+    mode: "boundary-aware",
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  expect(result.text).not.toContain("Object.prototype.__protocol__;");
+  expect(result.text).not.toContain("Object.prototype.values;");
 });
 
 test.serial("generateExterns runtime-aware mode captures helper-lowered dependency fields without noise", async () => {

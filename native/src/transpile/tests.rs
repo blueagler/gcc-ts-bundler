@@ -1,7 +1,8 @@
 use super::{
     apply_js_compat_text_fixes, collect_commonjs_extern_names, collect_enum_extern_names,
-    collect_protocol_extern_names, collect_static_property_names_from_text, print_program,
-    render_externs, render_generated_externs, transform_js_pass_through_module, transform_program,
+    collect_preserved_property_names, collect_protocol_extern_names,
+    collect_static_property_names_from_text, print_program, render_externs,
+    render_generated_externs, transform_js_pass_through_module, transform_program,
     transform_source_file, StaticPropertyNameCollector,
 };
 use crate::module_cache::parse_module;
@@ -739,6 +740,41 @@ fn rewrites_hard_static_interop_property_reads_to_bracket_access() {
 }
 
 #[test]
+fn collects_string_defined_property_hazards_without_hard_coded_framework_names() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("gcc-ts-bundler-string-hazard-{unique}"));
+    let define_file = root.join("define.js");
+    let read_file = root.join("read.js");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        &define_file,
+        "export const tpl = { [\"_$litType$\"]: 1, values: [] };\n",
+    )
+    .unwrap();
+    fs::write(
+        &read_file,
+        "export function isTemplate(value) { return value._$litType$ !== undefined; }\n",
+    )
+    .unwrap();
+
+    let names = collect_preserved_property_names(
+        &[
+            define_file.to_string_lossy().to_string(),
+            read_file.to_string_lossy().to_string(),
+        ],
+        &HashSet::new(),
+        &HashSet::new(),
+    )
+    .expect("collect preserved properties");
+
+    assert!(names.contains("_$litType$"), "{names:?}");
+    assert!(!names.contains("values"), "{names:?}");
+}
+
+#[test]
 fn renders_commonjs_export_externs() {
     let externs = render_externs(
         &BTreeSet::from([
@@ -926,6 +962,42 @@ fn bundler_runtime_rewrites_namespace_member_reads_to_numeric_slots() {
 }
 
 #[test]
+fn off_mode_keeps_namespace_import_bindings_before_top_level_destructures() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("gcc-ts-bundler-namespace-off-{unique}"));
+    let src_dir = root.join("src");
+    let feature_file = src_dir.join("feature.ts");
+    let main_file = src_dir.join("main.ts");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(
+        &feature_file,
+        "export const protocol = { PartA: 1, PartB: 2 };\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_file,
+        "import * as runtime from './feature';\nconst { PartA, PartB } = runtime.protocol;\nexport default PartA + PartB;\n",
+    )
+    .unwrap();
+
+    let transformed = GLOBALS
+        .set(&Globals::new(), || transform_source_file(&main_file, &empty_context()))
+        .unwrap();
+
+    let import_index = transformed
+        .find("const runtime = __goog_import_0;")
+        .expect("namespace import binding");
+    let destructure_index = transformed
+        .find("const { PartA, PartB } = runtime.protocol;")
+        .expect("namespace destructure");
+
+    assert!(import_index < destructure_index, "{transformed}");
+}
+
+#[test]
 fn bundler_runtime_rejects_reflective_namespace_usage() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -981,6 +1053,74 @@ fn bundler_runtime_rejects_reflective_namespace_usage() {
         error.contains("reflective Object.* operations on module namespace values"),
         "{error}"
     );
+}
+
+#[test]
+fn bundler_runtime_keeps_namespace_import_bindings_before_top_level_destructures() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("gcc-ts-bundler-namespace-runtime-{unique}"));
+    let src_dir = root.join("src");
+    let feature_file = src_dir.join("feature.ts");
+    let main_file = src_dir.join("main.ts");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(
+        &feature_file,
+        "export const protocol = { PartA: 1, PartB: 2 };\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_file,
+        "import * as runtime from './feature';\nconst { PartA, PartB } = runtime.protocol;\nexport default PartA + PartB;\n",
+    )
+    .unwrap();
+
+    let feature_module_id = to_goog_module_id(&feature_file, &root);
+    let main_module_id = to_goog_module_id(&main_file, &root);
+    let transformed = GLOBALS
+        .set(&Globals::new(), || {
+            transform_source_file(
+                &main_file,
+                &super::TranspileContext {
+                    bundler_module_slots: HashMap::from([
+                        (
+                            feature_module_id.clone(),
+                            super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
+                                "protocol".to_string(),
+                            ])),
+                        ),
+                        (
+                            main_module_id,
+                            super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
+                                "default".to_string(),
+                            ])),
+                        ),
+                    ]),
+                    bundler_runtime_logical_ids: HashMap::new(),
+                    chunk_mode: super::ChunkMode::BundlerRuntime,
+                    commonjs_specifiers: HashSet::new(),
+                    file_metadata: HashMap::new(),
+                    global_property_names: HashSet::new(),
+                    preserved_property_names: HashSet::new(),
+                    lazy_imports_by_file: HashMap::new(),
+                    package_aliases: Vec::new(),
+                    static_property_names: HashSet::new(),
+                    workspace_dir: root.clone(),
+                },
+            )
+        })
+        .unwrap();
+
+    let import_index = transformed
+        .find("const runtime = __gcc_import_0;")
+        .expect("namespace import binding");
+    let destructure_index = transformed
+        .find("const { PartA, PartB } = runtime[0];")
+        .expect("namespace destructure");
+
+    assert!(import_index < destructure_index, "{transformed}");
 }
 
 #[test]

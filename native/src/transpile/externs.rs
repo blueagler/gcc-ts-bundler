@@ -107,6 +107,7 @@ pub(super) fn collect_preserved_property_names(
     names.extend(static_property_names.iter().cloned());
     names.extend(collect_platform_callback_property_names(file_names)?);
     names.extend(collect_reflective_property_names(file_names)?);
+    names.extend(collect_string_defined_property_hazards(file_names)?);
     Ok(names)
 }
 
@@ -142,6 +143,28 @@ fn collect_reflective_property_names(
         names.extend(collector.names);
     }
     Ok(names)
+}
+
+fn collect_string_defined_property_hazards(
+    file_names: &[String],
+) -> std::result::Result<HashSet<String>, String> {
+    let mut defined_names = HashSet::new();
+    let mut accessed_names = HashSet::new();
+    for file_name in file_names {
+        if file_name.ends_with(".d.ts") {
+            continue;
+        }
+        let file_path = PathBuf::from(file_name);
+        let module = get_or_parse_cached_module(&file_path)?;
+        let mut collector = StringDefinedPropertyHazardCollector::default();
+        module.visit_with(&mut collector);
+        defined_names.extend(collector.defined_names);
+        accessed_names.extend(collector.accessed_names);
+    }
+    Ok(defined_names
+        .intersection(&accessed_names)
+        .cloned()
+        .collect())
 }
 
 pub(super) fn collect_static_property_names_from_text(source_text: &str) -> HashSet<String> {
@@ -320,6 +343,160 @@ impl ReflectivePropertyNameCollector {
         if is_valid_js_identifier(property_name) {
             self.names.insert(property_name.to_string());
         }
+    }
+}
+
+#[derive(Default)]
+struct StringDefinedPropertyHazardCollector {
+    accessed_names: HashSet<String>,
+    defined_names: HashSet<String>,
+}
+
+impl StringDefinedPropertyHazardCollector {
+    fn insert_accessed(&mut self, property_name: &str) {
+        if is_valid_js_identifier(property_name) {
+            self.accessed_names.insert(property_name.to_string());
+        }
+    }
+
+    fn insert_defined(&mut self, property_name: Option<String>) {
+        if let Some(property_name) = property_name {
+            if is_valid_js_identifier(&property_name) {
+                self.defined_names.insert(property_name);
+            }
+        }
+    }
+}
+
+impl Visit for StringDefinedPropertyHazardCollector {
+    fn visit_member_expr(&mut self, member_expr: &MemberExpr) {
+        if let MemberProp::Ident(prop_ident) = &member_expr.prop {
+            self.insert_accessed(prop_ident.sym.as_ref());
+        }
+        member_expr.visit_children_with(self);
+    }
+
+    fn visit_super_prop_expr(&mut self, super_prop: &SuperPropExpr) {
+        if let SuperProp::Ident(prop_ident) = &super_prop.prop {
+            self.insert_accessed(prop_ident.sym.as_ref());
+        }
+        super_prop.visit_children_with(self);
+    }
+
+    fn visit_var_declarator(&mut self, declarator: &VarDeclarator) {
+        if declarator.init.is_some() {
+            collect_pattern_property_reads(&declarator.name, &mut self.accessed_names);
+        }
+        declarator.visit_children_with(self);
+    }
+
+    fn visit_object_lit(&mut self, object_lit: &swc_core::ecma::ast::ObjectLit) {
+        for prop in &object_lit.props {
+            let swc_core::ecma::ast::PropOrSpread::Prop(prop) = prop else {
+                continue;
+            };
+            match prop.as_ref() {
+                swc_core::ecma::ast::Prop::KeyValue(key_value) => {
+                    self.insert_defined(string_defined_prop_name(&key_value.key));
+                }
+                swc_core::ecma::ast::Prop::Getter(getter) => {
+                    self.insert_defined(string_defined_prop_name(&getter.key));
+                }
+                swc_core::ecma::ast::Prop::Setter(setter) => {
+                    self.insert_defined(string_defined_prop_name(&setter.key));
+                }
+                swc_core::ecma::ast::Prop::Method(method) => {
+                    self.insert_defined(string_defined_prop_name(&method.key));
+                }
+                _ => {}
+            }
+        }
+        object_lit.visit_children_with(self);
+    }
+
+    fn visit_call_expr(&mut self, call_expr: &CallExpr) {
+        if let Callee::Expr(callee_expr) = &call_expr.callee {
+            match &**callee_expr {
+                Expr::Ident(ident) if ident.sym == *"__publicField" && call_expr.args.len() >= 2 => {
+                    if let Some(ExprOrSpread { expr, .. }) = call_expr.args.get(1) {
+                        self.insert_defined(string_literal_expr_name(expr));
+                    }
+                }
+                Expr::Member(member) => {
+                    let method_name = member_prop_name(&member.prop);
+                    let object_name = match &*member.obj {
+                        Expr::Ident(ident) => Some(ident.sym.as_ref()),
+                        _ => None,
+                    };
+                    let string_arg_index = match (object_name, method_name.as_deref()) {
+                        (Some("Object"), Some("defineProperty")) => Some(1usize),
+                        (Some("Reflect"), Some("defineProperty")) => Some(1usize),
+                        _ => None,
+                    };
+                    if let Some(index) = string_arg_index {
+                        if let Some(ExprOrSpread { expr, .. }) = call_expr.args.get(index) {
+                            self.insert_defined(string_literal_expr_name(expr));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        call_expr.visit_children_with(self);
+    }
+}
+
+fn string_defined_prop_name(prop_name: &PropName) -> Option<String> {
+    match prop_name {
+        PropName::Str(value) => Some(value.value.to_string_lossy().to_string()),
+        PropName::Computed(computed) => string_literal_expr_name(&computed.expr),
+        _ => None,
+    }
+}
+
+fn string_literal_expr_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Lit(swc_core::ecma::ast::Lit::Str(value)) => {
+            Some(value.value.to_string_lossy().to_string())
+        }
+        Expr::Tpl(template) if template.exprs.is_empty() && template.quasis.len() == 1 => template
+            .quasis
+            .first()
+            .map(|quasi| quasi.raw.to_string()),
+        _ => None,
+    }
+}
+
+fn collect_pattern_property_reads(pattern: &Pat, names: &mut HashSet<String>) {
+    match pattern {
+        Pat::Object(object) => {
+            for prop in &object.props {
+                match prop {
+                    swc_core::ecma::ast::ObjectPatProp::KeyValue(key_value) => {
+                        if let Some(property_name) = prop_name_to_string(&key_value.key) {
+                            if is_valid_js_identifier(&property_name) {
+                                names.insert(property_name);
+                            }
+                        }
+                        collect_pattern_property_reads(&key_value.value, names);
+                    }
+                    swc_core::ecma::ast::ObjectPatProp::Assign(assign) => {
+                        names.insert(assign.key.sym.to_string());
+                    }
+                    swc_core::ecma::ast::ObjectPatProp::Rest(rest) => {
+                        collect_pattern_property_reads(&rest.arg, names);
+                    }
+                }
+            }
+        }
+        Pat::Array(array) => {
+            for element in array.elems.iter().flatten() {
+                collect_pattern_property_reads(element, names);
+            }
+        }
+        Pat::Assign(assign) => collect_pattern_property_reads(&assign.left, names),
+        Pat::Rest(rest) => collect_pattern_property_reads(&rest.arg, names),
+        _ => {}
     }
 }
 
