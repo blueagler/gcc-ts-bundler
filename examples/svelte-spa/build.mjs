@@ -27,15 +27,15 @@ await bundleWithEsbuild({
   splitting: true,
   target: "es2018",
 });
-// await generateExterns({
-//   appEntryFiles: ["./main.js"],
-//   mode: "runtime-aware",
-//   modules: ["svelte"],
-//   outputFile: "./svelte.generated.externs.js",
-//   projectRoot,
-//   runtimeEntryFiles: await collectRuntimeEntries(prebundleDir),
-//   srcDir: "./src",
-// });
+await generateExterns({
+  appEntryFiles: ["./main.js"],
+  mode: "runtime-aware",
+  modules: ["svelte"],
+  outputFile: "./svelte.generated.externs.js",
+  projectRoot,
+  runtimeEntryFiles: await collectRuntimeEntries(prebundleDir),
+  srcDir: "./src",
+});
 
 const result = await build({
   cache: { mode: "off" },

@@ -6,20 +6,20 @@ import { build, generateExterns } from "../../dist/index.mjs";
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 const generatedExternsFile = path.join(projectRoot, "lit.generated.externs.js");
 
-// await generateExterns({
-//   appEntryFiles: ["./main.ts"],
-//   modules: ["lit", "@lit-labs/router", "@lit-labs/motion"],
-//   mode: "boundary-aware",
-//   outputFile: generatedExternsFile,
-//   projectRoot,
-//   srcDir: ".",
-// });
+await generateExterns({
+  appEntryFiles: ["./main.ts"],
+  modules: ["lit", "@lit-labs/router", "@lit-labs/motion"],
+  mode: "boundary-aware",
+  outputFile: generatedExternsFile,
+  projectRoot,
+  srcDir: ".",
+});
 
 const result = await build({
   cache: { mode: "off" },
   chunks: { loader: "script", mode: "bundler-runtime" },
   entries: ["./main.ts"],
-  // externs: ["./lit.generated.externs.js"],
+  externs: ["./lit.generated.externs.js"],
   outDir: "./dist",
   projectRoot,
   srcDir: ".",
