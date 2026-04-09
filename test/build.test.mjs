@@ -345,6 +345,46 @@ test.serial("builds an ESM package from node_modules in ADVANCED mode", async ()
   expect(output).not.toMatch(/demo-pkg/);
 });
 
+test.serial("prefers production package exports over development exports by default", async () => {
+  const fixture = await createFixture();
+  await fixture.write(
+    "src/index.ts",
+    'import { value } from "demo-pkg";\nexport default value;\n',
+  );
+  await fixture.write(
+    "node_modules/demo-pkg/package.json",
+    JSON.stringify({
+      name: "demo-pkg",
+      exports: {
+        browser: {
+          development: "./dev.js",
+          production: "./prod.js",
+          default: "./default.js",
+        },
+      },
+    }),
+  );
+  await fixture.write("node_modules/demo-pkg/dev.js", 'export const value = "DEV_EXPORT";\n');
+  await fixture.write("node_modules/demo-pkg/prod.js", 'export const value = "PROD_EXPORT";\n');
+  await fixture.write(
+    "node_modules/demo-pkg/default.js",
+    'export const value = "DEFAULT_EXPORT";\n',
+  );
+
+  const result = await build({
+    cache: { mode: "off" },
+    entries: ["./index.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  expect(result.exitCode).toBe(0);
+  const output = await fixture.read("dist/index.js");
+  expect(output).toMatch(/PROD_EXPORT/);
+  expect(output).not.toMatch(/DEV_EXPORT/);
+});
+
 test.serial("builds a CommonJS package entrypoint from node_modules", async () => {
   const fixture = await createFixture();
   await fixture.write(
@@ -774,6 +814,9 @@ test.serial("emits bundler-runtime chunks for explicit lazy modules", async () =
   expect(baseOutput).not.toContain("__gcc_runtime__");
   expect(baseOutput).not.toContain("initialized");
   expect(baseOutput).not.toContain("gcc.src.feature");
+  expect(baseOutput).not.toContain("sourceURL");
+  expect(baseOutput).not.toContain("unknown module");
+  expect(baseOutput).not.toContain("unknown chunk");
   expect(baseOutput).toMatch(/m[0-9a-f]{8}/);
   expect(baseOutput).toContain("__lazyLoader");
   expect(baseOutput).not.toMatch(/goog\.module/);
@@ -781,6 +824,7 @@ test.serial("emits bundler-runtime chunks for explicit lazy modules", async () =
   expect(baseOutput).not.toContain('Object.defineProperty(d,"default"');
   expect(lazyOutput).not.toContain("__gcc_runtime__");
   expect(lazyOutput).not.toContain("gcc.src.feature");
+  expect(lazyOutput).not.toContain("base chunk missing");
   expect(lazyOutput).toMatch(/m[0-9a-f]{8}/);
   expect(lazyOutput).not.toContain("renderMessage");
   expect(lazyOutput).toMatch(/\[[0-9]+\]=function/);

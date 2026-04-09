@@ -267,14 +267,13 @@ fn collect_bundler_module_slots(
         let mut changed = false;
         for (module_id, raw_exports) in &raw_exports_by_module {
             for target_module_id in &raw_exports.export_all_modules {
-                let Some(target_names) = resolved_export_names.get(target_module_id).cloned() else {
+                let Some(target_names) = resolved_export_names.get(target_module_id).cloned()
+                else {
                     return Err(format!(
                         "Unable to resolve bundler-runtime slot exports for module {target_module_id}"
                     ));
                 };
-                let resolved_names = resolved_export_names
-                    .entry(module_id.clone())
-                    .or_default();
+                let resolved_names = resolved_export_names.entry(module_id.clone()).or_default();
                 for export_name in target_names {
                     if export_name == "default" {
                         continue;
@@ -291,7 +290,10 @@ fn collect_bundler_module_slots(
     Ok(resolved_export_names
         .into_iter()
         .map(|(module_id, export_names)| {
-            (module_id, BundlerModuleSlots::from_export_names(&export_names))
+            (
+                module_id,
+                BundlerModuleSlots::from_export_names(&export_names),
+            )
         })
         .collect())
 }
@@ -311,10 +313,7 @@ fn collect_raw_bundler_exports(
                     .extend(exported_decl_names(&export_decl.decl));
             }
             ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportNamed(named_export)) => {
-                if matches!(
-                    named_export.type_only,
-                    true
-                ) {
+                if matches!(named_export.type_only, true) {
                     continue;
                 }
                 if let Some(src) = &named_export.src {
@@ -1957,14 +1956,14 @@ fn rewrite_bundler_runtime_namespace_usage(
     context: &TranspileContext,
 ) -> std::result::Result<(), String> {
     let dynamic_import_wrappers = collect_dynamic_import_wrappers(module);
-    let promise_carriers = collect_dynamic_import_promise_carriers(module, &dynamic_import_wrappers);
-    let mut visitor =
-        BundlerRuntimeNamespaceVisitor::new(
-            file_path,
-            context,
-            dynamic_import_wrappers,
-            promise_carriers,
-        );
+    let promise_carriers =
+        collect_dynamic_import_promise_carriers(module, &dynamic_import_wrappers);
+    let mut visitor = BundlerRuntimeNamespaceVisitor::new(
+        file_path,
+        context,
+        dynamic_import_wrappers,
+        promise_carriers,
+    );
     module.visit_mut_with(&mut visitor);
     if visitor.errors.is_empty() {
         Ok(())
@@ -2163,9 +2162,7 @@ fn extract_dynamic_import_module_ids_from_expr(expr: &Expr) -> Option<BTreeSet<S
     }
 }
 
-fn extract_dynamic_import_module_ids_from_arrow(
-    arrow: &ArrowExpr,
-) -> Option<BTreeSet<String>> {
+fn extract_dynamic_import_module_ids_from_arrow(arrow: &ArrowExpr) -> Option<BTreeSet<String>> {
     if !arrow.params.is_empty() {
         return None;
     }
@@ -2205,9 +2202,7 @@ fn extract_dynamic_import_object_wrappers(
     (!wrappers.is_empty()).then_some(wrappers)
 }
 
-fn dynamic_import_module_ids_from_call(
-    call_expr: &CallExpr,
-) -> Option<BTreeSet<String>> {
+fn dynamic_import_module_ids_from_call(call_expr: &CallExpr) -> Option<BTreeSet<String>> {
     let Callee::Expr(callee_expr) = &call_expr.callee else {
         return None;
     };
@@ -2220,7 +2215,10 @@ fn dynamic_import_module_ids_from_call(
     let Expr::Lit(Lit::Str(module_id)) = &*call_expr.args[0].expr else {
         return None;
     };
-    Some(BTreeSet::from([module_id.value.to_string_lossy().to_string()]))
+    Some(BTreeSet::from([module_id
+        .value
+        .to_string_lossy()
+        .to_string()]))
 }
 
 struct BundlerRuntimeNamespaceVisitor<'a> {
@@ -2250,11 +2248,8 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a> {
     }
 
     fn push_error(&mut self, message: impl Into<String>) {
-        self.errors.push(format!(
-            "{}: {}",
-            self.file_path,
-            message.into()
-        ));
+        self.errors
+            .push(format!("{}: {}", self.file_path, message.into()));
     }
 
     fn module_ids_for_promise_expr(&self, expr: &Expr) -> Option<BTreeSet<String>> {
@@ -2381,7 +2376,8 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a> {
                                 );
                                 return false;
                             };
-                            let Ok(slot) = self.slot_for_module_ids(module_ids, &export_name) else {
+                            let Ok(slot) = self.slot_for_module_ids(module_ids, &export_name)
+                            else {
                                 self.push_error(format!(
                                     "bundler-runtime cannot destructure namespace export {:?}",
                                     export_name
@@ -2396,7 +2392,8 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a> {
                         }
                         swc_core::ecma::ast::ObjectPatProp::Assign(assign) => {
                             let export_name = assign.key.sym.to_string();
-                            let Ok(slot) = self.slot_for_module_ids(module_ids, &export_name) else {
+                            let Ok(slot) = self.slot_for_module_ids(module_ids, &export_name)
+                            else {
                                 self.push_error(format!(
                                     "bundler-runtime cannot destructure namespace export {:?}",
                                     export_name
@@ -2436,10 +2433,7 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a> {
         }
     }
 
-    fn promise_module_ids_from_supplier_callback(
-        &self,
-        expr: &Expr,
-    ) -> Option<BTreeSet<String>> {
+    fn promise_module_ids_from_supplier_callback(&self, expr: &Expr) -> Option<BTreeSet<String>> {
         match expr {
             Expr::Arrow(arrow) if arrow.params.is_empty() => match &*arrow.body {
                 BlockStmtOrExpr::Expr(body_expr) => self.module_ids_for_promise_expr(body_expr),
@@ -2593,9 +2587,7 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
         };
 
         let Some(export_name) = member_prop_name(&member_expr.prop) else {
-            self.push_error(
-                "bundler-runtime does not support computed namespace property access",
-            );
+            self.push_error("bundler-runtime does not support computed namespace property access");
             return;
         };
         let slot = match self.slot_for_module_ids(&module_ids, &export_name) {
@@ -2658,11 +2650,7 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
                 .iter()
                 .find(|(source_index, _)| *source_index != index)
             {
-                self.visit_callback_expr_with_namespace_binding(
-                    &mut arg.expr,
-                    module_ids,
-                    false,
-                );
+                self.visit_callback_expr_with_namespace_binding(&mut arg.expr, module_ids, false);
                 continue;
             }
             arg.expr.visit_mut_with(self);
@@ -2670,9 +2658,13 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
 
         if let Callee::Expr(callee_expr) = &call_expr.callee {
             if let Expr::Member(member) = &**callee_expr {
-                if matches!(&*member.obj, Expr::Ident(object_ident) if object_ident.sym == *"Object") {
+                if matches!(&*member.obj, Expr::Ident(object_ident) if object_ident.sym == *"Object")
+                {
                     if let Some(method_name) = member_prop_name(&member.prop) {
-                        if matches!(method_name.as_str(), "assign" | "entries" | "keys" | "values") {
+                        if matches!(
+                            method_name.as_str(),
+                            "assign" | "entries" | "keys" | "values"
+                        ) {
                             if call_expr.args.iter().any(|arg| {
                                 matches!(&*arg.expr, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id()))
                             }) {
@@ -2686,12 +2678,11 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
             }
         }
 
-        let is_namespace_passthrough_call =
-            call_expr.args.len() == 1
-                && matches!(
-                    &*call_expr.args[0].expr,
-                    Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id())
-                );
+        let is_namespace_passthrough_call = call_expr.args.len() == 1
+            && matches!(
+                &*call_expr.args[0].expr,
+                Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id())
+            );
         if !is_namespace_passthrough_call
             && call_expr.args.iter().any(|arg| {
                 matches!(&*arg.expr, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id()))
@@ -2706,7 +2697,8 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
     fn visit_mut_return_stmt(&mut self, return_stmt: &mut swc_core::ecma::ast::ReturnStmt) {
         return_stmt.visit_mut_children_with(self);
         if let Some(argument) = &return_stmt.arg {
-            if matches!(&**argument, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id())) {
+            if matches!(&**argument, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id()))
+            {
                 self.push_error(
                     "bundler-runtime does not support returning module namespace values",
                 );
@@ -2725,7 +2717,8 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
                 return;
             }
         }
-        if matches!(&*assign_expr.right, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id())) {
+        if matches!(&*assign_expr.right, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id()))
+        {
             self.push_error(
                 "bundler-runtime does not support reassigning or storing module namespace values",
             );
@@ -2734,7 +2727,8 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
 
     fn visit_mut_for_in_stmt(&mut self, for_in_stmt: &mut swc_core::ecma::ast::ForInStmt) {
         for_in_stmt.visit_mut_children_with(self);
-        if matches!(&*for_in_stmt.right, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id())) {
+        if matches!(&*for_in_stmt.right, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id()))
+        {
             self.push_error(
                 "bundler-runtime does not support iterating over module namespace values",
             );
@@ -4108,7 +4102,10 @@ fn emit_bundler_runtime_module_program(
                     print_expression(*default_expr.expr)?
                 ));
                 let slot = current_slots.slot_for("default").ok_or_else(|| {
-                    format!("Missing bundler-runtime export slot for default in {}", module_id)
+                    format!(
+                        "Missing bundler-runtime export slot for default in {}",
+                        module_id
+                    )
                 })?;
                 output.push(render_module_export_slot(slot, &local_name));
             }
@@ -4141,7 +4138,10 @@ fn emit_bundler_runtime_module_program(
                         ));
                     }
                     let slot = current_slots.slot_for("default").ok_or_else(|| {
-                        format!("Missing bundler-runtime export slot for default in {}", module_id)
+                        format!(
+                            "Missing bundler-runtime export slot for default in {}",
+                            module_id
+                        )
                     })?;
                     output.push(render_module_export_slot(slot, &local_name));
                 }
@@ -4171,7 +4171,10 @@ fn emit_bundler_runtime_module_program(
                         ));
                     }
                     let slot = current_slots.slot_for("default").ok_or_else(|| {
-                        format!("Missing bundler-runtime export slot for default in {}", module_id)
+                        format!(
+                            "Missing bundler-runtime export slot for default in {}",
+                            module_id
+                        )
                     })?;
                     output.push(render_module_export_slot(slot, &local_name));
                 }
@@ -4185,8 +4188,7 @@ fn emit_bundler_runtime_module_program(
                     &export_all.src.value.to_string_lossy(),
                     context,
                 )?;
-                let runtime_export_module_id =
-                    to_bundler_runtime_module_id(&export_module_id);
+                let runtime_export_module_id = to_bundler_runtime_module_id(&export_module_id);
                 dependency_ids.push(export_module_id.clone());
                 output.push(format!(
                     "const {require_name} = __require({runtime_export_module_id:?});"
@@ -4236,7 +4238,10 @@ fn emit_bundler_runtime_module_program(
         })?;
         output.push(render_module_export_slot(export_slot, export_name));
         let default_slot = current_slots.slot_for("default").ok_or_else(|| {
-            format!("Missing bundler-runtime export slot for default in {}", module_id)
+            format!(
+                "Missing bundler-runtime export slot for default in {}",
+                module_id
+            )
         })?;
         output.push(render_module_export_slot(default_slot, export_name));
     }
@@ -4348,7 +4353,9 @@ fn convert_bundler_import_decl(
     if !value_specifiers.is_empty() {
         let local_name = format!("__gcc_import_{}", *import_counter);
         *import_counter += 1;
-        lines.push(format!("const {local_name} = __require({runtime_module_id:?});"));
+        lines.push(format!(
+            "const {local_name} = __require({runtime_module_id:?});"
+        ));
         let target_slots = context
             .bundler_module_slots
             .get(&module_id)
@@ -4419,9 +4426,7 @@ fn bind_bundler_import_specifiers(
                     .map(module_export_name_to_string)
                     .unwrap_or_else(|| named_specifier.local.sym.to_string());
                 let slot = target_slots.slot_for(&imported_name).ok_or_else(|| {
-                    format!(
-                        "Missing bundler-runtime export slot for imported name {imported_name}"
-                    )
+                    format!("Missing bundler-runtime export slot for imported name {imported_name}")
                 })?;
                 format!(
                     "const {} = {};",
@@ -4499,7 +4504,9 @@ fn convert_bundler_named_export(
             resolve_module_id_for_specifier(file_path, &src.value.to_string_lossy(), context)?;
         let runtime_module_id = to_bundler_runtime_module_id(&module_id);
         dependency_ids.push(module_id.clone());
-        lines.push(format!("const {require_name} = __require({runtime_module_id:?});"));
+        lines.push(format!(
+            "const {require_name} = __require({runtime_module_id:?});"
+        ));
         let target_slots = context
             .bundler_module_slots
             .get(&module_id)
@@ -4520,10 +4527,7 @@ fn convert_bundler_named_export(
                         )
                     })?;
                     let target_slot = current_slots.slot_for(&export_name).ok_or_else(|| {
-                        format!(
-                            "Missing bundler-runtime export slot for {}",
-                            export_name
-                        )
+                        format!("Missing bundler-runtime export slot for {}", export_name)
                     })?;
                     lines.push(render_module_export_slot(
                         target_slot,
@@ -6115,7 +6119,10 @@ mod tests {
         assert!(transformed.contains("feature[1]()"), "{transformed}");
         assert!(!transformed.contains("renderMessage"), "{transformed}");
         assert!(transformed.contains("__exports[0]"), "{transformed}");
-        assert!(!transformed.contains("__exports[\"default\"]"), "{transformed}");
+        assert!(
+            !transformed.contains("__exports[\"default\"]"),
+            "{transformed}"
+        );
     }
 
     #[test]
@@ -6187,7 +6194,11 @@ mod tests {
         let feature_file = src_dir.join("feature.ts");
         let main_file = src_dir.join("main.ts");
         fs::create_dir_all(&src_dir).unwrap();
-        fs::write(&feature_file, "export default function feature() { return 'ok'; }\n").unwrap();
+        fs::write(
+            &feature_file,
+            "export default function feature() { return 'ok'; }\n",
+        )
+        .unwrap();
         fs::write(
             &main_file,
             [

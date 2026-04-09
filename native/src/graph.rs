@@ -727,15 +727,13 @@ fn resolve_package_path(
     context: &ResolveContext,
 ) -> std::result::Result<PathBuf, String> {
     if let Some(package_json) = package_json {
-        let prefer_development_exports =
-            package_prefers_development(package_json, package_dir, &package_import.package_name)?;
+        let prefer_debug_exports = package_resolution_prefers_debug();
         if let Some(exports) = package_json.get("exports") {
             if let Some(target) = select_package_export_target(
                 exports,
-                package_dir,
                 &package_import.subpath,
                 &package_import.package_name,
-                prefer_development_exports,
+                prefer_debug_exports,
             )? {
                 if let Some(path) = resolve_package_target(
                     &target,
@@ -795,11 +793,16 @@ fn resolve_package_path(
 
 fn select_package_export_target(
     exports: &Value,
-    package_dir: &Path,
     subpath: &str,
     package_name: &str,
-    prefer_development_exports: bool,
+    prefer_debug_exports: bool,
 ) -> std::result::Result<Option<String>, String> {
+    let production_target = resolve_package_exports_with_conditions(
+        exports,
+        subpath,
+        package_name,
+        &["browser", "production", "import", "default"],
+    )?;
     let default_target = resolve_package_exports_with_conditions(
         exports,
         subpath,
@@ -813,54 +816,15 @@ fn select_package_export_target(
         &["browser", "development", "import", "default"],
     )?;
 
-    match (default_target, development_target) {
-        (Some(default_target), Some(development_target))
-            if development_target != default_target
-                && (prefer_development_exports
-                    || should_prefer_development_target(
-                        package_dir,
-                        &default_target,
-                        &development_target,
-                    )?) =>
-        {
-            Ok(Some(development_target))
-        }
-        (Some(default_target), _) => Ok(Some(default_target)),
-        (None, Some(development_target)) => Ok(Some(development_target)),
-        (None, None) => Ok(None),
+    if prefer_debug_exports {
+        Ok(development_target.or(default_target).or(production_target))
+    } else {
+        Ok(production_target.or(default_target).or(development_target))
     }
 }
 
-fn package_prefers_development(
-    package_json: &Value,
-    package_dir: &Path,
-    package_name: &str,
-) -> std::result::Result<bool, String> {
-    let Some(exports) = package_json.get("exports") else {
-        return Ok(false);
-    };
-
-    let default_target = resolve_package_exports_with_conditions(
-        exports,
-        ".",
-        package_name,
-        &["browser", "import", "default"],
-    )?;
-    let development_target = resolve_package_exports_with_conditions(
-        exports,
-        ".",
-        package_name,
-        &["browser", "development", "import", "default"],
-    )?;
-
-    match (default_target, development_target) {
-        (Some(default_target), Some(development_target))
-            if development_target != default_target =>
-        {
-            should_prefer_development_target(package_dir, &default_target, &development_target)
-        }
-        _ => Ok(false),
-    }
+fn package_resolution_prefers_debug() -> bool {
+    matches!(std::env::var("GCC_CLOSURE_DEBUG").as_deref(), Ok("1"))
 }
 
 fn resolve_package_exports_with_conditions(
@@ -933,44 +897,6 @@ fn resolve_export_target_value(
         )),
         _ => Ok(None),
     }
-}
-
-fn should_prefer_development_target(
-    package_dir: &Path,
-    default_target: &str,
-    development_target: &str,
-) -> std::result::Result<bool, String> {
-    if !default_target.starts_with("./") || !development_target.starts_with("./") {
-        return Ok(false);
-    }
-
-    let default_path = package_dir.join(default_target.trim_start_matches("./"));
-    let development_path = package_dir.join(development_target.trim_start_matches("./"));
-    if !default_path.exists() || !development_path.exists() {
-        return Ok(false);
-    }
-
-    let default_source = fs::read_to_string(&default_path).map_err(|error| error.to_string())?;
-    let development_source =
-        fs::read_to_string(&development_path).map_err(|error| error.to_string())?;
-    let development_path_name = development_path.to_string_lossy();
-    let default_path_name = default_path.to_string_lossy();
-
-    Ok((contains_closure_protocol_hints(&development_source)
-        && !contains_closure_protocol_hints(&default_source))
-        || (default_path_name.contains("/production/")
-            && development_path_name.contains("/development/"))
-        || (looks_minified_source(&default_source) && !looks_minified_source(&development_source)))
-}
-
-fn contains_closure_protocol_hints(source: &str) -> bool {
-    source.contains("JSCompiler_renameProperty(") || source.contains("@nocollapse")
-}
-
-fn looks_minified_source(source: &str) -> bool {
-    let newline_count = source.bytes().filter(|byte| *byte == b'\n').count();
-    let longest_line = source.lines().map(str::len).max().unwrap_or(0);
-    newline_count <= 3 && longest_line > 2000
 }
 
 fn resolve_browser_subpath(
@@ -1831,6 +1757,42 @@ mod tests {
             .sourceFiles
             .iter()
             .any(|path| path.ends_with("node_modules/demo-pkg/browser.js")));
+    }
+
+    #[test]
+    fn prefers_production_exports_in_release_mode() {
+        let exports = serde_json::from_str::<Value>(
+            r#"{
+                "browser": {
+                    "development": "./dev.js",
+                    "production": "./prod.js",
+                    "default": "./default.js"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let resolved = select_package_export_target(&exports, ".", "demo-pkg", false).unwrap();
+
+        assert_eq!(resolved.as_deref(), Some("./prod.js"));
+    }
+
+    #[test]
+    fn prefers_development_exports_in_debug_mode() {
+        let exports = serde_json::from_str::<Value>(
+            r#"{
+                "browser": {
+                    "development": "./dev.js",
+                    "production": "./prod.js",
+                    "default": "./default.js"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let resolved = select_package_export_target(&exports, ".", "demo-pkg", true).unwrap();
+
+        assert_eq!(resolved.as_deref(), Some("./dev.js"));
     }
 
     #[test]

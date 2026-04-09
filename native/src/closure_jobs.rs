@@ -8,7 +8,8 @@ use napi_derive::napi;
 use serde::Serialize;
 
 use crate::pathing::{
-    to_bundler_runtime_chunk_id, to_bundler_runtime_module_id, to_goog_module_id,
+    bundler_runtime_ids_are_readable, to_bundler_runtime_chunk_id, to_bundler_runtime_module_id,
+    to_goog_module_id,
 };
 
 const BUNDLER_RUNTIME_GLOBAL: &str = "__g";
@@ -159,12 +160,7 @@ pub fn prepare_closure_jobs(
             &runtime_asset_dir,
             &warning_level,
         ),
-        ChunkMode::Off => prepare_off_mode_jobs(
-            &input,
-            &resolved_chunks,
-            &raw_dir,
-            &warning_level,
-        ),
+        ChunkMode::Off => prepare_off_mode_jobs(&input, &resolved_chunks, &raw_dir, &warning_level),
     }
 }
 
@@ -193,6 +189,7 @@ fn prepare_bundler_runtime_jobs(
     let mut compile_jobs = Vec::new();
     let mut postprocess_actions = Vec::new();
     let mut published_outputs = Vec::new();
+    let runtime_debug = bundler_runtime_ids_are_readable();
     let mut module_map = BTreeMap::new();
     let mut runtime_module_map = BTreeMap::new();
     let mut manifest_chunks = BTreeMap::new();
@@ -204,12 +201,7 @@ fn prepare_bundler_runtime_jobs(
         .collect::<BTreeMap<_, _>>();
     let runtime_chunk_id_by_name = resolved_chunks
         .iter()
-        .map(|chunk| {
-            (
-                chunk.name.clone(),
-                to_bundler_runtime_chunk_id(&chunk.name),
-            )
-        })
+        .map(|chunk| (chunk.name.clone(), to_bundler_runtime_chunk_id(&chunk.name)))
         .collect::<BTreeMap<_, _>>();
 
     for chunk in resolved_chunks {
@@ -242,13 +234,13 @@ fn prepare_bundler_runtime_jobs(
                     .collect(),
                 modules: manifest_modules,
                 url: format!(
-                    "{}{}.js",
+                    "{}{}",
                     input.publicPath,
-                    if chunk.name == base_chunk.name {
-                        chunk.name.as_str()
-                    } else {
-                        runtime_chunk_id.as_str()
-                    }
+                    bundler_runtime_output_file_name(
+                        &chunk.name,
+                        &runtime_chunk_id,
+                        &base_chunk.name,
+                    )
                 ),
             },
         );
@@ -276,33 +268,36 @@ fn prepare_bundler_runtime_jobs(
                     .dependencies
                     .iter()
                     .map(|dependency| {
-                        chunk_index_by_name
-                            .get(dependency)
-                            .copied()
-                            .ok_or_else(|| format!("Missing chunk index for dependency {}", dependency))
+                        chunk_index_by_name.get(dependency).copied().ok_or_else(|| {
+                            format!("Missing chunk index for dependency {}", dependency)
+                        })
                     })
                     .collect::<std::result::Result<Vec<_>, _>>()?;
                 Ok::<_, String>(BundlerRuntimeInitChunk(
                     dependency_indices,
-                    format!(
-                        "{}{}.js",
-                        input.publicPath,
-                        if chunk.name == base_chunk.name {
-                            chunk.name.as_str()
-                        } else {
+                    if chunk.name == base_chunk.name {
+                        String::new()
+                    } else {
+                        bundler_runtime_output_file_name(
+                            &chunk.name,
                             runtime_chunk_id_by_name
                                 .get(&chunk.name)
                                 .map(String::as_str)
                                 .ok_or_else(|| {
                                     format!("Missing runtime chunk id for {}", chunk.name)
-                                })?
-                        }
-                    ),
+                                })?,
+                            &base_chunk.name,
+                        )
+                    },
                 ))
             })
             .collect::<std::result::Result<Vec<_>, _>>()?,
         runtime_module_map,
-        input.publicPath.clone(),
+        if input.publicPath == "./" {
+            String::new()
+        } else {
+            input.publicPath.clone()
+        },
     );
 
     let mut effective_externs = collect_effective_extern_paths(
@@ -344,6 +339,7 @@ fn prepare_bundler_runtime_jobs(
                 &input.chunkLoader,
                 &runtime_manifest,
                 module_text,
+                runtime_debug,
             )?
         } else {
             render_bundler_runtime_lazy_chunk(
@@ -351,6 +347,7 @@ fn prepare_bundler_runtime_jobs(
                     .get(&chunk.name)
                     .ok_or_else(|| format!("Missing chunk index for {}", chunk.name))?,
                 module_text,
+                runtime_debug,
             )
         };
         let source_path = runtime_asset_dir.join(format!("{}.linked.js", chunk.name));
@@ -396,7 +393,9 @@ fn prepare_bundler_runtime_jobs(
                             runtime_chunk_id_by_name
                                 .get(dependency)
                                 .cloned()
-                                .ok_or_else(|| format!("Missing runtime chunk id for {}", dependency))
+                                .ok_or_else(|| {
+                                    format!("Missing runtime chunk id for {}", dependency)
+                                })
                         })
                         .collect::<std::result::Result<Vec<_>, _>>()?
                         .join(",")
@@ -451,14 +450,10 @@ fn prepare_bundler_runtime_jobs(
             .get(&chunk.name)
             .cloned()
             .ok_or_else(|| format!("Missing runtime chunk id for {}", chunk.name))?;
-        let final_chunk_name = if chunk.name == base_chunk.name {
-            chunk.name.clone()
-        } else {
-            internal_chunk_name.clone()
-        };
+        let final_chunk_file_name =
+            bundler_runtime_output_file_name(&chunk.name, &internal_chunk_name, &base_chunk.name);
         let output_path = raw_dir.join(format!("{}.js", internal_chunk_name));
-        let final_output_path =
-            PathBuf::from(&input.outDir).join(format!("{}.js", final_chunk_name));
+        let final_output_path = PathBuf::from(&input.outDir).join(final_chunk_file_name);
         postprocess_actions.push(PostprocessAction {
             inputPath: output_path.to_string_lossy().to_string(),
             kind: "copy".to_string(),
@@ -488,7 +483,11 @@ fn prepare_off_mode_jobs(
                 .supportFiles
                 .iter()
                 .cloned()
-                .chain(resolved_chunks.iter().flat_map(|chunk| chunk.files.iter().cloned()))
+                .chain(
+                    resolved_chunks
+                        .iter()
+                        .flat_map(|chunk| chunk.files.iter().cloned()),
+                )
                 .collect(),
         ),
     )?;
@@ -510,7 +509,8 @@ fn prepare_off_mode_jobs(
             chunkOutputPathPrefix: None,
             compilationLevel: input.compilationLevel.clone(),
             dependencyMode: Some("PRUNE".to_string()),
-            entryPoint: (!entry_chunk.entry_points.is_empty()).then_some(entry_chunk.entry_points.clone()),
+            entryPoint: (!entry_chunk.entry_points.is_empty())
+                .then_some(entry_chunk.entry_points.clone()),
             externs,
             js: unique_paths(
                 input
@@ -555,7 +555,8 @@ fn prepare_off_mode_jobs(
                 format!(
                     "{}:{}{}",
                     chunk.name,
-                    unique_paths(chunk.files.clone()).len() + if index == 0 { leading_js.len() } else { 0 },
+                    unique_paths(chunk.files.clone()).len()
+                        + if index == 0 { leading_js.len() } else { 0 },
                     dependency_suffix
                 )
             })
@@ -569,7 +570,11 @@ fn prepare_off_mode_jobs(
         vec![ClosureCompileJob {
             assumeFunctionWrapper: true,
             chunk: Some(chunk_specs),
-            chunkOutputPathPrefix: Some(format!("{}{}", raw_dir.to_string_lossy(), std::path::MAIN_SEPARATOR)),
+            chunkOutputPathPrefix: Some(format!(
+                "{}{}",
+                raw_dir.to_string_lossy(),
+                std::path::MAIN_SEPARATOR
+            )),
             compilationLevel: input.compilationLevel.clone(),
             dependencyMode: Some("PRUNE".to_string()),
             entryPoint: (!entry_points.is_empty()).then_some(entry_points),
@@ -577,7 +582,11 @@ fn prepare_off_mode_jobs(
             js: unique_paths(
                 leading_js
                     .into_iter()
-                    .chain(resolved_chunks.iter().flat_map(|chunk| chunk.files.iter().cloned()))
+                    .chain(
+                        resolved_chunks
+                            .iter()
+                            .flat_map(|chunk| chunk.files.iter().cloned()),
+                    )
                     .collect(),
             ),
             jsOutputFile: None,
@@ -721,16 +730,13 @@ fn extern_file_has_declarations(file_path: &str) -> std::result::Result<bool, St
         Err(error) => return Err(error.to_string()),
     };
 
-    Ok(source_text
-        .lines()
-        .map(|line| line.trim())
-        .any(|line| {
-            !line.is_empty()
-                && line != "/** @externs */"
-                && line != "*/"
-                && !line.starts_with('*')
-                && !line.starts_with("//")
-        }))
+    Ok(source_text.lines().map(|line| line.trim()).any(|line| {
+        !line.is_empty()
+            && line != "/** @externs */"
+            && line != "*/"
+            && !line.starts_with('*')
+            && !line.starts_with("//")
+    }))
 }
 
 fn select_closure_lib_files(
@@ -747,17 +753,35 @@ fn select_closure_lib_files(
         || contents.contains("goog.provide(")
         || contents.contains("goog.reflect.");
     if needs_goog_base {
-        required.push(closure_lib_dir.join("base.js").to_string_lossy().to_string());
+        required.push(
+            closure_lib_dir
+                .join("base.js")
+                .to_string_lossy()
+                .to_string(),
+        );
     }
     if contents.contains("goog.reflect.") {
-        required.push(closure_lib_dir.join("reflect.js").to_string_lossy().to_string());
+        required.push(
+            closure_lib_dir
+                .join("reflect.js")
+                .to_string_lossy()
+                .to_string(),
+        );
     }
     if contents.contains("tslib") {
-        let base_path = closure_lib_dir.join("base.js").to_string_lossy().to_string();
+        let base_path = closure_lib_dir
+            .join("base.js")
+            .to_string_lossy()
+            .to_string();
         if !required.contains(&base_path) {
             required.push(base_path);
         }
-        required.push(closure_lib_dir.join("tslib.js").to_string_lossy().to_string());
+        required.push(
+            closure_lib_dir
+                .join("tslib.js")
+                .to_string_lossy()
+                .to_string(),
+        );
     }
 
     Ok(unique_paths(required))
@@ -774,8 +798,14 @@ fn select_bundler_runtime_closure_lib_files(
 
     let closure_lib_dir = Path::new(package_root).join("closure-lib");
     Ok(vec![
-        closure_lib_dir.join("base.js").to_string_lossy().to_string(),
-        closure_lib_dir.join("reflect.js").to_string_lossy().to_string(),
+        closure_lib_dir
+            .join("base.js")
+            .to_string_lossy()
+            .to_string(),
+        closure_lib_dir
+            .join("reflect.js")
+            .to_string_lossy()
+            .to_string(),
     ])
 }
 
@@ -794,15 +824,28 @@ fn read_candidate_contents(candidate_files: &[String]) -> std::result::Result<St
     Ok(contents)
 }
 
+fn bundler_runtime_output_file_name(
+    chunk_name: &str,
+    runtime_chunk_id: &str,
+    base_chunk_name: &str,
+) -> String {
+    if chunk_name == base_chunk_name {
+        format!("{chunk_name}.js")
+    } else {
+        format!("{runtime_chunk_id}.js")
+    }
+}
+
 fn render_bundler_runtime_base_chunk(
     chunk_id: usize,
     entry_points: &[String],
     loader: &str,
     manifest: &BundlerRuntimeInitManifest,
     module_text: &str,
+    debug_runtime: bool,
 ) -> std::result::Result<String, String> {
     Ok([
-        render_bundler_runtime_preamble(loader, manifest)?,
+        render_bundler_runtime_preamble(loader, manifest, debug_runtime)?,
         "var __register=globalThis.__g.r;".to_string(),
         module_text.to_string(),
         format!(
@@ -819,15 +862,25 @@ fn render_bundler_runtime_base_chunk(
     .join("\n"))
 }
 
-fn render_bundler_runtime_lazy_chunk(chunk_id: usize, module_text: &str) -> String {
+fn render_bundler_runtime_lazy_chunk(
+    chunk_id: usize,
+    module_text: &str,
+    debug_runtime: bool,
+) -> String {
     [
         "(function(g){".to_string(),
-        "if(!g)throw new Error(\"base chunk missing\");"
-            .to_string(),
+        if debug_runtime {
+            "if(!g)throw Error(\"base chunk missing\");".to_string()
+        } else {
+            "if(!g)throw Error(\"b\");".to_string()
+        },
         "var __register=g.r;".to_string(),
         module_text.to_string(),
         format!("g.l({chunk_id:?});"),
-        format!("}}).call(this,globalThis.{runtime_key});", runtime_key = BUNDLER_RUNTIME_GLOBAL),
+        format!(
+            "}}).call(this,globalThis.{runtime_key});",
+            runtime_key = BUNDLER_RUNTIME_GLOBAL
+        ),
         String::new(),
     ]
     .join("\n")
@@ -836,8 +889,39 @@ fn render_bundler_runtime_lazy_chunk(chunk_id: usize, module_text: &str) -> Stri
 fn render_bundler_runtime_preamble(
     loader: &str,
     manifest: &BundlerRuntimeInitManifest,
+    debug_runtime: bool,
 ) -> std::result::Result<String, String> {
     let manifest_json = serde_json::to_string(manifest).map_err(|error| error.to_string())?;
+    let loader_code = match loader {
+        "script" => 1,
+        "fetch" => 2,
+        _ => 0,
+    };
+    let missing_chunk_error = if debug_runtime {
+        "\"unknown chunk \"+a"
+    } else {
+        "\"c\"+a"
+    };
+    let missing_module_error = if debug_runtime {
+        "\"unknown module \"+a"
+    } else {
+        "\"m\"+a"
+    };
+    let script_error = if debug_runtime {
+        "\"load \"+a+\" failed\""
+    } else {
+        "\"l\"+a"
+    };
+    let fetch_error = if debug_runtime {
+        "\"fetch \"+a+\" failed (\"+c.status+\")\""
+    } else {
+        "\"f\"+a"
+    };
+    let fetch_eval = if debug_runtime {
+        "(0,global.eval)(c+\"\\n//# sourceURL=\"+b);"
+    } else {
+        "(0,global.eval)(c);"
+    };
     Ok([
         "(function(global){".to_string(),
         format!("var r=global.{BUNDLER_RUNTIME_GLOBAL}||(global.{BUNDLER_RUNTIME_GLOBAL}={{}});"),
@@ -847,26 +931,26 @@ fn render_bundler_runtime_preamble(
         "r.s=Object.create(null);".to_string(),
         "r.d=Object.create(null);".to_string(),
         "r.b=\"\";".to_string(),
-        "r.o=\"auto\";".to_string(),
+        "r.o=0;".to_string(),
         "r.k=null;".to_string(),
         "r.m=null;".to_string(),
-        "function u(a){var b=r.k&&r.k[a];if(!b)throw new Error(\"unknown chunk \"+a);return new URL(b[1],r.b||(global.location&&global.location.href?global.location.href:\"./\")).toString();}".to_string(),
+        format!("function u(a){{var b=r.k&&r.k[a];if(!b)throw Error({missing_chunk_error});return new URL(b[1],r.b||(global.location&&global.location.href?global.location.href:\"./\")).toString();}}"),
         "function g(a){var b=r.d[a];if(b)return b;b={};b.p=new Promise(function(c,d){b.r=c;b.j=d});r.d[a]=b;return b;}".to_string(),
         "r.l=function(a){r.s[a]=1;var b=r.d[a];if(b){b.r();delete r.d[a];}};".to_string(),
         "function h(a,b){r.s[a]=2;var c=r.d[a];if(c){c.j(b);delete r.d[a];}}".to_string(),
         "r.r=function(a,b,c){r.f[a]=c;};".to_string(),
-        "r.q=function(a){if(Object.prototype.hasOwnProperty.call(r.c,a))return r.c[a];var b=r.f[a];if(!b)throw new Error(\"unknown module \"+a);var c=[];r.c[a]=c;b(r.q,c,r.j,r.x);return c;};".to_string(),
-        "function p(a,b){return new Promise(function(c,d){var e=global.document.createElement(\"script\");e.async=true;e.src=b;e.onload=function(){c();};e.onerror=function(){d(new Error(\"load \"+a+\" failed\"));};(global.document.head||global.document.documentElement).appendChild(e);});}".to_string(),
-        "function w(a,b){return Promise.resolve(global.fetch(b)).then(function(c){if(!c.ok)throw new Error(\"fetch \"+a+\" failed (\"+c.status+\")\");return c.text();}).then(function(c){(0,global.eval)(c+\"\\n//# sourceURL=\"+b);});}".to_string(),
-        "function t(){return r.o!==\"auto\"?r.o:global.document?\"script\":\"fetch\";}".to_string(),
-        "function e(a){var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;var c=r.k&&r.k[a];if(!c)throw new Error(\"unknown chunk \"+a);r.s[a]=0;var d=g(a),f=t();return Promise.all((c[0]||[]).map(function(j){return e(j);})).then(function(){var j=u(a);return f===\"fetch\"?w(a,j):p(a,j);}).then(function(){return d.p;}).catch(function(j){h(a,j);throw j;});}".to_string(),
-        "r.j=function(a){var b=r.m&&r.m[a];if(!b)throw new Error(\"unknown module \"+a);return e(b).then(function(){return r.q(a);});};".to_string(),
-        "r.x=function(a){var b=r.m&&r.m[a];if(!b)throw new Error(\"unknown module \"+a);return e(b).then(function(){});};".to_string(),
+        format!("r.q=function(a){{if(Object.prototype.hasOwnProperty.call(r.c,a))return r.c[a];var b=r.f[a];if(!b)throw Error({missing_module_error});var c=[];r.c[a]=c;b(r.q,c,r.j,r.x);return c;}};"),
+        format!("function p(a,b){{return new Promise(function(c,d){{var e=global.document.createElement(\"script\");e.async=true;e.src=b;e.onload=function(){{c();}};e.onerror=function(){{d(Error({script_error}));}};(global.document.head||global.document.documentElement).appendChild(e);}});}}"),
+        format!("function w(a,b){{return Promise.resolve(global.fetch(b)).then(function(c){{if(!c.ok)throw Error({fetch_error});return c.text();}}).then(function(c){{{fetch_eval}}});}}"),
+        "function t(){return r.o===1?1:r.o===2?2:global.document?1:2;}".to_string(),
+        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;var c=r.k&&r.k[a];if(!c)throw Error({missing_chunk_error});r.s[a]=0;var d=g(a),f=t();return Promise.all((c[0]||[]).map(function(j){{return e(j);}})).then(function(){{var j=u(a);return f===2?w(a,j):p(a,j);}}).then(function(){{return d.p;}}).catch(function(j){{h(a,j);throw j;}});}}"),
+        format!("r.j=function(a){{var b=r.m&&r.m[a];if(!b)throw Error({missing_module_error});return e(b).then(function(){{return r.q(a);}});}};"),
+        format!("r.x=function(a){{var b=r.m&&r.m[a];if(!b)throw Error({missing_module_error});return e(b).then(function(){{}});}};"),
         "r.n=function(a){for(var b=0;b<a.length;b+=1)r.q(a[b]);};".to_string(),
-        "r.a=function(a,b){r.k=a[1];r.m=a[2];r.o=b||r.o;var c=global.document&&global.document.currentScript&&global.document.currentScript.src?global.document.currentScript.src:(global.location&&global.location.href?global.location.href:\"./\");r.b=new URL(a[3]||\"./\",c).toString();r.s[a[0]]=1;};".to_string(),
+        "r.a=function(a,b){r.k=a[1];r.m=a[2];r.o=b;var c=global.document&&global.document.currentScript&&global.document.currentScript.src?global.document.currentScript.src:(global.location&&global.location.href?global.location.href:\"./\");r.b=new URL(a[3]||\"./\",c).toString();r.s[a[0]]=1;};".to_string(),
         "r.i=1;".to_string(),
         "}".to_string(),
-        format!("r.a({manifest_json}, {loader:?});"),
+        format!("r.a({manifest_json},{loader_code});"),
         "}).call(this,globalThis);".to_string(),
         String::new(),
     ]
@@ -911,7 +995,11 @@ mod tests {
         fs::create_dir_all(&out_dir).unwrap();
         fs::create_dir_all(package_root.join("closure-externs")).unwrap();
         fs::create_dir_all(package_root.join("closure-lib")).unwrap();
-        fs::write(emitted_out_dir.join("src/main.js"), "__exports[\"boot\"]=boot;\n").unwrap();
+        fs::write(
+            emitted_out_dir.join("src/main.js"),
+            "__exports[\"boot\"]=boot;\n",
+        )
+        .unwrap();
         fs::write(
             emitted_out_dir.join("src/feature.js"),
             "__exports[\"renderMessage\"]=renderMessage;\n",
@@ -925,7 +1013,11 @@ mod tests {
         fs::write(package_root.join("closure-lib/base.js"), "").unwrap();
         fs::write(package_root.join("closure-lib/reflect.js"), "").unwrap();
         let native_extern = root.join("native.externs.js");
-        fs::write(&native_extern, "/** @externs */\nWindow.prototype.nativeKeep;\n").unwrap();
+        fs::write(
+            &native_extern,
+            "/** @externs */\nWindow.prototype.nativeKeep;\n",
+        )
+        .unwrap();
 
         let output = prepare_closure_jobs(PrepareClosureJobsInput {
             chunkMode: "bundler-runtime".to_string(),
@@ -968,9 +1060,9 @@ mod tests {
         assert_eq!(output.compileJobs.len(), 1);
         assert_eq!(output.postprocessActions.len(), 2);
         assert!(output
-        .publishedOutputs
-        .iter()
-        .any(|path| path.ends_with("chunk-map.json")));
+            .publishedOutputs
+            .iter()
+            .any(|path| path.ends_with("chunk-map.json")));
         assert!(output.generatedAssets.iter().any(|asset| {
             asset.path.ends_with("chunk-map.json")
                 && asset.text.contains("\"baseChunk\": \"c")
@@ -1019,8 +1111,16 @@ mod tests {
         let real_extern = root.join("real.externs.js");
         let native_extern = root.join("native.externs.js");
         fs::write(&empty_extern, "/** @externs */\n").unwrap();
-        fs::write(&real_extern, "/** @externs */\nWindow.prototype.userKeep;\n").unwrap();
-        fs::write(&native_extern, "/** @externs */\nWindow.prototype.nativeKeep;\n").unwrap();
+        fs::write(
+            &real_extern,
+            "/** @externs */\nWindow.prototype.userKeep;\n",
+        )
+        .unwrap();
+        fs::write(
+            &native_extern,
+            "/** @externs */\nWindow.prototype.nativeKeep;\n",
+        )
+        .unwrap();
 
         let output = prepare_closure_jobs(PrepareClosureJobsInput {
             chunkMode: "off".to_string(),
