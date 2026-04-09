@@ -4,7 +4,7 @@ export interface ClosureStageResult {
     exitCode: number;
     outputFiles: string[];
 }
-export declare function runClosureStage({ chunkPlan, emittedOutDir, explicitExternPaths, finalCacheDir, generatedExternPaths, nativeExternPath, options, outDir, supportFiles, packageRoot, }: {
+export declare function runClosureStage({ chunkPlan, emittedOutDir, explicitExternPaths, finalCacheDir, generatedExternPaths, nativeExternPath, options, outDir, projectCacheDir, supportFiles, packageRoot, }: {
     chunkPlan: ChunkPlanChunk[];
     emittedOutDir: string;
     explicitExternPaths: string[];
@@ -13,6 +13,7 @@ export declare function runClosureStage({ chunkPlan, emittedOutDir, explicitExte
     nativeExternPath: string;
     options: NormalizedBuildOptions;
     outDir: string;
+    projectCacheDir: string;
     supportFiles: string[];
     packageRoot: string;
 }): Promise<ClosureStageResult>;

@@ -3,7 +3,7 @@ import fs from "fs";
 
 import { generateExterns } from "../api/externs";
 import { BuildOptions, BuildResult, CleanCacheOptions } from "../api/types";
-import { hashContent } from "../cache/hash";
+import { hashContent, hashJson } from "../cache/hash";
 import {
   getDefaultPersistentCacheRoot,
   readJsonIfExists,
@@ -24,6 +24,7 @@ import {
   resolveBuild,
 } from "./resolve-build";
 import { emitNativeStage } from "../stages/native/emit";
+import { loadCompilerOptions } from "../stages/native/compiler-options";
 import { runClosureStage } from "../stages/closure/run-closure";
 import { writeEntryShims } from "../native/load";
 
@@ -38,6 +39,14 @@ interface FinalFastSnapshot {
   publishedOutputs: Array<{ name: string; size: number }>;
   trackedFiles: Record<string, FileStateSnapshot>;
 }
+
+interface RuntimeDependencyExternsCacheMetadata {
+  key: string;
+  outputFile: string;
+  version: number;
+}
+
+const RUNTIME_DEPENDENCY_EXTERNS_CACHE_VERSION = 1;
 
 export async function build(options: BuildOptions): Promise<BuildResult> {
   const context = await createBuildContext(normalizeBuildOptions(options));
@@ -189,6 +198,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 
     const runtimeDependencyExterns = await generateRuntimeDependencyExterns({
       appEntryFiles: context.options.entries,
+      cacheMode: context.options.cache.mode,
       cacheDir: resolvedBuild.nativeEmitCacheDir,
       dependencyModules: nativeEmitResult.dependencyModules,
       dependencyRuntimeFiles: nativeEmitResult.dependencyRuntimeFiles,
@@ -207,6 +217,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       nativeExternPath: nativeEmitResult.externsPath,
       options: context.options,
       outDir: context.options.outDir,
+      projectCacheDir: context.projectCacheDir,
       supportFiles: nativeEmitResult.supportFiles,
       packageRoot: context.packageRoot,
     });
@@ -266,6 +277,7 @@ export async function cleanCache(options: CleanCacheOptions = {}) {
 
 async function generateRuntimeDependencyExterns({
   appEntryFiles,
+  cacheMode,
   cacheDir,
   dependencyModules,
   dependencyRuntimeFiles,
@@ -274,6 +286,7 @@ async function generateRuntimeDependencyExterns({
   tsConfigPath,
 }: {
   appEntryFiles: string[];
+  cacheMode: "off" | "temp" | "persistent";
   cacheDir: string;
   dependencyModules: string[];
   dependencyRuntimeFiles: string[];
@@ -286,6 +299,47 @@ async function generateRuntimeDependencyExterns({
   }
 
   const outputFile = path.join(cacheDir, "runtime-dependency-externs.js");
+  const metadataPath = path.join(cacheDir, "runtime-dependency-externs.meta.json");
+  if (cacheMode !== "off") {
+    const compilerOptions = await loadCompilerOptions(tsConfigPath);
+    const cacheKey = hashJson({
+      appEntryFiles,
+      compilerOptions,
+      dependencyModules,
+      dependencyRuntimeFiles,
+      projectRoot,
+      srcDir,
+      version: RUNTIME_DEPENDENCY_EXTERNS_CACHE_VERSION,
+    });
+    const cachedMetadata =
+      await readJsonIfExists<RuntimeDependencyExternsCacheMetadata>(metadataPath);
+    if (
+      cachedMetadata?.version === RUNTIME_DEPENDENCY_EXTERNS_CACHE_VERSION &&
+      cachedMetadata.key === cacheKey &&
+      cachedMetadata.outputFile === outputFile &&
+      (await filesExist([outputFile]))
+    ) {
+      return outputFile;
+    }
+
+    await generateExterns({
+      appEntryFiles,
+      mode: "runtime-aware",
+      modules: dependencyModules,
+      outputFile,
+      projectRoot,
+      runtimeEntryFiles: dependencyRuntimeFiles,
+      srcDir,
+      tsConfigPath,
+    });
+    await writeJson(metadataPath, {
+      key: cacheKey,
+      outputFile,
+      version: RUNTIME_DEPENDENCY_EXTERNS_CACHE_VERSION,
+    } satisfies RuntimeDependencyExternsCacheMetadata);
+    return outputFile;
+  }
+
   await generateExterns({
     appEntryFiles,
     mode: "runtime-aware",

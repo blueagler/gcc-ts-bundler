@@ -14,7 +14,7 @@ import {
 import { resolveGraph } from "../../native/load";
 import { transpileSources } from "../../native/load";
 import { loadCompilerOptions } from "./compiler-options";
-import { collectClosureIrMetadata } from "./closure-ir";
+import { collectNativeTypeAnalysis } from "./closure-ir";
 
 const require = createBundleRequire();
 
@@ -119,17 +119,16 @@ export async function emitNativeStage({
   await fs.promises.rm(outDir, { force: true, recursive: true });
   await fs.promises.mkdir(outDir, { recursive: true });
 
-  const diagnostics = await getPreflightDiagnostics({
+  const missingInputDiagnostics = await getMissingInputDiagnostics({
     fileNames: combinedFileNames,
     preflight: options.diagnostics.preflight,
     tsConfigPath,
-    workspaceDir,
   });
-  if (diagnostics.length > 0) {
+  if (missingInputDiagnostics.length > 0) {
     return {
       dependencyModules,
       dependencyRuntimeFiles,
-      diagnostics,
+      diagnostics: missingInputDiagnostics,
       emitSkipped: true,
       emittedFiles: [],
       externsPath,
@@ -138,16 +137,17 @@ export async function emitNativeStage({
     };
   }
 
-  const closureIr = await collectClosureIrMetadata({
+  const analysis = await collectNativeTypeAnalysis({
     fileNames: combinedFileNames,
+    preflight: options.diagnostics.preflight,
     tsConfigPath,
     workspaceDir,
   });
-  if (closureIr.diagnostics.length > 0) {
+  if (analysis.diagnostics.length > 0) {
     return {
       dependencyModules,
       dependencyRuntimeFiles,
-      diagnostics: closureIr.diagnostics,
+      diagnostics: analysis.diagnostics,
       emitSkipped: true,
       emittedFiles: [],
       externsPath,
@@ -157,7 +157,7 @@ export async function emitNativeStage({
   }
   await fs.promises.writeFile(
     metadataPathForNative,
-    JSON.stringify(closureIr.files, null, 2),
+    JSON.stringify(analysis.files, null, 2),
     "utf-8",
   );
   const result = transpileSources({
@@ -260,16 +260,14 @@ async function collectTsxRuntimePackageInputs({
   };
 }
 
-async function getPreflightDiagnostics({
+async function getMissingInputDiagnostics({
   fileNames,
   preflight,
   tsConfigPath,
-  workspaceDir,
 }: {
   fileNames: string[];
   preflight: DiagnosticsPreflight;
   tsConfigPath: string;
-  workspaceDir: string;
 }): Promise<ts.Diagnostic[]> {
   if (preflight === "off") {
     return [];
@@ -287,31 +285,7 @@ async function getPreflightDiagnostics({
     ];
   }
 
-  if (preflight !== "full") {
-    return [];
-  }
-
-  const compilerOptions = await loadCompilerOptions(tsConfigPath);
-  const finalCompilerOptions: ts.CompilerOptions = {
-    ...compilerOptions,
-    allowJs: true,
-    ignoreDeprecations: "6.0",
-    moduleResolution: ts.ModuleResolutionKind.Bundler,
-    noEmit: true,
-    rootDir: workspaceDir,
-    skipLibCheck: true,
-    target: ts.ScriptTarget.ESNext,
-  };
-
-  const compilerHost = ts.createCompilerHost(finalCompilerOptions);
-  const program = ts.createProgram(
-    fileNames,
-    finalCompilerOptions,
-    compilerHost,
-  );
-  return [...ts.getPreEmitDiagnostics(program)].filter(
-    (diagnostic) => !shouldIgnorePreflightDiagnostic(diagnostic),
-  );
+  return [];
 }
 
 function createSimpleDiagnostic(messageText: string): ts.Diagnostic {
@@ -323,18 +297,6 @@ function createSimpleDiagnostic(messageText: string): ts.Diagnostic {
     messageText,
     start: undefined,
   };
-}
-
-function shouldIgnorePreflightDiagnostic(diagnostic: ts.Diagnostic) {
-  if (diagnostic.code !== 7016) {
-    return false;
-  }
-
-  const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n");
-  return (
-    message.includes("node_modules") &&
-    message.includes("implicitly has an 'any' type")
-  );
 }
 
 function getJsxRuntimeSpecifier(compilerOptions: ts.CompilerOptions) {

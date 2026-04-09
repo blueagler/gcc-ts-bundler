@@ -1,5 +1,6 @@
 import ts from "typescript";
 
+import { DiagnosticsPreflight } from "../../api/types";
 import { loadCompilerOptions } from "./compiler-options";
 
 export interface ClosureIrFileMetadata {
@@ -35,6 +36,45 @@ interface FunctionObjectParamRecord {
   typeName: string;
 }
 
+export async function collectNativeTypeAnalysis({
+  fileNames,
+  preflight,
+  tsConfigPath,
+  workspaceDir,
+}: {
+  fileNames: string[];
+  preflight: DiagnosticsPreflight;
+  tsConfigPath: string;
+  workspaceDir: string;
+}) {
+  const compilerOptions = await loadCompilerOptions(tsConfigPath, {
+    allowJs: true,
+    ignoreDeprecations: "6.0",
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    noEmit: true,
+    rootDir: workspaceDir,
+    skipLibCheck: true,
+    target: ts.ScriptTarget.ESNext,
+  });
+  const program = ts.createProgram(fileNames, compilerOptions);
+  const preflightDiagnostics =
+    preflight === "full"
+      ? [...ts.getPreEmitDiagnostics(program)].filter(
+          (diagnostic) => !shouldIgnorePreflightDiagnostic(diagnostic),
+        )
+      : [];
+  const { diagnostics: closureIrDiagnostics, files } = collectClosureIrFiles({
+    compilerOptions,
+    fileNames,
+    program,
+  });
+
+  return {
+    diagnostics: [...preflightDiagnostics, ...closureIrDiagnostics],
+    files,
+  };
+}
+
 export async function collectClosureIrMetadata({
   fileNames,
   tsConfigPath,
@@ -44,17 +84,29 @@ export async function collectClosureIrMetadata({
   tsConfigPath: string;
   workspaceDir: string;
 }) {
-  const compilerOptions = await loadCompilerOptions(tsConfigPath, {
-    allowJs: true,
-    rootDir: workspaceDir,
+  return collectNativeTypeAnalysis({
+    fileNames,
+    preflight: "off",
+    tsConfigPath,
+    workspaceDir,
   });
-  const program = ts.createProgram(fileNames, compilerOptions);
+}
+
+function collectClosureIrFiles({
+  compilerOptions,
+  fileNames,
+  program,
+}: {
+  compilerOptions: ts.CompilerOptions;
+  fileNames: string[];
+  program: ts.Program;
+}): { diagnostics: ts.Diagnostic[]; files: ClosureIrFileMetadata[] } {
   const checker = program.getTypeChecker();
   const unsafeEnumSymbols = collectUnsafeEnumSymbols(program, checker);
   const inputFiles = new Set(fileNames);
 
-  const files: ClosureIrFileMetadata[] = [];
   const diagnostics: ts.Diagnostic[] = [];
+  const files: ClosureIrFileMetadata[] = [];
 
   for (const sourceFile of program.getSourceFiles()) {
     if (!inputFiles.has(sourceFile.fileName)) {
@@ -158,6 +210,18 @@ export async function collectClosureIrMetadata({
   }
 
   return { diagnostics, files };
+}
+
+function shouldIgnorePreflightDiagnostic(diagnostic: ts.Diagnostic) {
+  if (diagnostic.code !== 7016) {
+    return false;
+  }
+
+  const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n");
+  return (
+    message.includes("node_modules") &&
+    message.includes("implicitly has an 'any' type")
+  );
 }
 
 function containsDecorators(sourceFile: ts.SourceFile) {

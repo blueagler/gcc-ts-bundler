@@ -1,9 +1,12 @@
 import fs from "fs/promises";
+import os from "os";
 import path from "path";
 import * as closureCompilerPackage from "google-closure-compiler";
 // @ts-expect-error - package does not expose types for this internal helper.
 import { getNativeImagePath } from "google-closure-compiler/lib/utils.js";
 
+import { hashContent, hashJson } from "../../cache/hash";
+import { readJsonIfExists, writeJson } from "../../cache/store";
 import { copyOrLinkFiles } from "../../internal/file-state";
 import { ChunkPlanChunk, NormalizedBuildOptions } from "../../internal/types";
 import { prepareClosureJobs, rewriteGccExports } from "../../native/load";
@@ -28,6 +31,14 @@ export interface ClosureStageResult {
   outputFiles: string[];
 }
 
+interface ClosureJobCacheMetadata {
+  outputFiles: string[];
+  version: number;
+}
+
+const CLOSURE_JOB_CACHE_VERSION = 1;
+const closureInputHashCache = new Map<string, Promise<string>>();
+
 export async function runClosureStage({
   chunkPlan,
   emittedOutDir,
@@ -37,6 +48,7 @@ export async function runClosureStage({
   nativeExternPath,
   options,
   outDir,
+  projectCacheDir,
   supportFiles,
   packageRoot,
 }: {
@@ -48,6 +60,7 @@ export async function runClosureStage({
   nativeExternPath: string;
   options: NormalizedBuildOptions;
   outDir: string;
+  projectCacheDir: string;
   supportFiles: string[];
   packageRoot: string;
 }): Promise<ClosureStageResult> {
@@ -88,37 +101,26 @@ export async function runClosureStage({
     }),
   );
 
-  for (const job of prepared.compileJobs) {
-    const closureOptions: ClosureCompilerOptions = {
-      assumeFunctionWrapper: job.assumeFunctionWrapper,
-      compilationLevel: job.compilationLevel as never,
-      externs: uniquePaths(job.externs),
-      js: uniquePaths(job.js),
-      languageIn: job.languageIn as never,
-      languageOut: job.languageOut as never,
-      rewritePolyfills: job.rewritePolyfills,
-      warningLevel: job.warningLevel as never,
-    };
-    if (job.chunk) {
-      closureOptions.chunk = job.chunk;
-    }
-    if (job.chunkOutputPathPrefix) {
-      closureOptions.chunkOutputPathPrefix = job.chunkOutputPathPrefix;
-    }
-    if (job.dependencyMode) {
-      closureOptions.dependencyMode = job.dependencyMode as never;
-    }
-    if (job.entryPoint && job.entryPoint.length > 0) {
-      closureOptions.entryPoint = job.entryPoint;
-    }
-    if (job.jsOutputFile) {
-      closureOptions.jsOutputFile = job.jsOutputFile;
-    }
-    applyInternalClosureDebugOptions(closureOptions);
-    const exitCode = await runClosureCompiler(closureOptions);
-    if (exitCode !== 0) {
-      return { cacheOutputFiles: [], exitCode, outputFiles: [] };
-    }
+  const closureJobCacheDir =
+    options.cache.mode === "off"
+      ? null
+      : path.join(projectCacheDir, "closure-jobs");
+  const concurrency =
+    options.chunks.mode === "bundler-runtime"
+      ? determineClosureConcurrency(prepared.compileJobs.length)
+      : 1;
+  const exitCodes = await runWithConcurrency(
+    prepared.compileJobs,
+    concurrency,
+    async (job) =>
+      runPreparedClosureJob({
+        cacheDir: closureJobCacheDir,
+        job,
+      }),
+  );
+  const failedExitCode = exitCodes.find((exitCode) => exitCode !== 0);
+  if (failedExitCode !== undefined) {
+    return { cacheOutputFiles: [], exitCode: failedExitCode, outputFiles: [] };
   }
 
   await Promise.all(
@@ -233,4 +235,230 @@ async function runClosureCompiler(
 
 function uniquePaths(paths: string[]) {
   return [...new Set(paths)];
+}
+
+async function runPreparedClosureJob({
+  cacheDir,
+  job,
+}: {
+  cacheDir: string | null;
+  job: ReturnType<typeof prepareClosureJobs>["compileJobs"][number];
+}) {
+  const outputFiles = getCompileJobOutputFiles(job);
+  const cached = cacheDir
+    ? await tryRestoreCachedClosureJob({
+        cacheDir,
+        job,
+        outputFiles,
+      })
+    : false;
+  if (cached) {
+    return 0;
+  }
+
+  const closureOptions: ClosureCompilerOptions = {
+    assumeFunctionWrapper: job.assumeFunctionWrapper,
+    compilationLevel: job.compilationLevel as never,
+    externs: uniquePaths(job.externs),
+    js: uniquePaths(job.js),
+    languageIn: job.languageIn as never,
+    languageOut: job.languageOut as never,
+    rewritePolyfills: job.rewritePolyfills,
+    warningLevel: job.warningLevel as never,
+  };
+  if (job.chunk) {
+    closureOptions.chunk = job.chunk;
+  }
+  if (job.chunkOutputPathPrefix) {
+    closureOptions.chunkOutputPathPrefix = job.chunkOutputPathPrefix;
+  }
+  if (job.dependencyMode) {
+    closureOptions.dependencyMode = job.dependencyMode as never;
+  }
+  if (job.entryPoint && job.entryPoint.length > 0) {
+    closureOptions.entryPoint = job.entryPoint;
+  }
+  if (job.jsOutputFile) {
+    closureOptions.jsOutputFile = job.jsOutputFile;
+  }
+  applyInternalClosureDebugOptions(closureOptions);
+  const exitCode = await runClosureCompiler(closureOptions);
+  if (exitCode !== 0) {
+    return exitCode;
+  }
+
+  if (cacheDir) {
+    await persistCachedClosureJob({
+      cacheDir,
+      job,
+      outputFiles,
+    });
+  }
+
+  return 0;
+}
+
+async function tryRestoreCachedClosureJob({
+  cacheDir,
+  job,
+  outputFiles,
+}: {
+  cacheDir: string;
+  job: ReturnType<typeof prepareClosureJobs>["compileJobs"][number];
+  outputFiles: string[];
+}) {
+  const jobCacheDir = await getClosureJobCacheDir(cacheDir, job);
+  const metadata = await readJsonIfExists<ClosureJobCacheMetadata>(
+    path.join(jobCacheDir, "meta.json"),
+  );
+  if (
+    !metadata ||
+    metadata.version !== CLOSURE_JOB_CACHE_VERSION ||
+    metadata.outputFiles.length !== outputFiles.length
+  ) {
+    return false;
+  }
+
+  const cachedFiles = metadata.outputFiles.map((fileName) =>
+    path.join(jobCacheDir, fileName),
+  );
+  const filesReady = await Promise.all(
+    cachedFiles.map((filePath) =>
+      fs
+        .stat(filePath)
+        .then(() => true)
+        .catch(() => false),
+    ),
+  );
+  if (filesReady.some((ready) => !ready)) {
+    return false;
+  }
+
+  await Promise.all(
+    outputFiles.map(async (outputFile, index) => {
+      await fs.mkdir(path.dirname(outputFile), { recursive: true });
+      await fs.copyFile(cachedFiles[index], outputFile);
+    }),
+  );
+  return true;
+}
+
+async function persistCachedClosureJob({
+  cacheDir,
+  job,
+  outputFiles,
+}: {
+  cacheDir: string;
+  job: ReturnType<typeof prepareClosureJobs>["compileJobs"][number];
+  outputFiles: string[];
+}) {
+  const jobCacheDir = await getClosureJobCacheDir(cacheDir, job);
+  await fs.rm(jobCacheDir, { force: true, recursive: true });
+  await fs.mkdir(jobCacheDir, { recursive: true });
+  const outputNames = outputFiles.map((outputFile) => path.basename(outputFile));
+  await Promise.all(
+    outputFiles.map((outputFile, index) =>
+      fs.copyFile(outputFile, path.join(jobCacheDir, outputNames[index])),
+    ),
+  );
+  await writeJson(path.join(jobCacheDir, "meta.json"), {
+    outputFiles: outputNames,
+    version: CLOSURE_JOB_CACHE_VERSION,
+  } satisfies ClosureJobCacheMetadata);
+}
+
+async function getClosureJobCacheDir(
+  cacheDir: string,
+  job: ReturnType<typeof prepareClosureJobs>["compileJobs"][number],
+) {
+  const outputFiles = getCompileJobOutputFiles(job);
+  const compilerVersion = resolveClosureCompilerJarPath() ?? getNativeImagePath() ?? "native";
+  const [jsInputs, externInputs] = await Promise.all([
+    hashFilesInOrder(job.js),
+    hashFilesInOrder(job.externs),
+  ]);
+  const key = hashJson({
+    compilerVersion,
+    externInputs,
+    job: {
+      assumeFunctionWrapper: job.assumeFunctionWrapper,
+      chunk: job.chunk ?? null,
+      compilationLevel: job.compilationLevel,
+      dependencyMode: job.dependencyMode ?? null,
+      entryPoint: job.entryPoint ?? null,
+      jsOutputKinds: outputFiles.map((outputFile) => path.basename(outputFile)),
+      languageIn: job.languageIn,
+      languageOut: job.languageOut,
+      rewritePolyfills: job.rewritePolyfills,
+      warningLevel: job.warningLevel,
+    },
+    jsInputs,
+    version: CLOSURE_JOB_CACHE_VERSION,
+  });
+  return path.join(cacheDir, key);
+}
+
+async function hashFilesInOrder(filePaths: string[]) {
+  return Promise.all(filePaths.map((filePath) => hashFileInput(filePath)));
+}
+
+async function hashFileInput(filePath: string) {
+  const stat = await fs.stat(filePath);
+  const cacheKey = `${filePath}:${stat.size}:${stat.mtimeMs}`;
+  const cached = closureInputHashCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const pending = fs
+    .readFile(filePath, "utf-8")
+    .then((contents) => hashContent(contents));
+  closureInputHashCache.set(cacheKey, pending);
+  return pending;
+}
+
+function getCompileJobOutputFiles(
+  job: ReturnType<typeof prepareClosureJobs>["compileJobs"][number],
+) {
+  if (job.jsOutputFile) {
+    return [job.jsOutputFile];
+  }
+  if (job.chunk && job.chunkOutputPathPrefix) {
+    return job.chunk.map((chunkSpec) =>
+      path.join(job.chunkOutputPathPrefix!, `${chunkSpec.split(":", 1)[0]}.js`),
+    );
+  }
+  throw new Error("Closure compile job is missing output configuration.");
+}
+
+function determineClosureConcurrency(jobCount: number) {
+  const fromEnv = Number.parseInt(
+    process.env.GCC_CLOSURE_CONCURRENCY ?? "",
+    10,
+  );
+  if (Number.isFinite(fromEnv) && fromEnv > 0) {
+    return Math.min(jobCount, fromEnv);
+  }
+  return Math.min(
+    jobCount,
+    Math.max(1, (os.availableParallelism?.() ?? 2) - 1),
+  );
+}
+
+async function runWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+) {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await worker(items[currentIndex], currentIndex);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }

@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +12,51 @@ import { parseExternsCliArgs } from "../src/cli/parse-externs-options.ts";
 import { parseCliArgs } from "../src/cli/parse-options.ts";
 
 const execFileAsync = promisify(execFile);
+
+function hashText(value) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function getProjectCacheDir(cacheDir, projectRoot) {
+  return path.join(cacheDir, hashText(projectRoot));
+}
+
+async function findFilesNamed(rootDir, fileName) {
+  const matches = [];
+  const pending = [rootDir];
+  while (pending.length > 0) {
+    const currentDir = pending.pop();
+    let entries;
+    try {
+      entries = await fs.readdir(currentDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const entryPath = path.join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(entryPath);
+        continue;
+      }
+      if (entry.name === fileName) {
+        matches.push(entryPath);
+      }
+    }
+  }
+  return matches.sort((left, right) => left.localeCompare(right));
+}
+
+async function listDirectoryNames(dirPath) {
+  try {
+    const entries = await fs.readdir(dirPath, { withFileTypes: true });
+    return entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort((left, right) => left.localeCompare(right));
+  } catch {
+    return [];
+  }
+}
 
 async function createFixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "gcc-ts-bundler-test-"));
@@ -878,6 +924,176 @@ test.serial("build auto-generates runtime-aware dependency externs for helper-lo
   );
   expect(builtModule.first).toBe("demo:1");
   expect(builtModule.second).toBe("demo:2");
+});
+
+test.serial("reuses cached runtime-aware dependency externs across final build variants", async () => {
+  const fixture = await createRuntimeExternFixture();
+  const cacheDir = path.join(fixture.projectRoot, ".cache");
+
+  const firstResult = await build({
+    cache: { dir: cacheDir, mode: "persistent" },
+    compilationLevel: "ADVANCED",
+    entries: ["./index.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+  expect(firstResult.exitCode).toBe(0);
+
+  const projectCacheDir = getProjectCacheDir(cacheDir, fixture.projectRoot);
+  const externFiles = await findFilesNamed(
+    path.join(projectCacheDir, "native-emit"),
+    "runtime-dependency-externs.js",
+  );
+  expect(externFiles).toHaveLength(1);
+  const firstStat = await fs.stat(externFiles[0]);
+
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  const secondResult = await build({
+    cache: { dir: cacheDir, mode: "persistent" },
+    compilationLevel: "SIMPLE",
+    entries: ["./index.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+  expect(secondResult.exitCode).toBe(0);
+
+  const secondStat = await fs.stat(externFiles[0]);
+  expect(secondStat.mtimeMs).toBe(firstStat.mtimeMs);
+});
+
+test.serial("reuses unchanged bundler-runtime compile jobs when one lazy chunk changes", async () => {
+  const fixture = await createFixture();
+  const cacheDir = path.join(fixture.projectRoot, ".cache");
+  await fixture.write(
+    "src/main.ts",
+    [
+      'const loadFeature = () => import("./feature");',
+      'document.body.textContent = "base";',
+      "void loadFeature;",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "src/feature.ts",
+    [
+      'export const marker = "FIRST";',
+      "export function renderMessage() {",
+      "  return marker;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  const firstResult = await build({
+    cache: { dir: cacheDir, mode: "persistent" },
+    chunks: { loader: "script", mode: "bundler-runtime" },
+    entries: ["./main.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+  expect(firstResult.exitCode).toBe(0);
+
+  const projectCacheDir = getProjectCacheDir(cacheDir, fixture.projectRoot);
+  const closureJobCacheDir = path.join(projectCacheDir, "closure-jobs");
+  const firstJobKeys = await listDirectoryNames(closureJobCacheDir);
+  expect(firstJobKeys.length).toBeGreaterThan(1);
+
+  await fixture.write(
+    "src/feature.ts",
+    [
+      'export const marker = "SECOND";',
+      "export function renderMessage() {",
+      "  return marker;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  const secondResult = await build({
+    cache: { dir: cacheDir, mode: "persistent" },
+    chunks: { loader: "script", mode: "bundler-runtime" },
+    entries: ["./main.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+  expect(secondResult.exitCode).toBe(0);
+
+  const secondJobKeys = await listDirectoryNames(closureJobCacheDir);
+  expect(secondJobKeys.length).toBe(firstJobKeys.length + 1);
+});
+
+test.serial("parallel bundler-runtime Closure execution is byte-equivalent to serial execution", async () => {
+  const fixture = await createFixture();
+  await fixture.write(
+    "src/main.ts",
+    [
+      'const loadFeature = () => import("./feature");',
+      "globalThis.__lazyLoader = loadFeature;",
+      'document.body.textContent = "base";',
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "src/feature.ts",
+    [
+      'export const marker = "LAZY_FEATURE";',
+      "export function renderMessage() {",
+      "  return marker;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  const serialOutDir = path.join(fixture.projectRoot, "dist-serial");
+  const parallelOutDir = path.join(fixture.projectRoot, "dist-parallel");
+  const previousConcurrency = process.env.GCC_CLOSURE_CONCURRENCY;
+
+  process.env.GCC_CLOSURE_CONCURRENCY = "1";
+  try {
+    const serialResult = await build({
+      cache: { mode: "off" },
+      chunks: { loader: "script", mode: "bundler-runtime" },
+      entries: ["./main.ts"],
+      outDir: serialOutDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+    expect(serialResult.exitCode).toBe(0);
+  } finally {
+    if (previousConcurrency === undefined) {
+      delete process.env.GCC_CLOSURE_CONCURRENCY;
+    } else {
+      process.env.GCC_CLOSURE_CONCURRENCY = previousConcurrency;
+    }
+  }
+
+  const parallelResult = await build({
+    cache: { mode: "off" },
+    chunks: { loader: "script", mode: "bundler-runtime" },
+    entries: ["./main.ts"],
+    outDir: parallelOutDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+  expect(parallelResult.exitCode).toBe(0);
+
+  const serialFiles = (await fs.readdir(serialOutDir)).sort();
+  const parallelFiles = (await fs.readdir(parallelOutDir)).sort();
+  expect(parallelFiles).toEqual(serialFiles);
+  await Promise.all(
+    serialFiles.map(async (fileName) => {
+      const [serialContents, parallelContents] = await Promise.all([
+        fs.readFile(path.join(serialOutDir, fileName), "utf8"),
+        fs.readFile(path.join(parallelOutDir, fileName), "utf8"),
+      ]);
+      expect(parallelContents).toBe(serialContents);
+    }),
+  );
 });
 
 test.serial("emits an optional chunk manifest when requested", async () => {

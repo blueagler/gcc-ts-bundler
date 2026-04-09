@@ -1853,21 +1853,43 @@ import ts5 from "typescript";
 
 // src/stages/native/closure-ir.ts
 import ts4 from "typescript";
-async function collectClosureIrMetadata({
+async function collectNativeTypeAnalysis({
   fileNames,
+  preflight,
   tsConfigPath,
   workspaceDir
 }) {
   const compilerOptions = await loadCompilerOptions(tsConfigPath, {
     allowJs: true,
-    rootDir: workspaceDir
+    ignoreDeprecations: "6.0",
+    moduleResolution: ts4.ModuleResolutionKind.Bundler,
+    noEmit: true,
+    rootDir: workspaceDir,
+    skipLibCheck: true,
+    target: ts4.ScriptTarget.ESNext
   });
   const program = ts4.createProgram(fileNames, compilerOptions);
+  const preflightDiagnostics = preflight === "full" ? [...ts4.getPreEmitDiagnostics(program)].filter((diagnostic) => !shouldIgnorePreflightDiagnostic(diagnostic)) : [];
+  const { diagnostics: closureIrDiagnostics, files } = collectClosureIrFiles({
+    compilerOptions,
+    fileNames,
+    program
+  });
+  return {
+    diagnostics: [...preflightDiagnostics, ...closureIrDiagnostics],
+    files
+  };
+}
+function collectClosureIrFiles({
+  compilerOptions,
+  fileNames,
+  program
+}) {
   const checker = program.getTypeChecker();
   const unsafeEnumSymbols = collectUnsafeEnumSymbols(program, checker);
   const inputFiles = new Set(fileNames);
-  const files = [];
   const diagnostics = [];
+  const files = [];
   for (const sourceFile of program.getSourceFiles()) {
     if (!inputFiles.has(sourceFile.fileName)) {
       continue;
@@ -1942,6 +1964,14 @@ async function collectClosureIrMetadata({
     });
   }
   return { diagnostics, files };
+}
+function shouldIgnorePreflightDiagnostic(diagnostic) {
+  if (diagnostic.code !== 7016) {
+    return false;
+  }
+  const message = ts4.flattenDiagnosticMessageText(diagnostic.messageText, `
+`);
+  return message.includes("node_modules") && message.includes("implicitly has an 'any' type");
 }
 function containsDecorators(sourceFile) {
   let found = false;
@@ -2347,17 +2377,34 @@ async function emitNativeStage({
   }
   await fs8.promises.rm(outDir, { force: true, recursive: true });
   await fs8.promises.mkdir(outDir, { recursive: true });
-  const diagnostics = await getPreflightDiagnostics({
+  const missingInputDiagnostics = await getMissingInputDiagnostics({
+    fileNames: combinedFileNames,
+    preflight: options.diagnostics.preflight,
+    tsConfigPath
+  });
+  if (missingInputDiagnostics.length > 0) {
+    return {
+      dependencyModules,
+      dependencyRuntimeFiles,
+      diagnostics: missingInputDiagnostics,
+      emitSkipped: true,
+      emittedFiles: [],
+      externsPath,
+      outDir,
+      supportFiles: []
+    };
+  }
+  const analysis = await collectNativeTypeAnalysis({
     fileNames: combinedFileNames,
     preflight: options.diagnostics.preflight,
     tsConfigPath,
     workspaceDir
   });
-  if (diagnostics.length > 0) {
+  if (analysis.diagnostics.length > 0) {
     return {
       dependencyModules,
       dependencyRuntimeFiles,
-      diagnostics,
+      diagnostics: analysis.diagnostics,
       emitSkipped: true,
       emittedFiles: [],
       externsPath,
@@ -2365,24 +2412,7 @@ async function emitNativeStage({
       supportFiles: []
     };
   }
-  const closureIr = await collectClosureIrMetadata({
-    fileNames: combinedFileNames,
-    tsConfigPath,
-    workspaceDir
-  });
-  if (closureIr.diagnostics.length > 0) {
-    return {
-      dependencyModules,
-      dependencyRuntimeFiles,
-      diagnostics: closureIr.diagnostics,
-      emitSkipped: true,
-      emittedFiles: [],
-      externsPath,
-      outDir,
-      supportFiles: []
-    };
-  }
-  await fs8.promises.writeFile(metadataPathForNative, JSON.stringify(closureIr.files, null, 2), "utf-8");
+  await fs8.promises.writeFile(metadataPathForNative, JSON.stringify(analysis.files, null, 2), "utf-8");
   const result = transpileSources({
     chunkMode: options.chunks.mode,
     metadataPath: metadataPathForNative,
@@ -2461,11 +2491,10 @@ async function collectTsxRuntimePackageInputs({
     sourceFiles: graph.sourceFiles
   };
 }
-async function getPreflightDiagnostics({
+async function getMissingInputDiagnostics({
   fileNames,
   preflight,
-  tsConfigPath,
-  workspaceDir
+  tsConfigPath
 }) {
   if (preflight === "off") {
     return [];
@@ -2477,23 +2506,7 @@ async function getPreflightDiagnostics({
       createSimpleDiagnostic(`Missing required build input(s): ${missingFiles.join(", ")}`)
     ];
   }
-  if (preflight !== "full") {
-    return [];
-  }
-  const compilerOptions = await loadCompilerOptions(tsConfigPath);
-  const finalCompilerOptions = {
-    ...compilerOptions,
-    allowJs: true,
-    ignoreDeprecations: "6.0",
-    moduleResolution: ts5.ModuleResolutionKind.Bundler,
-    noEmit: true,
-    rootDir: workspaceDir,
-    skipLibCheck: true,
-    target: ts5.ScriptTarget.ESNext
-  };
-  const compilerHost = ts5.createCompilerHost(finalCompilerOptions);
-  const program = ts5.createProgram(fileNames, finalCompilerOptions, compilerHost);
-  return [...ts5.getPreEmitDiagnostics(program)].filter((diagnostic) => !shouldIgnorePreflightDiagnostic(diagnostic));
+  return [];
 }
 function createSimpleDiagnostic(messageText) {
   return {
@@ -2504,14 +2517,6 @@ function createSimpleDiagnostic(messageText) {
     messageText,
     start: undefined
   };
-}
-function shouldIgnorePreflightDiagnostic(diagnostic) {
-  if (diagnostic.code !== 7016) {
-    return false;
-  }
-  const message = ts5.flattenDiagnosticMessageText(diagnostic.messageText, `
-`);
-  return message.includes("node_modules") && message.includes("implicitly has an 'any' type");
 }
 function getJsxRuntimeSpecifier(compilerOptions) {
   const jsxImportSource = compilerOptions.jsxImportSource ?? "react";
@@ -2599,9 +2604,12 @@ function toRuntimePackageAlias(specifier, targetPath) {
 
 // src/stages/closure/run-closure.ts
 import fs9 from "fs/promises";
+import os2 from "os";
 import path9 from "path";
 import * as closureCompilerPackage from "google-closure-compiler";
 import { getNativeImagePath } from "google-closure-compiler/lib/utils.js";
+var CLOSURE_JOB_CACHE_VERSION = 1;
+var closureInputHashCache = new Map;
 async function runClosureStage({
   chunkPlan,
   emittedOutDir,
@@ -2611,6 +2619,7 @@ async function runClosureStage({
   nativeExternPath,
   options,
   outDir,
+  projectCacheDir,
   supportFiles,
   packageRoot: packageRoot2
 }) {
@@ -2645,37 +2654,15 @@ async function runClosureStage({
     await fs9.mkdir(path9.dirname(asset.path), { recursive: true });
     await fs9.writeFile(asset.path, asset.text, "utf-8");
   }));
-  for (const job of prepared.compileJobs) {
-    const closureOptions = {
-      assumeFunctionWrapper: job.assumeFunctionWrapper,
-      compilationLevel: job.compilationLevel,
-      externs: uniquePaths(job.externs),
-      js: uniquePaths(job.js),
-      languageIn: job.languageIn,
-      languageOut: job.languageOut,
-      rewritePolyfills: job.rewritePolyfills,
-      warningLevel: job.warningLevel
-    };
-    if (job.chunk) {
-      closureOptions.chunk = job.chunk;
-    }
-    if (job.chunkOutputPathPrefix) {
-      closureOptions.chunkOutputPathPrefix = job.chunkOutputPathPrefix;
-    }
-    if (job.dependencyMode) {
-      closureOptions.dependencyMode = job.dependencyMode;
-    }
-    if (job.entryPoint && job.entryPoint.length > 0) {
-      closureOptions.entryPoint = job.entryPoint;
-    }
-    if (job.jsOutputFile) {
-      closureOptions.jsOutputFile = job.jsOutputFile;
-    }
-    applyInternalClosureDebugOptions(closureOptions);
-    const exitCode = await runClosureCompiler(closureOptions);
-    if (exitCode !== 0) {
-      return { cacheOutputFiles: [], exitCode, outputFiles: [] };
-    }
+  const closureJobCacheDir = options.cache.mode === "off" ? null : path9.join(projectCacheDir, "closure-jobs");
+  const concurrency = options.chunks.mode === "bundler-runtime" ? determineClosureConcurrency(prepared.compileJobs.length) : 1;
+  const exitCodes = await runWithConcurrency(prepared.compileJobs, concurrency, async (job) => runPreparedClosureJob({
+    cacheDir: closureJobCacheDir,
+    job
+  }));
+  const failedExitCode = exitCodes.find((exitCode) => exitCode !== 0);
+  if (failedExitCode !== undefined) {
+    return { cacheOutputFiles: [], exitCode: failedExitCode, outputFiles: [] };
   }
   await Promise.all(prepared.postprocessActions.map(async (action) => {
     await fs9.mkdir(path9.dirname(action.outputPath), { recursive: true });
@@ -2747,8 +2734,167 @@ async function runClosureCompiler(options) {
 function uniquePaths(paths) {
   return [...new Set(paths)];
 }
+async function runPreparedClosureJob({
+  cacheDir,
+  job
+}) {
+  const outputFiles = getCompileJobOutputFiles(job);
+  const cached = cacheDir ? await tryRestoreCachedClosureJob({
+    cacheDir,
+    job,
+    outputFiles
+  }) : false;
+  if (cached) {
+    return 0;
+  }
+  const closureOptions = {
+    assumeFunctionWrapper: job.assumeFunctionWrapper,
+    compilationLevel: job.compilationLevel,
+    externs: uniquePaths(job.externs),
+    js: uniquePaths(job.js),
+    languageIn: job.languageIn,
+    languageOut: job.languageOut,
+    rewritePolyfills: job.rewritePolyfills,
+    warningLevel: job.warningLevel
+  };
+  if (job.chunk) {
+    closureOptions.chunk = job.chunk;
+  }
+  if (job.chunkOutputPathPrefix) {
+    closureOptions.chunkOutputPathPrefix = job.chunkOutputPathPrefix;
+  }
+  if (job.dependencyMode) {
+    closureOptions.dependencyMode = job.dependencyMode;
+  }
+  if (job.entryPoint && job.entryPoint.length > 0) {
+    closureOptions.entryPoint = job.entryPoint;
+  }
+  if (job.jsOutputFile) {
+    closureOptions.jsOutputFile = job.jsOutputFile;
+  }
+  applyInternalClosureDebugOptions(closureOptions);
+  const exitCode = await runClosureCompiler(closureOptions);
+  if (exitCode !== 0) {
+    return exitCode;
+  }
+  if (cacheDir) {
+    await persistCachedClosureJob({
+      cacheDir,
+      job,
+      outputFiles
+    });
+  }
+  return 0;
+}
+async function tryRestoreCachedClosureJob({
+  cacheDir,
+  job,
+  outputFiles
+}) {
+  const jobCacheDir = await getClosureJobCacheDir(cacheDir, job);
+  const metadata = await readJsonIfExists(path9.join(jobCacheDir, "meta.json"));
+  if (!metadata || metadata.version !== CLOSURE_JOB_CACHE_VERSION || metadata.outputFiles.length !== outputFiles.length) {
+    return false;
+  }
+  const cachedFiles = metadata.outputFiles.map((fileName) => path9.join(jobCacheDir, fileName));
+  const filesReady = await Promise.all(cachedFiles.map((filePath) => fs9.stat(filePath).then(() => true).catch(() => false)));
+  if (filesReady.some((ready) => !ready)) {
+    return false;
+  }
+  await Promise.all(outputFiles.map(async (outputFile, index) => {
+    await fs9.mkdir(path9.dirname(outputFile), { recursive: true });
+    await fs9.copyFile(cachedFiles[index], outputFile);
+  }));
+  return true;
+}
+async function persistCachedClosureJob({
+  cacheDir,
+  job,
+  outputFiles
+}) {
+  const jobCacheDir = await getClosureJobCacheDir(cacheDir, job);
+  await fs9.rm(jobCacheDir, { force: true, recursive: true });
+  await fs9.mkdir(jobCacheDir, { recursive: true });
+  const outputNames = outputFiles.map((outputFile) => path9.basename(outputFile));
+  await Promise.all(outputFiles.map((outputFile, index) => fs9.copyFile(outputFile, path9.join(jobCacheDir, outputNames[index]))));
+  await writeJson(path9.join(jobCacheDir, "meta.json"), {
+    outputFiles: outputNames,
+    version: CLOSURE_JOB_CACHE_VERSION
+  });
+}
+async function getClosureJobCacheDir(cacheDir, job) {
+  const outputFiles = getCompileJobOutputFiles(job);
+  const compilerVersion = resolveClosureCompilerJarPath() ?? getNativeImagePath() ?? "native";
+  const [jsInputs, externInputs] = await Promise.all([
+    hashFilesInOrder(job.js),
+    hashFilesInOrder(job.externs)
+  ]);
+  const key = hashJson({
+    compilerVersion,
+    externInputs,
+    job: {
+      assumeFunctionWrapper: job.assumeFunctionWrapper,
+      chunk: job.chunk ?? null,
+      compilationLevel: job.compilationLevel,
+      dependencyMode: job.dependencyMode ?? null,
+      entryPoint: job.entryPoint ?? null,
+      jsOutputKinds: outputFiles.map((outputFile) => path9.basename(outputFile)),
+      languageIn: job.languageIn,
+      languageOut: job.languageOut,
+      rewritePolyfills: job.rewritePolyfills,
+      warningLevel: job.warningLevel
+    },
+    jsInputs,
+    version: CLOSURE_JOB_CACHE_VERSION
+  });
+  return path9.join(cacheDir, key);
+}
+async function hashFilesInOrder(filePaths) {
+  return Promise.all(filePaths.map((filePath) => hashFileInput(filePath)));
+}
+async function hashFileInput(filePath) {
+  const stat = await fs9.stat(filePath);
+  const cacheKey = `${filePath}:${stat.size}:${stat.mtimeMs}`;
+  const cached = closureInputHashCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  const pending = fs9.readFile(filePath, "utf-8").then((contents) => hashContent(contents));
+  closureInputHashCache.set(cacheKey, pending);
+  return pending;
+}
+function getCompileJobOutputFiles(job) {
+  if (job.jsOutputFile) {
+    return [job.jsOutputFile];
+  }
+  if (job.chunk && job.chunkOutputPathPrefix) {
+    return job.chunk.map((chunkSpec) => path9.join(job.chunkOutputPathPrefix, `${chunkSpec.split(":", 1)[0]}.js`));
+  }
+  throw new Error("Closure compile job is missing output configuration.");
+}
+function determineClosureConcurrency(jobCount) {
+  const fromEnv = Number.parseInt(process.env.GCC_CLOSURE_CONCURRENCY ?? "", 10);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) {
+    return Math.min(jobCount, fromEnv);
+  }
+  return Math.min(jobCount, Math.max(1, (os2.availableParallelism?.() ?? 2) - 1));
+}
+async function runWithConcurrency(items, concurrency, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await worker(items[currentIndex], currentIndex);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 // src/pipeline/build-pipeline.ts
+var RUNTIME_DEPENDENCY_EXTERNS_CACHE_VERSION = 1;
 async function build(options) {
   const context = await createBuildContext(normalizeBuildOptions(options));
   const usesPersistentCache = context.options.cache.mode === "persistent";
@@ -2837,6 +2983,7 @@ async function build(options) {
     }
     const runtimeDependencyExterns = await generateRuntimeDependencyExterns({
       appEntryFiles: context.options.entries,
+      cacheMode: context.options.cache.mode,
       cacheDir: resolvedBuild.nativeEmitCacheDir,
       dependencyModules: nativeEmitResult.dependencyModules,
       dependencyRuntimeFiles: nativeEmitResult.dependencyRuntimeFiles,
@@ -2853,6 +3000,7 @@ async function build(options) {
       nativeExternPath: nativeEmitResult.externsPath,
       options: context.options,
       outDir: context.options.outDir,
+      projectCacheDir: context.projectCacheDir,
       supportFiles: nativeEmitResult.supportFiles,
       packageRoot: context.packageRoot
     });
@@ -2904,6 +3052,7 @@ async function cleanCache(options = {}) {
 }
 async function generateRuntimeDependencyExterns({
   appEntryFiles,
+  cacheMode,
   cacheDir,
   dependencyModules,
   dependencyRuntimeFiles,
@@ -2915,6 +3064,39 @@ async function generateRuntimeDependencyExterns({
     return null;
   }
   const outputFile = path10.join(cacheDir, "runtime-dependency-externs.js");
+  const metadataPath = path10.join(cacheDir, "runtime-dependency-externs.meta.json");
+  if (cacheMode !== "off") {
+    const compilerOptions = await loadCompilerOptions(tsConfigPath);
+    const cacheKey = hashJson({
+      appEntryFiles,
+      compilerOptions,
+      dependencyModules,
+      dependencyRuntimeFiles,
+      projectRoot,
+      srcDir,
+      version: RUNTIME_DEPENDENCY_EXTERNS_CACHE_VERSION
+    });
+    const cachedMetadata = await readJsonIfExists(metadataPath);
+    if (cachedMetadata?.version === RUNTIME_DEPENDENCY_EXTERNS_CACHE_VERSION && cachedMetadata.key === cacheKey && cachedMetadata.outputFile === outputFile && await filesExist([outputFile])) {
+      return outputFile;
+    }
+    await generateExterns({
+      appEntryFiles,
+      mode: "runtime-aware",
+      modules: dependencyModules,
+      outputFile,
+      projectRoot,
+      runtimeEntryFiles: dependencyRuntimeFiles,
+      srcDir,
+      tsConfigPath
+    });
+    await writeJson(metadataPath, {
+      key: cacheKey,
+      outputFile,
+      version: RUNTIME_DEPENDENCY_EXTERNS_CACHE_VERSION
+    });
+    return outputFile;
+  }
   await generateExterns({
     appEntryFiles,
     mode: "runtime-aware",
