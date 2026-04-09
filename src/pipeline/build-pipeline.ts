@@ -1,9 +1,7 @@
 import path from "path";
-import fs from "fs";
 
-import { generateExterns } from "../api/externs";
 import { BuildOptions, BuildResult, CleanCacheOptions } from "../api/types";
-import { hashContent, hashJson } from "../cache/hash";
+import { hashContent } from "../cache/hash";
 import {
   getDefaultPersistentCacheRoot,
   readJsonIfExists,
@@ -11,10 +9,8 @@ import {
 } from "../cache/store";
 import {
   collectPublishedOutputStats,
-  copyOrLinkFiles,
   FileStateSnapshot,
   filesExist,
-  publishedOutputsMatch,
   publishedOutputsMatchSnapshot,
   trackedFilesMatch,
 } from "../internal/file-state";
@@ -24,9 +20,16 @@ import {
   resolveBuild,
 } from "./resolve-build";
 import { emitNativeStage } from "../stages/native/emit";
-import { loadCompilerOptions } from "../stages/native/compiler-options";
 import { runClosureStage } from "../stages/closure/run-closure";
 import { writeEntryShims } from "../native/load";
+import {
+  createBuildDiagnostic,
+  generateRuntimeDependencyExterns,
+  publishOutputs,
+  removeProjectCacheDir,
+  toImportPath,
+  toPublishedOutputPaths,
+} from "./build-helpers";
 
 interface FinalCacheMetadata {
   outputFiles: string[];
@@ -39,14 +42,6 @@ interface FinalFastSnapshot {
   publishedOutputs: Array<{ name: string; size: number }>;
   trackedFiles: Record<string, FileStateSnapshot>;
 }
-
-interface RuntimeDependencyExternsCacheMetadata {
-  key: string;
-  outputFile: string;
-  version: number;
-}
-
-const RUNTIME_DEPENDENCY_EXTERNS_CACHE_VERSION = 1;
 
 export async function build(options: BuildOptions): Promise<BuildResult> {
   const context = await createBuildContext(normalizeBuildOptions(options));
@@ -272,121 +267,5 @@ export async function cleanCache(options: CleanCacheOptions = {}) {
     options.cacheDir || getDefaultPersistentCacheRoot(),
   );
   const projectCacheDir = path.join(cacheRoot, hashContent(projectRoot));
-  await fs.promises.rm(projectCacheDir, { force: true, recursive: true });
-}
-
-async function generateRuntimeDependencyExterns({
-  appEntryFiles,
-  cacheMode,
-  cacheDir,
-  dependencyModules,
-  dependencyRuntimeFiles,
-  projectRoot,
-  srcDir,
-  tsConfigPath,
-}: {
-  appEntryFiles: string[];
-  cacheMode: "off" | "temp" | "persistent";
-  cacheDir: string;
-  dependencyModules: string[];
-  dependencyRuntimeFiles: string[];
-  projectRoot: string;
-  srcDir: string;
-  tsConfigPath: string;
-}) {
-  if (dependencyModules.length === 0 || dependencyRuntimeFiles.length === 0) {
-    return null;
-  }
-
-  const outputFile = path.join(cacheDir, "runtime-dependency-externs.js");
-  const metadataPath = path.join(
-    cacheDir,
-    "runtime-dependency-externs.meta.json",
-  );
-  if (cacheMode !== "off") {
-    const compilerOptions = await loadCompilerOptions(tsConfigPath);
-    const cacheKey = hashJson({
-      appEntryFiles,
-      compilerOptions,
-      dependencyModules,
-      dependencyRuntimeFiles,
-      projectRoot,
-      srcDir,
-      version: RUNTIME_DEPENDENCY_EXTERNS_CACHE_VERSION,
-    });
-    const cachedMetadata =
-      await readJsonIfExists<RuntimeDependencyExternsCacheMetadata>(
-        metadataPath,
-      );
-    if (
-      cachedMetadata?.version === RUNTIME_DEPENDENCY_EXTERNS_CACHE_VERSION &&
-      cachedMetadata.key === cacheKey &&
-      cachedMetadata.outputFile === outputFile &&
-      (await filesExist([outputFile]))
-    ) {
-      return outputFile;
-    }
-
-    await generateExterns({
-      appEntryFiles,
-      mode: "runtime-aware",
-      modules: dependencyModules,
-      outputFile,
-      projectRoot,
-      runtimeEntryFiles: dependencyRuntimeFiles,
-      srcDir,
-      tsConfigPath,
-    });
-    await writeJson(metadataPath, {
-      key: cacheKey,
-      outputFile,
-      version: RUNTIME_DEPENDENCY_EXTERNS_CACHE_VERSION,
-    } satisfies RuntimeDependencyExternsCacheMetadata);
-    return outputFile;
-  }
-
-  await generateExterns({
-    appEntryFiles,
-    mode: "runtime-aware",
-    modules: dependencyModules,
-    outputFile,
-    projectRoot,
-    runtimeEntryFiles: dependencyRuntimeFiles,
-    srcDir,
-    tsConfigPath,
-  });
-  return outputFile;
-}
-
-async function publishOutputs(outputFiles: string[], outDir: string) {
-  if (await publishedOutputsMatch(outputFiles, outDir)) {
-    return;
-  }
-
-  await copyOrLinkFiles(outputFiles, outDir);
-}
-
-function toImportPath(relativePath: string): string {
-  const normalized = relativePath.replace(/\\/g, "/").replace(/\.[^/.]+$/, "");
-  return normalized.startsWith(".") ? normalized : `./${normalized}`;
-}
-
-function toPublishedOutputPaths(
-  publishedOutputs: Array<{ name: string }>,
-  outDir: string,
-) {
-  return publishedOutputs.map(({ name }) => path.join(outDir, name));
-}
-
-function createBuildDiagnostic(error: unknown) {
-  return {
-    category: 1,
-    code: 0,
-    messageText:
-      error instanceof Error
-        ? error.message
-        : typeof error === "string"
-          ? error
-          : "Build failed.",
-  };
+  await removeProjectCacheDir(projectCacheDir);
 }

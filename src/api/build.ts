@@ -3,10 +3,23 @@ import { generateExterns } from "./externs";
 import { usage } from "../cli/usage";
 import { parseCliArgs } from "../cli/parse-options";
 import { parseExternsCliArgs } from "../cli/parse-externs-options";
-import { build as runBuild, cleanCache } from "../pipeline/build-pipeline";
-export { cleanCache };
-export const build = (options: BuildOptions): Promise<BuildResult> =>
-  runBuild(options);
+
+async function loadBuildPipeline() {
+  return import("../pipeline/build-pipeline");
+}
+
+export async function cleanCache(options: {
+  cacheDir?: string;
+  projectRoot?: string;
+}): Promise<void> {
+  const pipeline = await loadBuildPipeline();
+  return pipeline.cleanCache(options);
+}
+
+export const build = async (options: BuildOptions): Promise<BuildResult> => {
+  const pipeline = await loadBuildPipeline();
+  return pipeline.build(options);
+};
 export { generateExterns };
 
 export async function runCli(args: string[]): Promise<number> {
@@ -51,7 +64,7 @@ export async function runCli(args: string[]): Promise<number> {
     return 0;
   }
 
-  const result = await runBuild(options);
+  const result = await build(options);
   return result.exitCode;
 }
 

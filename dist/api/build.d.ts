@@ -1,7 +1,9 @@
 import { BuildOptions, BuildResult } from "./types";
 import { generateExterns } from "./externs";
-import { cleanCache } from "../pipeline/build-pipeline";
-export { cleanCache };
+export declare function cleanCache(options: {
+    cacheDir?: string;
+    projectRoot?: string;
+}): Promise<void>;
 export declare const build: (options: BuildOptions) => Promise<BuildResult>;
 export { generateExterns };
 export declare function runCli(args: string[]): Promise<number>;
