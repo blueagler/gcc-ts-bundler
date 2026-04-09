@@ -3,6 +3,7 @@ import os from "os";
 import path from "path";
 
 import { CacheMode } from "../api/types";
+import { ensureParentDirectory } from "../internal/files";
 import { hashContent } from "./hash";
 
 export interface CacheStore {
@@ -11,6 +12,10 @@ export interface CacheStore {
   projectCacheDir: string;
   rootDir: string;
   workspaceDir: string;
+}
+
+export function getProjectCacheDir(rootDir: string, projectRoot: string) {
+  return path.join(rootDir, hashContent(projectRoot));
 }
 
 export function getDefaultPersistentCacheRoot(): string {
@@ -59,7 +64,7 @@ export async function createCacheStore({
   }
 
   const rootDir = path.resolve(cacheDir || getDefaultPersistentCacheRoot());
-  const projectCacheDir = path.join(rootDir, hashContent(projectRoot));
+  const projectCacheDir = getProjectCacheDir(rootDir, projectRoot);
   const workspaceDir = path.join(projectCacheDir, "workspace");
   await fs.promises.mkdir(workspaceDir, { recursive: true });
 
@@ -86,14 +91,10 @@ export async function readJsonIfExists<T>(filePath: string): Promise<T | null> {
 }
 
 export async function writeJson(filePath: string, value: unknown) {
-  await ensureDirectoryExistence(filePath);
+  await ensureParentDirectory(filePath);
   await fs.promises.writeFile(
     filePath,
     JSON.stringify(value, null, 2),
     "utf-8",
   );
-}
-
-async function ensureDirectoryExistence(filePath: string): Promise<void> {
-  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
 }

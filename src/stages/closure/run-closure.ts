@@ -1,7 +1,11 @@
 import fs from "fs/promises";
 import path from "path";
 
-import { copyOrLinkFiles } from "../../internal/file-state";
+import {
+  copyOrLinkFiles,
+  ensureDirectory,
+  ensureParentDirectory,
+} from "../../internal/files";
 import { ChunkPlanChunk, NormalizedBuildOptions } from "../../internal/types";
 import { prepareClosureJobs, rewriteGccExports } from "../../native/load";
 import {
@@ -49,14 +53,14 @@ export async function runClosureStage({
   packageRoot: string;
 }): Promise<ClosureStageResult> {
   await fs.rm(finalCacheDir, { force: true, recursive: true });
-  await fs.mkdir(finalCacheDir, { recursive: true });
+  await ensureDirectory(finalCacheDir);
 
   const rawDir = path.join(finalCacheDir, "raw");
   const cacheOutputDir = path.join(finalCacheDir, "outputs");
-  await fs.mkdir(rawDir, { recursive: true });
-  await fs.mkdir(cacheOutputDir, { recursive: true });
+  await ensureDirectory(rawDir);
+  await ensureDirectory(cacheOutputDir);
   await fs.rm(outDir, { force: true, recursive: true });
-  await fs.mkdir(outDir, { recursive: true });
+  await ensureDirectory(outDir);
 
   const prepared = prepareClosureJobs({
     chunkLoader: options.chunks.loader,
@@ -80,7 +84,7 @@ export async function runClosureStage({
 
   await Promise.all(
     prepared.generatedAssets.map(async (asset) => {
-      await fs.mkdir(path.dirname(asset.path), { recursive: true });
+      await ensureParentDirectory(asset.path);
       await fs.writeFile(asset.path, asset.text, "utf-8");
     }),
   );
@@ -109,7 +113,7 @@ export async function runClosureStage({
 
   await Promise.all(
     prepared.postprocessActions.map(async (action) => {
-      await fs.mkdir(path.dirname(action.outputPath), { recursive: true });
+      await ensureParentDirectory(action.outputPath);
       if (action.kind === "rewrite-gcc-exports") {
         const contents = await fs.readFile(action.inputPath, "utf-8");
         await fs.writeFile(action.outputPath, rewriteGccExports(contents));

@@ -1,6 +1,3 @@
-import fs from "fs";
-import path from "path";
-
 import {
   collectFileStates,
   collectPublishedOutputStats as collectPublishedOutputStatsNative,
@@ -8,6 +5,7 @@ import {
   publishedOutputSnapshotMatches,
   publishedOutputsMatch as publishedOutputsMatchNative,
 } from "../native/load";
+import { uniqueSortedStrings } from "./files";
 
 export interface FileStateSnapshot {
   mtimeMs: number;
@@ -19,16 +17,10 @@ interface PublishedOutputSnapshot {
   size: number;
 }
 
-function uniqueSorted(filePaths: string[]) {
-  return [...new Set(filePaths)].sort((left, right) =>
-    left.localeCompare(right),
-  );
-}
-
 export async function collectTrackedFiles(
   filePaths: string[],
 ): Promise<Record<string, FileStateSnapshot>> {
-  const states = collectFileStates(uniqueSorted(filePaths));
+  const states = collectFileStates(uniqueSortedStrings(filePaths));
   return Object.fromEntries(
     states
       .filter((state) => state.exists)
@@ -56,7 +48,7 @@ export async function trackedFilesMatch(
 }
 
 export async function filesExist(filePaths: string[]): Promise<boolean> {
-  return collectFileStates(uniqueSorted(filePaths)).every(
+  return collectFileStates(uniqueSortedStrings(filePaths)).every(
     (state) => state.exists,
   );
 }
@@ -65,7 +57,7 @@ export async function publishedOutputsMatch(
   outputFiles: string[],
   outDir: string,
 ): Promise<boolean> {
-  return publishedOutputsMatchNative(uniqueSorted(outputFiles), outDir);
+  return publishedOutputsMatchNative(uniqueSortedStrings(outputFiles), outDir);
 }
 
 export async function publishedOutputsMatchSnapshot(
@@ -76,26 +68,5 @@ export async function publishedOutputsMatchSnapshot(
 }
 
 export async function collectPublishedOutputStats(outputFiles: string[]) {
-  return collectPublishedOutputStatsNative(uniqueSorted(outputFiles));
-}
-
-export async function copyOrLinkFiles(sourceFiles: string[], outDir: string) {
-  await fs.promises.rm(outDir, { force: true, recursive: true });
-  await fs.promises.mkdir(outDir, { recursive: true });
-
-  await Promise.all(
-    sourceFiles.map(async (sourceFile) => {
-      const destinationFile = path.join(outDir, path.basename(sourceFile));
-      try {
-        await fs.promises.link(sourceFile, destinationFile);
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code !== "EXDEV" && code !== "EEXIST" && code !== "EPERM") {
-          throw error;
-        }
-
-        await fs.promises.copyFile(sourceFile, destinationFile);
-      }
-    }),
-  );
+  return collectPublishedOutputStatsNative(uniqueSortedStrings(outputFiles));
 }

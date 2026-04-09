@@ -6,6 +6,7 @@ export interface CacheStore {
     rootDir: string;
     workspaceDir: string;
 }
+export declare function getProjectCacheDir(rootDir: string, projectRoot: string): string;
 export declare function getDefaultPersistentCacheRoot(): string;
 export declare function createCacheStore({ cacheDir, mode, projectRoot, }: {
     cacheDir?: string;

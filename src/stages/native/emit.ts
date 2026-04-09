@@ -4,6 +4,7 @@ import ts from "typescript";
 
 import { DiagnosticsPreflight } from "../../api/types";
 import { createBundleRequire } from "../../internal/bundle-location";
+import { uniqueSortedStrings } from "../../internal/files";
 import { filesExist } from "../../internal/file-state";
 import { collectFileStates } from "../../native/load";
 import {
@@ -74,7 +75,7 @@ export async function emitNativeStage({
   const runtimeSupportFiles = runtimePackageInputs.sourceFiles.map((fileName) =>
     toEmittedPath(fileName, outDir, workspaceDir),
   );
-  const combinedFileNames = uniqueSorted([
+  const combinedFileNames = uniqueSortedStrings([
     ...fileNames,
     ...runtimePackageInputs.sourceFiles,
   ]);
@@ -82,7 +83,7 @@ export async function emitNativeStage({
     ...packageAliases,
     ...runtimePackageInputs.packageAliases,
   ]);
-  const combinedPackageJsonFiles = uniqueSorted([
+  const combinedPackageJsonFiles = uniqueSortedStrings([
     ...packageJsonFiles,
     ...runtimePackageInputs.packageJsonFiles,
   ]);
@@ -171,7 +172,7 @@ export async function emitNativeStage({
     packageJsonFiles: combinedPackageJsonFiles,
     workspaceDir,
   });
-  const finalSupportFiles = uniqueSorted([
+  const finalSupportFiles = uniqueSortedStrings([
     ...runtimeSupportFiles,
     ...result.supportFiles,
   ]);
@@ -349,7 +350,7 @@ function toEmittedPath(
 }
 
 function collectDependencyModules(packageAliases: PackageAlias[]) {
-  return uniqueSorted(
+  return uniqueSortedStrings(
     packageAliases
       .filter((alias) => isDependencyFile(alias.targetPath))
       .map((alias) =>
@@ -369,7 +370,7 @@ function collectDependencyRuntimeFiles({
   sourceFiles: string[];
   workspaceDir: string;
 }) {
-  return uniqueSorted(
+  return uniqueSortedStrings(
     sourceFiles
       .filter((filePath) => isDependencyFile(filePath))
       .map((filePath) => toEmittedPath(filePath, outDir, workspaceDir)),
@@ -378,10 +379,6 @@ function collectDependencyRuntimeFiles({
 
 function isDependencyFile(filePath: string) {
   return path.resolve(filePath).includes(`${path.sep}node_modules${path.sep}`);
-}
-
-function uniqueSorted(values: string[]) {
-  return [...new Set(values)].sort((left, right) => left.localeCompare(right));
 }
 
 function mergePackageAliases(aliases: PackageAlias[]) {

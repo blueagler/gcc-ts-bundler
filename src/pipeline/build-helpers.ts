@@ -4,11 +4,8 @@ import path from "path";
 import { generateExterns } from "../api/externs";
 import { hashJson } from "../cache/hash";
 import { readJsonIfExists, writeJson } from "../cache/store";
-import {
-  copyOrLinkFiles,
-  filesExist,
-  publishedOutputsMatch,
-} from "../internal/file-state";
+import { copyOrLinkFiles } from "../internal/files";
+import { filesExist, publishedOutputsMatch } from "../internal/file-state";
 import { loadCompilerOptions } from "../stages/native/compiler-options";
 
 export interface RuntimeDependencyExternsCacheMetadata {

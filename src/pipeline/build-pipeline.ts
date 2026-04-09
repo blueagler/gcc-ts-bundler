@@ -1,8 +1,8 @@
 import path from "path";
 
 import { BuildOptions, BuildResult, CleanCacheOptions } from "../api/types";
-import { hashContent } from "../cache/hash";
 import {
+  getProjectCacheDir,
   getDefaultPersistentCacheRoot,
   readJsonIfExists,
   writeJson,
@@ -266,6 +266,6 @@ export async function cleanCache(options: CleanCacheOptions = {}) {
   const cacheRoot = path.resolve(
     options.cacheDir || getDefaultPersistentCacheRoot(),
   );
-  const projectCacheDir = path.join(cacheRoot, hashContent(projectRoot));
+  const projectCacheDir = getProjectCacheDir(cacheRoot, projectRoot);
   await removeProjectCacheDir(projectCacheDir);
 }

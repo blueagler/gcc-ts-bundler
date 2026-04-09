@@ -1,8 +1,9 @@
 import path from "path";
 
-import { hashContent, hashJson } from "../cache/hash";
+import { hashJson } from "../cache/hash";
 import {
   createCacheStore,
+  getProjectCacheDir,
   readJsonIfExists,
   writeJson,
   getDefaultPersistentCacheRoot,
@@ -11,10 +12,7 @@ import { collectTrackedFiles, trackedFilesMatch } from "../internal/file-state";
 import {
   BuildContext,
   BuildEntry,
-  ChunkPlanChunk,
-  LazyImport,
   NormalizedBuildOptions,
-  PackageAlias,
   ResolvedBuild,
 } from "../internal/types";
 import { planChunks, resolveGraph } from "../native/load";
@@ -32,6 +30,11 @@ import {
   hashTsConfig,
 } from "./resolve-build/signatures";
 import {
+  readChunkPlan,
+  ResolveMetadata,
+  ResolveSnapshot,
+} from "./resolve-build/cache";
+import {
   ensureDirectorySymlink,
   ensureWorkspaceNodeModules,
   resolveTsConfigPath,
@@ -43,33 +46,6 @@ export {
   getPackageRoot,
   getPackageSignature,
 } from "./resolve-build/signatures";
-
-interface ResolveMetadata {
-  chunkPlan: ChunkPlanChunk[];
-  entryFiles: Array<{
-    chunkName: string;
-    exportNames: string[];
-    hasDefaultExport: boolean;
-    outputName: string;
-    sourceRelativePath: string;
-  }>;
-  lazyImports: LazyImport[];
-}
-
-interface ResolveSnapshot {
-  compilerOptionsHash: string;
-  entryFiles: ResolveMetadata["entryFiles"];
-  finalKey: string;
-  lazyImports: LazyImport[];
-  nativeEmitKey: string;
-  optionsSignature: string;
-  packageAliases: PackageAlias[];
-  packageJsonFiles: string[];
-  packageSignature: string;
-  resolveKey: string;
-  sourceFiles: string[];
-  trackedFiles: Awaited<ReturnType<typeof collectTrackedFiles>>;
-}
 
 export async function createBuildContext(
   options: NormalizedBuildOptions,
@@ -83,9 +59,9 @@ export async function createBuildContext(
     packageSignature: usesPersistentCache
       ? await getPackageSignature(packageRoot)
       : "",
-    projectCacheDir: path.join(
+    projectCacheDir: getProjectCacheDir(
       path.resolve(options.cache.dir || getDefaultPersistentCacheRoot()),
-      hashContent(options.projectRoot),
+      options.projectRoot,
     ),
   };
 }
@@ -323,18 +299,4 @@ export async function resolveBuild(
     tsConfigPath,
     workspaceDir: cacheStore.workspaceDir,
   };
-}
-
-async function readChunkPlan(projectCacheDir: string, resolveKey: string) {
-  const resolveMetadataPath = path.join(
-    projectCacheDir,
-    "resolve",
-    `${resolveKey}.json`,
-  );
-  const metadata = await readJsonIfExists<ResolveMetadata>(resolveMetadataPath);
-  if (!metadata) {
-    throw new Error(`Missing resolve metadata for ${resolveKey}`);
-  }
-
-  return metadata.chunkPlan;
 }

@@ -12,5 +12,4 @@ export declare function filesExist(filePaths: string[]): Promise<boolean>;
 export declare function publishedOutputsMatch(outputFiles: string[], outDir: string): Promise<boolean>;
 export declare function publishedOutputsMatchSnapshot(publishedOutputs: PublishedOutputSnapshot[], outDir: string): Promise<boolean>;
 export declare function collectPublishedOutputStats(outputFiles: string[]): Promise<import("../native/load").NativePublishedOutputEntry[]>;
-export declare function copyOrLinkFiles(sourceFiles: string[], outDir: string): Promise<void>;
 export {};

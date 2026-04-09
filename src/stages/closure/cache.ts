@@ -1,8 +1,9 @@
 import fs from "fs/promises";
 import path from "path";
 
-import { hashContent, hashJson } from "../../cache/hash";
+import { hashJson } from "../../cache/hash";
 import { readJsonIfExists, writeJson } from "../../cache/store";
+import { ensureDirectory, hashFilesInOrder } from "../../internal/files";
 
 export interface ClosureJobCacheMetadata {
   outputFiles: string[];
@@ -10,7 +11,6 @@ export interface ClosureJobCacheMetadata {
 }
 
 export const CLOSURE_JOB_CACHE_VERSION = 1;
-const closureInputHashCache = new Map<string, Promise<string>>();
 
 export function getCompileJobOutputFiles(job: {
   chunkOutputPathPrefix?: string | null;
@@ -85,7 +85,7 @@ export async function tryRestoreCachedClosureJob({
 
   await Promise.all(
     outputFiles.map(async (outputFile, index) => {
-      await fs.mkdir(path.dirname(outputFile), { recursive: true });
+      await ensureDirectory(path.dirname(outputFile));
       await fs.copyFile(cachedFiles[index], outputFile);
     }),
   );
@@ -122,7 +122,7 @@ export async function persistCachedClosureJob({
     compilerVersion,
   );
   await fs.rm(jobCacheDir, { force: true, recursive: true });
-  await fs.mkdir(jobCacheDir, { recursive: true });
+  await ensureDirectory(jobCacheDir);
   const outputNames = outputFiles.map((outputFile) =>
     path.basename(outputFile),
   );
@@ -177,23 +177,4 @@ async function getClosureJobCacheDir(
     version: CLOSURE_JOB_CACHE_VERSION,
   });
   return path.join(cacheDir, cacheKey);
-}
-
-async function hashFilesInOrder(filePaths: string[]) {
-  return Promise.all(filePaths.map((filePath) => hashFileInput(filePath)));
-}
-
-async function hashFileInput(filePath: string) {
-  const stat = await fs.stat(filePath);
-  const cacheKey = `${filePath}:${stat.size}:${stat.mtimeMs}`;
-  const cached = closureInputHashCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
-  const pending = fs
-    .readFile(filePath, "utf-8")
-    .then((contents) => hashContent(contents));
-  closureInputHashCache.set(cacheKey, pending);
-  return pending;
 }
