@@ -693,7 +693,6 @@ fn render_shared_bundler_runtime_externs() -> String {
         "/** @externs */".to_string(),
         format!("Window.prototype.{BUNDLER_RUNTIME_GLOBAL};"),
         format!("WorkerGlobalScope.prototype.{BUNDLER_RUNTIME_GLOBAL};"),
-        "Object.prototype.default;".to_string(),
         "Object.prototype.markChunkFailed;".to_string(),
         "Object.prototype.markChunkLoaded;".to_string(),
         "Object.prototype.preloadDynamicImport;".to_string(),
@@ -765,7 +764,7 @@ fn render_bundler_runtime_preamble(
         "runtime[\"markChunkLoaded\"]=function(chunkId){runtime[\"chunkStates\"][chunkId]=\"loaded\";var deferred=runtime[\"chunkDeferreds\"][chunkId];if(deferred){deferred[\"resolve\"]();delete runtime[\"chunkDeferreds\"][chunkId];}};".to_string(),
         "runtime[\"markChunkFailed\"]=function(chunkId,error){runtime[\"chunkStates\"][chunkId]=\"failed\";var deferred=runtime[\"chunkDeferreds\"][chunkId];if(deferred){deferred[\"reject\"](error);delete runtime[\"chunkDeferreds\"][chunkId];}};".to_string(),
         "runtime[\"registerModule\"]=function(moduleId,_deps,factory){runtime[\"factories\"][moduleId]=factory;};".to_string(),
-        "runtime[\"require\"]=function(moduleId){if(Object.prototype.hasOwnProperty.call(runtime[\"cache\"],moduleId))return runtime[\"cache\"][moduleId];var factory=runtime[\"factories\"][moduleId];if(!factory)throw new Error(\"Module not registered: \" + moduleId);var exports=[];Object.defineProperty(exports,\"default\",{configurable:true,enumerable:false,get:function(){return exports[0];},set:function(value){exports[0]=value;}});runtime[\"cache\"][moduleId]=exports;factory(runtime[\"require\"], exports, runtime[\"dynamicImport\"], runtime[\"preloadDynamicImport\"]);return exports;};".to_string(),
+        "runtime[\"require\"]=function(moduleId){if(Object.prototype.hasOwnProperty.call(runtime[\"cache\"],moduleId))return runtime[\"cache\"][moduleId];var factory=runtime[\"factories\"][moduleId];if(!factory)throw new Error(\"Module not registered: \" + moduleId);var exports=[];runtime[\"cache\"][moduleId]=exports;factory(runtime[\"require\"], exports, runtime[\"dynamicImport\"], runtime[\"preloadDynamicImport\"]);return exports;};".to_string(),
         "runtime[\"loadWithScript\"]=function(chunkId,url){return new Promise(function(resolve,reject){var script=global.document.createElement(\"script\");script.async=true;script.src=url;script.onload=function(){resolve();};script.onerror=function(){reject(new Error(\"Failed to load chunk \" + chunkId));};(global.document.head||global.document.documentElement).appendChild(script);});};".to_string(),
         "runtime[\"loadWithFetch\"]=function(chunkId,url){return Promise.resolve(global.fetch(url)).then(function(response){if(!response.ok)throw new Error(\"Failed to fetch chunk \" + chunkId + \" (\" + response.status + \")\");return response.text();}).then(function(source){(0, global.eval)(source + \"\\n//# sourceURL=\" + url);});};".to_string(),
         "runtime[\"selectLoader\"]=function(){if(runtime[\"loaderMode\"]!==\"auto\")return runtime[\"loaderMode\"];return global.document ? \"script\" : \"fetch\";};".to_string(),
@@ -884,9 +883,14 @@ mod tests {
         assert!(output.generatedAssets.iter().any(|asset| {
             asset.path.ends_with("runtime-shared.externs.js")
                 && asset.text.contains("Object.prototype.require;")
+                && !asset.text.contains("Object.prototype.default;")
         }));
         assert!(output.generatedAssets.iter().any(|asset| {
             asset.path.ends_with("chunk-map.json") && asset.text.contains("\"baseChunk\": \"main\"")
+        }));
+        assert!(output.generatedAssets.iter().any(|asset| {
+            asset.path.ends_with("main.linked.js")
+                && !asset.text.contains("Object.defineProperty(exports,\"default\"")
         }));
         assert!(output.compileJobs[0].chunk.is_some());
         assert!(output.compileJobs[0]

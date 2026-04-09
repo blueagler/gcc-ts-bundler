@@ -355,7 +355,9 @@ async function persistCachedClosureJob({
   const jobCacheDir = await getClosureJobCacheDir(cacheDir, job);
   await fs.rm(jobCacheDir, { force: true, recursive: true });
   await fs.mkdir(jobCacheDir, { recursive: true });
-  const outputNames = outputFiles.map((outputFile) => path.basename(outputFile));
+  const outputNames = outputFiles.map((outputFile) =>
+    path.basename(outputFile),
+  );
   await Promise.all(
     outputFiles.map((outputFile, index) =>
       fs.copyFile(outputFile, path.join(jobCacheDir, outputNames[index])),
@@ -372,7 +374,8 @@ async function getClosureJobCacheDir(
   job: ReturnType<typeof prepareClosureJobs>["compileJobs"][number],
 ) {
   const outputFiles = getCompileJobOutputFiles(job);
-  const compilerVersion = resolveClosureCompilerJarPath() ?? getNativeImagePath() ?? "native";
+  const compilerVersion =
+    resolveClosureCompilerJarPath() ?? getNativeImagePath() ?? "native";
   const [jsInputs, externInputs] = await Promise.all([
     hashFilesInOrder(job.js),
     hashFilesInOrder(job.externs),
@@ -452,13 +455,16 @@ async function runWithConcurrency<T, R>(
 ) {
   const results = new Array<R>(items.length);
   let nextIndex = 0;
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (nextIndex < items.length) {
-      const currentIndex = nextIndex;
-      nextIndex += 1;
-      results[currentIndex] = await worker(items[currentIndex], currentIndex);
-    }
-  });
+  const workers = Array.from(
+    { length: Math.min(concurrency, items.length) },
+    async () => {
+      while (nextIndex < items.length) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        results[currentIndex] = await worker(items[currentIndex], currentIndex);
+      }
+    },
+  );
   await Promise.all(workers);
   return results;
 }

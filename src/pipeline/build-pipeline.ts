@@ -299,7 +299,10 @@ async function generateRuntimeDependencyExterns({
   }
 
   const outputFile = path.join(cacheDir, "runtime-dependency-externs.js");
-  const metadataPath = path.join(cacheDir, "runtime-dependency-externs.meta.json");
+  const metadataPath = path.join(
+    cacheDir,
+    "runtime-dependency-externs.meta.json",
+  );
   if (cacheMode !== "off") {
     const compilerOptions = await loadCompilerOptions(tsConfigPath);
     const cacheKey = hashJson({
@@ -312,7 +315,9 @@ async function generateRuntimeDependencyExterns({
       version: RUNTIME_DEPENDENCY_EXTERNS_CACHE_VERSION,
     });
     const cachedMetadata =
-      await readJsonIfExists<RuntimeDependencyExternsCacheMetadata>(metadataPath);
+      await readJsonIfExists<RuntimeDependencyExternsCacheMetadata>(
+        metadataPath,
+      );
     if (
       cachedMetadata?.version === RUNTIME_DEPENDENCY_EXTERNS_CACHE_VERSION &&
       cachedMetadata.key === cacheKey &&
