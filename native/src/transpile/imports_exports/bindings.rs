@@ -1,5 +1,10 @@
 use super::*;
 
+pub(super) struct NamedExportBinding {
+    pub(super) export_name: String,
+    pub(super) local_name: String,
+}
+
 pub(super) fn bind_import_specifiers(
     local_name: &str,
     specifiers: &[&ImportSpecifier],
@@ -72,6 +77,48 @@ pub(super) fn bind_bundler_import_specifiers(
     Ok(lines)
 }
 
+pub(super) fn collect_named_export_bindings(
+    named_export: &swc_core::ecma::ast::NamedExport,
+) -> Vec<NamedExportBinding> {
+    named_export
+        .specifiers
+        .iter()
+        .filter_map(|specifier| {
+            let swc_core::ecma::ast::ExportSpecifier::Named(named) = specifier else {
+                return None;
+            };
+            let local_name = module_export_name_to_string(&named.orig);
+            let export_name = named
+                .exported
+                .as_ref()
+                .map(module_export_name_to_string)
+                .unwrap_or_else(|| local_name.clone());
+            Some(NamedExportBinding {
+                export_name,
+                local_name,
+            })
+        })
+        .collect()
+}
+
+pub(super) fn reject_namespace_export_specifiers(
+    named_export: &swc_core::ecma::ast::NamedExport,
+    file_path: &Path,
+) -> std::result::Result<(), String> {
+    if named_export.specifiers.iter().any(|specifier| {
+        matches!(
+            specifier,
+            swc_core::ecma::ast::ExportSpecifier::Namespace(_)
+        )
+    }) {
+        return Err(format!(
+            "bundler-runtime does not support namespace re-exports in {}",
+            file_path.display()
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn exported_decl_names(decl: &swc_core::ecma::ast::Decl) -> Vec<String> {
     match decl {
         swc_core::ecma::ast::Decl::Fn(function_decl) => vec![function_decl.ident.sym.to_string()],
@@ -129,9 +176,7 @@ pub(crate) fn render_module_export_slot(slot: usize, value_expression: &str) -> 
     format!("__exports[{slot}] = {value_expression};")
 }
 
-pub(crate) fn module_export_name_to_string(
-    name: &swc_core::ecma::ast::ModuleExportName,
-) -> String {
+pub(crate) fn module_export_name_to_string(name: &swc_core::ecma::ast::ModuleExportName) -> String {
     match name {
         swc_core::ecma::ast::ModuleExportName::Ident(ident) => ident.sym.to_string(),
         swc_core::ecma::ast::ModuleExportName::Str(value) => {

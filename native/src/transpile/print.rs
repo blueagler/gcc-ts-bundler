@@ -20,27 +20,8 @@ pub(super) fn transform_program(
     enum_literal_values.extend(collect_imported_ts_enum_literal_values(&module, file_path));
     let mut program = Program::Module(module);
     let cm: Lrc<SourceMap> = Default::default();
-    let resolver_marks = if should_run_resolver(file_path) {
-        let unresolved_mark = Mark::new();
-        let top_level_mark = Mark::new();
-        resolver(unresolved_mark, top_level_mark, true).process(&mut program);
-        Some((unresolved_mark, top_level_mark))
-    } else {
-        None
-    };
-    let unresolved_ctxt = resolver_marks
-        .map(|(unresolved_mark, _)| {
-            swc_core::common::SyntaxContext::empty().apply_mark(unresolved_mark)
-        })
-        .unwrap_or_else(swc_core::common::SyntaxContext::empty);
-    let compat_property_names =
-        collect_global_this_compat_property_names(&program, unresolved_ctxt);
-    if !compat_property_names.is_empty() {
-        program.visit_mut_with(&mut GlobalThisCompatVisitor::new(
-            compat_property_names,
-            unresolved_ctxt,
-        )?);
-    }
+    let resolver_marks =
+        apply_resolver_and_global_this_compat(&mut program, should_run_resolver(file_path))?;
     if let Some((unresolved_mark, top_level_mark)) = resolver_marks {
         if should_run_react_transform(file_path) {
             jsx(

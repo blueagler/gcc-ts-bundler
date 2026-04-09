@@ -6,6 +6,23 @@ pub(super) struct DynamicImportWrappers {
     pub(super) object_wrappers: HashMap<Id, BTreeMap<String, BTreeSet<String>>>,
 }
 
+pub(super) fn resolve_dynamic_import_module_ids(
+    expr: &Expr,
+    carriers: &HashMap<Id, BTreeSet<String>>,
+    dynamic_import_wrappers: &DynamicImportWrappers,
+) -> Option<BTreeSet<String>> {
+    match expr {
+        Expr::Ident(ident) => carriers.get(&ident.to_id()).cloned(),
+        Expr::Call(call_expr) => {
+            resolve_dynamic_import_call_module_ids(call_expr, carriers, dynamic_import_wrappers)
+        }
+        Expr::Paren(paren) => {
+            resolve_dynamic_import_module_ids(&paren.expr, carriers, dynamic_import_wrappers)
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn collect_dynamic_import_promise_carriers(
     module: &Module,
     dynamic_import_wrappers: &DynamicImportWrappers,
@@ -26,52 +43,7 @@ struct PromiseCarrierCollector {
 
 impl PromiseCarrierCollector {
     fn module_ids_for_promise_expr(&self, expr: &Expr) -> Option<BTreeSet<String>> {
-        match expr {
-            Expr::Ident(ident) => self.carriers.get(&ident.to_id()).cloned(),
-            Expr::Call(call_expr) => {
-                if let Some(module_ids) = dynamic_import_module_ids_from_call(call_expr) {
-                    return Some(module_ids);
-                }
-                let Callee::Expr(callee_expr) = &call_expr.callee else {
-                    return None;
-                };
-                match &**callee_expr {
-                    Expr::Ident(ident) if call_expr.args.is_empty() => self
-                        .dynamic_import_wrappers
-                        .function_wrappers
-                        .get(&ident.to_id())
-                        .cloned(),
-                    Expr::Member(member) if call_expr.args.is_empty() => {
-                        let Expr::Ident(object_ident) = &*member.obj else {
-                            return None;
-                        };
-                        let wrapper_map = self
-                            .dynamic_import_wrappers
-                            .object_wrappers
-                            .get(&object_ident.to_id())?;
-                        let prop_name = member_prop_name(&member.prop);
-                        if let Some(prop_name) = prop_name {
-                            wrapper_map.get(&prop_name).cloned()
-                        } else {
-                            let mut module_ids = BTreeSet::new();
-                            for ids in wrapper_map.values() {
-                                module_ids.extend(ids.iter().cloned());
-                            }
-                            (!module_ids.is_empty()).then_some(module_ids)
-                        }
-                    }
-                    _ if call_expr.args.len() == 1 => {
-                        let Expr::Ident(carrier_ident) = &*call_expr.args[0].expr else {
-                            return None;
-                        };
-                        self.carriers.get(&carrier_ident.to_id()).cloned()
-                    }
-                    _ => None,
-                }
-            }
-            Expr::Paren(paren) => self.module_ids_for_promise_expr(&paren.expr),
-            _ => None,
-        }
+        resolve_dynamic_import_module_ids(expr, &self.carriers, &self.dynamic_import_wrappers)
     }
 }
 
@@ -249,4 +221,57 @@ pub(super) fn dynamic_import_module_ids_from_call(
         .value
         .to_string_lossy()
         .to_string()]))
+}
+
+fn resolve_dynamic_import_call_module_ids(
+    call_expr: &CallExpr,
+    carriers: &HashMap<Id, BTreeSet<String>>,
+    dynamic_import_wrappers: &DynamicImportWrappers,
+) -> Option<BTreeSet<String>> {
+    if let Some(module_ids) = dynamic_import_module_ids_from_call(call_expr) {
+        return Some(module_ids);
+    }
+
+    let Callee::Expr(callee_expr) = &call_expr.callee else {
+        return None;
+    };
+
+    match &**callee_expr {
+        Expr::Ident(ident) if call_expr.args.is_empty() => dynamic_import_wrappers
+            .function_wrappers
+            .get(&ident.to_id())
+            .cloned(),
+        Expr::Member(member) if call_expr.args.is_empty() => {
+            collect_member_wrapper_module_ids(member, dynamic_import_wrappers)
+        }
+        _ if call_expr.args.len() == 1 => {
+            let Expr::Ident(carrier_ident) = &*call_expr.args[0].expr else {
+                return None;
+            };
+            carriers.get(&carrier_ident.to_id()).cloned()
+        }
+        _ => None,
+    }
+}
+
+fn collect_member_wrapper_module_ids(
+    member: &MemberExpr,
+    dynamic_import_wrappers: &DynamicImportWrappers,
+) -> Option<BTreeSet<String>> {
+    let Expr::Ident(object_ident) = &*member.obj else {
+        return None;
+    };
+    let wrapper_map = dynamic_import_wrappers
+        .object_wrappers
+        .get(&object_ident.to_id())?;
+    let prop_name = member_prop_name(&member.prop);
+    if let Some(prop_name) = prop_name {
+        wrapper_map.get(&prop_name).cloned()
+    } else {
+        let mut module_ids = BTreeSet::new();
+        for ids in wrapper_map.values() {
+            module_ids.extend(ids.iter().cloned());
+        }
+        (!module_ids.is_empty()).then_some(module_ids)
+    }
 }
