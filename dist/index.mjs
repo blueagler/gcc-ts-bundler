@@ -1389,6 +1389,9 @@ function rewriteGccExports(code) {
 function transpileSources(input) {
   return loadBinding().transpileSources(input.fileNames, input.outDir, input.externsPath, input.metadataPath, input.chunkMode, input.workspaceDir, input.packageAliases ?? [], input.packageJsonFiles ?? [], input.lazyImports ?? []);
 }
+function prepareClosureJobs(input) {
+  return loadBinding().prepareClosureJobs(input);
+}
 function writeEntryShims(input) {
   return loadBinding().writeEntryShims(input.entries);
 }
@@ -2599,13 +2602,13 @@ import fs9 from "fs/promises";
 import path9 from "path";
 import * as closureCompilerPackage from "google-closure-compiler";
 import { getNativeImagePath } from "google-closure-compiler/lib/utils.js";
-var closureLibFilesCache = new Map;
-var BUNDLER_RUNTIME_GLOBAL = "__gcc_runtime__";
 async function runClosureStage({
   chunkPlan,
   emittedOutDir,
-  externPaths,
+  explicitExternPaths,
   finalCacheDir,
+  generatedExternPaths,
+  nativeExternPath,
   options,
   outDir,
   supportFiles,
@@ -2619,139 +2622,77 @@ async function runClosureStage({
   await fs9.mkdir(cacheOutputDir, { recursive: true });
   await fs9.rm(outDir, { force: true, recursive: true });
   await fs9.mkdir(outDir, { recursive: true });
-  const resolvedChunks = resolveChunkPlan(chunkPlan, emittedOutDir);
-  let manifestOutputPath = null;
-  if (options.chunks.mode === "bundler-runtime") {
-    const bundlerAssets = await createBundlerRuntimeAssets({
-      chunkPlan: resolvedChunks,
-      emittedOutDir,
-      finalCacheDir,
-      options
-    });
-    manifestOutputPath = bundlerAssets.manifestOutputPath;
-    const exitCode2 = await runBundlerRuntimeCompilation({
-      chunkPlan: resolvedChunks,
-      chunkSources: bundlerAssets.chunkSources,
-      externPaths: [...externPaths, bundlerAssets.runtimeExternsPath],
-      options,
-      outputDir: rawDir,
-      packageRoot: packageRoot2
-    });
-    if (exitCode2 !== 0) {
-      return { cacheOutputFiles: [], exitCode: exitCode2, outputFiles: [] };
-    }
-    const outputFiles2 = resolvedChunks.map((chunk) => path9.join(outDir, `${chunk.name}.js`));
-    await Promise.all(outputFiles2.map((outputFile, index) => fs9.copyFile(path9.join(rawDir, `${resolvedChunks[index].name}.js`), outputFile)));
-    const publishedFiles2 = manifestOutputPath === null ? outputFiles2 : [...outputFiles2, manifestOutputPath];
-    await copyOrLinkFiles(publishedFiles2, cacheOutputDir);
-    const cacheOutputFiles2 = publishedFiles2.map((outputFile) => path9.join(cacheOutputDir, path9.relative(outDir, outputFile)));
-    return { cacheOutputFiles: cacheOutputFiles2, exitCode: 0, outputFiles: publishedFiles2 };
-  }
-  const closureLibFiles = await collectClosureLibFiles(packageRoot2, [
-    ...supportFiles,
-    ...resolvedChunks.flatMap((chunk) => chunk.files)
-  ]);
-  const exitCode = resolvedChunks.length === 1 ? await runSingleClosureCompilation({
-    closureLibFiles,
-    entryChunk: resolvedChunks[0],
-    externPaths,
-    options,
-    supportFiles,
-    rawOutputPath: path9.join(rawDir, `${resolvedChunks[0].name}.js`)
-  }) : await runChunkedClosureCompilation({
-    chunkPlan: resolvedChunks,
-    closureLibFiles,
-    externPaths,
-    options,
-    outputDir: rawDir,
+  const prepared = prepareClosureJobs({
+    chunkLoader: options.chunks.loader,
+    chunkMode: options.chunks.mode,
+    chunkPlan,
+    compilationLevel: options.compilationLevel,
+    diagnosticsVerbose: options.diagnostics.verbose,
+    emittedOutDir,
+    explicitExternPaths,
+    explicitJsInputs: options.js,
+    finalCacheDir,
+    generatedExternPaths,
+    languageOut: options.languageOut,
+    manifestFile: options.chunks.manifestFile,
+    nativeExternPath,
+    outDir,
+    packageRoot: packageRoot2,
+    publicPath: options.chunks.publicPath,
     supportFiles
   });
-  if (exitCode !== 0) {
-    return { cacheOutputFiles: [], exitCode, outputFiles: [] };
-  }
-  const rawOutputs = resolvedChunks.map((chunk) => path9.join(rawDir, `${chunk.name}.js`));
-  const outputFiles = resolvedChunks.map((chunk) => path9.join(outDir, `${chunk.name}.js`));
-  await Promise.all(rawOutputs.map(async (rawFile, index) => {
-    const contents = await fs9.readFile(rawFile, "utf-8");
-    const transformed = rewriteGccExports(contents);
-    await fs9.writeFile(outputFiles[index], transformed);
+  await Promise.all(prepared.generatedAssets.map(async (asset) => {
+    await fs9.mkdir(path9.dirname(asset.path), { recursive: true });
+    await fs9.writeFile(asset.path, asset.text, "utf-8");
   }));
-  const publishedFiles = manifestOutputPath === null ? outputFiles : [...outputFiles, manifestOutputPath];
-  await copyOrLinkFiles(publishedFiles, cacheOutputDir);
-  const cacheOutputFiles = publishedFiles.map((outputFile) => path9.join(cacheOutputDir, path9.relative(outDir, outputFile)));
-  return { cacheOutputFiles, exitCode: 0, outputFiles: publishedFiles };
-}
-async function runSingleClosureCompilation({
-  closureLibFiles,
-  entryChunk,
-  externPaths,
-  options,
-  supportFiles,
-  rawOutputPath
-}) {
-  const closureOptions = {
-    assumeFunctionWrapper: true,
-    compilationLevel: options.compilationLevel,
-    dependencyMode: "PRUNE",
-    externs: uniquePaths(externPaths),
-    js: uniquePaths([
-      ...options.js,
-      ...closureLibFiles,
-      ...supportFiles,
-      ...entryChunk.files
-    ]),
-    jsOutputFile: rawOutputPath,
-    languageIn: "UNSTABLE",
-    languageOut: options.languageOut,
-    rewritePolyfills: false,
-    warningLevel: options.diagnostics.verbose ? "VERBOSE" : "QUIET"
-  };
-  if (entryChunk.entryPoints.length > 0) {
-    closureOptions.entryPoint = entryChunk.entryPoints;
+  for (const job of prepared.compileJobs) {
+    const closureOptions = {
+      assumeFunctionWrapper: job.assumeFunctionWrapper,
+      compilationLevel: job.compilationLevel,
+      externs: uniquePaths(job.externs),
+      js: uniquePaths(job.js),
+      languageIn: job.languageIn,
+      languageOut: job.languageOut,
+      rewritePolyfills: job.rewritePolyfills,
+      warningLevel: job.warningLevel
+    };
+    if (job.chunk) {
+      closureOptions.chunk = job.chunk;
+    }
+    if (job.chunkOutputPathPrefix) {
+      closureOptions.chunkOutputPathPrefix = job.chunkOutputPathPrefix;
+    }
+    if (job.dependencyMode) {
+      closureOptions.dependencyMode = job.dependencyMode;
+    }
+    if (job.entryPoint && job.entryPoint.length > 0) {
+      closureOptions.entryPoint = job.entryPoint;
+    }
+    if (job.jsOutputFile) {
+      closureOptions.jsOutputFile = job.jsOutputFile;
+    }
+    applyInternalClosureDebugOptions(closureOptions);
+    const exitCode = await runClosureCompiler(closureOptions);
+    if (exitCode !== 0) {
+      return { cacheOutputFiles: [], exitCode, outputFiles: [] };
+    }
   }
-  applyInternalClosureDebugOptions(closureOptions);
-  return runClosureCompiler(closureOptions);
-}
-async function runChunkedClosureCompilation({
-  chunkPlan,
-  closureLibFiles,
-  externPaths,
-  options,
-  outputDir,
-  supportFiles
-}) {
-  const leadingJs = uniquePaths([
-    ...options.js,
-    ...closureLibFiles,
-    ...supportFiles
-  ]);
-  const chunkSpecs = chunkPlan.map((chunk, index) => {
-    const dependencySuffix = chunk.dependencies.length > 0 ? `:${chunk.dependencies.join(",")}` : "";
-    return `${chunk.name}:${uniquePaths(chunk.files).length + (index === 0 ? leadingJs.length : 0)}${dependencySuffix}`;
-  });
-  const chunkFiles = uniquePaths([
-    ...leadingJs,
-    ...chunkPlan.flatMap((chunk) => chunk.files)
-  ]);
-  const closureOptions = {
-    assumeFunctionWrapper: true,
-    compilationLevel: options.compilationLevel,
-    chunk: chunkSpecs,
-    chunkOutputPathPrefix: `${outputDir}${path9.sep}`,
-    dependencyMode: "PRUNE",
-    externs: uniquePaths(externPaths),
-    js: chunkFiles,
-    languageIn: "UNSTABLE",
-    languageOut: options.languageOut,
-    rewritePolyfills: false,
-    warningLevel: options.diagnostics.verbose ? "VERBOSE" : "QUIET"
+  await Promise.all(prepared.postprocessActions.map(async (action) => {
+    await fs9.mkdir(path9.dirname(action.outputPath), { recursive: true });
+    if (action.kind === "rewrite-gcc-exports") {
+      const contents = await fs9.readFile(action.inputPath, "utf-8");
+      await fs9.writeFile(action.outputPath, rewriteGccExports(contents));
+      return;
+    }
+    await fs9.copyFile(action.inputPath, action.outputPath);
+  }));
+  await copyOrLinkFiles(prepared.publishedOutputs, cacheOutputDir);
+  const cacheOutputFiles = prepared.publishedOutputs.map((outputFile) => path9.join(cacheOutputDir, path9.relative(outDir, outputFile)));
+  return {
+    cacheOutputFiles,
+    exitCode: 0,
+    outputFiles: prepared.publishedOutputs
   };
-  const entryPoints = uniquePaths(chunkPlan.flatMap((chunk) => chunk.entryPoints));
-  if (entryPoints.length > 0) {
-    closureOptions.entryPoint = entryPoints;
-  }
-  applyInternalClosureDebugOptions(closureOptions);
-  return runClosureCompiler(closureOptions);
 }
 function applyInternalClosureDebugOptions(closureOptions) {
   const mutableOptions = closureOptions;
@@ -2763,241 +2704,11 @@ function applyInternalClosureDebugOptions(closureOptions) {
     mutableOptions.useTypesForOptimization = false;
   }
 }
-async function createBundlerRuntimeAssets({
-  chunkPlan,
-  emittedOutDir,
-  finalCacheDir,
-  options
-}) {
-  const assetDir = path9.join(finalCacheDir, "bundler-runtime");
-  await fs9.rm(assetDir, { force: true, recursive: true });
-  await fs9.mkdir(assetDir, { recursive: true });
-  const baseChunk = chunkPlan.find((chunk) => chunk.kind === "base") ?? chunkPlan[0];
-  const moduleMap = Object.fromEntries(chunkPlan.flatMap((chunk) => chunk.files.map((filePath) => [
-    toGoogModuleId(filePath, emittedOutDir),
-    chunk.name
-  ])));
-  const chunkManifest = Object.fromEntries(chunkPlan.map((chunk) => [
-    chunk.name,
-    {
-      deps: chunk.dependencies,
-      modules: chunk.files.map((filePath) => toGoogModuleId(filePath, emittedOutDir)),
-      url: `${options.chunks.publicPath}${chunk.name}.js`
-    }
-  ]));
-  const manifest = {
-    baseChunk: baseChunk.name,
-    chunks: chunkManifest,
-    loader: options.chunks.loader,
-    modules: moduleMap,
-    publicPath: options.chunks.publicPath
-  };
-  const runtimeExternsPath = path9.join(assetDir, "runtime.externs.js");
-  const exportNames = new Set;
-  const chunkSources = await Promise.all(chunkPlan.map(async (chunk) => {
-    const moduleSources = await Promise.all(chunk.files.map((filePath) => fs9.readFile(filePath, "utf-8")));
-    for (const sourceText2 of moduleSources) {
-      for (const exportName of collectBundlerRuntimeExportNames(sourceText2)) {
-        exportNames.add(exportName);
-      }
-    }
-    const moduleText = moduleSources.join(`
-`);
-    const sourceText = chunk.name === baseChunk.name ? renderBundlerRuntimeBaseChunk({
-      chunkId: chunk.name,
-      entryPoints: chunk.entryPoints,
-      loader: options.chunks.loader,
-      manifest,
-      moduleText
-    }) : renderBundlerRuntimeLazyChunk({
-      chunkId: chunk.name,
-      moduleText
-    });
-    const sourcePath = path9.join(assetDir, `${chunk.name}.linked.js`);
-    await fs9.writeFile(sourcePath, sourceText, "utf-8");
-    return { chunkName: chunk.name, sourcePath };
-  }));
-  await fs9.writeFile(runtimeExternsPath, renderBundlerRuntimeExterns(exportNames), "utf-8");
-  const manifestOutputPath = options.chunks.manifestFile ? path9.join(options.outDir, options.chunks.manifestFile) : null;
-  if (manifestOutputPath) {
-    await fs9.mkdir(path9.dirname(manifestOutputPath), { recursive: true });
-    await fs9.writeFile(manifestOutputPath, `${JSON.stringify(manifest, null, 2)}
-`, "utf-8");
-  }
-  return {
-    chunkSources,
-    manifestOutputPath,
-    runtimeExternsPath
-  };
-}
-async function runBundlerRuntimeCompilation({
-  chunkPlan,
-  chunkSources,
-  externPaths,
-  options,
-  outputDir,
-  packageRoot: packageRoot2
-}) {
-  for (const chunk of chunkPlan) {
-    const chunkSource = chunkSources.find((candidate) => candidate.chunkName === chunk.name);
-    if (!chunkSource) {
-      throw new Error(`Missing linked chunk source for ${chunk.name}`);
-    }
-    const extraJs = chunk.kind === "base" ? options.js : [];
-    const closureLibFiles = await collectBundlerRuntimeClosureLibFiles(packageRoot2, [...extraJs, chunkSource.sourcePath]);
-    const closureOptions = {
-      assumeFunctionWrapper: true,
-      compilationLevel: options.compilationLevel,
-      externs: uniquePaths(externPaths),
-      js: uniquePaths([...extraJs, ...closureLibFiles, chunkSource.sourcePath]),
-      jsOutputFile: path9.join(outputDir, `${chunk.name}.js`),
-      languageIn: "UNSTABLE",
-      languageOut: options.languageOut,
-      rewritePolyfills: false,
-      warningLevel: options.diagnostics.verbose ? "VERBOSE" : "QUIET"
-    };
-    applyInternalClosureDebugOptions(closureOptions);
-    const exitCode = await runClosureCompiler(closureOptions);
-    if (exitCode !== 0) {
-      return exitCode;
-    }
-  }
-  return 0;
-}
-async function collectBundlerRuntimeClosureLibFiles(packageRoot2, candidateFiles) {
-  const contents = (await Promise.all(uniquePaths(candidateFiles).map((filePath) => fs9.readFile(filePath, "utf-8").catch(() => "")))).join(`
-`);
-  if (!contents.includes("goog.reflect.")) {
-    return [];
-  }
-  return [
-    path9.join(packageRoot2, "closure-lib", "base.js"),
-    path9.join(packageRoot2, "closure-lib", "reflect.js")
-  ];
-}
-function renderBundlerRuntimeExterns(exportNames) {
-  const lines = [
-    "/** @externs */",
-    `Window.prototype.${BUNDLER_RUNTIME_GLOBAL};`,
-    `WorkerGlobalScope.prototype.${BUNDLER_RUNTIME_GLOBAL};`,
-    "Object.prototype.markChunkFailed;",
-    "Object.prototype.markChunkLoaded;",
-    "Object.prototype.preloadDynamicImport;",
-    "Object.prototype.registerModule;",
-    "Object.prototype.require;",
-    "Object.prototype.runEntries;",
-    ""
-  ];
-  for (const exportName of [...exportNames].sort((left, right) => left.localeCompare(right))) {
-    lines.push(/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(exportName) ? `Object.prototype.${exportName};` : `Object.prototype[${JSON.stringify(exportName)}];`);
-  }
-  lines.push("");
-  return lines.join(`
-`);
-}
-function collectBundlerRuntimeExportNames(sourceText) {
-  const exportNames = new Set;
-  for (const match of sourceText.matchAll(/__exports\[(["'])(.+?)\1\]\s*=/g)) {
-    exportNames.add(match[2]);
-  }
-  return exportNames;
-}
-function renderBundlerRuntimeBaseChunk({
-  chunkId,
-  entryPoints,
-  loader,
-  manifest,
-  moduleText
-}) {
-  return [
-    renderBundlerRuntimePreamble({
-      loader,
-      manifest: JSON.stringify(manifest)
-    }),
-    moduleText,
-    `globalThis[${JSON.stringify(BUNDLER_RUNTIME_GLOBAL)}]["markChunkLoaded"](${JSON.stringify(chunkId)});`,
-    `globalThis[${JSON.stringify(BUNDLER_RUNTIME_GLOBAL)}]["runEntries"](${JSON.stringify(entryPoints)});`,
-    ""
-  ].join(`
-`);
-}
-function renderBundlerRuntimeLazyChunk({
-  chunkId,
-  moduleText
-}) {
-  return [
-    "(function(__gcc_runtime){",
-    'if(!__gcc_runtime)throw new Error("bundler-runtime base chunk must load before lazy chunks.");',
-    moduleText,
-    `__gcc_runtime["markChunkLoaded"](${JSON.stringify(chunkId)});`,
-    `}).call(this,globalThis[${JSON.stringify(BUNDLER_RUNTIME_GLOBAL)}]);`,
-    ""
-  ].join(`
-`);
-}
-function renderBundlerRuntimePreamble({
-  loader,
-  manifest
-}) {
-  return [
-    "(function(global){",
-    `var runtimeKey=${JSON.stringify(BUNDLER_RUNTIME_GLOBAL)};`,
-    "var runtime=global[runtimeKey]||(global[runtimeKey]={});",
-    'if(!runtime["initialized"]){',
-    'runtime["manifest"]=null;',
-    'runtime["factories"]=Object.create(null);',
-    'runtime["cache"]=Object.create(null);',
-    'runtime["chunkStates"]=Object.create(null);',
-    'runtime["chunkDeferreds"]=Object.create(null);',
-    'runtime["baseUrl"]="";',
-    'runtime["loaderMode"]="auto";',
-    'runtime["resolveChunkUrl"]=function(chunkId){var manifest=runtime["manifest"];var chunk=manifest&&manifest["chunks"]&&manifest["chunks"][chunkId];if(!chunk)throw new Error("Unknown chunk " + chunkId);return new URL(chunk["url"], runtime["baseUrl"] || (global.location && global.location.href ? global.location.href : "./")).toString();};',
-    'runtime["getDeferred"]=function(chunkId){var existing=runtime["chunkDeferreds"][chunkId];if(existing)return existing;var deferred={};deferred["promise"]=new Promise(function(resolve,reject){deferred["resolve"]=resolve;deferred["reject"]=reject;});runtime["chunkDeferreds"][chunkId]=deferred;return deferred;};',
-    'runtime["markChunkLoaded"]=function(chunkId){runtime["chunkStates"][chunkId]="loaded";var deferred=runtime["chunkDeferreds"][chunkId];if(deferred){deferred["resolve"]();delete runtime["chunkDeferreds"][chunkId];}};',
-    'runtime["markChunkFailed"]=function(chunkId,error){runtime["chunkStates"][chunkId]="failed";var deferred=runtime["chunkDeferreds"][chunkId];if(deferred){deferred["reject"](error);delete runtime["chunkDeferreds"][chunkId];}};',
-    'runtime["registerModule"]=function(moduleId,_deps,factory){runtime["factories"][moduleId]=factory;};',
-    'runtime["require"]=function(moduleId){if(Object.prototype.hasOwnProperty.call(runtime["cache"],moduleId))return runtime["cache"][moduleId];var factory=runtime["factories"][moduleId];if(!factory)throw new Error("Module not registered: " + moduleId);var exports={};runtime["cache"][moduleId]=exports;factory(runtime["require"], exports, runtime["dynamicImport"], runtime["preloadDynamicImport"]);return exports;};',
-    'runtime["loadWithScript"]=function(chunkId,url){return new Promise(function(resolve,reject){var script=global.document.createElement("script");script.async=true;script.src=url;script.onload=function(){resolve();};script.onerror=function(){reject(new Error("Failed to load chunk " + chunkId));};(global.document.head||global.document.documentElement).appendChild(script);});};',
-    'runtime["loadWithFetch"]=function(chunkId,url){return Promise.resolve(global.fetch(url)).then(function(response){if(!response.ok)throw new Error("Failed to fetch chunk " + chunkId + " (" + response.status + ")");return response.text();}).then(function(source){(0, global.eval)(source + "\\n//# sourceURL=" + url);});};',
-    'runtime["selectLoader"]=function(){if(runtime["loaderMode"]!=="auto")return runtime["loaderMode"];return global.document ? "script" : "fetch";};',
-    'runtime["ensureChunk"]=function(chunkId){var state=runtime["chunkStates"][chunkId];if(state==="loaded")return Promise.resolve();if(state==="loading"){return runtime["getDeferred"](chunkId)["promise"];}var manifest=runtime["manifest"];var chunk=manifest&&manifest["chunks"]&&manifest["chunks"][chunkId];if(!chunk)throw new Error("Unknown chunk " + chunkId);runtime["chunkStates"][chunkId]="loading";var deferred=runtime["getDeferred"](chunkId);var loader=runtime["selectLoader"]();return Promise.all((chunk["deps"]||[]).map(function(depId){return runtime["ensureChunk"](depId);})).then(function(){var url=runtime["resolveChunkUrl"](chunkId);return loader==="fetch"?runtime["loadWithFetch"](chunkId,url):runtime["loadWithScript"](chunkId,url);}).then(function(){return deferred["promise"];}).catch(function(error){runtime["markChunkFailed"](chunkId,error);throw error;});};',
-    'runtime["dynamicImport"]=function(moduleId){var manifest=runtime["manifest"];var chunkId=manifest&&manifest["modules"]&&manifest["modules"][moduleId];if(!chunkId)throw new Error("Unknown module " + moduleId);return runtime["ensureChunk"](chunkId).then(function(){return runtime["require"](moduleId);});};',
-    'runtime["preloadDynamicImport"]=function(moduleId){var manifest=runtime["manifest"];var chunkId=manifest&&manifest["modules"]&&manifest["modules"][moduleId];if(!chunkId)throw new Error("Unknown module " + moduleId);return runtime["ensureChunk"](chunkId).then(function(){});};',
-    'runtime["runEntries"]=function(entryIds){for(var index=0;index<entryIds.length;index+=1)runtime["require"](entryIds[index]);};',
-    'runtime["init"]=function(manifest, loaderMode){runtime["manifest"]=manifest;runtime["loaderMode"]=loaderMode||runtime["loaderMode"];var currentScript=global.document&&global.document.currentScript&&global.document.currentScript.src?global.document.currentScript.src:(global.location&&global.location.href?global.location.href:"./");runtime["baseUrl"]=new URL(manifest["publicPath"]||"./", currentScript).toString();runtime["chunkStates"][manifest["baseChunk"]]="loaded";};',
-    'runtime["initialized"]=true;',
-    "}",
-    `runtime["init"](${manifest}, ${JSON.stringify(loader)});`,
-    "}).call(this,globalThis);",
-    ""
-  ].join(`
-`);
-}
-function resolveChunkPlan(chunkPlan, emittedOutDir) {
-  return chunkPlan.map((chunk) => ({
-    dependencies: chunk.dependencies,
-    entryPoints: chunk.entryFiles ? chunk.entryFiles.map((filePath) => toGoogModuleId(path9.join(emittedOutDir, filePath.replace(/\.[^/.]+$/, ".js")), emittedOutDir)) : (chunk.lazyModuleIds ?? []).length > 0 ? [...chunk.lazyModuleIds ?? []] : chunk.files.length > 0 ? [
-      toGoogModuleId(path9.join(emittedOutDir, chunk.files[chunk.files.length - 1].replace(/\.[^/.]+$/, ".js")), emittedOutDir)
-    ] : [],
-    files: chunk.files.map((filePath) => path9.join(emittedOutDir, filePath.replace(/\.[^/.]+$/, ".js"))),
-    kind: chunk.kind,
-    lazyModuleIds: chunk.lazyModuleIds ?? [],
-    name: chunk.name
-  }));
-}
 function getDefaultString(value) {
   if (typeof value === "object" && value !== null && "default" in value && typeof value.default === "string") {
     return value.default;
   }
   return;
-}
-function uniquePaths(paths) {
-  return [...new Set(paths)];
-}
-function toGoogModuleId(filePath, moduleRoot) {
-  const relativePath = path9.relative(moduleRoot, filePath).replace(/\\/g, "/");
-  const withoutExtension = relativePath.replace(/\.[^/.]+$/, "");
-  return `gcc.${withoutExtension.split("/").map((segment) => segment.replace(/[^A-Za-z0-9_$]/g, "_")).join(".")}`;
 }
 function resolveClosureCompilerJarPath() {
   const closureCompilerModule = closureCompilerPackage;
@@ -3033,50 +2744,11 @@ async function runClosureCompiler(options) {
     });
   });
 }
-async function collectClosureLibFiles(packageRoot2, candidateFiles) {
-  const closureLibDir = path9.join(packageRoot2, "closure-lib");
-  const cacheKey = `${closureLibDir}\x00${await hashClosureLibSelection(candidateFiles)}`;
-  const existing = closureLibFilesCache.get(cacheKey);
-  if (existing) {
-    return existing;
-  }
-  const filesPromise = selectClosureLibFiles(closureLibDir, candidateFiles);
-  closureLibFilesCache.set(cacheKey, filesPromise);
-  return filesPromise;
-}
-async function hashClosureLibSelection(filePaths) {
-  const stats = await Promise.all(uniquePaths(filePaths).map(async (filePath) => {
-    try {
-      const stat = await fs9.stat(filePath);
-      return `${filePath}:${stat.size}:${stat.mtimeMs}`;
-    } catch {
-      return `${filePath}:missing`;
-    }
-  }));
-  return stats.sort((left, right) => left.localeCompare(right)).join("|");
-}
-async function selectClosureLibFiles(closureLibDir, candidateFiles) {
-  const required = [];
-  const contents = (await Promise.all(uniquePaths(candidateFiles).map((filePath) => fs9.readFile(filePath, "utf-8").catch(() => "")))).join(`
-`);
-  const needsGoogBase = contents.includes("goog.module(") || contents.includes("goog.require(") || contents.includes("goog.requireType(") || contents.includes("goog.provide(") || contents.includes("goog.reflect.");
-  if (needsGoogBase) {
-    required.push(path9.join(closureLibDir, "base.js"));
-  }
-  if (contents.includes("goog.reflect.")) {
-    required.push(path9.join(closureLibDir, "reflect.js"));
-  }
-  if (contents.includes("tslib")) {
-    if (!required.includes(path9.join(closureLibDir, "base.js"))) {
-      required.push(path9.join(closureLibDir, "base.js"));
-    }
-    required.push(path9.join(closureLibDir, "tslib.js"));
-  }
-  return uniquePaths(required);
+function uniquePaths(paths) {
+  return [...new Set(paths)];
 }
 
 // src/pipeline/build-pipeline.ts
-var bundledExternsCacheByRoot = new Map;
 async function build(options) {
   const context = await createBuildContext(normalizeBuildOptions(options));
   const usesPersistentCache = context.options.cache.mode === "persistent";
@@ -3163,7 +2835,6 @@ async function build(options) {
         outputFiles: []
       };
     }
-    const bundledExterns = await collectBundledExterns(context.packageRoot);
     const runtimeDependencyExterns = await generateRuntimeDependencyExterns({
       appEntryFiles: context.options.entries,
       cacheDir: resolvedBuild.nativeEmitCacheDir,
@@ -3173,17 +2844,13 @@ async function build(options) {
       srcDir: context.options.srcDir,
       tsConfigPath: resolvedBuild.tsConfigPath
     });
-    const externPaths = await collectEffectiveExternPaths([
-      ...context.options.externs,
-      ...bundledExterns,
-      ...runtimeDependencyExterns ? [runtimeDependencyExterns] : [],
-      nativeEmitResult.externsPath
-    ]);
     const closureResult = await runClosureStage({
       chunkPlan: resolvedBuild.chunkPlan,
       emittedOutDir: nativeEmitResult.outDir,
-      externPaths,
+      explicitExternPaths: context.options.externs,
       finalCacheDir: resolvedBuild.finalCacheDir,
+      generatedExternPaths: runtimeDependencyExterns ? [runtimeDependencyExterns] : [],
+      nativeExternPath: nativeEmitResult.externsPath,
       options: context.options,
       outDir: context.options.outDir,
       supportFiles: nativeEmitResult.supportFiles,
@@ -3259,43 +2926,6 @@ async function generateRuntimeDependencyExterns({
     tsConfigPath
   });
   return outputFile;
-}
-async function collectBundledExterns(packageRoot2) {
-  let bundledExternsPromise = bundledExternsCacheByRoot.get(packageRoot2);
-  if (!bundledExternsPromise) {
-    bundledExternsPromise = (async () => {
-      const closureExternsPath = path10.join(packageRoot2, "closure-externs");
-      let entries;
-      try {
-        entries = await fs10.promises.readdir(closureExternsPath);
-      } catch (error) {
-        if (error.code === "ENOENT") {
-          return [];
-        }
-        throw error;
-      }
-      return entries.map((entry) => path10.join(closureExternsPath, entry)).sort((left, right) => left.localeCompare(right));
-    })();
-    bundledExternsCacheByRoot.set(packageRoot2, bundledExternsPromise);
-  }
-  return bundledExternsPromise;
-}
-async function collectEffectiveExternPaths(paths) {
-  const effectivePaths = [];
-  for (const filePath of [...new Set(paths)]) {
-    if (await externFileHasDeclarations(filePath)) {
-      effectivePaths.push(filePath);
-    }
-  }
-  return effectivePaths;
-}
-async function externFileHasDeclarations(filePath) {
-  try {
-    const sourceText = await fs10.promises.readFile(filePath, "utf-8");
-    return sourceText.split(/\r?\n/).map((line) => line.trim()).some((line) => line.length > 0 && line !== "/** @externs */" && line !== "*/" && !line.startsWith("*") && !line.startsWith("//"));
-  } catch {
-    return false;
-  }
 }
 async function publishOutputs(outputFiles, outDir) {
   if (await publishedOutputsMatch2(outputFiles, outDir)) {

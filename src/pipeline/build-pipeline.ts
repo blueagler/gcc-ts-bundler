@@ -39,8 +39,6 @@ interface FinalFastSnapshot {
   trackedFiles: Record<string, FileStateSnapshot>;
 }
 
-const bundledExternsCacheByRoot = new Map<string, Promise<string[]>>();
-
 export async function build(options: BuildOptions): Promise<BuildResult> {
   const context = await createBuildContext(normalizeBuildOptions(options));
   const usesPersistentCache = context.options.cache.mode === "persistent";
@@ -189,7 +187,6 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       };
     }
 
-    const bundledExterns = await collectBundledExterns(context.packageRoot);
     const runtimeDependencyExterns = await generateRuntimeDependencyExterns({
       appEntryFiles: context.options.entries,
       cacheDir: resolvedBuild.nativeEmitCacheDir,
@@ -199,17 +196,15 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       srcDir: context.options.srcDir,
       tsConfigPath: resolvedBuild.tsConfigPath,
     });
-    const externPaths = await collectEffectiveExternPaths([
-      ...context.options.externs,
-      ...bundledExterns,
-      ...(runtimeDependencyExterns ? [runtimeDependencyExterns] : []),
-      nativeEmitResult.externsPath,
-    ]);
     const closureResult = await runClosureStage({
       chunkPlan: resolvedBuild.chunkPlan,
       emittedOutDir: nativeEmitResult.outDir,
-      externPaths,
+      explicitExternPaths: context.options.externs,
       finalCacheDir: resolvedBuild.finalCacheDir,
+      generatedExternPaths: runtimeDependencyExterns
+        ? [runtimeDependencyExterns]
+        : [],
+      nativeExternPath: nativeEmitResult.externsPath,
       options: context.options,
       outDir: context.options.outDir,
       supportFiles: nativeEmitResult.supportFiles,
@@ -302,59 +297,6 @@ async function generateRuntimeDependencyExterns({
     tsConfigPath,
   });
   return outputFile;
-}
-
-async function collectBundledExterns(packageRoot: string) {
-  let bundledExternsPromise = bundledExternsCacheByRoot.get(packageRoot);
-  if (!bundledExternsPromise) {
-    bundledExternsPromise = (async () => {
-      const closureExternsPath = path.join(packageRoot, "closure-externs");
-      let entries: string[];
-      try {
-        entries = await fs.promises.readdir(closureExternsPath);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-          return [];
-        }
-        throw error;
-      }
-      return entries
-        .map((entry) => path.join(closureExternsPath, entry))
-        .sort((left, right) => left.localeCompare(right));
-    })();
-    bundledExternsCacheByRoot.set(packageRoot, bundledExternsPromise);
-  }
-
-  return bundledExternsPromise;
-}
-
-async function collectEffectiveExternPaths(paths: string[]) {
-  const effectivePaths: string[] = [];
-  for (const filePath of [...new Set(paths)]) {
-    if (await externFileHasDeclarations(filePath)) {
-      effectivePaths.push(filePath);
-    }
-  }
-  return effectivePaths;
-}
-
-async function externFileHasDeclarations(filePath: string) {
-  try {
-    const sourceText = await fs.promises.readFile(filePath, "utf-8");
-    return sourceText
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .some(
-        (line) =>
-          line.length > 0 &&
-          line !== "/** @externs */" &&
-          line !== "*/" &&
-          !line.startsWith("*") &&
-          !line.startsWith("//"),
-      );
-  } catch {
-    return false;
-  }
 }
 
 async function publishOutputs(outputFiles: string[], outDir: string) {

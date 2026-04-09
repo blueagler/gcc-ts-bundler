@@ -20,6 +20,55 @@ interface NativeChunkPlanChunkOutput {
     lazyModuleIds?: string[];
     name: string;
 }
+interface NativeClosureCompileJob {
+    assumeFunctionWrapper: boolean;
+    chunk?: string[];
+    chunkOutputPathPrefix?: string;
+    compilationLevel: string;
+    dependencyMode?: string;
+    entryPoint?: string[];
+    externs: string[];
+    js: string[];
+    jsOutputFile?: string;
+    languageIn: string;
+    languageOut: string;
+    rewritePolyfills: boolean;
+    warningLevel: string;
+}
+interface NativeGeneratedAsset {
+    path: string;
+    text: string;
+}
+interface NativePostprocessAction {
+    inputPath: string;
+    kind: "copy" | "rewrite-gcc-exports";
+    outputPath: string;
+}
+interface NativePrepareClosureJobsInput {
+    chunkLoader: string;
+    chunkMode: string;
+    chunkPlan: NativeChunkPlanChunkOutput[];
+    compilationLevel: string;
+    diagnosticsVerbose: boolean;
+    emittedOutDir: string;
+    explicitExternPaths: string[];
+    explicitJsInputs: string[];
+    finalCacheDir: string;
+    generatedExternPaths: string[];
+    languageOut: string;
+    manifestFile: string;
+    nativeExternPath: string;
+    outDir: string;
+    packageRoot: string;
+    publicPath: string;
+    supportFiles: string[];
+}
+interface NativePrepareClosureJobsOutput {
+    compileJobs: NativeClosureCompileJob[];
+    generatedAssets: NativeGeneratedAsset[];
+    postprocessActions: NativePostprocessAction[];
+    publishedOutputs: string[];
+}
 interface NativePackageAliasEntry {
     packageName: string;
     subpath: string;
@@ -93,6 +142,7 @@ export declare function transpileSources(input: {
     lazyImports?: NativeLazyImportInput[];
     workspaceDir: string;
 }): NativeTranspileOutput;
+export declare function prepareClosureJobs(input: NativePrepareClosureJobsInput): NativePrepareClosureJobsOutput;
 export declare function writeEntryShims(input: {
     entries: Array<{
         exportNames: string[];

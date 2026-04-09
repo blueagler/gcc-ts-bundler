@@ -1,3 +1,4 @@
+mod closure_jobs;
 mod closure_metadata;
 mod commonjs;
 mod exports;
@@ -55,6 +56,13 @@ pub fn plan_chunks(
             shim_files,
         )
     })
+}
+
+#[napi(js_name = "prepareClosureJobs")]
+pub fn prepare_closure_jobs(
+    input: closure_jobs::PrepareClosureJobsInput,
+) -> Result<closure_jobs::PrepareClosureJobsOutput> {
+    with_globals(|| closure_jobs::prepare_closure_jobs(input))
 }
 
 #[napi(js_name = "writeEntryShims")]
