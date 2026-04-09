@@ -71,12 +71,38 @@ test.serial("generateExterns runtime-aware mode captures helper-lowered dependen
   expect(result.mode).toBe("runtime-aware");
   expect(result.text).toContain("Object.prototype.counts;");
   expect(result.text).toContain("Object.prototype.label;");
-  expect(result.text).toContain("Object.prototype.reset;");
-  expect(result.text).toContain("Object.prototype.from;");
+  expect(result.text).not.toContain("Object.prototype.reset;");
+  expect(result.text).not.toContain("Object.prototype.from;");
   expect(result.text).not.toContain("Object.prototype.bump;");
   expect(result.text).not.toContain("Object.prototype.addEventListener;");
   expect(result.text).not.toContain("Object.prototype.apply;");
   expect(result.text).not.toContain("Object.prototype.length;");
+});
+
+test.serial("generateExterns runtime-aware mode keeps string-defined members used from app code", async () => {
+  const fixture = await createRuntimeExternFixture();
+  await fixture.write(
+    "src/index.ts",
+    [
+      'import { Counter } from "runtime-pkg";',
+      "const counter = Counter.from();",
+      "counter.reset();",
+      'export const current = counter.bump("demo");',
+      "",
+    ].join("\n"),
+  );
+
+  const result = await generateExterns({
+    appEntryFiles: ["./index.ts"],
+    mode: "runtime-aware",
+    modules: ["runtime-pkg"],
+    projectRoot: fixture.projectRoot,
+    runtimeEntryFiles: ["./node_modules/runtime-pkg/index.js"],
+    srcDir: fixture.srcDir,
+  });
+
+  expect(result.text).toContain("Object.prototype.reset;");
+  expect(result.text).toContain("Object.prototype.from;");
 });
 
 test.serial("externs CLI writes generated output with bun-compatible tests", async () => {
@@ -143,12 +169,28 @@ test.serial("externs CLI runtime-aware mode accepts runtime-entry files", async 
   expect(externsOutput).not.toContain("Object.prototype.addEventListener;");
 });
 
-test.serial("build auto-generates runtime-aware dependency externs for helper-lowered fields", async () => {
+test.serial("build uses explicit runtime-aware dependency externs for helper-lowered fields", async () => {
   const fixture = await createRuntimeExternFixture();
+  const externsFile = path.join(
+    fixture.projectRoot,
+    "closure-externs",
+    "runtime.generated.js",
+  );
+
+  await generateExterns({
+    appEntryFiles: ["./index.ts"],
+    mode: "runtime-aware",
+    modules: ["runtime-pkg"],
+    outputFile: externsFile,
+    projectRoot: fixture.projectRoot,
+    runtimeEntryFiles: ["./node_modules/runtime-pkg/index.js"],
+    srcDir: fixture.srcDir,
+  });
 
   const result = await build({
     cache: { mode: "off" },
     entries: ["./index.ts"],
+    externs: ["./closure-externs/runtime.generated.js"],
     outDir: fixture.outDir,
     projectRoot: fixture.projectRoot,
     srcDir: fixture.srcDir,
@@ -165,11 +207,11 @@ test.serial("build auto-generates runtime-aware dependency externs for helper-lo
   expect(builtModule.second).toBe("demo:2");
 });
 
-test.serial("reuses cached runtime-aware dependency externs across final build variants", async () => {
+test.serial("build does not auto-generate runtime-aware dependency externs by default", async () => {
   const fixture = await createRuntimeExternFixture();
   const cacheDir = path.join(fixture.projectRoot, ".cache");
 
-  const firstResult = await build({
+  const result = await build({
     cache: { dir: cacheDir, mode: "persistent" },
     compilationLevel: "ADVANCED",
     entries: ["./index.ts"],
@@ -177,28 +219,12 @@ test.serial("reuses cached runtime-aware dependency externs across final build v
     projectRoot: fixture.projectRoot,
     srcDir: fixture.srcDir,
   });
-  expect(firstResult.exitCode).toBe(0);
+  expect(result.exitCode).toBe(0);
 
   const projectCacheDir = getProjectCacheDir(cacheDir, fixture.projectRoot);
   const externFiles = await findFilesNamed(
     path.join(projectCacheDir, "native-emit"),
     "runtime-dependency-externs.js",
   );
-  expect(externFiles).toHaveLength(1);
-  const firstStat = await fs.stat(externFiles[0]);
-
-  await new Promise((resolve) => setTimeout(resolve, 25));
-
-  const secondResult = await build({
-    cache: { dir: cacheDir, mode: "persistent" },
-    compilationLevel: "SIMPLE",
-    entries: ["./index.ts"],
-    outDir: fixture.outDir,
-    projectRoot: fixture.projectRoot,
-    srcDir: fixture.srcDir,
-  });
-  expect(secondResult.exitCode).toBe(0);
-
-  const secondStat = await fs.stat(externFiles[0]);
-  expect(secondStat.mtimeMs).toBe(firstStat.mtimeMs);
+  expect(externFiles).toHaveLength(0);
 });

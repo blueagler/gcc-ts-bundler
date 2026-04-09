@@ -24,7 +24,6 @@ import { runClosureStage } from "../stages/closure/run-closure";
 import { writeEntryShims } from "../native/load";
 import {
   createBuildDiagnostic,
-  generateRuntimeDependencyExterns,
   publishOutputs,
   removeProjectCacheDir,
   toImportPath,
@@ -191,24 +190,12 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       };
     }
 
-    const runtimeDependencyExterns = await generateRuntimeDependencyExterns({
-      appEntryFiles: context.options.entries,
-      cacheMode: context.options.cache.mode,
-      cacheDir: resolvedBuild.nativeEmitCacheDir,
-      dependencyModules: nativeEmitResult.dependencyModules,
-      dependencyRuntimeFiles: nativeEmitResult.dependencyRuntimeFiles,
-      projectRoot: context.options.projectRoot,
-      srcDir: context.options.srcDir,
-      tsConfigPath: resolvedBuild.tsConfigPath,
-    });
     const closureResult = await runClosureStage({
       chunkPlan: resolvedBuild.chunkPlan,
       emittedOutDir: nativeEmitResult.outDir,
       explicitExternPaths: context.options.externs,
       finalCacheDir: resolvedBuild.finalCacheDir,
-      generatedExternPaths: runtimeDependencyExterns
-        ? [runtimeDependencyExterns]
-        : [],
+      generatedExternPaths: [],
       nativeExternPath: nativeEmitResult.externsPath,
       options: context.options,
       outDir: context.options.outDir,

@@ -198,6 +198,47 @@ export function collectBoundaryAwareExternLines({
   return emittedLines;
 }
 
+export function collectBoundaryAwareUsageMemberNames({
+  appEntryFiles,
+  compilerOptions,
+  projectRoot,
+  registry,
+}: {
+  appEntryFiles: string[];
+  compilerOptions: ts.CompilerOptions;
+  projectRoot: string;
+  registry: ContractRegistry;
+}) {
+  const usage = analyzeAppUsage({
+    appEntryFiles,
+    compilerOptions,
+    projectRoot,
+    registry,
+  });
+  const members = new Set<string>();
+
+  for (const symbol of usage.structuralContracts) {
+    for (const member of collectStructuralContractMembers(symbol, registry)) {
+      members.add(member);
+    }
+  }
+  for (const member of usage.structuralMembers) {
+    members.add(member);
+  }
+  for (const names of usage.nominalInstanceMembers.values()) {
+    for (const member of names) {
+      members.add(member);
+    }
+  }
+  for (const names of usage.nominalStaticMembers.values()) {
+    for (const member of names) {
+      members.add(member);
+    }
+  }
+
+  return members;
+}
+
 function analyzeAppUsage({
   appEntryFiles,
   compilerOptions,
@@ -267,7 +308,13 @@ function analyzeAppUsage({
               fieldBindings,
             );
           } else if (ts.isVariableDeclaration(child)) {
-            registerVariableBinding(child, importBindings, localBindings);
+            registerVariableBinding(
+              child,
+              checker,
+              registry,
+              importBindings,
+              localBindings,
+            );
           }
           ts.forEachChild(child, classVisit);
         };
@@ -276,7 +323,13 @@ function analyzeAppUsage({
       }
 
       if (ts.isVariableDeclaration(node)) {
-        registerVariableBinding(node, importBindings, localBindings);
+        registerVariableBinding(
+          node,
+          checker,
+          registry,
+          importBindings,
+          localBindings,
+        );
       } else if (ts.isNewExpression(node)) {
         analyzeNewExpression(
           node,
@@ -528,23 +581,32 @@ function collectClassFieldBindings(
 
 function registerVariableBinding(
   declaration: ts.VariableDeclaration,
+  checker: ts.TypeChecker,
+  registry: ContractRegistry,
   importBindings: Map<string, ts.Symbol>,
   localBindings: Map<string, ts.Symbol>,
 ) {
-  if (
-    !ts.isIdentifier(declaration.name) ||
-    !declaration.initializer ||
-    !ts.isNewExpression(declaration.initializer) ||
-    !ts.isIdentifier(declaration.initializer.expression)
-  ) {
+  if (!ts.isIdentifier(declaration.name) || !declaration.initializer) {
     return;
   }
-  const classSymbol = importBindings.get(
-    declaration.initializer.expression.text,
+
+  const initializer = declaration.initializer;
+  const resolvedTypeSymbol = resolveTypeSymbol(
+    checker.getTypeAtLocation(initializer),
+    checker,
   );
-  if (classSymbol) {
-    localBindings.set(declaration.name.text, classSymbol);
+  const classSymbol =
+    (ts.isNewExpression(initializer) && ts.isIdentifier(initializer.expression)
+      ? importBindings.get(initializer.expression.text)
+      : undefined) ??
+    (resolvedTypeSymbol
+      ? findClassContractByName(resolvedTypeSymbol.getName(), registry)
+      : undefined);
+
+  if (!classSymbol) {
+    return;
   }
+  localBindings.set(declaration.name.text, classSymbol);
 }
 
 function resolveBoundClassSymbol(

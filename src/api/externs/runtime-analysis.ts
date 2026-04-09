@@ -2,7 +2,6 @@ import fs from "fs";
 import ts from "typescript";
 
 import {
-  getPropertyNameText,
   getScriptKindForFile,
   getStringLiteralMemberName,
   isAssignmentOperator,
@@ -13,8 +12,16 @@ import {
   isThisOrSuperExpression,
 } from "./shared";
 
+export interface RuntimeRenameHazards {
+  accessedMembers: Set<string>;
+  definedMembers: Set<string>;
+}
+
 export async function analyzeRuntimeUsage(runtimeEntryFiles: string[]) {
-  const structuralMembers = new Set<string>();
+  const hazards: RuntimeRenameHazards = {
+    accessedMembers: new Set(),
+    definedMembers: new Set(),
+  };
 
   for (const runtimeEntryFile of runtimeEntryFiles) {
     const sourceText = await fs.promises.readFile(runtimeEntryFile, "utf8");
@@ -27,46 +34,20 @@ export async function analyzeRuntimeUsage(runtimeEntryFiles: string[]) {
     );
     const knownConstructors = collectKnownConstructorBindings(sourceFile);
     const visit = (node: ts.Node) => {
-      if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
-        for (const member of node.members) {
-          if (
-            ts.isPropertyDeclaration(member) ||
-            ts.isGetAccessorDeclaration(member) ||
-            ts.isSetAccessorDeclaration(member)
-          ) {
-            const memberName = getPropertyNameText(member.name);
-            if (memberName && isRuntimeExternPropertyName(memberName)) {
-              structuralMembers.add(memberName);
-            }
-          }
-        }
-      } else if (ts.isPropertyAccessExpression(node)) {
+      if (ts.isPropertyAccessExpression(node)) {
         if (
-          isThisOrSuperExpression(node.expression) &&
+          isRelevantRuntimeTarget(node.expression, knownConstructors) &&
           isRuntimeExternPropertyName(node.name.text)
         ) {
-          structuralMembers.add(node.name.text);
-        }
-      } else if (ts.isElementAccessExpression(node)) {
-        const memberName = getStringLiteralMemberName(node.argumentExpression);
-        if (
-          memberName &&
-          isThisOrSuperExpression(node.expression) &&
-          isRuntimeExternPropertyName(memberName)
-        ) {
-          structuralMembers.add(memberName);
+          hazards.accessedMembers.add(node.name.text);
         }
       } else if (
         ts.isBinaryExpression(node) &&
         isAssignmentOperator(node.operatorToken.kind)
       ) {
-        collectRuntimeAssignmentMembers(
-          node.left,
-          knownConstructors,
-          structuralMembers,
-        );
+        collectRuntimeAssignmentMembers(node.left, knownConstructors, hazards);
       } else if (ts.isCallExpression(node)) {
-        collectRuntimeCallMembers(node, knownConstructors, structuralMembers);
+        collectRuntimeCallMembers(node, knownConstructors, hazards);
       }
 
       ts.forEachChild(node, visit);
@@ -75,7 +56,7 @@ export async function analyzeRuntimeUsage(runtimeEntryFiles: string[]) {
     visit(sourceFile);
   }
 
-  return structuralMembers;
+  return hazards;
 }
 
 function collectKnownConstructorBindings(sourceFile: ts.SourceFile) {
@@ -105,16 +86,12 @@ function collectKnownConstructorBindings(sourceFile: ts.SourceFile) {
 function collectRuntimeAssignmentMembers(
   target: ts.Expression,
   knownConstructors: Set<string>,
-  structuralMembers: Set<string>,
+  hazards: RuntimeRenameHazards,
 ) {
   if (ts.isPropertyAccessExpression(target)) {
-    if (
-      isThisOrSuperExpression(target.expression) ||
-      isKnownPrototypeExpression(target.expression, knownConstructors) ||
-      isKnownConstructorExpression(target.expression, knownConstructors)
-    ) {
+    if (isRelevantRuntimeTarget(target.expression, knownConstructors)) {
       if (isRuntimeExternPropertyName(target.name.text)) {
-        structuralMembers.add(target.name.text);
+        hazards.accessedMembers.add(target.name.text);
       }
     }
     return;
@@ -124,12 +101,10 @@ function collectRuntimeAssignmentMembers(
     const memberName = getStringLiteralMemberName(target.argumentExpression);
     if (
       memberName &&
-      (isThisOrSuperExpression(target.expression) ||
-        isKnownPrototypeExpression(target.expression, knownConstructors) ||
-        isKnownConstructorExpression(target.expression, knownConstructors)) &&
+      isRelevantRuntimeTarget(target.expression, knownConstructors) &&
       isRuntimeExternPropertyName(memberName)
     ) {
-      structuralMembers.add(memberName);
+      hazards.definedMembers.add(memberName);
     }
   }
 }
@@ -137,7 +112,7 @@ function collectRuntimeAssignmentMembers(
 function collectRuntimeCallMembers(
   node: ts.CallExpression,
   knownConstructors: Set<string>,
-  structuralMembers: Set<string>,
+  hazards: RuntimeRenameHazards,
 ) {
   const callee = node.expression;
   if (
@@ -148,11 +123,10 @@ function collectRuntimeCallMembers(
     const memberName = getStringLiteralMemberName(node.arguments[1]);
     if (
       memberName &&
-      (isThisOrSuperExpression(node.arguments[0]) ||
-        isKnownConstructorExpression(node.arguments[0], knownConstructors)) &&
+      isRelevantRuntimeTarget(node.arguments[0], knownConstructors) &&
       isRuntimeExternPropertyName(memberName)
     ) {
-      structuralMembers.add(memberName);
+      hazards.definedMembers.add(memberName);
     }
     return;
   }
@@ -166,11 +140,21 @@ function collectRuntimeCallMembers(
     return;
   }
   const target = node.arguments[0];
-  if (
-    isThisOrSuperExpression(target) ||
-    isKnownConstructorExpression(target, knownConstructors) ||
-    isKnownPrototypeExpression(target, knownConstructors)
-  ) {
-    structuralMembers.add(memberName);
+  if (isRelevantRuntimeTarget(target, knownConstructors)) {
+    hazards.definedMembers.add(memberName);
   }
+}
+
+function isRelevantRuntimeTarget(
+  expression: ts.Node,
+  knownConstructors: Set<string>,
+) {
+  return (
+    isThisOrSuperExpression(expression) ||
+    isKnownPrototypeExpression(
+      expression as ts.Expression,
+      knownConstructors,
+    ) ||
+    isKnownConstructorExpression(expression as ts.Expression, knownConstructors)
+  );
 }

@@ -77,1102 +77,6 @@ var init_compiler_options = __esm(() => {
   compilerOptionsCache = new Map;
 });
 
-// src/api/externs/shared.ts
-import path2 from "path";
-import ts2 from "typescript";
-function createEmptyContractRegistry() {
-  return {
-    classContracts: new Map,
-    interfaceContracts: new Map,
-    scannedFiles: new Set,
-    typeAliasContracts: new Map
-  };
-}
-function collectStructuralContractMembers(symbol, registry, seen = new Set) {
-  if (seen.has(symbol)) {
-    return new Set;
-  }
-  seen.add(symbol);
-  const interfaceContract = registry.interfaceContracts.get(symbol);
-  if (interfaceContract) {
-    const members = new Set(interfaceContract.members);
-    for (const extendedSymbol of interfaceContract.extends) {
-      for (const member of collectStructuralContractMembers(extendedSymbol, registry, seen)) {
-        members.add(member);
-      }
-    }
-    return members;
-  }
-  const typeAliasContract = registry.typeAliasContracts.get(symbol);
-  if (typeAliasContract) {
-    return new Set(typeAliasContract.members);
-  }
-  return new Set;
-}
-function resolveTypeSymbol(type, checker) {
-  const symbol = type.getSymbol();
-  if (!symbol && type.isUnionOrIntersection()) {
-    for (const child of type.types) {
-      const childSymbol = resolveTypeSymbol(child, checker);
-      if (childSymbol) {
-        return childSymbol;
-      }
-    }
-    return null;
-  }
-  return resolveAliasedSymbol(symbol, checker);
-}
-function resolveValueSymbol(node, checker) {
-  return resolveAliasedSymbol(checker.getSymbolAtLocation(node), checker);
-}
-function resolveAliasedSymbol(symbol, checker) {
-  if (!symbol) {
-    return null;
-  }
-  return symbol.flags & ts2.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
-}
-function renderStructuralExternLine(name) {
-  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? `Object.prototype.${name};` : `Object.prototype[${JSON.stringify(name)}];`;
-}
-function addMapSetValue(map, key, value) {
-  const current = map.get(key);
-  if (current) {
-    current.add(value);
-    return;
-  }
-  map.set(key, new Set([value]));
-}
-function isProjectAppSourceFile(filePath, projectRoot) {
-  const resolvedFilePath = path2.resolve(filePath);
-  return !resolvedFilePath.includes(`${path2.sep}node_modules${path2.sep}`) && !resolvedFilePath.endsWith(".d.ts") && resolvedFilePath.startsWith(path2.resolve(projectRoot) + path2.sep);
-}
-function isExportedDeclaration(node) {
-  return (ts2.getCombinedModifierFlags(node) & ts2.ModifierFlags.Export) !== 0;
-}
-function hasStaticModifier(node) {
-  return (ts2.getCombinedModifierFlags(node) & ts2.ModifierFlags.Static) !== 0;
-}
-function hasNonPublicModifier(node) {
-  const modifierFlags = ts2.getCombinedModifierFlags(node);
-  return (modifierFlags & ts2.ModifierFlags.Private) !== 0 || (modifierFlags & ts2.ModifierFlags.Protected) !== 0;
-}
-function getPropertyNameText(name) {
-  if (!name) {
-    return null;
-  }
-  if (ts2.isIdentifier(name) || ts2.isStringLiteral(name) || ts2.isNumericLiteral(name)) {
-    return name.text;
-  }
-  return null;
-}
-function getStringLiteralMemberName(expression) {
-  if (!expression) {
-    return null;
-  }
-  return ts2.isStringLiteral(expression) || ts2.isNoSubstitutionTemplateLiteral(expression) ? expression.text : null;
-}
-function isExternPropertyName(name) {
-  return name !== "prototype" && name !== "constructor" && !name.startsWith("#") && !name.includes("@") && !name.startsWith("_") && !name.startsWith("$") && !BUILTIN_CONTAINER_NAMES.has(name);
-}
-function isRuntimeExternPropertyName(name) {
-  return name !== "prototype" && name !== "constructor" && !name.startsWith("#") && !name.includes("@") && !BUILTIN_CONTAINER_NAMES.has(name) && !BUILTIN_RUNTIME_MEMBER_NAMES.has(name);
-}
-function isThisOrSuperExpression(expression) {
-  return expression.kind === ts2.SyntaxKind.ThisKeyword || expression.kind === ts2.SyntaxKind.SuperKeyword;
-}
-function isKnownConstructorExpression(expression, knownConstructors) {
-  return ts2.isIdentifier(expression) && knownConstructors.has(expression.text);
-}
-function isKnownPrototypeExpression(expression, knownConstructors) {
-  return ts2.isPropertyAccessExpression(expression) && expression.name.text === "prototype" && isKnownConstructorExpression(expression.expression, knownConstructors);
-}
-function isObjectDefinePropertyCall(expression) {
-  return ts2.isPropertyAccessExpression(expression) && ts2.isIdentifier(expression.expression) && expression.expression.text === "Object" && expression.name.text === "defineProperty";
-}
-function isAssignmentOperator(kind) {
-  return kind === ts2.SyntaxKind.EqualsToken || kind === ts2.SyntaxKind.BarBarEqualsToken || kind === ts2.SyntaxKind.AmpersandAmpersandEqualsToken || kind === ts2.SyntaxKind.QuestionQuestionEqualsToken;
-}
-function getScriptKindForFile(filePath) {
-  if (filePath.endsWith(".tsx")) {
-    return ts2.ScriptKind.TSX;
-  }
-  if (filePath.endsWith(".ts") || filePath.endsWith(".mts") || filePath.endsWith(".cts")) {
-    return ts2.ScriptKind.TS;
-  }
-  if (filePath.endsWith(".jsx")) {
-    return ts2.ScriptKind.JSX;
-  }
-  return ts2.ScriptKind.JS;
-}
-function isScannedDeclarationSymbol(symbol, scannedFiles) {
-  return (symbol.declarations ?? []).some((declaration) => scannedFiles.has(path2.resolve(declaration.getSourceFile().fileName)));
-}
-function findPackageDir(filePath) {
-  let currentDir = path2.dirname(filePath);
-  while (true) {
-    const packageJsonPath = path2.join(currentDir, "package.json");
-    if (ts2.sys.fileExists(packageJsonPath)) {
-      return currentDir;
-    }
-    const parentDir = path2.dirname(currentDir);
-    if (parentDir === currentDir) {
-      return null;
-    }
-    currentDir = parentDir;
-  }
-}
-function isTypeSourceFile(filePath) {
-  return DECLARATION_EXTENSIONS.some((extension) => filePath.endsWith(extension));
-}
-function isTypescriptLibFile(filePath) {
-  return filePath.includes(`${path2.sep}node_modules${path2.sep}typescript${path2.sep}lib${path2.sep}`);
-}
-function symbolCacheKey(symbol) {
-  const declaration = symbol.declarations?.[0];
-  return declaration ? `${path2.resolve(declaration.getSourceFile().fileName)}:${symbol.getName()}` : symbol.getName();
-}
-function uniqueStrings(values) {
-  return [...new Set(values)].sort((left, right) => left.localeCompare(right));
-}
-function isRecoverableExternConfigError(error) {
-  return error instanceof Error && (error.message.includes("TS18003") || error.message.includes("No inputs were found in config file"));
-}
-var DECLARATION_EXTENSIONS, BUILTIN_CONTAINER_NAMES, BUILTIN_RUNTIME_MEMBER_NAMES;
-var init_shared = __esm(() => {
-  DECLARATION_EXTENSIONS = [
-    ".d.ts",
-    ".d.mts",
-    ".d.cts",
-    ".ts",
-    ".tsx",
-    ".mts",
-    ".cts"
-  ];
-  BUILTIN_CONTAINER_NAMES = new Set([
-    "Array",
-    "AsyncIterable",
-    "AsyncIterator",
-    "Iterable",
-    "Iterator",
-    "Map",
-    "Promise",
-    "ReadonlyArray",
-    "ReadonlyMap",
-    "ReadonlySet",
-    "Set",
-    "String",
-    "WeakMap",
-    "WeakSet"
-  ]);
-  BUILTIN_RUNTIME_MEMBER_NAMES = new Set([
-    "addEventListener",
-    "apply",
-    "attachShadow",
-    "attributes",
-    "length",
-    "message",
-    "name",
-    "removeAttribute",
-    "removeEventListener",
-    "setAttribute"
-  ]);
-});
-
-// src/api/externs/compiler.ts
-import fs2 from "fs";
-import path3 from "path";
-import ts3 from "typescript";
-async function loadExternCompilerOptions({
-  projectRoot,
-  tsConfigPath
-}) {
-  const fallbackOptions = {
-    allowJs: true,
-    baseUrl: projectRoot,
-    module: ts3.ModuleKind.ESNext,
-    moduleResolution: ts3.ModuleResolutionKind.Bundler,
-    target: ts3.ScriptTarget.ESNext
-  };
-  const resolvedConfigPath = tsConfigPath ?? path3.join(projectRoot, "tsconfig.json");
-  try {
-    await fs2.promises.access(resolvedConfigPath, fs2.constants.R_OK);
-    try {
-      return await loadCompilerOptions(resolvedConfigPath, {
-        allowJs: true,
-        rootDir: projectRoot
-      });
-    } catch (error) {
-      if (!isRecoverableExternConfigError(error)) {
-        throw error;
-      }
-    }
-  } catch (error) {
-    if (error.code !== "ENOENT") {
-      throw error;
-    }
-  }
-  return fallbackOptions;
-}
-async function resolveModuleTypeEntries({
-  compilerOptions,
-  projectRoot,
-  specifiers,
-  tolerateMissing
-}) {
-  const resolvedEntries = [];
-  for (const specifier of specifiers) {
-    try {
-      resolvedEntries.push(await resolveModuleTypeEntry({
-        compilerOptions,
-        projectRoot,
-        specifier
-      }));
-    } catch (error) {
-      if (!tolerateMissing) {
-        throw error;
-      }
-    }
-  }
-  return uniqueStrings(resolvedEntries);
-}
-function resolveAnalysisEntryFiles({
-  entryFiles,
-  projectRoot,
-  srcDir
-}) {
-  return entryFiles.map((entry) => {
-    if (path3.isAbsolute(entry)) {
-      return entry;
-    }
-    const fromSrcDir = path3.resolve(srcDir, entry);
-    if (ts3.sys.fileExists(fromSrcDir)) {
-      return fromSrcDir;
-    }
-    return path3.resolve(projectRoot, entry);
-  });
-}
-async function collectReachableTypeFiles({
-  compilerOptions,
-  entryFiles,
-  includeDependencies
-}) {
-  const rootPackageDirs = new Set(entryFiles.map((filePath) => findPackageDir(filePath)).filter((packageDir) => packageDir !== null));
-  const queue = [...entryFiles];
-  const seen = new Set;
-  while (queue.length > 0) {
-    const nextFile = queue.shift();
-    if (!nextFile) {
-      continue;
-    }
-    const resolvedFile = path3.resolve(nextFile);
-    if (seen.has(resolvedFile) || !isTypeSourceFile(resolvedFile)) {
-      continue;
-    }
-    if (isTypescriptLibFile(resolvedFile)) {
-      continue;
-    }
-    seen.add(resolvedFile);
-    const sourceText = await fs2.promises.readFile(resolvedFile, "utf8");
-    const sourceFile = ts3.createSourceFile(resolvedFile, sourceText, ts3.ScriptTarget.Latest, true);
-    for (const specifier of collectReferencedSpecifiers(sourceFile)) {
-      const resolvedModule = ts3.resolveModuleName(specifier, resolvedFile, compilerOptions, ts3.sys).resolvedModule;
-      if (!resolvedModule) {
-        continue;
-      }
-      const normalizedDependency = normalizeResolvedTypeFile(resolvedModule.resolvedFileName);
-      if (!normalizedDependency || isTypescriptLibFile(normalizedDependency)) {
-        continue;
-      }
-      if (!includeDependencies) {
-        const dependencyPackageDir = findPackageDir(normalizedDependency);
-        if (dependencyPackageDir && !rootPackageDirs.has(dependencyPackageDir)) {
-          continue;
-        }
-      }
-      queue.push(normalizedDependency);
-    }
-  }
-  return [...seen].sort((left, right) => left.localeCompare(right));
-}
-async function resolveModuleTypeEntry({
-  compilerOptions,
-  projectRoot,
-  specifier
-}) {
-  const containingFile = path3.join(projectRoot, "__gcc_externs_entry__.ts");
-  const resolution = ts3.resolveModuleName(specifier, containingFile, compilerOptions, ts3.sys).resolvedModule;
-  const resolvedFromTypescript = resolution && normalizeResolvedTypeFile(resolution.resolvedFileName);
-  if (resolvedFromTypescript) {
-    return resolvedFromTypescript;
-  }
-  const require2 = ts3.createModuleResolutionCache(projectRoot, (fileName) => fileName, compilerOptions);
-  const fallbackResolution = ts3.nodeModuleNameResolver(specifier, containingFile, compilerOptions, ts3.sys, require2).resolvedModule;
-  const resolvedFromFallback = fallbackResolution && normalizeResolvedTypeFile(fallbackResolution.resolvedFileName);
-  if (resolvedFromFallback) {
-    return resolvedFromFallback;
-  }
-  throw new Error(`Unable to resolve TypeScript declarations for module ${JSON.stringify(specifier)} from ${projectRoot}.`);
-}
-function normalizeResolvedTypeFile(resolvedFileName) {
-  const normalizedPath = path3.resolve(resolvedFileName);
-  if (isTypeSourceFile(normalizedPath)) {
-    return normalizedPath;
-  }
-  for (const extension of DECLARATION_EXTENSIONS) {
-    const candidate = withTypeExtension(normalizedPath, extension);
-    if (ts3.sys.fileExists(candidate)) {
-      return path3.resolve(candidate);
-    }
-  }
-  return null;
-}
-function withTypeExtension(filePath, nextExtension) {
-  if (filePath.endsWith(".d.ts") || filePath.endsWith(".d.mts") || filePath.endsWith(".d.cts")) {
-    return filePath;
-  }
-  const extension = path3.extname(filePath);
-  return `${filePath.slice(0, filePath.length - extension.length)}${nextExtension}`;
-}
-function collectReferencedSpecifiers(sourceFile) {
-  const specifiers = new Set;
-  const add = (value) => {
-    if (value) {
-      specifiers.add(value);
-    }
-  };
-  const visit = (node) => {
-    if (ts3.isImportDeclaration(node) || ts3.isExportDeclaration(node)) {
-      const moduleSpecifier = node.moduleSpecifier;
-      if (moduleSpecifier && ts3.isStringLiteralLike(moduleSpecifier)) {
-        add(moduleSpecifier.text);
-      }
-    } else if (ts3.isImportEqualsDeclaration(node) && ts3.isExternalModuleReference(node.moduleReference) && node.moduleReference.expression && ts3.isStringLiteralLike(node.moduleReference.expression)) {
-      add(node.moduleReference.expression.text);
-    } else if (ts3.isImportTypeNode(node) && ts3.isLiteralTypeNode(node.argument) && ts3.isStringLiteralLike(node.argument.literal)) {
-      add(node.argument.literal.text);
-    }
-    ts3.forEachChild(node, visit);
-  };
-  visit(sourceFile);
-  return specifiers;
-}
-var init_compiler = __esm(() => {
-  init_compiler_options();
-  init_shared();
-});
-
-// src/api/externs/contracts.ts
-import path4 from "path";
-import ts4 from "typescript";
-function collectContracts(program, scannedFiles) {
-  const checker = program.getTypeChecker();
-  const scannedFileSet = new Set(scannedFiles.map((filePath) => path4.resolve(filePath)));
-  const interfaceContracts = new Map;
-  const typeAliasContracts = new Map;
-  const classContracts = new Map;
-  for (const sourceFile of program.getSourceFiles()) {
-    if (!scannedFileSet.has(path4.resolve(sourceFile.fileName))) {
-      continue;
-    }
-    for (const statement of sourceFile.statements) {
-      if (ts4.isInterfaceDeclaration(statement) && isExportedDeclaration(statement)) {
-        const symbol = checker.getSymbolAtLocation(statement.name);
-        if (!symbol) {
-          continue;
-        }
-        interfaceContracts.set(symbol, {
-          extends: getReferencedContractSymbols(statement.heritageClauses?.flatMap((clause) => clause.types) ?? [], checker, scannedFileSet),
-          members: collectTypeElementMembers(statement.members),
-          name: statement.name.text,
-          symbol
-        });
-        continue;
-      }
-      if (ts4.isTypeAliasDeclaration(statement) && isExportedDeclaration(statement)) {
-        const symbol = checker.getSymbolAtLocation(statement.name);
-        if (!symbol) {
-          continue;
-        }
-        const members = collectAliasMembers(statement.type);
-        if (members.size === 0) {
-          continue;
-        }
-        typeAliasContracts.set(symbol, {
-          members,
-          name: statement.name.text,
-          symbol
-        });
-        continue;
-      }
-      if (ts4.isClassDeclaration(statement) && statement.name && isExportedDeclaration(statement)) {
-        const symbol = checker.getSymbolAtLocation(statement.name);
-        if (!symbol) {
-          continue;
-        }
-        const instanceMembers = new Set;
-        const staticMembers = new Set;
-        for (const member of statement.members) {
-          if (ts4.isConstructorDeclaration(member)) {
-            continue;
-          }
-          if (hasNonPublicModifier(member)) {
-            continue;
-          }
-          const memberName = getPropertyNameText(member.name);
-          if (!memberName || !isExternPropertyName(memberName)) {
-            continue;
-          }
-          if (hasStaticModifier(member)) {
-            staticMembers.add(memberName);
-          } else {
-            instanceMembers.add(memberName);
-          }
-        }
-        classContracts.set(symbol, {
-          constructorParamContracts: collectConstructorParamContracts(statement, checker, scannedFileSet),
-          instanceMembers,
-          name: statement.name.text,
-          staticMembers,
-          symbol,
-          usedImplementedContracts: getClassImplementedContracts(statement, checker, scannedFileSet)
-        });
-      }
-    }
-  }
-  return {
-    classContracts,
-    interfaceContracts,
-    scannedFiles: scannedFileSet,
-    typeAliasContracts
-  };
-}
-function collectCandidateExternLines(registry) {
-  const properties = new Set;
-  for (const contract of registry.interfaceContracts.values()) {
-    for (const member of collectStructuralContractMembers(contract.symbol, registry)) {
-      properties.add(member);
-    }
-  }
-  for (const contract of registry.typeAliasContracts.values()) {
-    for (const member of contract.members) {
-      properties.add(member);
-    }
-  }
-  for (const contract of registry.classContracts.values()) {
-    for (const member of contract.instanceMembers) {
-      properties.add(member);
-    }
-  }
-  return new Set([...properties].sort((left, right) => left.localeCompare(right)).map((property) => renderStructuralExternLine(property)));
-}
-function collectBoundaryAwareExternLines({
-  appEntryFiles,
-  compilerOptions,
-  projectRoot,
-  registry
-}) {
-  const usage = analyzeAppUsage({
-    appEntryFiles,
-    compilerOptions,
-    projectRoot,
-    registry
-  });
-  const emittedLines = new Set;
-  for (const symbol of usage.structuralContracts) {
-    for (const member of collectStructuralContractMembers(symbol, registry)) {
-      emittedLines.add(renderStructuralExternLine(member));
-    }
-  }
-  for (const member of usage.structuralMembers) {
-    emittedLines.add(renderStructuralExternLine(member));
-  }
-  return emittedLines;
-}
-function analyzeAppUsage({
-  appEntryFiles,
-  compilerOptions,
-  projectRoot,
-  registry
-}) {
-  const program = ts4.createProgram(appEntryFiles, {
-    ...compilerOptions,
-    noEmit: true,
-    skipLibCheck: true
-  });
-  const checker = program.getTypeChecker();
-  const usage = {
-    nominalInstanceMembers: new Map,
-    nominalStaticMembers: new Map,
-    structuralContracts: new Set,
-    structuralMembers: new Set
-  };
-  const sourceFiles = program.getSourceFiles().filter((sourceFile) => isProjectAppSourceFile(sourceFile.fileName, projectRoot));
-  for (const sourceFile of sourceFiles) {
-    const importBindings = collectImportedClassBindings(sourceFile, registry);
-    const localBindings = new Map;
-    const visit = (node) => {
-      if (ts4.isClassDeclaration(node)) {
-        const fieldBindings = collectClassFieldBindings(node, importBindings);
-        const classVisit = (child) => {
-          if (ts4.isNewExpression(child)) {
-            analyzeNewExpression(child, checker, registry, usage, importBindings, localBindings);
-          } else if (ts4.isPropertyAccessExpression(child)) {
-            analyzePropertyAccess(child, checker, registry, usage, importBindings, localBindings, fieldBindings);
-          } else if (ts4.isElementAccessExpression(child) && ts4.isStringLiteral(child.argumentExpression)) {
-            analyzeElementAccess(child, checker, registry, usage, importBindings, localBindings, fieldBindings);
-          } else if (ts4.isVariableDeclaration(child)) {
-            registerVariableBinding(child, importBindings, localBindings);
-          }
-          ts4.forEachChild(child, classVisit);
-        };
-        ts4.forEachChild(node, classVisit);
-        return;
-      }
-      if (ts4.isVariableDeclaration(node)) {
-        registerVariableBinding(node, importBindings, localBindings);
-      } else if (ts4.isNewExpression(node)) {
-        analyzeNewExpression(node, checker, registry, usage, importBindings, localBindings);
-      } else if (ts4.isPropertyAccessExpression(node)) {
-        analyzePropertyAccess(node, checker, registry, usage, importBindings, localBindings, new Map);
-      } else if (ts4.isElementAccessExpression(node) && ts4.isStringLiteral(node.argumentExpression)) {
-        analyzeElementAccess(node, checker, registry, usage, importBindings, localBindings, new Map);
-      }
-      ts4.forEachChild(node, visit);
-    };
-    visit(sourceFile);
-  }
-  return usage;
-}
-function analyzeNewExpression(node, checker, registry, usage, importBindings, localBindings) {
-  const calleeSymbol = resolveBoundClassSymbol(node.expression, importBindings, localBindings, new Map) ?? resolveValueSymbol(node.expression, checker) ?? resolveTypeSymbol(checker.getTypeAtLocation(node.expression), checker);
-  if (!calleeSymbol) {
-    return;
-  }
-  const classContract = registry.classContracts.get(calleeSymbol);
-  if (!classContract) {
-    return;
-  }
-  for (const [
-    index,
-    contractSymbols
-  ] of classContract.constructorParamContracts.entries()) {
-    const argument = node.arguments?.[index];
-    if (!argument || !isStructuralBoundaryArgument(argument)) {
-      continue;
-    }
-    for (const symbol of contractSymbols) {
-      usage.structuralContracts.add(symbol);
-    }
-  }
-}
-function analyzePropertyAccess(node, checker, registry, usage, importBindings, localBindings, fieldBindings) {
-  const propertyName = node.name.text;
-  if (!isExternPropertyName(propertyName)) {
-    return;
-  }
-  if (ts4.isIdentifier(node.expression) && importBindings.has(node.expression.text)) {
-    const targetSymbol = importBindings.get(node.expression.text);
-    if (targetSymbol) {
-      const classContract = registry.classContracts.get(targetSymbol);
-      if (classContract && classContract.staticMembers.has(propertyName)) {
-        addMapSetValue(usage.nominalStaticMembers, targetSymbol, propertyName);
-        return;
-      }
-    }
-  }
-  const boundInstanceSymbol = resolveBoundClassSymbol(node.expression, importBindings, localBindings, fieldBindings);
-  if (boundInstanceSymbol && registry.classContracts.has(boundInstanceSymbol)) {
-    addMapSetValue(usage.nominalInstanceMembers, boundInstanceSymbol, propertyName);
-    return;
-  }
-  const typeSymbol = resolveTypeSymbol(checker.getTypeAtLocation(node.expression), checker);
-  if (!typeSymbol) {
-    return;
-  }
-  if (registry.classContracts.has(typeSymbol)) {
-    addMapSetValue(usage.nominalInstanceMembers, typeSymbol, propertyName);
-    return;
-  }
-  if (registry.interfaceContracts.has(typeSymbol) || registry.typeAliasContracts.has(typeSymbol)) {
-    usage.structuralMembers.add(propertyName);
-  }
-}
-function analyzeElementAccess(node, checker, registry, usage, importBindings, localBindings, fieldBindings) {
-  const argumentExpression = node.argumentExpression;
-  if (!ts4.isStringLiteral(argumentExpression)) {
-    return;
-  }
-  const propertyName = argumentExpression.text;
-  if (!isExternPropertyName(propertyName)) {
-    return;
-  }
-  const boundSymbol = resolveBoundClassSymbol(node.expression, importBindings, localBindings, fieldBindings);
-  if (boundSymbol && registry.classContracts.has(boundSymbol)) {
-    addMapSetValue(usage.nominalInstanceMembers, boundSymbol, propertyName);
-    return;
-  }
-  const typeSymbol = resolveTypeSymbol(checker.getTypeAtLocation(node.expression), checker);
-  if (!typeSymbol) {
-    return;
-  }
-  if (registry.classContracts.has(typeSymbol)) {
-    addMapSetValue(usage.nominalInstanceMembers, typeSymbol, propertyName);
-    return;
-  }
-  if (registry.interfaceContracts.has(typeSymbol) || registry.typeAliasContracts.has(typeSymbol)) {
-    usage.structuralMembers.add(propertyName);
-  }
-}
-function collectImportedClassBindings(sourceFile, registry) {
-  const bindings = new Map;
-  for (const statement of sourceFile.statements) {
-    if (!ts4.isImportDeclaration(statement) || !statement.importClause) {
-      continue;
-    }
-    const clause = statement.importClause;
-    if (clause.name) {
-      const symbol = findClassContractByName(clause.name.text, registry);
-      if (symbol) {
-        bindings.set(clause.name.text, symbol);
-      }
-    }
-    const namedBindings = clause.namedBindings;
-    if (!namedBindings || !ts4.isNamedImports(namedBindings)) {
-      continue;
-    }
-    for (const specifier of namedBindings.elements) {
-      const importedName = specifier.propertyName?.text ?? specifier.name.text;
-      const symbol = findClassContractByName(importedName, registry);
-      if (symbol) {
-        bindings.set(specifier.name.text, symbol);
-      }
-    }
-  }
-  return bindings;
-}
-function collectClassFieldBindings(declaration, importBindings) {
-  const bindings = new Map;
-  for (const member of declaration.members) {
-    if (!ts4.isPropertyDeclaration(member) || !member.initializer || !ts4.isIdentifier(member.name) || !ts4.isNewExpression(member.initializer) || !ts4.isIdentifier(member.initializer.expression)) {
-      continue;
-    }
-    const classSymbol = importBindings.get(member.initializer.expression.text);
-    if (classSymbol) {
-      bindings.set(member.name.text, classSymbol);
-    }
-  }
-  return bindings;
-}
-function registerVariableBinding(declaration, importBindings, localBindings) {
-  if (!ts4.isIdentifier(declaration.name) || !declaration.initializer || !ts4.isNewExpression(declaration.initializer) || !ts4.isIdentifier(declaration.initializer.expression)) {
-    return;
-  }
-  const classSymbol = importBindings.get(declaration.initializer.expression.text);
-  if (classSymbol) {
-    localBindings.set(declaration.name.text, classSymbol);
-  }
-}
-function resolveBoundClassSymbol(expression, importBindings, localBindings, fieldBindings) {
-  if (ts4.isIdentifier(expression)) {
-    return localBindings.get(expression.text) ?? importBindings.get(expression.text) ?? null;
-  }
-  if (ts4.isPropertyAccessExpression(expression) && expression.expression.kind === ts4.SyntaxKind.ThisKeyword) {
-    return fieldBindings.get(expression.name.text) ?? null;
-  }
-  return null;
-}
-function findClassContractByName(name, registry) {
-  for (const [symbol, contract] of registry.classContracts) {
-    if (contract.name === name) {
-      return symbol;
-    }
-  }
-  return null;
-}
-function collectTypeElementMembers(members) {
-  const collected = new Set;
-  for (const member of members) {
-    if (ts4.isPropertySignature(member) || ts4.isMethodSignature(member) || ts4.isGetAccessorDeclaration(member) || ts4.isSetAccessorDeclaration(member)) {
-      const memberName = getPropertyNameText(member.name);
-      if (memberName && isExternPropertyName(memberName)) {
-        collected.add(memberName);
-      }
-    }
-  }
-  return collected;
-}
-function collectAliasMembers(typeNode) {
-  if (ts4.isTypeLiteralNode(typeNode)) {
-    return collectTypeElementMembers(typeNode.members);
-  }
-  if (ts4.isIntersectionTypeNode(typeNode)) {
-    const members = new Set;
-    for (const child of typeNode.types) {
-      for (const member of collectAliasMembers(child)) {
-        members.add(member);
-      }
-    }
-    return members;
-  }
-  return new Set;
-}
-function getReferencedContractSymbols(typeNodes, checker, scannedFiles) {
-  const symbols = new Set;
-  for (const typeNode of typeNodes) {
-    for (const symbol of getContractSymbolsFromTypeNode(typeNode, checker, scannedFiles)) {
-      symbols.add(symbol);
-    }
-  }
-  return symbols;
-}
-function getContractSymbolsFromTypeNode(typeNode, checker, scannedFiles) {
-  if (ts4.isExpressionWithTypeArguments(typeNode)) {
-    const symbol = resolveAliasedSymbol(checker.getSymbolAtLocation(typeNode.expression), checker);
-    return symbol && isScannedDeclarationSymbol(symbol, scannedFiles) ? new Set([symbol]) : new Set;
-  }
-  if (ts4.isParenthesizedTypeNode(typeNode)) {
-    return getContractSymbolsFromTypeNode(typeNode.type, checker, scannedFiles);
-  }
-  if (ts4.isIntersectionTypeNode(typeNode) || ts4.isUnionTypeNode(typeNode)) {
-    const symbols = new Set;
-    for (const child of typeNode.types) {
-      for (const symbol of getContractSymbolsFromTypeNode(child, checker, scannedFiles)) {
-        symbols.add(symbol);
-      }
-    }
-    return symbols;
-  }
-  if (ts4.isTypeReferenceNode(typeNode)) {
-    return getContractSymbolsFromEntityName(typeNode.typeName, checker, scannedFiles);
-  }
-  return new Set;
-}
-function getContractSymbolsFromEntityName(entityName, checker, scannedFiles) {
-  const symbol = ts4.isIdentifier(entityName) ? checker.getSymbolAtLocation(entityName) : checker.getSymbolAtLocation(entityName.right);
-  const resolved = resolveAliasedSymbol(symbol, checker);
-  if (!resolved) {
-    return new Set;
-  }
-  return isScannedDeclarationSymbol(resolved, scannedFiles) ? new Set([resolved]) : new Set;
-}
-function collectConstructorParamContracts(statement, checker, scannedFiles) {
-  const constructorDeclaration = statement.members.find((member) => ts4.isConstructorDeclaration(member));
-  if (!constructorDeclaration || !ts4.isConstructorDeclaration(constructorDeclaration)) {
-    return [];
-  }
-  return constructorDeclaration.parameters.map((parameter) => parameter.type ? getContractSymbolsFromTypeNode(parameter.type, checker, scannedFiles) : new Set);
-}
-function getClassImplementedContracts(statement, checker, scannedFiles, seen = new Set) {
-  const contracts = new Set;
-  const classSymbol = statement.name && checker.getSymbolAtLocation(statement.name);
-  const classKey = classSymbol ? symbolCacheKey(classSymbol) : "";
-  if (classKey && seen.has(classKey)) {
-    return contracts;
-  }
-  if (classKey) {
-    seen.add(classKey);
-  }
-  for (const clause of statement.heritageClauses ?? []) {
-    if (clause.token === ts4.SyntaxKind.ImplementsKeyword) {
-      for (const typeNode of clause.types) {
-        for (const symbol of getContractSymbolsFromTypeNode(typeNode, checker, scannedFiles)) {
-          contracts.add(symbol);
-        }
-      }
-      continue;
-    }
-    if (clause.token === ts4.SyntaxKind.ExtendsKeyword) {
-      for (const typeNode of clause.types) {
-        const baseSymbol = resolveAliasedSymbol(checker.getSymbolAtLocation(typeNode.expression), checker);
-        if (!baseSymbol) {
-          continue;
-        }
-        const declaration = baseSymbol.declarations?.find((item) => ts4.isClassDeclaration(item));
-        if (declaration && ts4.isClassDeclaration(declaration)) {
-          for (const symbol of getClassImplementedContracts(declaration, checker, scannedFiles, seen)) {
-            contracts.add(symbol);
-          }
-        }
-      }
-    }
-  }
-  return contracts;
-}
-function isStructuralBoundaryArgument(expression) {
-  return !(ts4.isArrayLiteralExpression(expression) || ts4.isObjectLiteralExpression(expression) || ts4.isStringLiteralLike(expression) || ts4.isNumericLiteral(expression) || expression.kind === ts4.SyntaxKind.TrueKeyword || expression.kind === ts4.SyntaxKind.FalseKeyword || expression.kind === ts4.SyntaxKind.NullKeyword);
-}
-var init_contracts = __esm(() => {
-  init_shared();
-});
-
-// src/api/externs/runtime-analysis.ts
-import fs3 from "fs";
-import ts5 from "typescript";
-async function analyzeRuntimeUsage(runtimeEntryFiles) {
-  const structuralMembers = new Set;
-  for (const runtimeEntryFile of runtimeEntryFiles) {
-    const sourceText = await fs3.promises.readFile(runtimeEntryFile, "utf8");
-    const sourceFile = ts5.createSourceFile(runtimeEntryFile, sourceText, ts5.ScriptTarget.Latest, true, getScriptKindForFile(runtimeEntryFile));
-    const knownConstructors = collectKnownConstructorBindings(sourceFile);
-    const visit = (node) => {
-      if (ts5.isClassDeclaration(node) || ts5.isClassExpression(node)) {
-        for (const member of node.members) {
-          if (ts5.isPropertyDeclaration(member) || ts5.isGetAccessorDeclaration(member) || ts5.isSetAccessorDeclaration(member)) {
-            const memberName = getPropertyNameText(member.name);
-            if (memberName && isRuntimeExternPropertyName(memberName)) {
-              structuralMembers.add(memberName);
-            }
-          }
-        }
-      } else if (ts5.isPropertyAccessExpression(node)) {
-        if (isThisOrSuperExpression(node.expression) && isRuntimeExternPropertyName(node.name.text)) {
-          structuralMembers.add(node.name.text);
-        }
-      } else if (ts5.isElementAccessExpression(node)) {
-        const memberName = getStringLiteralMemberName(node.argumentExpression);
-        if (memberName && isThisOrSuperExpression(node.expression) && isRuntimeExternPropertyName(memberName)) {
-          structuralMembers.add(memberName);
-        }
-      } else if (ts5.isBinaryExpression(node) && isAssignmentOperator(node.operatorToken.kind)) {
-        collectRuntimeAssignmentMembers(node.left, knownConstructors, structuralMembers);
-      } else if (ts5.isCallExpression(node)) {
-        collectRuntimeCallMembers(node, knownConstructors, structuralMembers);
-      }
-      ts5.forEachChild(node, visit);
-    };
-    visit(sourceFile);
-  }
-  return structuralMembers;
-}
-function collectKnownConstructorBindings(sourceFile) {
-  const knownConstructors = new Set;
-  const visit = (node) => {
-    if ((ts5.isClassDeclaration(node) || ts5.isFunctionDeclaration(node)) && node.name) {
-      knownConstructors.add(node.name.text);
-    } else if (ts5.isVariableDeclaration(node) && ts5.isIdentifier(node.name) && node.initializer && (ts5.isClassExpression(node.initializer) || ts5.isFunctionExpression(node.initializer) || ts5.isArrowFunction(node.initializer))) {
-      knownConstructors.add(node.name.text);
-    }
-    ts5.forEachChild(node, visit);
-  };
-  visit(sourceFile);
-  return knownConstructors;
-}
-function collectRuntimeAssignmentMembers(target, knownConstructors, structuralMembers) {
-  if (ts5.isPropertyAccessExpression(target)) {
-    if (isThisOrSuperExpression(target.expression) || isKnownPrototypeExpression(target.expression, knownConstructors) || isKnownConstructorExpression(target.expression, knownConstructors)) {
-      if (isRuntimeExternPropertyName(target.name.text)) {
-        structuralMembers.add(target.name.text);
-      }
-    }
-    return;
-  }
-  if (ts5.isElementAccessExpression(target)) {
-    const memberName = getStringLiteralMemberName(target.argumentExpression);
-    if (memberName && (isThisOrSuperExpression(target.expression) || isKnownPrototypeExpression(target.expression, knownConstructors) || isKnownConstructorExpression(target.expression, knownConstructors)) && isRuntimeExternPropertyName(memberName)) {
-      structuralMembers.add(memberName);
-    }
-  }
-}
-function collectRuntimeCallMembers(node, knownConstructors, structuralMembers) {
-  const callee = node.expression;
-  if (ts5.isIdentifier(callee) && callee.text === "__publicField" && node.arguments.length >= 2) {
-    const memberName2 = getStringLiteralMemberName(node.arguments[1]);
-    if (memberName2 && (isThisOrSuperExpression(node.arguments[0]) || isKnownConstructorExpression(node.arguments[0], knownConstructors)) && isRuntimeExternPropertyName(memberName2)) {
-      structuralMembers.add(memberName2);
-    }
-    return;
-  }
-  if (!isObjectDefinePropertyCall(callee) || node.arguments.length < 2) {
-    return;
-  }
-  const memberName = getStringLiteralMemberName(node.arguments[1]);
-  if (!memberName || !isRuntimeExternPropertyName(memberName)) {
-    return;
-  }
-  const target = node.arguments[0];
-  if (isThisOrSuperExpression(target) || isKnownConstructorExpression(target, knownConstructors) || isKnownPrototypeExpression(target, knownConstructors)) {
-    structuralMembers.add(memberName);
-  }
-}
-var init_runtime_analysis = __esm(() => {
-  init_shared();
-});
-
-// src/api/externs/render.ts
-function renderCandidateExterns({
-  modules,
-  registry,
-  scannedFiles
-}) {
-  return renderExternText({
-    emittedLines: collectCandidateExternLines(registry),
-    mode: "candidates",
-    modules,
-    scannedFiles
-  });
-}
-function renderBoundaryAwareExterns({
-  appEntryFiles,
-  compilerOptions,
-  modules,
-  projectRoot,
-  registry,
-  scannedFiles
-}) {
-  return renderExternText({
-    emittedLines: collectBoundaryAwareExternLines({
-      appEntryFiles,
-      compilerOptions,
-      projectRoot,
-      registry
-    }),
-    mode: "boundary-aware",
-    modules,
-    scannedFiles
-  });
-}
-async function renderRuntimeAwareExterns({
-  appEntryFiles,
-  compilerOptions,
-  modules,
-  projectRoot,
-  registry,
-  runtimeEntryFiles,
-  scannedFiles
-}) {
-  const emittedLines = appEntryFiles.length > 0 ? collectBoundaryAwareExternLines({
-    appEntryFiles,
-    compilerOptions,
-    projectRoot,
-    registry
-  }) : collectCandidateExternLines(registry);
-  const runtimeMembers = await analyzeRuntimeUsage(runtimeEntryFiles);
-  for (const member of runtimeMembers) {
-    emittedLines.add(renderStructuralExternLine(member));
-  }
-  return renderExternText({
-    emittedLines,
-    mode: "runtime-aware",
-    modules,
-    runtimeEntryFiles,
-    scannedFiles
-  });
-}
-function renderExternText({
-  emittedLines,
-  mode,
-  modules,
-  runtimeEntryFiles = [],
-  scannedFiles
-}) {
-  const scannedSummary = mode === "runtime-aware" ? `// Scanned ${scannedFiles.length} type file${scannedFiles.length === 1 ? "" : "s"} and ${runtimeEntryFiles.length} runtime file${runtimeEntryFiles.length === 1 ? "" : "s"}.` : `// Scanned ${scannedFiles.length} type file${scannedFiles.length === 1 ? "" : "s"}.`;
-  return [
-    "/** @externs */",
-    `// Generated by gcc-ts-bundler for: ${modules.join(", ")}`,
-    `// Mode: ${mode}`,
-    scannedSummary,
-    "",
-    ...[...emittedLines].sort((left, right) => left.localeCompare(right)),
-    ""
-  ].join(`
-`);
-}
-var init_render = __esm(() => {
-  init_runtime_analysis();
-  init_contracts();
-  init_shared();
-});
-
-// src/api/externs.ts
-import fs4 from "fs";
-import path5 from "path";
-import ts6 from "typescript";
-async function generateExterns(options) {
-  if (options.modules.length === 0) {
-    throw new Error("generateExterns requires at least one module specifier.");
-  }
-  const mode = options.mode ?? "boundary-aware";
-  const projectRoot = path5.resolve(options.projectRoot ?? process.cwd());
-  const srcDir = path5.resolve(projectRoot, options.srcDir ?? ".");
-  const tsConfigPath = options.tsConfigPath && path5.resolve(projectRoot, options.tsConfigPath);
-  const compilerOptions = await loadExternCompilerOptions({
-    projectRoot,
-    tsConfigPath
-  });
-  const includeDependencies = options.includeDependencies ?? true;
-  if (mode === "boundary-aware" && (options.appEntryFiles?.length ?? 0) === 0) {
-    throw new Error("generateExterns in boundary-aware mode requires appEntryFiles.");
-  }
-  if (mode === "runtime-aware" && (options.runtimeEntryFiles?.length ?? 0) === 0) {
-    throw new Error("generateExterns in runtime-aware mode requires runtimeEntryFiles.");
-  }
-  const typeEntryFiles = await resolveModuleTypeEntries({
-    compilerOptions,
-    projectRoot,
-    specifiers: options.modules,
-    tolerateMissing: mode === "runtime-aware"
-  });
-  const scannedFiles = typeEntryFiles.length === 0 ? [] : await collectReachableTypeFiles({
-    compilerOptions,
-    entryFiles: typeEntryFiles,
-    includeDependencies
-  });
-  const registry = scannedFiles.length === 0 ? createEmptyContractRegistry() : collectContracts(ts6.createProgram(scannedFiles, {
-    ...compilerOptions,
-    noEmit: true,
-    skipLibCheck: true
-  }), scannedFiles);
-  const text = mode === "candidates" ? renderCandidateExterns({
-    modules: options.modules,
-    registry,
-    scannedFiles
-  }) : mode === "boundary-aware" ? renderBoundaryAwareExterns({
-    appEntryFiles: resolveAnalysisEntryFiles({
-      entryFiles: options.appEntryFiles ?? [],
-      projectRoot,
-      srcDir
-    }),
-    compilerOptions,
-    modules: options.modules,
-    projectRoot,
-    registry,
-    scannedFiles
-  }) : await renderRuntimeAwareExterns({
-    appEntryFiles: resolveAnalysisEntryFiles({
-      entryFiles: options.appEntryFiles ?? [],
-      projectRoot,
-      srcDir
-    }),
-    compilerOptions,
-    modules: options.modules,
-    projectRoot,
-    registry,
-    runtimeEntryFiles: resolveAnalysisEntryFiles({
-      entryFiles: options.runtimeEntryFiles ?? [],
-      projectRoot,
-      srcDir
-    }),
-    scannedFiles
-  });
-  const outputFile = options.outputFile && path5.resolve(projectRoot, options.outputFile);
-  if (outputFile) {
-    await fs4.promises.mkdir(path5.dirname(outputFile), { recursive: true });
-    await fs4.promises.writeFile(outputFile, text, "utf8");
-  }
-  return {
-    mode,
-    modules: [...options.modules],
-    outputFile,
-    scannedFiles,
-    text
-  };
-}
-var init_externs = __esm(() => {
-  init_compiler();
-  init_contracts();
-  init_render();
-});
-
 // src/api/types.ts
 var DEFAULT_BUILD_OPTIONS;
 var init_types = __esm(() => {
@@ -2778,7 +1682,7 @@ function configureClosureCompilerInstance(instance) {
   }
   return instance;
 }
-var init_compiler2 = () => {};
+var init_compiler = () => {};
 
 // src/stages/closure/cache.ts
 import fs12 from "fs/promises";
@@ -3053,7 +1957,7 @@ async function readPropertyRenamingReport(reportPath, cache) {
 var init_run_closure = __esm(() => {
   init_files();
   init_load();
-  init_compiler2();
+  init_compiler();
   init_cache2();
   init_concurrency();
 });
@@ -3061,65 +1965,6 @@ var init_run_closure = __esm(() => {
 // src/pipeline/build-helpers.ts
 import fs14 from "fs";
 import path19 from "path";
-async function generateRuntimeDependencyExterns({
-  appEntryFiles,
-  cacheMode,
-  cacheDir,
-  dependencyModules,
-  dependencyRuntimeFiles,
-  projectRoot,
-  srcDir,
-  tsConfigPath
-}) {
-  if (dependencyModules.length === 0 || dependencyRuntimeFiles.length === 0) {
-    return null;
-  }
-  const outputFile = path19.join(cacheDir, "runtime-dependency-externs.js");
-  const metadataPath = path19.join(cacheDir, "runtime-dependency-externs.meta.json");
-  if (cacheMode !== "off") {
-    const compilerOptions = await loadCompilerOptions(tsConfigPath);
-    const cacheKey = hashJson({
-      appEntryFiles,
-      compilerOptions,
-      dependencyModules,
-      dependencyRuntimeFiles,
-      projectRoot,
-      srcDir,
-      version: RUNTIME_DEPENDENCY_EXTERNS_CACHE_VERSION
-    });
-    const cachedMetadata = await readJsonIfExists(metadataPath);
-    if (cachedMetadata?.version === RUNTIME_DEPENDENCY_EXTERNS_CACHE_VERSION && cachedMetadata.key === cacheKey && cachedMetadata.outputFile === outputFile && await filesExist([outputFile])) {
-      return outputFile;
-    }
-    await generateExterns({
-      appEntryFiles,
-      mode: "runtime-aware",
-      modules: dependencyModules,
-      outputFile,
-      projectRoot,
-      runtimeEntryFiles: dependencyRuntimeFiles,
-      srcDir,
-      tsConfigPath
-    });
-    await writeJson(metadataPath, {
-      key: cacheKey,
-      outputFile,
-      version: RUNTIME_DEPENDENCY_EXTERNS_CACHE_VERSION
-    });
-    return outputFile;
-  }
-  await generateExterns({
-    appEntryFiles,
-    mode: "runtime-aware",
-    modules: dependencyModules,
-    outputFile,
-    projectRoot,
-    runtimeEntryFiles: dependencyRuntimeFiles,
-    srcDir,
-    tsConfigPath
-  });
-  return outputFile;
-}
 async function publishOutputs(outputFiles, outDir) {
   if (await publishedOutputsMatch2(outputFiles, outDir)) {
     return;
@@ -3143,14 +1988,9 @@ function createBuildDiagnostic(error) {
 async function removeProjectCacheDir(projectCacheDir) {
   await fs14.promises.rm(projectCacheDir, { force: true, recursive: true });
 }
-var RUNTIME_DEPENDENCY_EXTERNS_CACHE_VERSION = 1;
 var init_build_helpers = __esm(() => {
-  init_externs();
-  init_hash();
-  init_store();
   init_files();
   init_file_state();
-  init_compiler_options();
 });
 
 // src/pipeline/build-pipeline.ts
@@ -3246,22 +2086,12 @@ async function build(options) {
         outputFiles: []
       };
     }
-    const runtimeDependencyExterns = await generateRuntimeDependencyExterns({
-      appEntryFiles: context.options.entries,
-      cacheMode: context.options.cache.mode,
-      cacheDir: resolvedBuild.nativeEmitCacheDir,
-      dependencyModules: nativeEmitResult.dependencyModules,
-      dependencyRuntimeFiles: nativeEmitResult.dependencyRuntimeFiles,
-      projectRoot: context.options.projectRoot,
-      srcDir: context.options.srcDir,
-      tsConfigPath: resolvedBuild.tsConfigPath
-    });
     const closureResult = await runClosureStage({
       chunkPlan: resolvedBuild.chunkPlan,
       emittedOutDir: nativeEmitResult.outDir,
       explicitExternPaths: context.options.externs,
       finalCacheDir: resolvedBuild.finalCacheDir,
-      generatedExternPaths: runtimeDependencyExterns ? [runtimeDependencyExterns] : [],
+      generatedExternPaths: [],
       nativeExternPath: nativeEmitResult.externsPath,
       options: context.options,
       outDir: context.options.outDir,
@@ -3325,8 +2155,1114 @@ var init_build_pipeline = __esm(() => {
   init_build_helpers();
 });
 
-// src/api/build.ts
-init_externs();
+// src/api/externs.ts
+import fs4 from "fs";
+import path5 from "path";
+import ts6 from "typescript";
+
+// src/api/externs/compiler.ts
+init_compiler_options();
+import fs2 from "fs";
+import path3 from "path";
+import ts3 from "typescript";
+
+// src/api/externs/shared.ts
+import path2 from "path";
+import ts2 from "typescript";
+var DECLARATION_EXTENSIONS = [
+  ".d.ts",
+  ".d.mts",
+  ".d.cts",
+  ".ts",
+  ".tsx",
+  ".mts",
+  ".cts"
+];
+var BUILTIN_CONTAINER_NAMES = new Set([
+  "Array",
+  "AsyncIterable",
+  "AsyncIterator",
+  "Iterable",
+  "Iterator",
+  "Map",
+  "Promise",
+  "ReadonlyArray",
+  "ReadonlyMap",
+  "ReadonlySet",
+  "Set",
+  "String",
+  "WeakMap",
+  "WeakSet"
+]);
+var BUILTIN_RUNTIME_MEMBER_NAMES = new Set([
+  "addEventListener",
+  "apply",
+  "attachShadow",
+  "attributes",
+  "length",
+  "message",
+  "name",
+  "removeAttribute",
+  "removeEventListener",
+  "setAttribute"
+]);
+function createEmptyContractRegistry() {
+  return {
+    classContracts: new Map,
+    interfaceContracts: new Map,
+    scannedFiles: new Set,
+    typeAliasContracts: new Map
+  };
+}
+function collectStructuralContractMembers(symbol, registry, seen = new Set) {
+  if (seen.has(symbol)) {
+    return new Set;
+  }
+  seen.add(symbol);
+  const interfaceContract = registry.interfaceContracts.get(symbol);
+  if (interfaceContract) {
+    const members = new Set(interfaceContract.members);
+    for (const extendedSymbol of interfaceContract.extends) {
+      for (const member of collectStructuralContractMembers(extendedSymbol, registry, seen)) {
+        members.add(member);
+      }
+    }
+    return members;
+  }
+  const typeAliasContract = registry.typeAliasContracts.get(symbol);
+  if (typeAliasContract) {
+    return new Set(typeAliasContract.members);
+  }
+  return new Set;
+}
+function resolveTypeSymbol(type, checker) {
+  const symbol = type.getSymbol();
+  if (!symbol && type.isUnionOrIntersection()) {
+    for (const child of type.types) {
+      const childSymbol = resolveTypeSymbol(child, checker);
+      if (childSymbol) {
+        return childSymbol;
+      }
+    }
+    return null;
+  }
+  return resolveAliasedSymbol(symbol, checker);
+}
+function resolveValueSymbol(node, checker) {
+  return resolveAliasedSymbol(checker.getSymbolAtLocation(node), checker);
+}
+function resolveAliasedSymbol(symbol, checker) {
+  if (!symbol) {
+    return null;
+  }
+  return symbol.flags & ts2.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+}
+function renderStructuralExternLine(name) {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? `Object.prototype.${name};` : `Object.prototype[${JSON.stringify(name)}];`;
+}
+function addMapSetValue(map, key, value) {
+  const current = map.get(key);
+  if (current) {
+    current.add(value);
+    return;
+  }
+  map.set(key, new Set([value]));
+}
+function isProjectAppSourceFile(filePath, projectRoot) {
+  const resolvedFilePath = path2.resolve(filePath);
+  return !resolvedFilePath.includes(`${path2.sep}node_modules${path2.sep}`) && !resolvedFilePath.endsWith(".d.ts") && resolvedFilePath.startsWith(path2.resolve(projectRoot) + path2.sep);
+}
+function isExportedDeclaration(node) {
+  return (ts2.getCombinedModifierFlags(node) & ts2.ModifierFlags.Export) !== 0;
+}
+function hasStaticModifier(node) {
+  return (ts2.getCombinedModifierFlags(node) & ts2.ModifierFlags.Static) !== 0;
+}
+function hasNonPublicModifier(node) {
+  const modifierFlags = ts2.getCombinedModifierFlags(node);
+  return (modifierFlags & ts2.ModifierFlags.Private) !== 0 || (modifierFlags & ts2.ModifierFlags.Protected) !== 0;
+}
+function getPropertyNameText(name) {
+  if (!name) {
+    return null;
+  }
+  if (ts2.isIdentifier(name) || ts2.isStringLiteral(name) || ts2.isNumericLiteral(name)) {
+    return name.text;
+  }
+  return null;
+}
+function getStringLiteralMemberName(expression) {
+  if (!expression) {
+    return null;
+  }
+  return ts2.isStringLiteral(expression) || ts2.isNoSubstitutionTemplateLiteral(expression) ? expression.text : null;
+}
+function isExternPropertyName(name) {
+  return name !== "prototype" && name !== "constructor" && !name.startsWith("#") && !name.includes("@") && !name.startsWith("_") && !name.startsWith("$") && !BUILTIN_CONTAINER_NAMES.has(name);
+}
+function isRuntimeExternPropertyName(name) {
+  return name !== "prototype" && name !== "constructor" && !name.startsWith("#") && !name.includes("@") && !BUILTIN_CONTAINER_NAMES.has(name) && !BUILTIN_RUNTIME_MEMBER_NAMES.has(name);
+}
+function isThisOrSuperExpression(expression) {
+  return expression.kind === ts2.SyntaxKind.ThisKeyword || expression.kind === ts2.SyntaxKind.SuperKeyword;
+}
+function isKnownConstructorExpression(expression, knownConstructors) {
+  return ts2.isIdentifier(expression) && knownConstructors.has(expression.text);
+}
+function isKnownPrototypeExpression(expression, knownConstructors) {
+  return ts2.isPropertyAccessExpression(expression) && expression.name.text === "prototype" && isKnownConstructorExpression(expression.expression, knownConstructors);
+}
+function isObjectDefinePropertyCall(expression) {
+  return ts2.isPropertyAccessExpression(expression) && ts2.isIdentifier(expression.expression) && expression.expression.text === "Object" && expression.name.text === "defineProperty";
+}
+function isAssignmentOperator(kind) {
+  return kind === ts2.SyntaxKind.EqualsToken || kind === ts2.SyntaxKind.BarBarEqualsToken || kind === ts2.SyntaxKind.AmpersandAmpersandEqualsToken || kind === ts2.SyntaxKind.QuestionQuestionEqualsToken;
+}
+function getScriptKindForFile(filePath) {
+  if (filePath.endsWith(".tsx")) {
+    return ts2.ScriptKind.TSX;
+  }
+  if (filePath.endsWith(".ts") || filePath.endsWith(".mts") || filePath.endsWith(".cts")) {
+    return ts2.ScriptKind.TS;
+  }
+  if (filePath.endsWith(".jsx")) {
+    return ts2.ScriptKind.JSX;
+  }
+  return ts2.ScriptKind.JS;
+}
+function isScannedDeclarationSymbol(symbol, scannedFiles) {
+  return (symbol.declarations ?? []).some((declaration) => scannedFiles.has(path2.resolve(declaration.getSourceFile().fileName)));
+}
+function findPackageDir(filePath) {
+  let currentDir = path2.dirname(filePath);
+  while (true) {
+    const packageJsonPath = path2.join(currentDir, "package.json");
+    if (ts2.sys.fileExists(packageJsonPath)) {
+      return currentDir;
+    }
+    const parentDir = path2.dirname(currentDir);
+    if (parentDir === currentDir) {
+      return null;
+    }
+    currentDir = parentDir;
+  }
+}
+function isTypeSourceFile(filePath) {
+  return DECLARATION_EXTENSIONS.some((extension) => filePath.endsWith(extension));
+}
+function isTypescriptLibFile(filePath) {
+  return filePath.includes(`${path2.sep}node_modules${path2.sep}typescript${path2.sep}lib${path2.sep}`);
+}
+function symbolCacheKey(symbol) {
+  const declaration = symbol.declarations?.[0];
+  return declaration ? `${path2.resolve(declaration.getSourceFile().fileName)}:${symbol.getName()}` : symbol.getName();
+}
+function uniqueStrings(values) {
+  return [...new Set(values)].sort((left, right) => left.localeCompare(right));
+}
+function isRecoverableExternConfigError(error) {
+  return error instanceof Error && (error.message.includes("TS18003") || error.message.includes("No inputs were found in config file"));
+}
+
+// src/api/externs/compiler.ts
+async function loadExternCompilerOptions({
+  projectRoot,
+  tsConfigPath
+}) {
+  const fallbackOptions = {
+    allowJs: true,
+    baseUrl: projectRoot,
+    module: ts3.ModuleKind.ESNext,
+    moduleResolution: ts3.ModuleResolutionKind.Bundler,
+    target: ts3.ScriptTarget.ESNext
+  };
+  const resolvedConfigPath = tsConfigPath ?? path3.join(projectRoot, "tsconfig.json");
+  try {
+    await fs2.promises.access(resolvedConfigPath, fs2.constants.R_OK);
+    try {
+      return await loadCompilerOptions(resolvedConfigPath, {
+        allowJs: true,
+        rootDir: projectRoot
+      });
+    } catch (error) {
+      if (!isRecoverableExternConfigError(error)) {
+        throw error;
+      }
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+  return fallbackOptions;
+}
+async function resolveModuleTypeEntries({
+  compilerOptions,
+  projectRoot,
+  specifiers,
+  tolerateMissing
+}) {
+  const resolvedEntries = [];
+  for (const specifier of specifiers) {
+    try {
+      resolvedEntries.push(await resolveModuleTypeEntry({
+        compilerOptions,
+        projectRoot,
+        specifier
+      }));
+    } catch (error) {
+      if (!tolerateMissing) {
+        throw error;
+      }
+    }
+  }
+  return uniqueStrings(resolvedEntries);
+}
+function resolveAnalysisEntryFiles({
+  entryFiles,
+  projectRoot,
+  srcDir
+}) {
+  return entryFiles.map((entry) => {
+    if (path3.isAbsolute(entry)) {
+      return entry;
+    }
+    const fromSrcDir = path3.resolve(srcDir, entry);
+    if (ts3.sys.fileExists(fromSrcDir)) {
+      return fromSrcDir;
+    }
+    return path3.resolve(projectRoot, entry);
+  });
+}
+async function collectReachableTypeFiles({
+  compilerOptions,
+  entryFiles,
+  includeDependencies
+}) {
+  const rootPackageDirs = new Set(entryFiles.map((filePath) => findPackageDir(filePath)).filter((packageDir) => packageDir !== null));
+  const queue = [...entryFiles];
+  const seen = new Set;
+  while (queue.length > 0) {
+    const nextFile = queue.shift();
+    if (!nextFile) {
+      continue;
+    }
+    const resolvedFile = path3.resolve(nextFile);
+    if (seen.has(resolvedFile) || !isTypeSourceFile(resolvedFile)) {
+      continue;
+    }
+    if (isTypescriptLibFile(resolvedFile)) {
+      continue;
+    }
+    seen.add(resolvedFile);
+    const sourceText = await fs2.promises.readFile(resolvedFile, "utf8");
+    const sourceFile = ts3.createSourceFile(resolvedFile, sourceText, ts3.ScriptTarget.Latest, true);
+    for (const specifier of collectReferencedSpecifiers(sourceFile)) {
+      const resolvedModule = ts3.resolveModuleName(specifier, resolvedFile, compilerOptions, ts3.sys).resolvedModule;
+      if (!resolvedModule) {
+        continue;
+      }
+      const normalizedDependency = normalizeResolvedTypeFile(resolvedModule.resolvedFileName);
+      if (!normalizedDependency || isTypescriptLibFile(normalizedDependency)) {
+        continue;
+      }
+      if (!includeDependencies) {
+        const dependencyPackageDir = findPackageDir(normalizedDependency);
+        if (dependencyPackageDir && !rootPackageDirs.has(dependencyPackageDir)) {
+          continue;
+        }
+      }
+      queue.push(normalizedDependency);
+    }
+  }
+  return [...seen].sort((left, right) => left.localeCompare(right));
+}
+async function resolveModuleTypeEntry({
+  compilerOptions,
+  projectRoot,
+  specifier
+}) {
+  const containingFile = path3.join(projectRoot, "__gcc_externs_entry__.ts");
+  const resolution = ts3.resolveModuleName(specifier, containingFile, compilerOptions, ts3.sys).resolvedModule;
+  const resolvedFromTypescript = resolution && normalizeResolvedTypeFile(resolution.resolvedFileName);
+  if (resolvedFromTypescript) {
+    return resolvedFromTypescript;
+  }
+  const require2 = ts3.createModuleResolutionCache(projectRoot, (fileName) => fileName, compilerOptions);
+  const fallbackResolution = ts3.nodeModuleNameResolver(specifier, containingFile, compilerOptions, ts3.sys, require2).resolvedModule;
+  const resolvedFromFallback = fallbackResolution && normalizeResolvedTypeFile(fallbackResolution.resolvedFileName);
+  if (resolvedFromFallback) {
+    return resolvedFromFallback;
+  }
+  throw new Error(`Unable to resolve TypeScript declarations for module ${JSON.stringify(specifier)} from ${projectRoot}.`);
+}
+function normalizeResolvedTypeFile(resolvedFileName) {
+  const normalizedPath = path3.resolve(resolvedFileName);
+  if (isTypeSourceFile(normalizedPath)) {
+    return normalizedPath;
+  }
+  for (const extension of DECLARATION_EXTENSIONS) {
+    const candidate = withTypeExtension(normalizedPath, extension);
+    if (ts3.sys.fileExists(candidate)) {
+      return path3.resolve(candidate);
+    }
+  }
+  return null;
+}
+function withTypeExtension(filePath, nextExtension) {
+  if (filePath.endsWith(".d.ts") || filePath.endsWith(".d.mts") || filePath.endsWith(".d.cts")) {
+    return filePath;
+  }
+  const extension = path3.extname(filePath);
+  return `${filePath.slice(0, filePath.length - extension.length)}${nextExtension}`;
+}
+function collectReferencedSpecifiers(sourceFile) {
+  const specifiers = new Set;
+  const add = (value) => {
+    if (value) {
+      specifiers.add(value);
+    }
+  };
+  const visit = (node) => {
+    if (ts3.isImportDeclaration(node) || ts3.isExportDeclaration(node)) {
+      const moduleSpecifier = node.moduleSpecifier;
+      if (moduleSpecifier && ts3.isStringLiteralLike(moduleSpecifier)) {
+        add(moduleSpecifier.text);
+      }
+    } else if (ts3.isImportEqualsDeclaration(node) && ts3.isExternalModuleReference(node.moduleReference) && node.moduleReference.expression && ts3.isStringLiteralLike(node.moduleReference.expression)) {
+      add(node.moduleReference.expression.text);
+    } else if (ts3.isImportTypeNode(node) && ts3.isLiteralTypeNode(node.argument) && ts3.isStringLiteralLike(node.argument.literal)) {
+      add(node.argument.literal.text);
+    }
+    ts3.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return specifiers;
+}
+
+// src/api/externs/contracts.ts
+import path4 from "path";
+import ts4 from "typescript";
+function collectContracts(program, scannedFiles) {
+  const checker = program.getTypeChecker();
+  const scannedFileSet = new Set(scannedFiles.map((filePath) => path4.resolve(filePath)));
+  const interfaceContracts = new Map;
+  const typeAliasContracts = new Map;
+  const classContracts = new Map;
+  for (const sourceFile of program.getSourceFiles()) {
+    if (!scannedFileSet.has(path4.resolve(sourceFile.fileName))) {
+      continue;
+    }
+    for (const statement of sourceFile.statements) {
+      if (ts4.isInterfaceDeclaration(statement) && isExportedDeclaration(statement)) {
+        const symbol = checker.getSymbolAtLocation(statement.name);
+        if (!symbol) {
+          continue;
+        }
+        interfaceContracts.set(symbol, {
+          extends: getReferencedContractSymbols(statement.heritageClauses?.flatMap((clause) => clause.types) ?? [], checker, scannedFileSet),
+          members: collectTypeElementMembers(statement.members),
+          name: statement.name.text,
+          symbol
+        });
+        continue;
+      }
+      if (ts4.isTypeAliasDeclaration(statement) && isExportedDeclaration(statement)) {
+        const symbol = checker.getSymbolAtLocation(statement.name);
+        if (!symbol) {
+          continue;
+        }
+        const members = collectAliasMembers(statement.type);
+        if (members.size === 0) {
+          continue;
+        }
+        typeAliasContracts.set(symbol, {
+          members,
+          name: statement.name.text,
+          symbol
+        });
+        continue;
+      }
+      if (ts4.isClassDeclaration(statement) && statement.name && isExportedDeclaration(statement)) {
+        const symbol = checker.getSymbolAtLocation(statement.name);
+        if (!symbol) {
+          continue;
+        }
+        const instanceMembers = new Set;
+        const staticMembers = new Set;
+        for (const member of statement.members) {
+          if (ts4.isConstructorDeclaration(member)) {
+            continue;
+          }
+          if (hasNonPublicModifier(member)) {
+            continue;
+          }
+          const memberName = getPropertyNameText(member.name);
+          if (!memberName || !isExternPropertyName(memberName)) {
+            continue;
+          }
+          if (hasStaticModifier(member)) {
+            staticMembers.add(memberName);
+          } else {
+            instanceMembers.add(memberName);
+          }
+        }
+        classContracts.set(symbol, {
+          constructorParamContracts: collectConstructorParamContracts(statement, checker, scannedFileSet),
+          instanceMembers,
+          name: statement.name.text,
+          staticMembers,
+          symbol,
+          usedImplementedContracts: getClassImplementedContracts(statement, checker, scannedFileSet)
+        });
+      }
+    }
+  }
+  return {
+    classContracts,
+    interfaceContracts,
+    scannedFiles: scannedFileSet,
+    typeAliasContracts
+  };
+}
+function collectCandidateExternLines(registry) {
+  const properties = new Set;
+  for (const contract of registry.interfaceContracts.values()) {
+    for (const member of collectStructuralContractMembers(contract.symbol, registry)) {
+      properties.add(member);
+    }
+  }
+  for (const contract of registry.typeAliasContracts.values()) {
+    for (const member of contract.members) {
+      properties.add(member);
+    }
+  }
+  for (const contract of registry.classContracts.values()) {
+    for (const member of contract.instanceMembers) {
+      properties.add(member);
+    }
+  }
+  return new Set([...properties].sort((left, right) => left.localeCompare(right)).map((property) => renderStructuralExternLine(property)));
+}
+function collectBoundaryAwareExternLines({
+  appEntryFiles,
+  compilerOptions,
+  projectRoot,
+  registry
+}) {
+  const usage = analyzeAppUsage({
+    appEntryFiles,
+    compilerOptions,
+    projectRoot,
+    registry
+  });
+  const emittedLines = new Set;
+  for (const symbol of usage.structuralContracts) {
+    for (const member of collectStructuralContractMembers(symbol, registry)) {
+      emittedLines.add(renderStructuralExternLine(member));
+    }
+  }
+  for (const member of usage.structuralMembers) {
+    emittedLines.add(renderStructuralExternLine(member));
+  }
+  return emittedLines;
+}
+function collectBoundaryAwareUsageMemberNames({
+  appEntryFiles,
+  compilerOptions,
+  projectRoot,
+  registry
+}) {
+  const usage = analyzeAppUsage({
+    appEntryFiles,
+    compilerOptions,
+    projectRoot,
+    registry
+  });
+  const members = new Set;
+  for (const symbol of usage.structuralContracts) {
+    for (const member of collectStructuralContractMembers(symbol, registry)) {
+      members.add(member);
+    }
+  }
+  for (const member of usage.structuralMembers) {
+    members.add(member);
+  }
+  for (const names of usage.nominalInstanceMembers.values()) {
+    for (const member of names) {
+      members.add(member);
+    }
+  }
+  for (const names of usage.nominalStaticMembers.values()) {
+    for (const member of names) {
+      members.add(member);
+    }
+  }
+  return members;
+}
+function analyzeAppUsage({
+  appEntryFiles,
+  compilerOptions,
+  projectRoot,
+  registry
+}) {
+  const program = ts4.createProgram(appEntryFiles, {
+    ...compilerOptions,
+    noEmit: true,
+    skipLibCheck: true
+  });
+  const checker = program.getTypeChecker();
+  const usage = {
+    nominalInstanceMembers: new Map,
+    nominalStaticMembers: new Map,
+    structuralContracts: new Set,
+    structuralMembers: new Set
+  };
+  const sourceFiles = program.getSourceFiles().filter((sourceFile) => isProjectAppSourceFile(sourceFile.fileName, projectRoot));
+  for (const sourceFile of sourceFiles) {
+    const importBindings = collectImportedClassBindings(sourceFile, registry);
+    const localBindings = new Map;
+    const visit = (node) => {
+      if (ts4.isClassDeclaration(node)) {
+        const fieldBindings = collectClassFieldBindings(node, importBindings);
+        const classVisit = (child) => {
+          if (ts4.isNewExpression(child)) {
+            analyzeNewExpression(child, checker, registry, usage, importBindings, localBindings);
+          } else if (ts4.isPropertyAccessExpression(child)) {
+            analyzePropertyAccess(child, checker, registry, usage, importBindings, localBindings, fieldBindings);
+          } else if (ts4.isElementAccessExpression(child) && ts4.isStringLiteral(child.argumentExpression)) {
+            analyzeElementAccess(child, checker, registry, usage, importBindings, localBindings, fieldBindings);
+          } else if (ts4.isVariableDeclaration(child)) {
+            registerVariableBinding(child, checker, registry, importBindings, localBindings);
+          }
+          ts4.forEachChild(child, classVisit);
+        };
+        ts4.forEachChild(node, classVisit);
+        return;
+      }
+      if (ts4.isVariableDeclaration(node)) {
+        registerVariableBinding(node, checker, registry, importBindings, localBindings);
+      } else if (ts4.isNewExpression(node)) {
+        analyzeNewExpression(node, checker, registry, usage, importBindings, localBindings);
+      } else if (ts4.isPropertyAccessExpression(node)) {
+        analyzePropertyAccess(node, checker, registry, usage, importBindings, localBindings, new Map);
+      } else if (ts4.isElementAccessExpression(node) && ts4.isStringLiteral(node.argumentExpression)) {
+        analyzeElementAccess(node, checker, registry, usage, importBindings, localBindings, new Map);
+      }
+      ts4.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
+  return usage;
+}
+function analyzeNewExpression(node, checker, registry, usage, importBindings, localBindings) {
+  const calleeSymbol = resolveBoundClassSymbol(node.expression, importBindings, localBindings, new Map) ?? resolveValueSymbol(node.expression, checker) ?? resolveTypeSymbol(checker.getTypeAtLocation(node.expression), checker);
+  if (!calleeSymbol) {
+    return;
+  }
+  const classContract = registry.classContracts.get(calleeSymbol);
+  if (!classContract) {
+    return;
+  }
+  for (const [
+    index,
+    contractSymbols
+  ] of classContract.constructorParamContracts.entries()) {
+    const argument = node.arguments?.[index];
+    if (!argument || !isStructuralBoundaryArgument(argument)) {
+      continue;
+    }
+    for (const symbol of contractSymbols) {
+      usage.structuralContracts.add(symbol);
+    }
+  }
+}
+function analyzePropertyAccess(node, checker, registry, usage, importBindings, localBindings, fieldBindings) {
+  const propertyName = node.name.text;
+  if (!isExternPropertyName(propertyName)) {
+    return;
+  }
+  if (ts4.isIdentifier(node.expression) && importBindings.has(node.expression.text)) {
+    const targetSymbol = importBindings.get(node.expression.text);
+    if (targetSymbol) {
+      const classContract = registry.classContracts.get(targetSymbol);
+      if (classContract && classContract.staticMembers.has(propertyName)) {
+        addMapSetValue(usage.nominalStaticMembers, targetSymbol, propertyName);
+        return;
+      }
+    }
+  }
+  const boundInstanceSymbol = resolveBoundClassSymbol(node.expression, importBindings, localBindings, fieldBindings);
+  if (boundInstanceSymbol && registry.classContracts.has(boundInstanceSymbol)) {
+    addMapSetValue(usage.nominalInstanceMembers, boundInstanceSymbol, propertyName);
+    return;
+  }
+  const typeSymbol = resolveTypeSymbol(checker.getTypeAtLocation(node.expression), checker);
+  if (!typeSymbol) {
+    return;
+  }
+  if (registry.classContracts.has(typeSymbol)) {
+    addMapSetValue(usage.nominalInstanceMembers, typeSymbol, propertyName);
+    return;
+  }
+  if (registry.interfaceContracts.has(typeSymbol) || registry.typeAliasContracts.has(typeSymbol)) {
+    usage.structuralMembers.add(propertyName);
+  }
+}
+function analyzeElementAccess(node, checker, registry, usage, importBindings, localBindings, fieldBindings) {
+  const argumentExpression = node.argumentExpression;
+  if (!ts4.isStringLiteral(argumentExpression)) {
+    return;
+  }
+  const propertyName = argumentExpression.text;
+  if (!isExternPropertyName(propertyName)) {
+    return;
+  }
+  const boundSymbol = resolveBoundClassSymbol(node.expression, importBindings, localBindings, fieldBindings);
+  if (boundSymbol && registry.classContracts.has(boundSymbol)) {
+    addMapSetValue(usage.nominalInstanceMembers, boundSymbol, propertyName);
+    return;
+  }
+  const typeSymbol = resolveTypeSymbol(checker.getTypeAtLocation(node.expression), checker);
+  if (!typeSymbol) {
+    return;
+  }
+  if (registry.classContracts.has(typeSymbol)) {
+    addMapSetValue(usage.nominalInstanceMembers, typeSymbol, propertyName);
+    return;
+  }
+  if (registry.interfaceContracts.has(typeSymbol) || registry.typeAliasContracts.has(typeSymbol)) {
+    usage.structuralMembers.add(propertyName);
+  }
+}
+function collectImportedClassBindings(sourceFile, registry) {
+  const bindings = new Map;
+  for (const statement of sourceFile.statements) {
+    if (!ts4.isImportDeclaration(statement) || !statement.importClause) {
+      continue;
+    }
+    const clause = statement.importClause;
+    if (clause.name) {
+      const symbol = findClassContractByName(clause.name.text, registry);
+      if (symbol) {
+        bindings.set(clause.name.text, symbol);
+      }
+    }
+    const namedBindings = clause.namedBindings;
+    if (!namedBindings || !ts4.isNamedImports(namedBindings)) {
+      continue;
+    }
+    for (const specifier of namedBindings.elements) {
+      const importedName = specifier.propertyName?.text ?? specifier.name.text;
+      const symbol = findClassContractByName(importedName, registry);
+      if (symbol) {
+        bindings.set(specifier.name.text, symbol);
+      }
+    }
+  }
+  return bindings;
+}
+function collectClassFieldBindings(declaration, importBindings) {
+  const bindings = new Map;
+  for (const member of declaration.members) {
+    if (!ts4.isPropertyDeclaration(member) || !member.initializer || !ts4.isIdentifier(member.name) || !ts4.isNewExpression(member.initializer) || !ts4.isIdentifier(member.initializer.expression)) {
+      continue;
+    }
+    const classSymbol = importBindings.get(member.initializer.expression.text);
+    if (classSymbol) {
+      bindings.set(member.name.text, classSymbol);
+    }
+  }
+  return bindings;
+}
+function registerVariableBinding(declaration, checker, registry, importBindings, localBindings) {
+  if (!ts4.isIdentifier(declaration.name) || !declaration.initializer) {
+    return;
+  }
+  const initializer = declaration.initializer;
+  const resolvedTypeSymbol = resolveTypeSymbol(checker.getTypeAtLocation(initializer), checker);
+  const classSymbol = (ts4.isNewExpression(initializer) && ts4.isIdentifier(initializer.expression) ? importBindings.get(initializer.expression.text) : undefined) ?? (resolvedTypeSymbol ? findClassContractByName(resolvedTypeSymbol.getName(), registry) : undefined);
+  if (!classSymbol) {
+    return;
+  }
+  localBindings.set(declaration.name.text, classSymbol);
+}
+function resolveBoundClassSymbol(expression, importBindings, localBindings, fieldBindings) {
+  if (ts4.isIdentifier(expression)) {
+    return localBindings.get(expression.text) ?? importBindings.get(expression.text) ?? null;
+  }
+  if (ts4.isPropertyAccessExpression(expression) && expression.expression.kind === ts4.SyntaxKind.ThisKeyword) {
+    return fieldBindings.get(expression.name.text) ?? null;
+  }
+  return null;
+}
+function findClassContractByName(name, registry) {
+  for (const [symbol, contract] of registry.classContracts) {
+    if (contract.name === name) {
+      return symbol;
+    }
+  }
+  return null;
+}
+function collectTypeElementMembers(members) {
+  const collected = new Set;
+  for (const member of members) {
+    if (ts4.isPropertySignature(member) || ts4.isMethodSignature(member) || ts4.isGetAccessorDeclaration(member) || ts4.isSetAccessorDeclaration(member)) {
+      const memberName = getPropertyNameText(member.name);
+      if (memberName && isExternPropertyName(memberName)) {
+        collected.add(memberName);
+      }
+    }
+  }
+  return collected;
+}
+function collectAliasMembers(typeNode) {
+  if (ts4.isTypeLiteralNode(typeNode)) {
+    return collectTypeElementMembers(typeNode.members);
+  }
+  if (ts4.isIntersectionTypeNode(typeNode)) {
+    const members = new Set;
+    for (const child of typeNode.types) {
+      for (const member of collectAliasMembers(child)) {
+        members.add(member);
+      }
+    }
+    return members;
+  }
+  return new Set;
+}
+function getReferencedContractSymbols(typeNodes, checker, scannedFiles) {
+  const symbols = new Set;
+  for (const typeNode of typeNodes) {
+    for (const symbol of getContractSymbolsFromTypeNode(typeNode, checker, scannedFiles)) {
+      symbols.add(symbol);
+    }
+  }
+  return symbols;
+}
+function getContractSymbolsFromTypeNode(typeNode, checker, scannedFiles) {
+  if (ts4.isExpressionWithTypeArguments(typeNode)) {
+    const symbol = resolveAliasedSymbol(checker.getSymbolAtLocation(typeNode.expression), checker);
+    return symbol && isScannedDeclarationSymbol(symbol, scannedFiles) ? new Set([symbol]) : new Set;
+  }
+  if (ts4.isParenthesizedTypeNode(typeNode)) {
+    return getContractSymbolsFromTypeNode(typeNode.type, checker, scannedFiles);
+  }
+  if (ts4.isIntersectionTypeNode(typeNode) || ts4.isUnionTypeNode(typeNode)) {
+    const symbols = new Set;
+    for (const child of typeNode.types) {
+      for (const symbol of getContractSymbolsFromTypeNode(child, checker, scannedFiles)) {
+        symbols.add(symbol);
+      }
+    }
+    return symbols;
+  }
+  if (ts4.isTypeReferenceNode(typeNode)) {
+    return getContractSymbolsFromEntityName(typeNode.typeName, checker, scannedFiles);
+  }
+  return new Set;
+}
+function getContractSymbolsFromEntityName(entityName, checker, scannedFiles) {
+  const symbol = ts4.isIdentifier(entityName) ? checker.getSymbolAtLocation(entityName) : checker.getSymbolAtLocation(entityName.right);
+  const resolved = resolveAliasedSymbol(symbol, checker);
+  if (!resolved) {
+    return new Set;
+  }
+  return isScannedDeclarationSymbol(resolved, scannedFiles) ? new Set([resolved]) : new Set;
+}
+function collectConstructorParamContracts(statement, checker, scannedFiles) {
+  const constructorDeclaration = statement.members.find((member) => ts4.isConstructorDeclaration(member));
+  if (!constructorDeclaration || !ts4.isConstructorDeclaration(constructorDeclaration)) {
+    return [];
+  }
+  return constructorDeclaration.parameters.map((parameter) => parameter.type ? getContractSymbolsFromTypeNode(parameter.type, checker, scannedFiles) : new Set);
+}
+function getClassImplementedContracts(statement, checker, scannedFiles, seen = new Set) {
+  const contracts = new Set;
+  const classSymbol = statement.name && checker.getSymbolAtLocation(statement.name);
+  const classKey = classSymbol ? symbolCacheKey(classSymbol) : "";
+  if (classKey && seen.has(classKey)) {
+    return contracts;
+  }
+  if (classKey) {
+    seen.add(classKey);
+  }
+  for (const clause of statement.heritageClauses ?? []) {
+    if (clause.token === ts4.SyntaxKind.ImplementsKeyword) {
+      for (const typeNode of clause.types) {
+        for (const symbol of getContractSymbolsFromTypeNode(typeNode, checker, scannedFiles)) {
+          contracts.add(symbol);
+        }
+      }
+      continue;
+    }
+    if (clause.token === ts4.SyntaxKind.ExtendsKeyword) {
+      for (const typeNode of clause.types) {
+        const baseSymbol = resolveAliasedSymbol(checker.getSymbolAtLocation(typeNode.expression), checker);
+        if (!baseSymbol) {
+          continue;
+        }
+        const declaration = baseSymbol.declarations?.find((item) => ts4.isClassDeclaration(item));
+        if (declaration && ts4.isClassDeclaration(declaration)) {
+          for (const symbol of getClassImplementedContracts(declaration, checker, scannedFiles, seen)) {
+            contracts.add(symbol);
+          }
+        }
+      }
+    }
+  }
+  return contracts;
+}
+function isStructuralBoundaryArgument(expression) {
+  return !(ts4.isArrayLiteralExpression(expression) || ts4.isObjectLiteralExpression(expression) || ts4.isStringLiteralLike(expression) || ts4.isNumericLiteral(expression) || expression.kind === ts4.SyntaxKind.TrueKeyword || expression.kind === ts4.SyntaxKind.FalseKeyword || expression.kind === ts4.SyntaxKind.NullKeyword);
+}
+
+// src/api/externs/runtime-analysis.ts
+import fs3 from "fs";
+import ts5 from "typescript";
+async function analyzeRuntimeUsage(runtimeEntryFiles) {
+  const hazards = {
+    accessedMembers: new Set,
+    definedMembers: new Set
+  };
+  for (const runtimeEntryFile of runtimeEntryFiles) {
+    const sourceText = await fs3.promises.readFile(runtimeEntryFile, "utf8");
+    const sourceFile = ts5.createSourceFile(runtimeEntryFile, sourceText, ts5.ScriptTarget.Latest, true, getScriptKindForFile(runtimeEntryFile));
+    const knownConstructors = collectKnownConstructorBindings(sourceFile);
+    const visit = (node) => {
+      if (ts5.isPropertyAccessExpression(node)) {
+        if (isRelevantRuntimeTarget(node.expression, knownConstructors) && isRuntimeExternPropertyName(node.name.text)) {
+          hazards.accessedMembers.add(node.name.text);
+        }
+      } else if (ts5.isBinaryExpression(node) && isAssignmentOperator(node.operatorToken.kind)) {
+        collectRuntimeAssignmentMembers(node.left, knownConstructors, hazards);
+      } else if (ts5.isCallExpression(node)) {
+        collectRuntimeCallMembers(node, knownConstructors, hazards);
+      }
+      ts5.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
+  return hazards;
+}
+function collectKnownConstructorBindings(sourceFile) {
+  const knownConstructors = new Set;
+  const visit = (node) => {
+    if ((ts5.isClassDeclaration(node) || ts5.isFunctionDeclaration(node)) && node.name) {
+      knownConstructors.add(node.name.text);
+    } else if (ts5.isVariableDeclaration(node) && ts5.isIdentifier(node.name) && node.initializer && (ts5.isClassExpression(node.initializer) || ts5.isFunctionExpression(node.initializer) || ts5.isArrowFunction(node.initializer))) {
+      knownConstructors.add(node.name.text);
+    }
+    ts5.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return knownConstructors;
+}
+function collectRuntimeAssignmentMembers(target, knownConstructors, hazards) {
+  if (ts5.isPropertyAccessExpression(target)) {
+    if (isRelevantRuntimeTarget(target.expression, knownConstructors)) {
+      if (isRuntimeExternPropertyName(target.name.text)) {
+        hazards.accessedMembers.add(target.name.text);
+      }
+    }
+    return;
+  }
+  if (ts5.isElementAccessExpression(target)) {
+    const memberName = getStringLiteralMemberName(target.argumentExpression);
+    if (memberName && isRelevantRuntimeTarget(target.expression, knownConstructors) && isRuntimeExternPropertyName(memberName)) {
+      hazards.definedMembers.add(memberName);
+    }
+  }
+}
+function collectRuntimeCallMembers(node, knownConstructors, hazards) {
+  const callee = node.expression;
+  if (ts5.isIdentifier(callee) && callee.text === "__publicField" && node.arguments.length >= 2) {
+    const memberName2 = getStringLiteralMemberName(node.arguments[1]);
+    if (memberName2 && isRelevantRuntimeTarget(node.arguments[0], knownConstructors) && isRuntimeExternPropertyName(memberName2)) {
+      hazards.definedMembers.add(memberName2);
+    }
+    return;
+  }
+  if (!isObjectDefinePropertyCall(callee) || node.arguments.length < 2) {
+    return;
+  }
+  const memberName = getStringLiteralMemberName(node.arguments[1]);
+  if (!memberName || !isRuntimeExternPropertyName(memberName)) {
+    return;
+  }
+  const target = node.arguments[0];
+  if (isRelevantRuntimeTarget(target, knownConstructors)) {
+    hazards.definedMembers.add(memberName);
+  }
+}
+function isRelevantRuntimeTarget(expression, knownConstructors) {
+  return isThisOrSuperExpression(expression) || isKnownPrototypeExpression(expression, knownConstructors) || isKnownConstructorExpression(expression, knownConstructors);
+}
+
+// src/api/externs/render.ts
+function renderCandidateExterns({
+  modules,
+  registry,
+  scannedFiles
+}) {
+  return renderExternText({
+    emittedLines: collectCandidateExternLines(registry),
+    mode: "candidates",
+    modules,
+    scannedFiles
+  });
+}
+function renderBoundaryAwareExterns({
+  appEntryFiles,
+  compilerOptions,
+  modules,
+  projectRoot,
+  registry,
+  scannedFiles
+}) {
+  return renderExternText({
+    emittedLines: collectBoundaryAwareExternLines({
+      appEntryFiles,
+      compilerOptions,
+      projectRoot,
+      registry
+    }),
+    mode: "boundary-aware",
+    modules,
+    scannedFiles
+  });
+}
+async function renderRuntimeAwareExterns({
+  appEntryFiles,
+  compilerOptions,
+  modules,
+  projectRoot,
+  registry,
+  runtimeEntryFiles,
+  scannedFiles
+}) {
+  const appUsageMembers = appEntryFiles.length > 0 ? collectBoundaryAwareUsageMemberNames({
+    appEntryFiles,
+    compilerOptions,
+    projectRoot,
+    registry
+  }) : new Set;
+  const runtimeUsage = await analyzeRuntimeUsage(runtimeEntryFiles);
+  const emittedLines = new Set;
+  for (const member of runtimeUsage.definedMembers) {
+    if (runtimeUsage.accessedMembers.has(member) || appUsageMembers.has(member)) {
+      emittedLines.add(renderStructuralExternLine(member));
+    }
+  }
+  return renderExternText({
+    emittedLines,
+    mode: "runtime-aware",
+    modules,
+    runtimeEntryFiles,
+    scannedFiles
+  });
+}
+function renderExternText({
+  emittedLines,
+  mode,
+  modules,
+  runtimeEntryFiles = [],
+  scannedFiles
+}) {
+  const scannedSummary = mode === "runtime-aware" ? `// Scanned ${scannedFiles.length} type file${scannedFiles.length === 1 ? "" : "s"} and ${runtimeEntryFiles.length} runtime file${runtimeEntryFiles.length === 1 ? "" : "s"}.` : `// Scanned ${scannedFiles.length} type file${scannedFiles.length === 1 ? "" : "s"}.`;
+  return [
+    "/** @externs */",
+    `// Generated by gcc-ts-bundler for: ${modules.join(", ")}`,
+    `// Mode: ${mode}`,
+    scannedSummary,
+    "",
+    ...[...emittedLines].sort((left, right) => left.localeCompare(right)),
+    ""
+  ].join(`
+`);
+}
+
+// src/api/externs.ts
+async function generateExterns(options) {
+  if (options.modules.length === 0) {
+    throw new Error("generateExterns requires at least one module specifier.");
+  }
+  const mode = options.mode ?? "boundary-aware";
+  const projectRoot = path5.resolve(options.projectRoot ?? process.cwd());
+  const srcDir = path5.resolve(projectRoot, options.srcDir ?? ".");
+  const tsConfigPath = options.tsConfigPath && path5.resolve(projectRoot, options.tsConfigPath);
+  const compilerOptions = await loadExternCompilerOptions({
+    projectRoot,
+    tsConfigPath
+  });
+  const includeDependencies = options.includeDependencies ?? true;
+  if (mode === "boundary-aware" && (options.appEntryFiles?.length ?? 0) === 0) {
+    throw new Error("generateExterns in boundary-aware mode requires appEntryFiles.");
+  }
+  if (mode === "runtime-aware" && (options.runtimeEntryFiles?.length ?? 0) === 0) {
+    throw new Error("generateExterns in runtime-aware mode requires runtimeEntryFiles.");
+  }
+  const typeEntryFiles = await resolveModuleTypeEntries({
+    compilerOptions,
+    projectRoot,
+    specifiers: options.modules,
+    tolerateMissing: mode === "runtime-aware"
+  });
+  const scannedFiles = typeEntryFiles.length === 0 ? [] : await collectReachableTypeFiles({
+    compilerOptions,
+    entryFiles: typeEntryFiles,
+    includeDependencies
+  });
+  const registry = scannedFiles.length === 0 ? createEmptyContractRegistry() : collectContracts(ts6.createProgram(scannedFiles, {
+    ...compilerOptions,
+    noEmit: true,
+    skipLibCheck: true
+  }), scannedFiles);
+  const text = mode === "candidates" ? renderCandidateExterns({
+    modules: options.modules,
+    registry,
+    scannedFiles
+  }) : mode === "boundary-aware" ? renderBoundaryAwareExterns({
+    appEntryFiles: resolveAnalysisEntryFiles({
+      entryFiles: options.appEntryFiles ?? [],
+      projectRoot,
+      srcDir
+    }),
+    compilerOptions,
+    modules: options.modules,
+    projectRoot,
+    registry,
+    scannedFiles
+  }) : await renderRuntimeAwareExterns({
+    appEntryFiles: resolveAnalysisEntryFiles({
+      entryFiles: options.appEntryFiles ?? [],
+      projectRoot,
+      srcDir
+    }),
+    compilerOptions,
+    modules: options.modules,
+    projectRoot,
+    registry,
+    runtimeEntryFiles: resolveAnalysisEntryFiles({
+      entryFiles: options.runtimeEntryFiles ?? [],
+      projectRoot,
+      srcDir
+    }),
+    scannedFiles
+  });
+  const outputFile = options.outputFile && path5.resolve(projectRoot, options.outputFile);
+  if (outputFile) {
+    await fs4.promises.mkdir(path5.dirname(outputFile), { recursive: true });
+    await fs4.promises.writeFile(outputFile, text, "utf8");
+  }
+  return {
+    mode,
+    modules: [...options.modules],
+    outputFile,
+    scannedFiles,
+    text
+  };
+}
 
 // src/cli/parse-options.ts
 init_types();

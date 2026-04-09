@@ -3,6 +3,7 @@ import ts from "typescript";
 import { analyzeRuntimeUsage } from "./runtime-analysis";
 import {
   collectBoundaryAwareExternLines,
+  collectBoundaryAwareUsageMemberNames,
   collectCandidateExternLines,
 } from "./contracts";
 import { ContractRegistry, renderStructuralExternLine } from "./shared";
@@ -71,18 +72,24 @@ export async function renderRuntimeAwareExterns({
   runtimeEntryFiles: string[];
   scannedFiles: string[];
 }) {
-  const emittedLines =
+  const appUsageMembers =
     appEntryFiles.length > 0
-      ? collectBoundaryAwareExternLines({
+      ? collectBoundaryAwareUsageMemberNames({
           appEntryFiles,
           compilerOptions,
           projectRoot,
           registry,
         })
-      : collectCandidateExternLines(registry);
-  const runtimeMembers = await analyzeRuntimeUsage(runtimeEntryFiles);
-  for (const member of runtimeMembers) {
-    emittedLines.add(renderStructuralExternLine(member));
+      : new Set<string>();
+  const runtimeUsage = await analyzeRuntimeUsage(runtimeEntryFiles);
+  const emittedLines = new Set<string>();
+  for (const member of runtimeUsage.definedMembers) {
+    if (
+      runtimeUsage.accessedMembers.has(member) ||
+      appUsageMembers.has(member)
+    ) {
+      emittedLines.add(renderStructuralExternLine(member));
+    }
   }
 
   return renderExternText({
