@@ -983,11 +983,17 @@ fn bundler_runtime_rewrites_namespace_member_reads_to_numeric_slots() {
 
     assert!(transformed.contains("feature[1]()"), "{transformed}");
     assert!(!transformed.contains("renderMessage"), "{transformed}");
-    assert!(transformed.contains("__exports[0]"), "{transformed}");
+    assert!(transformed.contains("__exports[0]="), "{transformed}");
     assert!(
         !transformed.contains("__exports[\"default\"]"),
         "{transformed}"
     );
+    assert!(transformed.contains("__register("), "{transformed}");
+    assert!(
+        transformed.contains("function(__require, __exports, __dynamicImport, __preloadDynamicImport, __live)"),
+        "{transformed}"
+    );
+    assert!(!transformed.contains(", []"), "{transformed}");
 }
 
 #[test]
@@ -1152,6 +1158,117 @@ fn bundler_runtime_keeps_namespace_import_bindings_before_top_level_destructures
         .expect("namespace destructure");
 
     assert!(import_index < destructure_index, "{transformed}");
+}
+
+#[test]
+fn bundler_runtime_keeps_named_imports_live_instead_of_snapshotting_slots() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("gcc-ts-bundler-live-imports-{unique}"));
+    let src_dir = root.join("src");
+    let feature_file = src_dir.join("feature.ts");
+    let main_file = src_dir.join("main.ts");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(&feature_file, "export let documentRef;\n").unwrap();
+    fs::write(
+        &main_file,
+        "import { documentRef } from './feature';\nexport default function setTitle() { documentRef.title = 'ok'; }\n",
+    )
+    .unwrap();
+
+    let feature_module_id = to_goog_module_id(&feature_file, &root);
+    let main_module_id = to_goog_module_id(&main_file, &root);
+    let transformed = GLOBALS
+        .set(&Globals::new(), || {
+            transform_source_file(
+                &main_file,
+                &super::TranspileContext {
+                    bundler_module_slots: HashMap::from([
+                        (
+                            feature_module_id,
+                            super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
+                                "documentRef".to_string(),
+                            ])),
+                        ),
+                        (
+                            main_module_id,
+                            super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
+                                "default".to_string(),
+                            ])),
+                        ),
+                    ]),
+                    bundler_runtime_logical_ids: HashMap::new(),
+                    chunk_mode: super::ChunkMode::BundlerRuntime,
+                    commonjs_specifiers: HashSet::new(),
+                    file_metadata: HashMap::new(),
+                    global_property_names: HashSet::new(),
+                    preserved_property_names: HashSet::new(),
+                    lazy_imports_by_file: HashMap::new(),
+                    package_aliases: Vec::new(),
+                    static_property_names: HashSet::new(),
+                    workspace_dir: root.clone(),
+                },
+            )
+        })
+        .unwrap();
+
+    assert!(
+        transformed.contains("const __gcc_import_0 = __require("),
+        "{transformed}"
+    );
+    assert!(
+        transformed.contains("__gcc_import_0[0].title = 'ok';"),
+        "{transformed}"
+    );
+    assert!(!transformed.contains("const documentRef ="), "{transformed}");
+}
+
+#[test]
+fn bundler_runtime_keeps_exported_let_bindings_live() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("gcc-ts-bundler-live-export-{unique}"));
+    let src_dir = root.join("src");
+    let main_file = src_dir.join("main.ts");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(
+        &main_file,
+        "export let count = 0;\ncount += 1;\n",
+    )
+    .unwrap();
+
+    let main_module_id = to_goog_module_id(&main_file, &root);
+    let transformed = GLOBALS
+        .set(&Globals::new(), || {
+            transform_source_file(
+                &main_file,
+                &super::TranspileContext {
+                    bundler_module_slots: HashMap::from([(
+                        main_module_id,
+                        super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
+                            "count".to_string(),
+                        ])),
+                    )]),
+                    bundler_runtime_logical_ids: HashMap::new(),
+                    chunk_mode: super::ChunkMode::BundlerRuntime,
+                    commonjs_specifiers: HashSet::new(),
+                    file_metadata: HashMap::new(),
+                    global_property_names: HashSet::new(),
+                    preserved_property_names: HashSet::new(),
+                    lazy_imports_by_file: HashMap::new(),
+                    package_aliases: Vec::new(),
+                    static_property_names: HashSet::new(),
+                    workspace_dir: root.clone(),
+                },
+            )
+        })
+        .unwrap();
+
+    assert!(transformed.contains("__live(__exports,0,function(){return count;});"), "{transformed}");
 }
 
 #[test]

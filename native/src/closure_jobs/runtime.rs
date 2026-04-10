@@ -71,23 +71,17 @@ pub(super) fn render_bundler_runtime_lazy_chunk(
     module_text: &str,
     debug_runtime: bool,
 ) -> String {
-    [
-        "(function(g){".to_string(),
-        if debug_runtime {
-            "if(!g)throw Error(\"base chunk missing\");".to_string()
-        } else {
-            "if(!g)throw Error(\"b\");".to_string()
-        },
-        "var __register=g.r;".to_string(),
-        module_text.to_string(),
-        format!("g.l({chunk_id:?});"),
-        format!(
-            "}}).call(this,globalThis.{runtime_key});",
-            runtime_key = BUNDLER_RUNTIME_GLOBAL
-        ),
-        String::new(),
-    ]
-    .join("\n")
+    let fallback_error = if debug_runtime {
+        "\"base chunk missing\""
+    } else {
+        "\"b\""
+    };
+    format!(
+        "(globalThis.{runtime_key}||{{h:function(){{throw Error({fallback_error});}}}}).h(function(__register){{\n{}\n}},{chunk_id:?});\n",
+        indent_block(module_text),
+        runtime_key = BUNDLER_RUNTIME_GLOBAL,
+        fallback_error = fallback_error,
+    )
 }
 
 pub(super) fn render_bundler_runtime_preamble(
@@ -142,8 +136,10 @@ pub(super) fn render_bundler_runtime_preamble(
         "function g(a){var b=r.d[a];if(b)return b;b={};b.p=new Promise(function(c,d){b.r=c;b.j=d});r.d[a]=b;return b;}".to_string(),
         "r.l=function(a){r.s[a]=1;var b=r.d[a];if(b){b.r();delete r.d[a];}};".to_string(),
         "function h(a,b){r.s[a]=2;var c=r.d[a];if(c){c.j(b);delete r.d[a];}}".to_string(),
-        "r.r=function(a,b,c){r.f[a]=c;};".to_string(),
-        format!("r.q=function(a){{if(Object.prototype.hasOwnProperty.call(r.c,a))return r.c[a];var b=r.f[a];if(!b)throw Error({missing_module_error});var c=[];r.c[a]=c;b(r.q,c,r.j,r.x);return c;}};"),
+        "r.r=function(a,b){r.f[a]=b;};".to_string(),
+        "r.g=function(a,b,c){Object.defineProperty(a,b,{configurable:!0,enumerable:!0,get:c});};".to_string(),
+        "r.h=function(a,b){a(r.r);r.l(b);};".to_string(),
+        format!("r.q=function(a){{if(Object.prototype.hasOwnProperty.call(r.c,a))return r.c[a];var b=r.f[a];if(!b)throw Error({missing_module_error});var c=[];r.c[a]=c;b(r.q,c,r.j,r.x,r.g);return c;}};"),
         format!("function p(a,b){{return new Promise(function(c,d){{var e=global.document.createElement(\"script\");e.async=true;e.src=b;e.onload=function(){{c();}};e.onerror=function(){{d(Error({script_error}));}};(global.document.head||global.document.documentElement).appendChild(e);}});}}"),
         format!("function w(a,b){{return Promise.resolve(global.fetch(b)).then(function(c){{if(!c.ok)throw Error({fetch_error});return c.text();}}).then(function(c){{{fetch_eval}}});}}"),
         "function t(){return r.o===1?1:r.o===2?2:global.document?1:2;}".to_string(),
@@ -159,4 +155,15 @@ pub(super) fn render_bundler_runtime_preamble(
         String::new(),
     ]
     .join("\n"))
+}
+
+fn indent_block(source: &str) -> String {
+    if source.is_empty() {
+        return String::new();
+    }
+    source
+        .lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }

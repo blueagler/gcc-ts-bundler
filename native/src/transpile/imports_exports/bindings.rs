@@ -1,8 +1,23 @@
 use super::*;
+use swc_core::ecma::ast::{ComputedPropName, KeyValueProp, Prop};
 
 pub(super) struct NamedExportBinding {
     pub(super) export_name: String,
     pub(super) local_name: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct ImportBindingRewrite {
+    pub(crate) binding_id: Id,
+    pub(crate) local_name: String,
+    pub(crate) replacement: Box<Expr>,
+    pub(crate) replacement_code: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BundlerExportSlotMode {
+    Live,
+    Static,
 }
 
 pub(super) fn bind_import_specifiers(
@@ -35,26 +50,28 @@ pub(super) fn bind_import_specifiers(
         .collect()
 }
 
-pub(super) fn bind_bundler_import_specifiers(
+pub(super) fn plan_bundler_import_specifiers(
     local_name: &str,
     specifiers: &[&ImportSpecifier],
     target_slots: &BundlerModuleSlots,
-) -> std::result::Result<Vec<String>, String> {
-    let mut lines = Vec::with_capacity(specifiers.len());
+) -> std::result::Result<(Vec<String>, Vec<ImportBindingRewrite>), String> {
+    let mut lines = Vec::new();
+    let mut rewrites = Vec::new();
     for specifier in specifiers {
-        let line = match specifier {
+        match specifier {
             ImportSpecifier::Default(default_specifier) => {
                 let slot = target_slots
                     .slot_for("default")
                     .ok_or_else(|| "Missing bundler-runtime default export slot".to_string())?;
-                format!(
-                    "const {} = {};",
-                    default_specifier.local.sym,
-                    stable_slot_access(local_name, slot)
-                )
+                rewrites.push(ImportBindingRewrite {
+                    binding_id: default_specifier.local.to_id(),
+                    local_name: default_specifier.local.sym.to_string(),
+                    replacement: Box::new(slot_access_expr(local_name, slot)),
+                    replacement_code: stable_slot_access(local_name, slot),
+                });
             }
             ImportSpecifier::Namespace(namespace_specifier) => {
-                format!("const {} = {};", namespace_specifier.local.sym, local_name)
+                lines.push(format!("const {} = {};", namespace_specifier.local.sym, local_name));
             }
             ImportSpecifier::Named(named_specifier) => {
                 let imported_name = named_specifier
@@ -65,16 +82,16 @@ pub(super) fn bind_bundler_import_specifiers(
                 let slot = target_slots.slot_for(&imported_name).ok_or_else(|| {
                     format!("Missing bundler-runtime export slot for imported name {imported_name}")
                 })?;
-                format!(
-                    "const {} = {};",
-                    named_specifier.local.sym,
-                    stable_slot_access(local_name, slot)
-                )
+                rewrites.push(ImportBindingRewrite {
+                    binding_id: named_specifier.local.to_id(),
+                    local_name: named_specifier.local.sym.to_string(),
+                    replacement: Box::new(slot_access_expr(local_name, slot)),
+                    replacement_code: stable_slot_access(local_name, slot),
+                });
             }
-        };
-        lines.push(line);
+        }
     }
-    Ok(lines)
+    Ok((lines, rewrites))
 }
 
 pub(super) fn collect_named_export_bindings(
@@ -172,8 +189,70 @@ pub(crate) fn stable_slot_access(object_name: &str, slot: usize) -> String {
     format!("{object_name}[{slot}]")
 }
 
-pub(crate) fn render_module_export_slot(slot: usize, value_expression: &str) -> String {
-    format!("__exports[{slot}] = {value_expression};")
+fn slot_access_expr(object_name: &str, slot: usize) -> Expr {
+    Expr::Member(MemberExpr {
+        span: Default::default(),
+        obj: Box::new(Expr::Ident(create_ident(object_name))),
+        prop: MemberProp::Computed(ComputedPropName {
+            span: Default::default(),
+            expr: Box::new(Expr::Lit(Lit::Num(swc_core::ecma::ast::Number {
+                span: Default::default(),
+                value: slot as f64,
+                raw: None,
+            }))),
+        }),
+    })
+}
+
+pub(crate) fn apply_import_binding_rewrites(module: &mut Module, rewrites: &[ImportBindingRewrite]) {
+    if rewrites.is_empty() {
+        return;
+    }
+    let rewrite_map = rewrites
+        .iter()
+        .map(|rewrite| (rewrite.binding_id.clone(), rewrite.replacement.clone()))
+        .collect::<HashMap<_, _>>();
+    module.visit_mut_with(&mut ImportBindingRewriteVisitor { rewrite_map });
+}
+
+struct ImportBindingRewriteVisitor {
+    rewrite_map: HashMap<Id, Box<Expr>>,
+}
+
+impl VisitMut for ImportBindingRewriteVisitor {
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        expr.visit_mut_children_with(self);
+        let Expr::Ident(ident) = expr else {
+            return;
+        };
+        let Some(replacement) = self.rewrite_map.get(&ident.to_id()) else {
+            return;
+        };
+        *expr = *replacement.clone();
+    }
+
+    fn visit_mut_prop(&mut self, prop: &mut Prop) {
+        if let Prop::Shorthand(ident) = prop {
+            if let Some(replacement) = self.rewrite_map.get(&ident.to_id()) {
+                *prop = Prop::KeyValue(KeyValueProp {
+                    key: PropName::Ident(ident.clone().into()),
+                    value: replacement.clone(),
+                });
+                return;
+            }
+        }
+        prop.visit_mut_children_with(self);
+    }
+}
+
+pub(crate) fn render_live_export_slot(slot: usize, value_expression: &str) -> String {
+    format!(
+        "__live(__exports,{slot},function(){{return {value_expression};}});"
+    )
+}
+
+pub(crate) fn render_static_export_slot(slot: usize, value_expression: &str) -> String {
+    format!("__exports[{slot}]={value_expression};")
 }
 
 pub(crate) fn module_export_name_to_string(name: &swc_core::ecma::ast::ModuleExportName) -> String {

@@ -18,9 +18,38 @@ pub(super) fn emit_bundler_runtime_module_program(
         .ok_or_else(|| format!("Missing bundler-runtime export slots for {module_id}"))?;
     rewrite_bundler_runtime_namespace_usage(&mut module, file_path, context)?;
     let mut output = Vec::new();
-    let mut dependency_ids = Vec::new();
     let mut import_counter = 0usize;
     let mut export_counter = 0usize;
+    let import_plans = module
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import_decl)) => {
+                Some(convert_bundler_import_decl(
+                    file_path,
+                    import_decl,
+                    context,
+                    &mut import_counter,
+                ))
+            }
+            _ => None,
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let import_binding_rewrites = import_plans
+        .iter()
+        .flat_map(|plan| {
+            plan.binding_rewrites
+                .iter()
+                .map(|rewrite| (rewrite.local_name.clone(), rewrite.replacement_code.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    let all_rewrites = import_plans
+        .iter()
+        .flat_map(|plan| plan.binding_rewrites.iter().cloned())
+        .collect::<Vec<_>>();
+    apply_import_binding_rewrites(&mut module, &all_rewrites);
+    let local_export_modes = collect_local_export_modes(&module);
+    let mut import_plans = import_plans.into_iter();
 
     if let Some(metadata) = file_metadata {
         for type_decl in &metadata.type_declarations {
@@ -35,25 +64,22 @@ pub(super) fn emit_bundler_runtime_module_program(
                         enum_decl.name, module_id
                     )
                 })?;
-                output.push(render_module_export_slot(slot, &enum_decl.name));
+                output.push(render_static_export_slot(slot, &enum_decl.name));
             }
         }
     }
 
     for item in module.body {
         match item {
-            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import_decl)) => {
-                let (lines, deps) = convert_bundler_import_decl(
-                    file_path,
-                    &import_decl,
-                    context,
-                    &mut import_counter,
-                )?;
-                output.extend(lines);
-                dependency_ids.extend(deps);
+            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(_)) => {
+                let plan = import_plans
+                    .next()
+                    .ok_or_else(|| "Missing bundler-runtime import plan".to_string())?;
+                output.extend(plan.lines);
             }
             ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDecl(export_decl)) => {
                 let exported_names = exported_decl_names(&export_decl.decl);
+                let slot_mode = slot_mode_for_export_decl(&export_decl.decl, &local_export_modes);
                 output.push(print_statement(Stmt::Decl(export_decl.decl))?);
                 for export_name in exported_names {
                     let slot = current_slots.slot_for(&export_name).ok_or_else(|| {
@@ -62,19 +88,20 @@ pub(super) fn emit_bundler_runtime_module_program(
                             export_name, module_id
                         )
                     })?;
-                    output.push(render_module_export_slot(slot, &export_name));
+                    output.push(render_slot_export(slot_mode, slot, &export_name));
                 }
             }
             ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportNamed(named_export)) => {
-                let (lines, deps) = convert_bundler_named_export(
+                let lines = convert_bundler_named_export(
                     file_path,
                     &named_export,
                     context,
                     current_slots,
+                    &import_binding_rewrites,
+                    &local_export_modes,
                     &mut export_counter,
                 )?;
                 output.extend(lines);
-                dependency_ids.extend(deps);
             }
             ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDefaultExpr(
                 default_expr,
@@ -91,7 +118,7 @@ pub(super) fn emit_bundler_runtime_module_program(
                         module_id
                     )
                 })?;
-                output.push(render_module_export_slot(slot, &local_name));
+                output.push(render_static_export_slot(slot, &local_name));
             }
             ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDefaultDecl(
                 default_decl,
@@ -127,7 +154,7 @@ pub(super) fn emit_bundler_runtime_module_program(
                             module_id
                         )
                     })?;
-                    output.push(render_module_export_slot(slot, &local_name));
+                    output.push(render_static_export_slot(slot, &local_name));
                 }
                 swc_core::ecma::ast::DefaultDecl::Class(class_expr) => {
                     let local_name = class_expr
@@ -160,7 +187,7 @@ pub(super) fn emit_bundler_runtime_module_program(
                             module_id
                         )
                     })?;
-                    output.push(render_module_export_slot(slot, &local_name));
+                    output.push(render_static_export_slot(slot, &local_name));
                 }
                 _ => {}
             },
@@ -173,7 +200,6 @@ pub(super) fn emit_bundler_runtime_module_program(
                     context,
                 )?;
                 let runtime_export_module_id = to_bundler_runtime_module_id(&export_module_id);
-                dependency_ids.push(export_module_id.clone());
                 output.push(format!(
                     "const {require_name} = __require({runtime_export_module_id:?});"
                 ));
@@ -202,7 +228,7 @@ pub(super) fn emit_bundler_runtime_module_program(
                             export_name, module_id
                         )
                     })?;
-                    output.push(render_module_export_slot(
+                    output.push(render_live_export_slot(
                         target_slot,
                         &stable_slot_access(&require_name, source_slot),
                     ));
@@ -220,21 +246,16 @@ pub(super) fn emit_bundler_runtime_module_program(
                 export_name, module_id
             )
         })?;
-        output.push(render_module_export_slot(export_slot, export_name));
+        output.push(render_live_export_slot(export_slot, export_name));
         let default_slot = current_slots.slot_for("default").ok_or_else(|| {
             format!(
                 "Missing bundler-runtime export slot for default in {}",
                 module_id
             )
         })?;
-        output.push(render_module_export_slot(default_slot, export_name));
+        output.push(render_live_export_slot(default_slot, export_name));
     }
 
-    let dependency_ids = dependency_ids
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
     let body = rewrite_bundler_exports(
         &output
             .into_iter()
@@ -242,18 +263,10 @@ pub(super) fn emit_bundler_runtime_module_program(
             .collect::<Vec<_>>()
             .join("\n"),
     );
-    let runtime_dependency_ids = serde_json::to_string(
-        &dependency_ids
-            .iter()
-            .map(|module_id| to_bundler_runtime_module_id(module_id))
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|error| error.to_string())?;
     let source_text = format!(
-        "__register({module_id:?}, {runtime_dependency_ids}, function(__require, __exports, __dynamicImport, __preloadDynamicImport) {{\n{}\n}});",
+        "__register({module_id:?}, function(__require, __exports, __dynamicImport, __preloadDynamicImport, __live) {{\n{}\n}});",
         indent_block(&body),
         module_id = runtime_module_id,
-        runtime_dependency_ids = runtime_dependency_ids,
     );
     Ok(apply_js_compat_text_fixes(source_text))
 }
@@ -284,4 +297,214 @@ fn rewrite_bundler_exports(source: &str) -> String {
                 .into_owned()
         })
         .unwrap_or(dot_rewritten)
+}
+
+fn render_slot_export(mode: BundlerExportSlotMode, slot: usize, value_expression: &str) -> String {
+    match mode {
+        BundlerExportSlotMode::Static => render_static_export_slot(slot, value_expression),
+        BundlerExportSlotMode::Live => render_live_export_slot(slot, value_expression),
+    }
+}
+
+fn slot_mode_for_export_decl(
+    decl: &swc_core::ecma::ast::Decl,
+    local_export_modes: &HashMap<String, BundlerExportSlotMode>,
+) -> BundlerExportSlotMode {
+    match decl {
+        swc_core::ecma::ast::Decl::Fn(_) | swc_core::ecma::ast::Decl::Class(_) => {
+            BundlerExportSlotMode::Static
+        }
+        swc_core::ecma::ast::Decl::Var(var_decl) => {
+            if matches!(var_decl.kind, VarDeclKind::Const) {
+                let all_static = var_decl
+                    .decls
+                    .iter()
+                    .flat_map(|decl| export_binding_names_with_ids(&decl.name))
+                    .all(|(_, name)| {
+                        matches!(
+                            local_export_modes.get(&name),
+                            Some(BundlerExportSlotMode::Static)
+                        )
+                    });
+                if all_static {
+                    BundlerExportSlotMode::Static
+                } else {
+                    BundlerExportSlotMode::Live
+                }
+            } else {
+                BundlerExportSlotMode::Live
+            }
+        }
+        _ => BundlerExportSlotMode::Live,
+    }
+}
+
+fn collect_local_export_modes(module: &Module) -> HashMap<String, BundlerExportSlotMode> {
+    let mut binding_candidates = HashMap::<Id, (String, BundlerExportSlotMode)>::new();
+    for item in &module.body {
+        match item {
+            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import_decl)) => {
+                for specifier in &import_decl.specifiers {
+                    let local = match specifier {
+                        ImportSpecifier::Default(default_specifier) => &default_specifier.local,
+                        ImportSpecifier::Namespace(namespace_specifier) => &namespace_specifier.local,
+                        ImportSpecifier::Named(named_specifier) => &named_specifier.local,
+                    };
+                    binding_candidates.insert(
+                        local.to_id(),
+                        (local.sym.to_string(), BundlerExportSlotMode::Live),
+                    );
+                }
+            }
+            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDecl(export_decl)) => {
+                collect_decl_export_candidates(&export_decl.decl, &mut binding_candidates);
+            }
+            ModuleItem::Stmt(Stmt::Decl(decl)) => {
+                collect_decl_export_candidates(decl, &mut binding_candidates);
+            }
+            _ => {}
+        }
+    }
+
+    let tracked_ids = binding_candidates.keys().cloned().collect::<HashSet<_>>();
+    let mut reassigned_collector = ReassignedBindingCollector {
+        tracked_ids,
+        reassigned_ids: HashSet::new(),
+    };
+    module.visit_with(&mut reassigned_collector);
+
+    binding_candidates
+        .into_iter()
+        .map(|(binding_id, (name, mode))| {
+            let mode = if reassigned_collector.reassigned_ids.contains(&binding_id) {
+                BundlerExportSlotMode::Live
+            } else {
+                mode
+            };
+            (name, mode)
+        })
+        .collect()
+}
+
+fn collect_decl_export_candidates(
+    decl: &swc_core::ecma::ast::Decl,
+    binding_candidates: &mut HashMap<Id, (String, BundlerExportSlotMode)>,
+) {
+    match decl {
+        swc_core::ecma::ast::Decl::Fn(function_decl) => {
+            binding_candidates.insert(
+                function_decl.ident.to_id(),
+                (function_decl.ident.sym.to_string(), BundlerExportSlotMode::Static),
+            );
+        }
+        swc_core::ecma::ast::Decl::Class(class_decl) => {
+            binding_candidates.insert(
+                class_decl.ident.to_id(),
+                (class_decl.ident.sym.to_string(), BundlerExportSlotMode::Static),
+            );
+        }
+        swc_core::ecma::ast::Decl::Var(var_decl) => {
+            let mode = if matches!(var_decl.kind, VarDeclKind::Const) {
+                BundlerExportSlotMode::Static
+            } else {
+                BundlerExportSlotMode::Live
+            };
+            for (binding_id, name) in var_decl
+                .decls
+                .iter()
+                .flat_map(|decl| export_binding_names_with_ids(&decl.name))
+            {
+                binding_candidates.insert(binding_id, (name, mode));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn export_binding_names_with_ids(pattern: &Pat) -> Vec<(Id, String)> {
+    match pattern {
+        Pat::Ident(ident) => vec![(ident.to_id(), ident.id.sym.to_string())],
+        Pat::Array(array) => array
+            .elems
+            .iter()
+            .flatten()
+            .flat_map(export_binding_names_with_ids)
+            .collect(),
+        Pat::Object(object) => object
+            .props
+            .iter()
+            .flat_map(|prop| match prop {
+                swc_core::ecma::ast::ObjectPatProp::KeyValue(key_value) => {
+                    export_binding_names_with_ids(&key_value.value)
+                }
+                swc_core::ecma::ast::ObjectPatProp::Assign(assign) => {
+                    vec![(assign.key.to_id(), assign.key.sym.to_string())]
+                }
+                swc_core::ecma::ast::ObjectPatProp::Rest(rest) => {
+                    export_binding_names_with_ids(&rest.arg)
+                }
+            })
+            .collect(),
+        Pat::Assign(assign) => export_binding_names_with_ids(&assign.left),
+        Pat::Rest(rest) => export_binding_names_with_ids(&rest.arg),
+        _ => Vec::new(),
+    }
+}
+
+struct ReassignedBindingCollector {
+    tracked_ids: HashSet<Id>,
+    reassigned_ids: HashSet<Id>,
+}
+
+impl Visit for ReassignedBindingCollector {
+    fn visit_assign_expr(&mut self, assign_expr: &swc_core::ecma::ast::AssignExpr) {
+        assign_expr.visit_children_with(self);
+        collect_assign_target_ids(&assign_expr.left, &self.tracked_ids, &mut self.reassigned_ids);
+    }
+
+    fn visit_update_expr(&mut self, update_expr: &swc_core::ecma::ast::UpdateExpr) {
+        update_expr.visit_children_with(self);
+        if let Expr::Ident(ident) = &*update_expr.arg {
+            let binding_id = ident.to_id();
+            if self.tracked_ids.contains(&binding_id) {
+                self.reassigned_ids.insert(binding_id);
+            }
+        }
+    }
+}
+
+fn collect_assign_target_ids(
+    target: &swc_core::ecma::ast::AssignTarget,
+    tracked_ids: &HashSet<Id>,
+    reassigned_ids: &mut HashSet<Id>,
+) {
+    match target {
+        swc_core::ecma::ast::AssignTarget::Simple(simple) => {
+            collect_simple_assign_target_ids(simple, tracked_ids, reassigned_ids)
+        }
+        swc_core::ecma::ast::AssignTarget::Pat(pattern) => {
+            let pattern: Pat = pattern.clone().into();
+            for (binding_id, _) in export_binding_names_with_ids(&pattern) {
+                if tracked_ids.contains(&binding_id) {
+                    reassigned_ids.insert(binding_id);
+                }
+            }
+        }
+    }
+}
+
+fn collect_simple_assign_target_ids(
+    target: &swc_core::ecma::ast::SimpleAssignTarget,
+    tracked_ids: &HashSet<Id>,
+    reassigned_ids: &mut HashSet<Id>,
+) {
+    match target {
+        swc_core::ecma::ast::SimpleAssignTarget::Ident(binding) => {
+            let binding_id = binding.id.to_id();
+            if tracked_ids.contains(&binding_id) {
+                reassigned_ids.insert(binding_id);
+            }
+        }
+        _ => {}
+    }
 }

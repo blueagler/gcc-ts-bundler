@@ -4,14 +4,20 @@ mod bindings;
 mod resolve;
 
 use self::bindings::{
-    bind_bundler_import_specifiers, bind_import_specifiers, collect_named_export_bindings,
-    reject_namespace_export_specifiers,
+    bind_import_specifiers, collect_named_export_bindings, plan_bundler_import_specifiers,
+    reject_namespace_export_specifiers, ImportBindingRewrite,
 };
 pub(super) use self::bindings::{
-    exported_decl_names, member_access, module_export_name_to_string, render_module_export_slot,
-    stable_slot_access,
+    apply_import_binding_rewrites,
+    exported_decl_names, member_access, module_export_name_to_string, render_live_export_slot,
+    render_static_export_slot, stable_slot_access, BundlerExportSlotMode,
 };
 pub(super) use self::resolve::resolve_module_id_for_specifier;
+
+pub(super) struct BundlerImportPlan {
+    pub(super) lines: Vec<String>,
+    pub(super) binding_rewrites: Vec<ImportBindingRewrite>,
+}
 
 pub(super) fn convert_import_decl(
     file_path: &Path,
@@ -65,7 +71,7 @@ pub(super) fn convert_bundler_import_decl(
     import_decl: &ImportDecl,
     context: &TranspileContext,
     import_counter: &mut usize,
-) -> std::result::Result<(Vec<String>, Vec<String>), String> {
+) -> std::result::Result<BundlerImportPlan, String> {
     let module_id = resolve_module_id_for_specifier(
         file_path,
         &import_decl.src.value.to_string_lossy(),
@@ -73,11 +79,13 @@ pub(super) fn convert_bundler_import_decl(
     )?;
     let runtime_module_id = to_bundler_runtime_module_id(&module_id);
     let mut lines = Vec::new();
-    let mut dependency_ids = Vec::new();
+    let mut binding_rewrites = Vec::new();
     if import_decl.specifiers.is_empty() {
         lines.push(format!("__require({runtime_module_id:?});"));
-        dependency_ids.push(module_id);
-        return Ok((lines, dependency_ids));
+        return Ok(BundlerImportPlan {
+            lines,
+            binding_rewrites,
+        });
     }
 
     let mut value_specifiers = Vec::new();
@@ -99,15 +107,19 @@ pub(super) fn convert_bundler_import_decl(
             .bundler_module_slots
             .get(&module_id)
             .ok_or_else(|| format!("Missing bundler-runtime export slots for {module_id}"))?;
-        lines.extend(bind_bundler_import_specifiers(
+        let (specifier_lines, specifier_rewrites) = plan_bundler_import_specifiers(
             &local_name,
             &value_specifiers,
             target_slots,
-        )?);
-        dependency_ids.push(module_id);
+        )?;
+        lines.extend(specifier_lines);
+        binding_rewrites.extend(specifier_rewrites);
     }
 
-    Ok((lines, dependency_ids))
+    Ok(BundlerImportPlan {
+        lines,
+        binding_rewrites,
+    })
 }
 
 pub(super) fn convert_named_export(
@@ -149,10 +161,11 @@ pub(super) fn convert_bundler_named_export(
     named_export: &swc_core::ecma::ast::NamedExport,
     context: &TranspileContext,
     current_slots: &BundlerModuleSlots,
+    import_binding_rewrites: &HashMap<String, String>,
+    local_export_modes: &HashMap<String, BundlerExportSlotMode>,
     export_counter: &mut usize,
-) -> std::result::Result<(Vec<String>, Vec<String>), String> {
+) -> std::result::Result<Vec<String>, String> {
     let mut lines = Vec::new();
-    let mut dependency_ids = Vec::new();
     reject_namespace_export_specifiers(named_export, file_path)?;
     if let Some(src) = &named_export.src {
         let require_name = format!("__gcc_export_{}", *export_counter);
@@ -160,7 +173,6 @@ pub(super) fn convert_bundler_named_export(
         let module_id =
             resolve_module_id_for_specifier(file_path, &src.value.to_string_lossy(), context)?;
         let runtime_module_id = to_bundler_runtime_module_id(&module_id);
-        dependency_ids.push(module_id.clone());
         lines.push(format!(
             "const {require_name} = __require({runtime_module_id:?});"
         ));
@@ -183,12 +195,12 @@ pub(super) fn convert_bundler_named_export(
                         binding.export_name
                     )
                 })?;
-            lines.push(render_module_export_slot(
+            lines.push(render_live_export_slot(
                 target_slot,
                 &stable_slot_access(&require_name, source_slot),
             ));
         }
-        return Ok((lines, dependency_ids));
+        return Ok(lines);
     }
 
     for binding in collect_named_export_bindings(named_export) {
@@ -200,7 +212,22 @@ pub(super) fn convert_bundler_named_export(
                     binding.export_name
                 )
             })?;
-        lines.push(render_module_export_slot(target_slot, &binding.local_name));
+        let value_expression = import_binding_rewrites
+            .get(&binding.local_name)
+            .map(String::as_str)
+            .unwrap_or(binding.local_name.as_str());
+        match local_export_modes
+            .get(&binding.local_name)
+            .copied()
+            .unwrap_or(BundlerExportSlotMode::Live)
+        {
+            BundlerExportSlotMode::Static => {
+                lines.push(render_static_export_slot(target_slot, value_expression))
+            }
+            BundlerExportSlotMode::Live => {
+                lines.push(render_live_export_slot(target_slot, value_expression))
+            }
+        }
     }
-    Ok((lines, dependency_ids))
+    Ok(lines)
 }

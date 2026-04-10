@@ -1,0 +1,3 @@
+@function --m3-density(--value) {
+  result: var(--value);
+}

@@ -1,3 +1,4 @@
 dist
 .prebundle
+.m3-compiled
 src/**/*.svelte.js

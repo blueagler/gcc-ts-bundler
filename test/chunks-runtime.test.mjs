@@ -120,7 +120,8 @@ test.serial("emits bundler-runtime chunks for explicit lazy modules", async () =
   expect(lazyOutput).not.toContain("base chunk missing");
   expect(lazyOutput).toMatch(/m[0-9a-f]{8}/);
   expect(lazyOutput).not.toContain("renderMessage");
-  expect(lazyOutput).toMatch(/\[[0-9]+\]=function/);
+  expect(lazyOutput).not.toMatch(/Object\.defineProperty\([^)]*,\s*[0-9]+,/);
+  expect(lazyOutput).toMatch(/\[[0-9]+\]=/);
   expect(lazyOutput).not.toContain('["default"]');
   expect(lazyOutput).not.toMatch(/goog\.module/);
 });
@@ -151,6 +152,66 @@ test.serial("bundler-runtime rejects reflective namespace operations", async () 
     /reflective Object\.\* operations on module namespace values/,
   );
 });
+
+test.serial(
+  "bundler-runtime rewrites property-protocol strings from the renaming report",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/main.js",
+      [
+        "function applyAttributes(attrs, node) {",
+        "  for (const key in attrs) {",
+        '    if (key === "class") {',
+        "      node.className = attrs[key];",
+        '    } else if (key === "style") {',
+        "      node.style.cssText = attrs[key];",
+        "    } else {",
+        "      node.setAttribute(key, attrs[key]);",
+        "    }",
+        "  }",
+        "}",
+        "",
+        "function omitProps(props, exclude) {",
+        "  const next = {};",
+        "  for (const key in props) {",
+        '    if (exclude.includes(key) || "label" in props) {',
+        "      continue;",
+        "    }",
+        "    next[key] = props[key];",
+        "  }",
+        "  return next;",
+        "}",
+        "",
+        'const exclude = "$$slots $$events $$legacy variant children".split(" ");',
+        "const attrs = omitProps({",
+        '  $$slots: { default: true },',
+        '  class: "m3-container",',
+        '  style: "color:red",',
+        '  variant: "filled",',
+        '  label: "ignored",',
+        "}, exclude);",
+        "applyAttributes(attrs, document.body);",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await build({
+      cache: { mode: "off" },
+      chunks: { loader: "script", mode: "bundler-runtime" },
+      entries: ["./main.js"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+
+    expect(result.exitCode).toBe(0);
+    const output = await fixture.read("dist/main.js");
+    expect(output).not.toContain('==="class"');
+    expect(output).not.toContain('["$$slots"');
+    expect(output).not.toContain('"$$slots $$events $$legacy variant children".split(" ")');
+  },
+);
 
 test.serial("bundler-runtime caches one combined Closure job when one lazy chunk changes", async () => {
   const fixture = await createFixture();
