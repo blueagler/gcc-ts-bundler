@@ -29,6 +29,7 @@ import {
   toImportPath,
   toPublishedOutputPaths,
 } from "./build-helpers";
+import { withInternalTiming } from "../internal/timing";
 
 interface FinalCacheMetadata {
   outputFiles: string[];
@@ -76,7 +77,9 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   let resolved: Awaited<ReturnType<typeof resolveBuild>> | null = null;
 
   try {
-    resolved = await resolveBuild(context);
+    resolved = await withInternalTiming("resolve-build", () =>
+      resolveBuild(context),
+    );
     const resolvedBuild = resolved;
     const finalMetadataPath = path.join(
       resolvedBuild.finalCacheDir,
@@ -174,6 +177,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       options: context.options,
       packageAliases: resolvedBuild.packageAliases,
       packageJsonFiles: resolvedBuild.packageJsonFiles,
+      tsxRuntimeSourceFiles: resolvedBuild.tsxRuntimeSourceFiles,
       tsConfigPath: resolvedBuild.tsConfigPath,
       workspaceDir: resolvedBuild.workspaceDir,
     });

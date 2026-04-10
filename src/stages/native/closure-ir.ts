@@ -11,17 +11,21 @@ export type {
   ClosureIrTypeDeclaration,
 } from "./closure-ir/types";
 
-export async function collectNativeTypeAnalysis({
+export interface NativeTypeAnalysisContext {
+  compilerOptions: ts.CompilerOptions;
+  fileNames: string[];
+  program: ts.Program;
+}
+
+export async function createNativeTypeAnalysisContext({
   fileNames,
-  preflight,
   tsConfigPath,
   workspaceDir,
 }: {
   fileNames: string[];
-  preflight: DiagnosticsPreflight;
   tsConfigPath: string;
   workspaceDir: string;
-}) {
+}): Promise<NativeTypeAnalysisContext> {
   const compilerOptions = await loadCompilerOptions(tsConfigPath, {
     allowJs: true,
     ignoreDeprecations: "6.0",
@@ -31,7 +35,21 @@ export async function collectNativeTypeAnalysis({
     skipLibCheck: true,
     target: ts.ScriptTarget.ESNext,
   });
-  const program = ts.createProgram(fileNames, compilerOptions);
+  return {
+    compilerOptions,
+    fileNames,
+    program: ts.createProgram(fileNames, compilerOptions),
+  };
+}
+
+export function collectNativeTypeAnalysisFromContext({
+  context,
+  preflight,
+}: {
+  context: NativeTypeAnalysisContext;
+  preflight: DiagnosticsPreflight;
+}) {
+  const { compilerOptions, fileNames, program } = context;
   const preflightDiagnostics =
     preflight === "full"
       ? [...ts.getPreEmitDiagnostics(program)].filter(
@@ -48,6 +66,25 @@ export async function collectNativeTypeAnalysis({
     diagnostics: [...preflightDiagnostics, ...closureIrDiagnostics],
     files,
   };
+}
+
+export async function collectNativeTypeAnalysis({
+  fileNames,
+  preflight,
+  tsConfigPath,
+  workspaceDir,
+}: {
+  fileNames: string[];
+  preflight: DiagnosticsPreflight;
+  tsConfigPath: string;
+  workspaceDir: string;
+}) {
+  const context = await createNativeTypeAnalysisContext({
+    fileNames,
+    tsConfigPath,
+    workspaceDir,
+  });
+  return collectNativeTypeAnalysisFromContext({ context, preflight });
 }
 
 export async function collectClosureIrMetadata({

@@ -14,6 +14,9 @@ export interface ResolveMetadata {
     sourceRelativePath: string;
   }>;
   lazyImports: LazyImport[];
+  packageAliases?: PackageAlias[];
+  packageJsonFiles?: string[];
+  tsxRuntimeSourceFiles?: string[];
 }
 
 export interface ResolveSnapshot {
@@ -28,6 +31,7 @@ export interface ResolveSnapshot {
   packageSignature: string;
   resolveKey: string;
   sourceFiles: string[];
+  tsxRuntimeSourceFiles: string[];
   trackedFiles: Awaited<ReturnType<typeof collectTrackedFiles>>;
 }
 

@@ -6,6 +6,7 @@ import {
   ensureDirectory,
   ensureParentDirectory,
 } from "../../internal/files";
+import { withInternalTiming } from "../../internal/timing";
 import { ChunkPlanChunk, NormalizedBuildOptions } from "../../internal/types";
 import {
   prepareClosureJobs,
@@ -102,26 +103,74 @@ export async function runClosureStage({
     options.chunks.mode === "bundler-runtime"
       ? determineClosureConcurrency(prepared.compileJobs.length)
       : 1;
-  const exitCodes = await runWithConcurrency(
-    prepared.compileJobs,
-    concurrency,
-    async (job) =>
+  const exitCodes = await withInternalTiming("closure:compile", () =>
+    runWithConcurrency(prepared.compileJobs, concurrency, async (job) =>
       runPreparedClosureJob({
         cacheDir: closureJobCacheDir,
         job,
       }),
+    ),
   );
   const failedExitCode = exitCodes.find((exitCode) => exitCode !== 0);
   if (failedExitCode !== undefined) {
     return { cacheOutputFiles: [], exitCode: failedExitCode, outputFiles: [] };
   }
 
-  const propertyRenamingReports = new Map<string, Promise<string>>();
-  const es5HelperRewrite = await rewriteBundlerRuntimeEs5ChunksIfNeeded(
-    prepared,
-    options.chunks.mode,
-    options.languageOut,
+  await withInternalTiming("closure:postprocess", () =>
+    runClosurePostprocess({
+      chunkMode: options.chunks.mode,
+      languageOut: options.languageOut,
+      prepared,
+    }),
   );
+
+  await withInternalTiming("closure:publish", () =>
+    copyOrLinkFiles(prepared.publishedOutputs, cacheOutputDir),
+  );
+  const cacheOutputFiles = prepared.publishedOutputs.map((outputFile) =>
+    path.join(cacheOutputDir, path.relative(outDir, outputFile)),
+  );
+
+  return {
+    cacheOutputFiles,
+    exitCode: 0,
+    outputFiles: prepared.publishedOutputs,
+  };
+}
+
+async function runClosurePostprocess({
+  chunkMode,
+  languageOut,
+  prepared,
+}: {
+  chunkMode: string;
+  languageOut: string;
+  prepared: ReturnType<typeof prepareClosureJobs>;
+}) {
+  const propertyRenamingReports = new Map<string, Promise<string>>();
+  const es5Rewrite = createEs5HelperRewriteContext({
+    bundlerRuntimeBaseInputPath: prepared.bundlerRuntimeBaseInputPath,
+    chunkMode,
+    languageOut,
+  });
+  const inputContents = new Map<string, Promise<string>>();
+  const inputPaths = [
+    ...new Set(prepared.postprocessActions.map((action) => action.inputPath)),
+  ];
+
+  await Promise.all(
+    inputPaths.map(async (inputPath) => {
+      if (!es5Rewrite.requiresInputRead()) {
+        return;
+      }
+      const originalContents = await readInputContents(
+        inputPath,
+        inputContents,
+      );
+      applyEs5HelperRewrite(inputPath, originalContents, es5Rewrite);
+    }),
+  );
+
   await Promise.all(
     prepared.postprocessActions.map(async (action) => {
       await ensureParentDirectory(action.outputPath);
@@ -131,11 +180,24 @@ export async function runClosureStage({
             propertyRenamingReports,
           )
         : "";
-      if (action.kind === "copy" && !reportText) {
+      if (
+        action.kind === "copy" &&
+        !reportText &&
+        !es5Rewrite.requiresInputRead()
+      ) {
         await fs.copyFile(action.inputPath, action.outputPath);
         return;
       }
-      let contents = await fs.readFile(action.inputPath, "utf-8");
+
+      const originalContents = await readInputContents(
+        action.inputPath,
+        inputContents,
+      );
+      let contents = applyEs5HelperRewrite(
+        action.inputPath,
+        originalContents,
+        es5Rewrite,
+      );
       if (
         action.kind === "rewrite-gcc-exports" ||
         action.kind === "rewrite-gcc-exports-and-decorator-metadata"
@@ -149,79 +211,72 @@ export async function runClosureStage({
       ) {
         contents = rewriteDecoratorMetadata(contents, reportText);
       }
+      if (action.inputPath === prepared.bundlerRuntimeBaseInputPath) {
+        contents = injectBundlerRuntimeEs5HelperBag(
+          contents,
+          es5Rewrite.renderHelperBag(),
+        );
+      }
       await fs.writeFile(action.outputPath, contents);
     }),
   );
-  if (es5HelperRewrite?.baseOutputPath && es5HelperRewrite.helperBag) {
-    const baseOutput = await fs.readFile(
-      es5HelperRewrite.baseOutputPath,
-      "utf-8",
-    );
-    const injected = injectBundlerRuntimeEs5HelperBag(
-      baseOutput,
-      es5HelperRewrite.helperBag,
-    );
-    if (injected !== baseOutput) {
-      await fs.writeFile(es5HelperRewrite.baseOutputPath, injected);
-    }
-  }
+}
 
-  await copyOrLinkFiles(prepared.publishedOutputs, cacheOutputDir);
-  const cacheOutputFiles = prepared.publishedOutputs.map((outputFile) =>
-    path.join(cacheOutputDir, path.relative(outDir, outputFile)),
-  );
+function createEs5HelperRewriteContext({
+  bundlerRuntimeBaseInputPath,
+  chunkMode,
+  languageOut,
+}: {
+  bundlerRuntimeBaseInputPath?: string;
+  chunkMode: string;
+  languageOut: string;
+}) {
+  const shouldRewriteHelpers =
+    chunkMode === "bundler-runtime" &&
+    /ECMASCRIPT(?:3|5)/.test(languageOut) &&
+    !!bundlerRuntimeBaseInputPath;
+  const helperKeys = new Set<string>();
+  const rewrittenInputs = new Map<string, string>();
 
   return {
-    cacheOutputFiles,
-    exitCode: 0,
-    outputFiles: prepared.publishedOutputs,
+    requiresInputRead() {
+      return shouldRewriteHelpers;
+    },
+    renderHelperBag() {
+      return helperKeys.size === 0
+        ? ""
+        : renderBundlerRuntimeEs5HelperBag(helperKeys);
+    },
+    rewrite(inputPath: string, contents: string) {
+      if (!shouldRewriteHelpers || inputPath === bundlerRuntimeBaseInputPath) {
+        return contents;
+      }
+      const cached = rewrittenInputs.get(inputPath);
+      if (cached !== undefined) {
+        return cached;
+      }
+      const rewritten = rewriteBundlerRuntimeEs5Helpers(contents);
+      for (const helperKey of rewritten.helperKeys) {
+        helperKeys.add(helperKey);
+      }
+      rewrittenInputs.set(inputPath, rewritten.code);
+      return rewritten.code;
+    },
   };
 }
 
-async function rewriteBundlerRuntimeEs5ChunksIfNeeded(
-  prepared: ReturnType<typeof prepareClosureJobs>,
-  chunkMode: string,
-  languageOut: string,
+function applyEs5HelperRewrite(
+  inputPath: string,
+  contents: string,
+  rewriteContext: ReturnType<typeof createEs5HelperRewriteContext>,
 ) {
-  if (
-    chunkMode !== "bundler-runtime" ||
-    !/ECMASCRIPT(?:3|5)/.test(languageOut) ||
-    !prepared.bundlerRuntimeBaseInputPath
-  ) {
-    return null;
-  }
-
-  const helperKeys = new Set<string>();
-  const inputPaths = [
-    ...new Set(prepared.postprocessActions.map((action) => action.inputPath)),
-  ];
-  for (const inputPath of inputPaths) {
-    if (inputPath === prepared.bundlerRuntimeBaseInputPath) {
-      continue;
-    }
-    const contents = await fs.readFile(inputPath, "utf-8");
-    const rewritten = rewriteBundlerRuntimeEs5Helpers(contents);
-    for (const helperKey of rewritten.helperKeys) {
-      helperKeys.add(helperKey);
-    }
-    if (rewritten.code !== contents) {
-      await fs.writeFile(inputPath, rewritten.code);
-    }
-  }
-
-  if (helperKeys.size === 0) {
-    return null;
-  }
-
-  return {
-    baseOutputPath: prepared.postprocessActions.find(
-      (action) => action.inputPath === prepared.bundlerRuntimeBaseInputPath,
-    )?.outputPath,
-    helperBag: renderBundlerRuntimeEs5HelperBag(helperKeys),
-  };
+  return rewriteContext.rewrite(inputPath, contents);
 }
 
 function injectBundlerRuntimeEs5HelperBag(code: string, helperBag: string) {
+  if (!helperBag) {
+    return code;
+  }
   const marker = "}).call(this,globalThis);";
   const markerIndex = code.indexOf(marker);
   if (markerIndex === -1) {
@@ -229,6 +284,18 @@ function injectBundlerRuntimeEs5HelperBag(code: string, helperBag: string) {
   }
   const insertAt = markerIndex + marker.length;
   return `${code.slice(0, insertAt)}${helperBag}${code.slice(insertAt)}`;
+}
+
+async function readInputContents(
+  inputPath: string,
+  cache: Map<string, Promise<string>>,
+) {
+  let pending = cache.get(inputPath);
+  if (!pending) {
+    pending = fs.readFile(inputPath, "utf-8");
+    cache.set(inputPath, pending);
+  }
+  return pending;
 }
 
 function renderBundlerRuntimeEs5HelperBag(helperKeys: Set<string>) {

@@ -77,6 +77,7 @@ export interface ResolvedBuild {
   packageJsonFiles: string[];
   lazyImports: LazyImport[];
   sourceFiles: string[];
+  tsxRuntimeSourceFiles: string[];
   finalCacheDir: string;
   finalKey: string;
   nativeEmitCacheDir: string;

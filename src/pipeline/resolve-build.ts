@@ -35,6 +35,12 @@ import {
   ResolveSnapshot,
 } from "./resolve-build/cache";
 import {
+  collectTsxRuntimeSupport,
+  mergePackageAliases,
+  mergeRuntimePackageJsonFiles,
+  mergeTsxRuntimeTrackedFiles,
+} from "./resolve-build/jsx-runtime";
+import {
   ensureDirectorySymlink,
   ensureWorkspaceNodeModules,
   resolveTsConfigPath,
@@ -142,6 +148,7 @@ export async function resolveBuild(
       shimDir,
       shimFiles,
       sourceFiles: cachedSnapshot.sourceFiles,
+      tsxRuntimeSourceFiles: cachedSnapshot.tsxRuntimeSourceFiles ?? [],
       trackedFiles: cachedSnapshot.trackedFiles,
       tsConfigPath,
       workspaceDir: cacheStore.workspaceDir,
@@ -159,12 +166,26 @@ export async function resolveBuild(
     options.outputNames,
   );
   const resolvedLazyImports = graphResult.lazyImports;
+  const tsxRuntimeSupport = await collectTsxRuntimeSupport({
+    fileNames: graphResult.sourceFiles,
+    tsConfigPath,
+    workspaceDir: cacheStore.workspaceDir,
+  });
+  const packageAliases = mergePackageAliases([
+    ...graphResult.packageAliases,
+    ...tsxRuntimeSupport.packageAliases,
+  ]);
+  const packageJsonFiles = mergeRuntimePackageJsonFiles(
+    graphResult.packageJsonFiles,
+    tsxRuntimeSupport.packageJsonFiles,
+  );
   const resolveKey = usesPersistentCache
     ? hashJson({
         compilerOptionsHash,
         entries: entryRelativePaths,
         files: graphResult.fileHashes,
         packageSignature: context.packageSignature,
+        tsxRuntimeSourceFiles: tsxRuntimeSupport.sourceFiles,
       })
     : "active";
   const resolveMetadataPath = path.join(
@@ -175,6 +196,15 @@ export async function resolveBuild(
   let resolveMetadata = usesPersistentCache
     ? await readJsonIfExists<ResolveMetadata>(resolveMetadataPath)
     : null;
+  if (resolveMetadata) {
+    resolveMetadata = {
+      ...resolveMetadata,
+      packageAliases: resolveMetadata.packageAliases ?? packageAliases,
+      packageJsonFiles: resolveMetadata.packageJsonFiles ?? packageJsonFiles,
+      tsxRuntimeSourceFiles:
+        resolveMetadata.tsxRuntimeSourceFiles ?? tsxRuntimeSupport.sourceFiles,
+    };
+  }
 
   if (!resolveMetadata) {
     const entryFiles = graphResult.entries.map(
@@ -222,10 +252,20 @@ export async function resolveBuild(
         sourceRelativePath: entry.sourceRelativePath,
       })),
       lazyImports: resolvedLazyImports,
+      packageAliases,
+      packageJsonFiles,
+      tsxRuntimeSourceFiles: tsxRuntimeSupport.sourceFiles,
     };
     if (usesPersistentCache) {
       await writeJson(resolveMetadataPath, resolveMetadata);
     }
+  } else if (
+    usesPersistentCache &&
+    (!Array.isArray(resolveMetadata.packageAliases) ||
+      !Array.isArray(resolveMetadata.packageJsonFiles) ||
+      !Array.isArray(resolveMetadata.tsxRuntimeSourceFiles))
+  ) {
+    await writeJson(resolveMetadataPath, resolveMetadata);
   }
 
   const entryFiles = resolveMetadata.entryFiles.map(
@@ -239,6 +279,7 @@ export async function resolveBuild(
         diagnostics: options.diagnostics,
         packageSignature: context.packageSignature,
         resolveKey,
+        tsxRuntimeSourceFiles: resolveMetadata.tsxRuntimeSourceFiles ?? [],
       })
     : "active";
   const finalKey = usesPersistentCache
@@ -251,11 +292,15 @@ export async function resolveBuild(
         languageOut: options.languageOut,
         packageSignature: context.packageSignature,
         resolveKey,
+        tsxRuntimeSourceFiles: resolveMetadata.tsxRuntimeSourceFiles ?? [],
       })
     : "active";
   const trackedFiles = usesPersistentCache
     ? await collectTrackedFiles([
-        ...graphResult.trackedFiles,
+        ...mergeTsxRuntimeTrackedFiles(
+          graphResult.trackedFiles,
+          tsxRuntimeSupport.trackedFiles,
+        ),
         tsConfigPath,
         ...options.externs,
         ...options.js,
@@ -269,11 +314,12 @@ export async function resolveBuild(
       lazyImports: resolvedLazyImports,
       nativeEmitKey,
       optionsSignature: context.optionsSignature,
-      packageAliases: graphResult.packageAliases,
-      packageJsonFiles: graphResult.packageJsonFiles,
+      packageAliases,
+      packageJsonFiles,
       packageSignature: context.packageSignature,
       resolveKey,
       sourceFiles: graphResult.sourceFiles,
+      tsxRuntimeSourceFiles: resolveMetadata.tsxRuntimeSourceFiles ?? [],
       trackedFiles,
     } satisfies ResolveSnapshot);
   }
@@ -283,8 +329,8 @@ export async function resolveBuild(
     chunkPlan: resolveMetadata.chunkPlan,
     entryFiles,
     lazyImports: resolvedLazyImports,
-    packageAliases: graphResult.packageAliases,
-    packageJsonFiles: graphResult.packageJsonFiles,
+    packageAliases,
+    packageJsonFiles,
     finalCacheDir: path.join(cacheStore.projectCacheDir, "final", finalKey),
     finalKey,
     nativeEmitCacheDir: path.join(
@@ -295,6 +341,7 @@ export async function resolveBuild(
     shimDir,
     shimFiles,
     sourceFiles: graphResult.sourceFiles,
+    tsxRuntimeSourceFiles: resolveMetadata.tsxRuntimeSourceFiles ?? [],
     trackedFiles,
     tsConfigPath,
     workspaceDir: cacheStore.workspaceDir,

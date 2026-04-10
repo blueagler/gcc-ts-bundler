@@ -3,21 +3,19 @@ import path from "path";
 import ts from "typescript";
 
 import { DiagnosticsPreflight } from "../../api/types";
-import { createBundleRequire } from "../../internal/bundle-location";
 import { uniqueSortedStrings } from "../../internal/files";
 import { filesExist } from "../../internal/file-state";
-import { collectFileStates } from "../../native/load";
+import { withInternalTiming } from "../../internal/timing";
 import {
   LazyImport,
   NormalizedBuildOptions,
   PackageAlias,
 } from "../../internal/types";
-import { resolveGraph } from "../../native/load";
-import { transpileSources } from "../../native/load";
-import { loadCompilerOptions } from "./compiler-options";
-import { collectNativeTypeAnalysis } from "./closure-ir";
-
-const require = createBundleRequire();
+import { collectFileStates, transpileSources } from "../../native/load";
+import {
+  collectNativeTypeAnalysisFromContext,
+  createNativeTypeAnalysisContext,
+} from "./closure-ir";
 
 export interface NativeEmitStageResult {
   dependencyModules: string[];
@@ -50,6 +48,7 @@ export async function emitNativeStage({
   options,
   packageAliases,
   packageJsonFiles,
+  tsxRuntimeSourceFiles,
   tsConfigPath,
   workspaceDir,
 }: {
@@ -60,6 +59,7 @@ export async function emitNativeStage({
   options: NormalizedBuildOptions;
   packageAliases: PackageAlias[];
   packageJsonFiles: string[];
+  tsxRuntimeSourceFiles: string[];
   tsConfigPath: string;
   workspaceDir: string;
 }): Promise<NativeEmitStageResult> {
@@ -67,32 +67,20 @@ export async function emitNativeStage({
   const outDir = path.join(cacheDir, "out");
   const externsPath = path.join(cacheDir, "native-generated.externs.js");
   const metadataPathForNative = path.join(cacheDir, "closure-ir.json");
-  const runtimePackageInputs = await collectTsxRuntimePackageInputs({
-    fileNames,
-    tsConfigPath,
-    workspaceDir,
-  });
-  const runtimeSupportFiles = runtimePackageInputs.sourceFiles.map((fileName) =>
+  const runtimeSupportFiles = tsxRuntimeSourceFiles.map((fileName) =>
     toEmittedPath(fileName, outDir, workspaceDir),
   );
   const combinedFileNames = uniqueSortedStrings([
     ...fileNames,
-    ...runtimePackageInputs.sourceFiles,
+    ...tsxRuntimeSourceFiles,
   ]);
-  const combinedPackageAliases = mergePackageAliases([
-    ...packageAliases,
-    ...runtimePackageInputs.packageAliases,
-  ]);
-  const combinedPackageJsonFiles = uniqueSortedStrings([
-    ...packageJsonFiles,
-    ...runtimePackageInputs.packageJsonFiles,
-  ]);
-  const dependencyModules = collectDependencyModules(combinedPackageAliases);
+  const dependencyModules = collectDependencyModules(packageAliases);
   const dependencyRuntimeFiles = collectDependencyRuntimeFiles({
     outDir,
     sourceFiles: combinedFileNames,
     workspaceDir,
   });
+
   const cachedMetadata = usesPersistentCache
     ? await readMetadata(metadataPath)
     : null;
@@ -138,12 +126,21 @@ export async function emitNativeStage({
     };
   }
 
-  const analysis = await collectNativeTypeAnalysis({
-    fileNames: combinedFileNames,
-    preflight: options.diagnostics.preflight,
-    tsConfigPath,
-    workspaceDir,
-  });
+  const analysisContext = await withInternalTiming(
+    "native-emit:analysis-context",
+    () =>
+      createNativeTypeAnalysisContext({
+        fileNames: combinedFileNames,
+        tsConfigPath,
+        workspaceDir,
+      }),
+  );
+  const analysis = await withInternalTiming("native-emit:closure-ir", () =>
+    collectNativeTypeAnalysisFromContext({
+      context: analysisContext,
+      preflight: options.diagnostics.preflight,
+    }),
+  );
   if (analysis.diagnostics.length > 0) {
     return {
       dependencyModules,
@@ -156,22 +153,27 @@ export async function emitNativeStage({
       supportFiles: [],
     };
   }
+
   await fs.promises.writeFile(
     metadataPathForNative,
     JSON.stringify(analysis.files, null, 2),
     "utf-8",
   );
-  const result = transpileSources({
-    chunkMode: options.chunks.mode,
-    metadataPath: metadataPathForNative,
-    externsPath,
-    fileNames: combinedFileNames,
-    lazyImports,
-    outDir,
-    packageAliases: combinedPackageAliases,
-    packageJsonFiles: combinedPackageJsonFiles,
-    workspaceDir,
-  });
+  const result = await withInternalTiming("native-emit:transpile", () =>
+    Promise.resolve(
+      transpileSources({
+        chunkMode: options.chunks.mode,
+        metadataPath: metadataPathForNative,
+        externsPath,
+        fileNames: combinedFileNames,
+        lazyImports,
+        outDir,
+        packageAliases,
+        packageJsonFiles,
+        workspaceDir,
+      }),
+    ),
+  );
   const finalSupportFiles = uniqueSortedStrings([
     ...runtimeSupportFiles,
     ...result.supportFiles,
@@ -206,58 +208,6 @@ export async function emitNativeStage({
     externsPath: result.externsPath,
     outDir,
     supportFiles: finalSupportFiles,
-  };
-}
-
-async function collectTsxRuntimePackageInputs({
-  fileNames,
-  tsConfigPath,
-  workspaceDir,
-}: {
-  fileNames: string[];
-  tsConfigPath: string;
-  workspaceDir: string;
-}) {
-  if (!fileNames.some((fileName) => fileName.endsWith(".tsx"))) {
-    return {
-      packageAliases: [] as PackageAlias[],
-      packageJsonFiles: [] as string[],
-      sourceFiles: [] as string[],
-    };
-  }
-
-  const compilerOptions = await loadCompilerOptions(tsConfigPath);
-  const runtimeSpecifier = getJsxRuntimeSpecifier(compilerOptions);
-  if (!runtimeSpecifier) {
-    return {
-      packageAliases: [] as PackageAlias[],
-      packageJsonFiles: [] as string[],
-      sourceFiles: [] as string[],
-    };
-  }
-
-  const resolvedEntry = require.resolve(runtimeSpecifier, {
-    paths: [workspaceDir],
-  });
-  const workspaceEntry = toWorkspaceNodeModulesPath(
-    resolvedEntry,
-    workspaceDir,
-  );
-  const runtimeAlias = toRuntimePackageAlias(runtimeSpecifier, workspaceEntry);
-  const graph = resolveGraph({
-    entries: [workspaceEntry],
-    packageMode: "esm-only",
-    srcDir: path.join(workspaceDir, "src"),
-    workspaceDir,
-  });
-
-  return {
-    packageAliases: mergePackageAliases([
-      runtimeAlias,
-      ...graph.packageAliases,
-    ]),
-    packageJsonFiles: graph.packageJsonFiles,
-    sourceFiles: graph.sourceFiles,
   };
 }
 
@@ -298,18 +248,6 @@ function createSimpleDiagnostic(messageText: string): ts.Diagnostic {
     messageText,
     start: undefined,
   };
-}
-
-function getJsxRuntimeSpecifier(compilerOptions: ts.CompilerOptions) {
-  const jsxImportSource = compilerOptions.jsxImportSource ?? "react";
-  switch (compilerOptions.jsx) {
-    case ts.JsxEmit.ReactJSX:
-      return `${jsxImportSource}/jsx-runtime`;
-    case ts.JsxEmit.ReactJSXDev:
-      return `${jsxImportSource}/jsx-dev-runtime`;
-    default:
-      return null;
-  }
 }
 
 async function readMetadata(
@@ -379,50 +317,4 @@ function collectDependencyRuntimeFiles({
 
 function isDependencyFile(filePath: string) {
   return path.resolve(filePath).includes(`${path.sep}node_modules${path.sep}`);
-}
-
-function mergePackageAliases(aliases: PackageAlias[]) {
-  const merged = new Map<string, PackageAlias>();
-  for (const alias of aliases) {
-    merged.set(`${alias.packageName}\0${alias.subpath}`, alias);
-  }
-
-  return [...merged.values()].sort((left, right) => {
-    const leftKey = `${left.packageName}\0${left.subpath}`;
-    const rightKey = `${right.packageName}\0${right.subpath}`;
-    return leftKey.localeCompare(rightKey);
-  });
-}
-
-function toWorkspaceNodeModulesPath(
-  resolvedPath: string,
-  workspaceDir: string,
-) {
-  const marker = `${path.sep}node_modules${path.sep}`;
-  const markerIndex = resolvedPath.lastIndexOf(marker);
-  if (markerIndex === -1) {
-    return resolvedPath;
-  }
-
-  const relativeNodeModulesPath = resolvedPath.slice(markerIndex + 1);
-  return path.join(workspaceDir, relativeNodeModulesPath);
-}
-
-function toRuntimePackageAlias(
-  specifier: string,
-  targetPath: string,
-): PackageAlias {
-  const segments = specifier.startsWith("@")
-    ? specifier.split("/", 3)
-    : specifier.split("/", 2);
-  const packageName = specifier.startsWith("@")
-    ? `${segments[0]}/${segments[1]}`
-    : segments[0];
-  const subpath = specifier.startsWith("@") ? segments[2] : segments[1];
-
-  return {
-    packageName,
-    subpath: subpath ? `./${subpath}` : ".",
-    targetPath,
-  };
 }

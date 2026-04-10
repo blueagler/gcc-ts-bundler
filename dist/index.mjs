@@ -15,6 +15,101 @@ var __export = (target, all) => {
 };
 var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
 
+// src/internal/bundle-location.ts
+import fs from "fs";
+import path from "path";
+import { createRequire } from "module";
+import { fileURLToPath } from "url";
+function getBundleFilePath() {
+  return fileURLToPath(__gcc_current_module_url);
+}
+function createBundleRequire() {
+  bundleRequire ??= createRequire(__gcc_current_module_url);
+  return bundleRequire;
+}
+function getPackageRootFromBundle() {
+  if (packageRoot) {
+    return packageRoot;
+  }
+  let currentDir = path.dirname(getBundleFilePath());
+  while (true) {
+    if (fs.existsSync(path.join(currentDir, "package.json"))) {
+      packageRoot = currentDir;
+      return currentDir;
+    }
+    const parentDir = path.dirname(currentDir);
+    if (parentDir === currentDir) {
+      throw new Error(`Unable to locate package.json from bundled module path ${getBundleFilePath()}`);
+    }
+    currentDir = parentDir;
+  }
+}
+var bundleRequire = null, packageRoot = null;
+var init_bundle_location = () => {};
+
+// src/native/index.ts
+import fs2 from "fs";
+import path2 from "path";
+function detectLinuxLibc() {
+  const report = process.report?.getReport?.();
+  if (report?.header?.glibcVersionRuntime) {
+    return "gnu";
+  }
+  try {
+    const { execFileSync } = require2("node:child_process");
+    const output = execFileSync("ldd", ["--version"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    return output.includes("musl") ? "musl" : "gnu";
+  } catch {}
+  return "musl";
+}
+function getTargetKey() {
+  if (process.platform === "linux") {
+    return `${process.platform}-${process.arch}-${detectLinuxLibc()}`;
+  }
+  if (process.platform === "win32") {
+    return `${process.platform}-${process.arch}-msvc`;
+  }
+  return `${process.platform}-${process.arch}`;
+}
+function loadNativeBinding() {
+  const targetKey = getTargetKey();
+  const packageName = SUPPORTED_TARGETS[targetKey];
+  const localFallbackPath = path2.join(getPackageRootFromBundle(), "native", "index.node");
+  if (fs2.existsSync(localFallbackPath)) {
+    return require2(localFallbackPath);
+  }
+  const loadErrors = [];
+  if (packageName) {
+    try {
+      return require2(packageName);
+    } catch (error) {
+      loadErrors.push(`${packageName}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  const supportedTargets = Object.keys(SUPPORTED_TARGETS).join(", ");
+  const details = loadErrors.length > 0 ? ` Tried ${loadErrors.join("; ")}.` : "";
+  throw new Error(`No native binding available for ${targetKey}. Supported targets: ${supportedTargets}.${details}`);
+}
+var require2, SUPPORTED_TARGETS, native_default;
+var init_native = __esm(() => {
+  init_bundle_location();
+  require2 = createBundleRequire();
+  SUPPORTED_TARGETS = {
+    "darwin-arm64": "gcc-ts-bundler-darwin-arm64",
+    "darwin-x64": "gcc-ts-bundler-darwin-x64",
+    "linux-arm64-gnu": "gcc-ts-bundler-linux-arm64-gnu",
+    "linux-arm64-musl": "gcc-ts-bundler-linux-arm64-musl",
+    "linux-x64-gnu": "gcc-ts-bundler-linux-x64-gnu",
+    "linux-x64-musl": "gcc-ts-bundler-linux-x64-musl",
+    "win32-arm64-msvc": "gcc-ts-bundler-win32-arm64-msvc",
+    "win32-x64-msvc": "gcc-ts-bundler-win32-x64-msvc"
+  };
+  native_default = loadNativeBinding();
+});
+
 // src/cache/hash.ts
 import crypto from "crypto";
 function normalizeValue(value) {
@@ -35,11 +130,11 @@ function hashJson(value) {
 var init_hash = () => {};
 
 // src/stages/native/compiler-options.ts
-import fs from "fs";
-import path3 from "path";
+import fs3 from "fs";
+import path5 from "path";
 import ts4 from "typescript";
 async function loadCompilerOptions(configPath, extraOptions = {}) {
-  const configStat = await fs.promises.stat(configPath);
+  const configStat = await fs3.promises.stat(configPath);
   const cacheKey = hashJson({
     configPath,
     extraOptions,
@@ -50,7 +145,7 @@ async function loadCompilerOptions(configPath, extraOptions = {}) {
   if (cached) {
     return cached;
   }
-  const configDir = path3.dirname(configPath);
+  const configDir = path5.dirname(configPath);
   const configFile = ts4.readConfigFile(configPath, ts4.sys.readFile);
   if (configFile.error) {
     throw new Error(ts4.flattenDiagnosticMessageText(configFile.error.messageText, `
@@ -113,25 +208,25 @@ var init_types = __esm(() => {
 });
 
 // src/internal/files.ts
-import fs5 from "fs/promises";
-import path6 from "path";
+import fs7 from "fs/promises";
+import path8 from "path";
 function uniqueSortedStrings(values) {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
 }
 async function ensureDirectory(dirPath) {
-  await fs5.mkdir(dirPath, { recursive: true });
+  await fs7.mkdir(dirPath, { recursive: true });
 }
 async function ensureParentDirectory(filePath) {
-  await ensureDirectory(path6.dirname(filePath));
+  await ensureDirectory(path8.dirname(filePath));
 }
 async function hashFileInput(filePath) {
-  const stat = await fs5.stat(filePath);
+  const stat = await fs7.stat(filePath);
   const cacheKey = `${filePath}:${stat.size}:${stat.mtimeMs}`;
   const cached = fileInputHashCache.get(cacheKey);
   if (cached) {
     return cached;
   }
-  const pending = fs5.readFile(filePath, "utf-8").then((contents) => hashContent(contents));
+  const pending = fs7.readFile(filePath, "utf-8").then((contents) => hashContent(contents));
   fileInputHashCache.set(cacheKey, pending);
   return pending;
 }
@@ -139,18 +234,18 @@ async function hashFilesInOrder(filePaths) {
   return Promise.all(filePaths.map((filePath) => hashFileInput(filePath)));
 }
 async function copyOrLinkFiles(sourceFiles, outDir) {
-  await fs5.rm(outDir, { force: true, recursive: true });
+  await fs7.rm(outDir, { force: true, recursive: true });
   await ensureDirectory(outDir);
   await Promise.all(sourceFiles.map(async (sourceFile) => {
-    const destinationFile = path6.join(outDir, path6.basename(sourceFile));
+    const destinationFile = path8.join(outDir, path8.basename(sourceFile));
     try {
-      await fs5.link(sourceFile, destinationFile);
+      await fs7.link(sourceFile, destinationFile);
     } catch (error) {
       const code = error.code;
       if (code !== "EXDEV" && code !== "EEXIST" && code !== "EPERM") {
         throw error;
       }
-      await fs5.copyFile(sourceFile, destinationFile);
+      await fs7.copyFile(sourceFile, destinationFile);
     }
   }));
 }
@@ -161,20 +256,20 @@ var init_files = __esm(() => {
 });
 
 // src/cache/store.ts
-import fs6 from "fs";
+import fs8 from "fs";
 import os from "os";
-import path7 from "path";
+import path9 from "path";
 function getProjectCacheDir(rootDir, projectRoot) {
-  return path7.join(rootDir, hashContent(projectRoot));
+  return path9.join(rootDir, hashContent(projectRoot));
 }
 function getDefaultPersistentCacheRoot() {
   if (process.platform === "darwin") {
-    return path7.join(os.homedir(), "Library", "Caches", "gcc-ts-bundler");
+    return path9.join(os.homedir(), "Library", "Caches", "gcc-ts-bundler");
   }
   if (process.platform === "win32") {
-    return path7.join(process.env.LOCALAPPDATA ?? path7.join(os.homedir(), "AppData", "Local"), "gcc-ts-bundler");
+    return path9.join(process.env.LOCALAPPDATA ?? path9.join(os.homedir(), "AppData", "Local"), "gcc-ts-bundler");
   }
-  return path7.join(process.env.XDG_CACHE_HOME ?? path7.join(os.homedir(), ".cache"), "gcc-ts-bundler");
+  return path9.join(process.env.XDG_CACHE_HOME ?? path9.join(os.homedir(), ".cache"), "gcc-ts-bundler");
 }
 async function createCacheStore({
   cacheDir,
@@ -182,12 +277,12 @@ async function createCacheStore({
   projectRoot
 }) {
   if (mode === "off" || mode === "temp") {
-    const rootDir2 = await fs6.promises.mkdtemp(path7.join(os.tmpdir(), "gcc-ts-bundler-"));
-    const workspaceDir2 = path7.join(rootDir2, "workspace");
-    await fs6.promises.mkdir(workspaceDir2, { recursive: true });
+    const rootDir2 = await fs8.promises.mkdtemp(path9.join(os.tmpdir(), "gcc-ts-bundler-"));
+    const workspaceDir2 = path9.join(rootDir2, "workspace");
+    await fs8.promises.mkdir(workspaceDir2, { recursive: true });
     return {
       async cleanup() {
-        await fs6.promises.rm(rootDir2, { force: true, recursive: true });
+        await fs8.promises.rm(rootDir2, { force: true, recursive: true });
       },
       mode,
       projectCacheDir: rootDir2,
@@ -195,10 +290,10 @@ async function createCacheStore({
       workspaceDir: workspaceDir2
     };
   }
-  const rootDir = path7.resolve(cacheDir || getDefaultPersistentCacheRoot());
+  const rootDir = path9.resolve(cacheDir || getDefaultPersistentCacheRoot());
   const projectCacheDir = getProjectCacheDir(rootDir, projectRoot);
-  const workspaceDir = path7.join(projectCacheDir, "workspace");
-  await fs6.promises.mkdir(workspaceDir, { recursive: true });
+  const workspaceDir = path9.join(projectCacheDir, "workspace");
+  await fs8.promises.mkdir(workspaceDir, { recursive: true });
   return {
     async cleanup() {},
     mode,
@@ -209,7 +304,7 @@ async function createCacheStore({
 }
 async function readJsonIfExists(filePath) {
   try {
-    const raw = await fs6.promises.readFile(filePath, "utf-8");
+    const raw = await fs8.promises.readFile(filePath, "utf-8");
     return JSON.parse(raw);
   } catch (error) {
     if (error.code === "ENOENT") {
@@ -220,106 +315,11 @@ async function readJsonIfExists(filePath) {
 }
 async function writeJson(filePath, value) {
   await ensureParentDirectory(filePath);
-  await fs6.promises.writeFile(filePath, JSON.stringify(value, null, 2), "utf-8");
+  await fs8.promises.writeFile(filePath, JSON.stringify(value, null, 2), "utf-8");
 }
 var init_store = __esm(() => {
   init_files();
   init_hash();
-});
-
-// src/internal/bundle-location.ts
-import fs7 from "fs";
-import path8 from "path";
-import { createRequire } from "module";
-import { fileURLToPath } from "url";
-function getBundleFilePath() {
-  return fileURLToPath(__gcc_current_module_url);
-}
-function createBundleRequire() {
-  bundleRequire ??= createRequire(__gcc_current_module_url);
-  return bundleRequire;
-}
-function getPackageRootFromBundle() {
-  if (packageRoot) {
-    return packageRoot;
-  }
-  let currentDir = path8.dirname(getBundleFilePath());
-  while (true) {
-    if (fs7.existsSync(path8.join(currentDir, "package.json"))) {
-      packageRoot = currentDir;
-      return currentDir;
-    }
-    const parentDir = path8.dirname(currentDir);
-    if (parentDir === currentDir) {
-      throw new Error(`Unable to locate package.json from bundled module path ${getBundleFilePath()}`);
-    }
-    currentDir = parentDir;
-  }
-}
-var bundleRequire = null, packageRoot = null;
-var init_bundle_location = () => {};
-
-// src/native/index.ts
-import fs8 from "fs";
-import path9 from "path";
-function detectLinuxLibc() {
-  const report = process.report?.getReport?.();
-  if (report?.header?.glibcVersionRuntime) {
-    return "gnu";
-  }
-  try {
-    const { execFileSync } = require2("node:child_process");
-    const output = execFileSync("ldd", ["--version"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    return output.includes("musl") ? "musl" : "gnu";
-  } catch {}
-  return "musl";
-}
-function getTargetKey() {
-  if (process.platform === "linux") {
-    return `${process.platform}-${process.arch}-${detectLinuxLibc()}`;
-  }
-  if (process.platform === "win32") {
-    return `${process.platform}-${process.arch}-msvc`;
-  }
-  return `${process.platform}-${process.arch}`;
-}
-function loadNativeBinding() {
-  const targetKey = getTargetKey();
-  const packageName = SUPPORTED_TARGETS[targetKey];
-  const localFallbackPath = path9.join(getPackageRootFromBundle(), "native", "index.node");
-  if (fs8.existsSync(localFallbackPath)) {
-    return require2(localFallbackPath);
-  }
-  const loadErrors = [];
-  if (packageName) {
-    try {
-      return require2(packageName);
-    } catch (error) {
-      loadErrors.push(`${packageName}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  const supportedTargets = Object.keys(SUPPORTED_TARGETS).join(", ");
-  const details = loadErrors.length > 0 ? ` Tried ${loadErrors.join("; ")}.` : "";
-  throw new Error(`No native binding available for ${targetKey}. Supported targets: ${supportedTargets}.${details}`);
-}
-var require2, SUPPORTED_TARGETS, native_default;
-var init_native = __esm(() => {
-  init_bundle_location();
-  require2 = createBundleRequire();
-  SUPPORTED_TARGETS = {
-    "darwin-arm64": "gcc-ts-bundler-darwin-arm64",
-    "darwin-x64": "gcc-ts-bundler-darwin-x64",
-    "linux-arm64-gnu": "gcc-ts-bundler-linux-arm64-gnu",
-    "linux-arm64-musl": "gcc-ts-bundler-linux-arm64-musl",
-    "linux-x64-gnu": "gcc-ts-bundler-linux-x64-gnu",
-    "linux-x64-musl": "gcc-ts-bundler-linux-x64-musl",
-    "win32-arm64-msvc": "gcc-ts-bundler-win32-arm64-msvc",
-    "win32-x64-msvc": "gcc-ts-bundler-win32-x64-msvc"
-  };
-  native_default = loadNativeBinding();
 });
 
 // src/native/load.ts
@@ -555,14 +555,115 @@ var init_cache = __esm(() => {
   init_store();
 });
 
-// src/pipeline/resolve-build/workspace.ts
-import fs10 from "fs";
+// src/pipeline/resolve-build/jsx-runtime.ts
 import path13 from "path";
 import ts8 from "typescript";
+async function collectTsxRuntimeSupport({
+  fileNames,
+  tsConfigPath,
+  workspaceDir
+}) {
+  if (!fileNames.some((fileName) => fileName.endsWith(".tsx"))) {
+    return emptyTsxRuntimeSupport();
+  }
+  const compilerOptions = await loadCompilerOptions(tsConfigPath);
+  const runtimeSpecifier = getJsxRuntimeSpecifier(compilerOptions);
+  if (!runtimeSpecifier) {
+    return emptyTsxRuntimeSupport();
+  }
+  const resolvedEntry = require3.resolve(runtimeSpecifier, {
+    paths: [workspaceDir]
+  });
+  const workspaceEntry = toWorkspaceNodeModulesPath(resolvedEntry, workspaceDir);
+  const runtimeAlias = toRuntimePackageAlias(runtimeSpecifier, workspaceEntry);
+  const graph = resolveGraph({
+    entries: [workspaceEntry],
+    packageMode: "esm-only",
+    srcDir: path13.join(workspaceDir, "src"),
+    workspaceDir
+  });
+  return {
+    packageAliases: mergePackageAliases([
+      runtimeAlias,
+      ...graph.packageAliases
+    ]),
+    packageJsonFiles: graph.packageJsonFiles,
+    sourceFiles: graph.sourceFiles,
+    trackedFiles: graph.trackedFiles
+  };
+}
+function mergePackageAliases(aliases) {
+  const merged = new Map;
+  for (const alias of aliases) {
+    merged.set(`${alias.packageName}\x00${alias.subpath}`, alias);
+  }
+  return [...merged.values()].sort((left, right) => {
+    const leftKey = `${left.packageName}\x00${left.subpath}`;
+    const rightKey = `${right.packageName}\x00${right.subpath}`;
+    return leftKey.localeCompare(rightKey);
+  });
+}
+function mergeTsxRuntimeTrackedFiles(baseTrackedFiles, runtimeTrackedFiles) {
+  return uniqueSortedStrings([...baseTrackedFiles, ...runtimeTrackedFiles]);
+}
+function mergeRuntimePackageJsonFiles(packageJsonFiles, runtimePackageJsonFiles) {
+  return uniqueSortedStrings([...packageJsonFiles, ...runtimePackageJsonFiles]);
+}
+function emptyTsxRuntimeSupport() {
+  return {
+    packageAliases: [],
+    packageJsonFiles: [],
+    sourceFiles: [],
+    trackedFiles: []
+  };
+}
+function getJsxRuntimeSpecifier(compilerOptions) {
+  const jsxImportSource = compilerOptions.jsxImportSource ?? "react";
+  switch (compilerOptions.jsx) {
+    case ts8.JsxEmit.ReactJSX:
+      return `${jsxImportSource}/jsx-runtime`;
+    case ts8.JsxEmit.ReactJSXDev:
+      return `${jsxImportSource}/jsx-dev-runtime`;
+    default:
+      return null;
+  }
+}
+function toWorkspaceNodeModulesPath(resolvedPath, workspaceDir) {
+  const marker = `${path13.sep}node_modules${path13.sep}`;
+  const markerIndex = resolvedPath.lastIndexOf(marker);
+  if (markerIndex === -1) {
+    return resolvedPath;
+  }
+  const relativeNodeModulesPath = resolvedPath.slice(markerIndex + 1);
+  return path13.join(workspaceDir, relativeNodeModulesPath);
+}
+function toRuntimePackageAlias(specifier, targetPath) {
+  const segments = specifier.startsWith("@") ? specifier.split("/", 3) : specifier.split("/", 2);
+  const packageName = specifier.startsWith("@") ? `${segments[0]}/${segments[1]}` : segments[0];
+  const subpathSegments = specifier.startsWith("@") ? segments.slice(2) : segments.slice(1);
+  return {
+    packageName,
+    subpath: subpathSegments.length > 0 ? `./${subpathSegments.join("/")}` : ".",
+    targetPath
+  };
+}
+var require3;
+var init_jsx_runtime = __esm(() => {
+  init_load();
+  init_compiler_options();
+  init_files();
+  init_bundle_location();
+  require3 = createBundleRequire();
+});
+
+// src/pipeline/resolve-build/workspace.ts
+import fs10 from "fs";
+import path14 from "path";
+import ts9 from "typescript";
 async function ensureDirectorySymlink(linkPath, targetPath) {
   try {
     const currentTarget = await fs10.promises.readlink(linkPath);
-    if (path13.resolve(path13.dirname(linkPath), currentTarget) === targetPath) {
+    if (path14.resolve(path14.dirname(linkPath), currentTarget) === targetPath) {
       return;
     }
     await fs10.promises.rm(linkPath, { force: true, recursive: true });
@@ -571,16 +672,16 @@ async function ensureDirectorySymlink(linkPath, targetPath) {
       await fs10.promises.rm(linkPath, { force: true, recursive: true });
     }
   }
-  await fs10.promises.mkdir(path13.dirname(linkPath), { recursive: true });
+  await fs10.promises.mkdir(path14.dirname(linkPath), { recursive: true });
   await fs10.promises.symlink(targetPath, linkPath, process.platform === "win32" ? "junction" : "dir");
 }
 async function ensureWorkspaceNodeModules(workspaceDir, options) {
-  const linkPath = path13.join(workspaceDir, "node_modules");
+  const linkPath = path14.join(workspaceDir, "node_modules");
   if (options.packages.mode === "off") {
     await removePathIfExists(linkPath);
     return;
   }
-  const nodeModulesPath = path13.join(options.projectRoot, "node_modules");
+  const nodeModulesPath = path14.join(options.projectRoot, "node_modules");
   const hasNodeModules = await fs10.promises.access(nodeModulesPath).then(() => true).catch(() => false);
   if (!hasNodeModules) {
     await removePathIfExists(linkPath);
@@ -589,7 +690,7 @@ async function ensureWorkspaceNodeModules(workspaceDir, options) {
   await ensureDirectorySymlink(linkPath, nodeModulesPath);
 }
 async function resolveTsConfigPath(projectRoot) {
-  const configPath = ts8.findConfigFile(projectRoot, ts8.sys.fileExists, "tsconfig.json");
+  const configPath = ts9.findConfigFile(projectRoot, ts9.sys.fileExists, "tsconfig.json");
   if (!configPath) {
     throw new Error(`Cannot find tsconfig.json in ${projectRoot}`);
   }
@@ -607,16 +708,16 @@ async function removePathIfExists(targetPath) {
 var init_workspace = () => {};
 
 // src/pipeline/resolve-build/options.ts
-import path14 from "path";
+import path15 from "path";
 function normalizeBuildOptions(options) {
-  const projectRoot = path14.resolve(options.projectRoot ?? process.cwd());
-  const srcDir = path14.resolve(projectRoot, options.srcDir ?? (DEFAULT_BUILD_OPTIONS.srcDir || "src"));
-  const outDir = path14.resolve(projectRoot, options.outDir ?? (DEFAULT_BUILD_OPTIONS.outDir || "dist"));
+  const projectRoot = path15.resolve(options.projectRoot ?? process.cwd());
+  const srcDir = path15.resolve(projectRoot, options.srcDir ?? (DEFAULT_BUILD_OPTIONS.srcDir || "src"));
+  const outDir = path15.resolve(projectRoot, options.outDir ?? (DEFAULT_BUILD_OPTIONS.outDir || "dist"));
   const chunkPublicPath = normalizeChunkPublicPath(options.chunks?.publicPath ?? DEFAULT_BUILD_OPTIONS.chunks.publicPath);
-  const chunkManifestFile = path14.basename(options.chunks?.manifestFile ?? DEFAULT_BUILD_OPTIONS.chunks.manifestFile);
+  const chunkManifestFile = path15.basename(options.chunks?.manifestFile ?? DEFAULT_BUILD_OPTIONS.chunks.manifestFile);
   return {
     cache: {
-      dir: options.cache?.dir ? path14.resolve(projectRoot, options.cache.dir) : DEFAULT_BUILD_OPTIONS.cache.dir,
+      dir: options.cache?.dir ? path15.resolve(projectRoot, options.cache.dir) : DEFAULT_BUILD_OPTIONS.cache.dir,
       mode: options.cache?.mode ?? DEFAULT_BUILD_OPTIONS.cache.mode
     },
     chunks: {
@@ -632,9 +733,9 @@ function normalizeBuildOptions(options) {
       preflight: options.diagnostics?.preflight ?? DEFAULT_BUILD_OPTIONS.diagnostics.preflight,
       verbose: options.diagnostics?.verbose ?? DEFAULT_BUILD_OPTIONS.diagnostics.verbose
     },
-    entries: options.entries.map((entry) => path14.isAbsolute(entry) ? entry : path14.resolve(srcDir, entry)),
-    externs: [...options.externs ?? []].map((filePath) => path14.isAbsolute(filePath) ? filePath : path14.resolve(projectRoot, filePath)),
-    js: [...options.js ?? []].map((filePath) => path14.isAbsolute(filePath) ? filePath : path14.resolve(projectRoot, filePath)),
+    entries: options.entries.map((entry) => path15.isAbsolute(entry) ? entry : path15.resolve(srcDir, entry)),
+    externs: [...options.externs ?? []].map((filePath) => path15.isAbsolute(filePath) ? filePath : path15.resolve(projectRoot, filePath)),
+    js: [...options.js ?? []].map((filePath) => path15.isAbsolute(filePath) ? filePath : path15.resolve(projectRoot, filePath)),
     languageOut: options.languageOut ?? DEFAULT_BUILD_OPTIONS.languageOut,
     outDir,
     outputNames: [...options.outputNames ?? []],
@@ -656,7 +757,7 @@ var init_options = __esm(() => {
 });
 
 // src/pipeline/resolve-build.ts
-import path15 from "path";
+import path16 from "path";
 async function createBuildContext(options) {
   const packageRoot2 = getPackageRoot();
   const usesPersistentCache = options.cache.mode === "persistent";
@@ -665,7 +766,7 @@ async function createBuildContext(options) {
     optionsSignature: getOptionsSignature(options),
     packageRoot: packageRoot2,
     packageSignature: usesPersistentCache ? await getPackageSignature(packageRoot2) : "",
-    projectCacheDir: getProjectCacheDir(path15.resolve(options.cache.dir || getDefaultPersistentCacheRoot()), options.projectRoot)
+    projectCacheDir: getProjectCacheDir(path16.resolve(options.cache.dir || getDefaultPersistentCacheRoot()), options.projectRoot)
   };
 }
 async function resolveBuild(context) {
@@ -679,18 +780,18 @@ async function resolveBuild(context) {
     projectRoot: options.projectRoot
   });
   const usesPersistentCache = options.cache.mode === "persistent";
-  const sourceRoot = path15.join(cacheStore.workspaceDir, "src");
+  const sourceRoot = path16.join(cacheStore.workspaceDir, "src");
   await ensureDirectorySymlink(sourceRoot, options.srcDir);
   await ensureWorkspaceNodeModules(cacheStore.workspaceDir, options);
   const tsConfigPath = await resolveTsConfigPath(options.projectRoot);
   const compilerOptionsHash = usesPersistentCache ? await hashTsConfig(tsConfigPath) : "";
-  const entryRelativePaths = options.entries.map((entry) => path15.relative(options.srcDir, entry));
-  const overlayEntries = options.entries.map((entry) => path15.join(sourceRoot, path15.relative(options.srcDir, entry)));
-  const resolveSnapshotPath = path15.join(cacheStore.projectCacheDir, "resolve", "latest.json");
+  const entryRelativePaths = options.entries.map((entry) => path16.relative(options.srcDir, entry));
+  const overlayEntries = options.entries.map((entry) => path16.join(sourceRoot, path16.relative(options.srcDir, entry)));
+  const resolveSnapshotPath = path16.join(cacheStore.projectCacheDir, "resolve", "latest.json");
   const cachedSnapshot = usesPersistentCache ? await readJsonIfExists(resolveSnapshotPath) : null;
   if (cachedSnapshot && Array.isArray(cachedSnapshot.packageAliases) && Array.isArray(cachedSnapshot.sourceFiles) && Array.isArray(cachedSnapshot.packageJsonFiles) && cachedSnapshot.packageSignature === context.packageSignature && cachedSnapshot.compilerOptionsHash === compilerOptionsHash && cachedSnapshot.optionsSignature === context.optionsSignature && await trackedFilesMatch(cachedSnapshot.trackedFiles)) {
     const entryFiles2 = cachedSnapshot.entryFiles.map((entry) => toBuildEntry(entry, sourceRoot));
-    const shimDir2 = path15.join(cacheStore.workspaceDir, "entries");
+    const shimDir2 = path16.join(cacheStore.workspaceDir, "entries");
     const shimFiles2 = toShimFiles(entryFiles2, shimDir2);
     return {
       cleanup: cacheStore.cleanup,
@@ -699,12 +800,13 @@ async function resolveBuild(context) {
       lazyImports: cachedSnapshot.lazyImports ?? [],
       packageAliases: cachedSnapshot.packageAliases,
       packageJsonFiles: cachedSnapshot.packageJsonFiles,
-      finalCacheDir: path15.join(cacheStore.projectCacheDir, "final", cachedSnapshot.finalKey),
+      finalCacheDir: path16.join(cacheStore.projectCacheDir, "final", cachedSnapshot.finalKey),
       finalKey: cachedSnapshot.finalKey,
-      nativeEmitCacheDir: path15.join(cacheStore.projectCacheDir, "native-emit", cachedSnapshot.nativeEmitKey),
+      nativeEmitCacheDir: path16.join(cacheStore.projectCacheDir, "native-emit", cachedSnapshot.nativeEmitKey),
       shimDir: shimDir2,
       shimFiles: shimFiles2,
       sourceFiles: cachedSnapshot.sourceFiles,
+      tsxRuntimeSourceFiles: cachedSnapshot.tsxRuntimeSourceFiles ?? [],
       trackedFiles: cachedSnapshot.trackedFiles,
       tsConfigPath,
       workspaceDir: cacheStore.workspaceDir
@@ -718,14 +820,33 @@ async function resolveBuild(context) {
   });
   const outputNames = resolveOutputNames(entryRelativePaths, options.outputNames);
   const resolvedLazyImports = graphResult.lazyImports;
+  const tsxRuntimeSupport = await collectTsxRuntimeSupport({
+    fileNames: graphResult.sourceFiles,
+    tsConfigPath,
+    workspaceDir: cacheStore.workspaceDir
+  });
+  const packageAliases = mergePackageAliases([
+    ...graphResult.packageAliases,
+    ...tsxRuntimeSupport.packageAliases
+  ]);
+  const packageJsonFiles = mergeRuntimePackageJsonFiles(graphResult.packageJsonFiles, tsxRuntimeSupport.packageJsonFiles);
   const resolveKey = usesPersistentCache ? hashJson({
     compilerOptionsHash,
     entries: entryRelativePaths,
     files: graphResult.fileHashes,
-    packageSignature: context.packageSignature
+    packageSignature: context.packageSignature,
+    tsxRuntimeSourceFiles: tsxRuntimeSupport.sourceFiles
   }) : "active";
-  const resolveMetadataPath = path15.join(cacheStore.projectCacheDir, "resolve", `${resolveKey}.json`);
+  const resolveMetadataPath = path16.join(cacheStore.projectCacheDir, "resolve", `${resolveKey}.json`);
   let resolveMetadata = usesPersistentCache ? await readJsonIfExists(resolveMetadataPath) : null;
+  if (resolveMetadata) {
+    resolveMetadata = {
+      ...resolveMetadata,
+      packageAliases: resolveMetadata.packageAliases ?? packageAliases,
+      packageJsonFiles: resolveMetadata.packageJsonFiles ?? packageJsonFiles,
+      tsxRuntimeSourceFiles: resolveMetadata.tsxRuntimeSourceFiles ?? tsxRuntimeSupport.sourceFiles
+    };
+  }
   if (!resolveMetadata) {
     const entryFiles2 = graphResult.entries.map((entry, index) => ({
       chunkName: sanitizeChunkName(outputNames[index]),
@@ -733,9 +854,9 @@ async function resolveBuild(context) {
       hasDefaultExport: entry.hasDefaultExport,
       outputName: outputNames[index],
       sourcePath: entry.sourcePath,
-      sourceRelativePath: path15.relative(sourceRoot, entry.sourcePath)
+      sourceRelativePath: path16.relative(sourceRoot, entry.sourcePath)
     }));
-    const shimDir2 = path15.join(cacheStore.workspaceDir, "entries");
+    const shimDir2 = path16.join(cacheStore.workspaceDir, "entries");
     const shimFiles2 = toShimFiles(entryFiles2, shimDir2);
     resolveMetadata = {
       chunkPlan: planChunks({
@@ -767,20 +888,26 @@ async function resolveBuild(context) {
         outputName: entry.outputName,
         sourceRelativePath: entry.sourceRelativePath
       })),
-      lazyImports: resolvedLazyImports
+      lazyImports: resolvedLazyImports,
+      packageAliases,
+      packageJsonFiles,
+      tsxRuntimeSourceFiles: tsxRuntimeSupport.sourceFiles
     };
     if (usesPersistentCache) {
       await writeJson(resolveMetadataPath, resolveMetadata);
     }
+  } else if (usesPersistentCache && (!Array.isArray(resolveMetadata.packageAliases) || !Array.isArray(resolveMetadata.packageJsonFiles) || !Array.isArray(resolveMetadata.tsxRuntimeSourceFiles))) {
+    await writeJson(resolveMetadataPath, resolveMetadata);
   }
   const entryFiles = resolveMetadata.entryFiles.map((entry) => toBuildEntry(entry, sourceRoot));
-  const shimDir = path15.join(cacheStore.workspaceDir, "entries");
+  const shimDir = path16.join(cacheStore.workspaceDir, "entries");
   const shimFiles = toShimFiles(entryFiles, shimDir);
   const nativeEmitKey = usesPersistentCache ? hashJson({
     compilerOptionsHash,
     diagnostics: options.diagnostics,
     packageSignature: context.packageSignature,
-    resolveKey
+    resolveKey,
+    tsxRuntimeSourceFiles: resolveMetadata.tsxRuntimeSourceFiles ?? []
   }) : "active";
   const finalKey = usesPersistentCache ? hashJson({
     compilationLevel: options.compilationLevel,
@@ -790,10 +917,11 @@ async function resolveBuild(context) {
     ]),
     languageOut: options.languageOut,
     packageSignature: context.packageSignature,
-    resolveKey
+    resolveKey,
+    tsxRuntimeSourceFiles: resolveMetadata.tsxRuntimeSourceFiles ?? []
   }) : "active";
   const trackedFiles = usesPersistentCache ? await collectTrackedFiles([
-    ...graphResult.trackedFiles,
+    ...mergeTsxRuntimeTrackedFiles(graphResult.trackedFiles, tsxRuntimeSupport.trackedFiles),
     tsConfigPath,
     ...options.externs,
     ...options.js
@@ -806,11 +934,12 @@ async function resolveBuild(context) {
       lazyImports: resolvedLazyImports,
       nativeEmitKey,
       optionsSignature: context.optionsSignature,
-      packageAliases: graphResult.packageAliases,
-      packageJsonFiles: graphResult.packageJsonFiles,
+      packageAliases,
+      packageJsonFiles,
       packageSignature: context.packageSignature,
       resolveKey,
       sourceFiles: graphResult.sourceFiles,
+      tsxRuntimeSourceFiles: resolveMetadata.tsxRuntimeSourceFiles ?? [],
       trackedFiles
     });
   }
@@ -819,14 +948,15 @@ async function resolveBuild(context) {
     chunkPlan: resolveMetadata.chunkPlan,
     entryFiles,
     lazyImports: resolvedLazyImports,
-    packageAliases: graphResult.packageAliases,
-    packageJsonFiles: graphResult.packageJsonFiles,
-    finalCacheDir: path15.join(cacheStore.projectCacheDir, "final", finalKey),
+    packageAliases,
+    packageJsonFiles,
+    finalCacheDir: path16.join(cacheStore.projectCacheDir, "final", finalKey),
     finalKey,
-    nativeEmitCacheDir: path15.join(cacheStore.projectCacheDir, "native-emit", nativeEmitKey),
+    nativeEmitCacheDir: path16.join(cacheStore.projectCacheDir, "native-emit", nativeEmitKey),
     shimDir,
     shimFiles,
     sourceFiles: graphResult.sourceFiles,
+    tsxRuntimeSourceFiles: resolveMetadata.tsxRuntimeSourceFiles ?? [],
     trackedFiles,
     tsConfigPath,
     workspaceDir: cacheStore.workspaceDir
@@ -840,36 +970,61 @@ var init_resolve_build = __esm(() => {
   init_entries();
   init_signatures();
   init_cache();
+  init_jsx_runtime();
   init_workspace();
   init_options();
   init_signatures();
 });
 
+// src/internal/timing.ts
+import { performance } from "node:perf_hooks";
+function logInternalTiming(label, durationMs) {
+  if (!SHOW_INTERNAL_TIMINGS) {
+    return;
+  }
+  console.error(`[gcc-ts-bundler timing] ${label}: ${durationMs.toFixed(1)}ms`);
+}
+async function withInternalTiming(label, work) {
+  if (!SHOW_INTERNAL_TIMINGS) {
+    return await work();
+  }
+  const startedAt = performance.now();
+  try {
+    return await work();
+  } finally {
+    logInternalTiming(label, performance.now() - startedAt);
+  }
+}
+var SHOW_INTERNAL_TIMINGS;
+var init_timing = __esm(() => {
+  SHOW_INTERNAL_TIMINGS = process.env.GCC_BUILD_TIMINGS === "1";
+});
+
 // src/stages/native/closure-ir/diagnostics.ts
-import ts9 from "typescript";
+import ts10 from "typescript";
 function shouldIgnorePreflightDiagnostic(diagnostic) {
   if (diagnostic.code !== 7016) {
     return false;
   }
-  const message = ts9.flattenDiagnosticMessageText(diagnostic.messageText, `
+  const message = ts10.flattenDiagnosticMessageText(diagnostic.messageText, `
 `);
   return message.includes("node_modules") && message.includes("implicitly has an 'any' type");
 }
 var init_diagnostics = () => {};
 
 // src/stages/native/closure-ir/decorators.ts
-import ts10 from "typescript";
+import ts11 from "typescript";
 function containsDecorators(sourceFile) {
   let found = false;
   const visit = (node) => {
     if (found) {
       return;
     }
-    if (ts10.canHaveDecorators(node) && (ts10.getDecorators(node)?.length ?? 0) > 0) {
+    if (ts11.canHaveDecorators(node) && (ts11.getDecorators(node)?.length ?? 0) > 0) {
       found = true;
       return;
     }
-    ts10.forEachChild(node, visit);
+    ts11.forEachChild(node, visit);
   };
   visit(sourceFile);
   return found;
@@ -879,13 +1034,13 @@ function transpileDecoratedSource({
   fileName,
   sourceText
 }) {
-  return ts10.transpileModule(sourceText, {
+  return ts11.transpileModule(sourceText, {
     compilerOptions: {
       ...compilerOptions,
-      module: ts10.ModuleKind.ESNext,
-      moduleResolution: ts10.ModuleResolutionKind.Bundler,
+      module: ts11.ModuleKind.ESNext,
+      moduleResolution: ts11.ModuleResolutionKind.Bundler,
       sourceMap: false,
-      target: ts10.ScriptTarget.ES2018
+      target: ts11.ScriptTarget.ES2018
     },
     fileName,
     reportDiagnostics: true
@@ -894,7 +1049,7 @@ function transpileDecoratedSource({
 var init_decorators = () => {};
 
 // src/stages/native/closure-ir/metadata/docs.ts
-import ts11 from "typescript";
+import ts12 from "typescript";
 function buildInterfaceDeclarationSnippet(statement, checker) {
   const lines = ["/**"];
   lines.push(" * @record");
@@ -908,13 +1063,13 @@ function buildInterfaceDeclarationSnippet(statement, checker) {
     if (!memberName) {
       continue;
     }
-    if (ts11.isPropertySignature(member)) {
+    if (ts12.isPropertySignature(member)) {
       const propertyType = member.type ? toClosureType(checker.getTypeFromTypeNode(member.type), checker) : "?";
       lines.push(`/** @type {${propertyType}} */`);
       lines.push(`${statement.name.text}.prototype.${renderPropertyName(memberName)};`);
       continue;
     }
-    if (ts11.isMethodSignature(member)) {
+    if (ts12.isMethodSignature(member)) {
       const signature = checker.getSignatureFromDeclaration(member);
       if (!signature) {
         continue;
@@ -980,7 +1135,7 @@ function buildFunctionObjectParamRecord(statement, checker) {
     return null;
   }
   const firstParameter = statement.parameters[0];
-  if (!firstParameter || !ts11.isObjectBindingPattern(firstParameter.name) || hasRestElement(firstParameter.name)) {
+  if (!firstParameter || !ts12.isObjectBindingPattern(firstParameter.name) || hasRestElement(firstParameter.name)) {
     return null;
   }
   const parameterType = checker.getTypeAtLocation(firstParameter);
@@ -1013,9 +1168,9 @@ function buildClassJsDoc(statement, checker) {
     for (const clause of statement.heritageClauses) {
       for (const typeNode of clause.types) {
         const closureType = toClosureType(checker.getTypeAtLocation(typeNode), checker);
-        if (clause.token === ts11.SyntaxKind.ExtendsKeyword) {
+        if (clause.token === ts12.SyntaxKind.ExtendsKeyword) {
           lines.push(` * @extends {${closureType}}`);
-        } else if (clause.token === ts11.SyntaxKind.ImplementsKeyword) {
+        } else if (clause.token === ts12.SyntaxKind.ImplementsKeyword) {
           lines.push(` * @implements {${closureType}}`);
         }
       }
@@ -1030,13 +1185,13 @@ function getTemplateNames(typeParameters) {
   return (typeParameters ?? []).map((parameter) => parameter.name.text);
 }
 function hasExportModifier(node) {
-  return (ts11.getCombinedModifierFlags(node) & ts11.ModifierFlags.Export) !== 0;
+  return (ts12.getCombinedModifierFlags(node) & ts12.ModifierFlags.Export) !== 0;
 }
 function getPropertyNameText2(name) {
   if (!name) {
     return null;
   }
-  if (ts11.isIdentifier(name) || ts11.isStringLiteral(name) || ts11.isNumericLiteral(name) || ts11.isPrivateIdentifier(name)) {
+  if (ts12.isIdentifier(name) || ts12.isStringLiteral(name) || ts12.isNumericLiteral(name) || ts12.isPrivateIdentifier(name)) {
     return name.text;
   }
   return null;
@@ -1064,25 +1219,25 @@ function toClosureType(type, checker, seen = new Set) {
     return "?";
   }
   seen.add(type);
-  if (type.flags & ts11.TypeFlags.Any)
+  if (type.flags & ts12.TypeFlags.Any)
     return "?";
-  if (type.flags & ts11.TypeFlags.Unknown)
+  if (type.flags & ts12.TypeFlags.Unknown)
     return "?";
-  if (type.flags & ts11.TypeFlags.StringLike)
+  if (type.flags & ts12.TypeFlags.StringLike)
     return "string";
-  if (type.flags & ts11.TypeFlags.NumberLike)
+  if (type.flags & ts12.TypeFlags.NumberLike)
     return "number";
-  if (type.flags & ts11.TypeFlags.BooleanLike)
+  if (type.flags & ts12.TypeFlags.BooleanLike)
     return "boolean";
-  if (type.flags & ts11.TypeFlags.Void)
+  if (type.flags & ts12.TypeFlags.Void)
     return "void";
-  if (type.flags & ts11.TypeFlags.Undefined)
+  if (type.flags & ts12.TypeFlags.Undefined)
     return "undefined";
-  if (type.flags & ts11.TypeFlags.Null)
+  if (type.flags & ts12.TypeFlags.Null)
     return "null";
-  if (type.flags & ts11.TypeFlags.Never)
+  if (type.flags & ts12.TypeFlags.Never)
     return "never";
-  if (type.flags & ts11.TypeFlags.TypeParameter)
+  if (type.flags & ts12.TypeFlags.TypeParameter)
     return checker.typeToString(type);
   if (type.isUnion()) {
     return `(${type.types.map((item) => toClosureType(item, checker, seen)).join("|")})`;
@@ -1109,7 +1264,7 @@ function toClosureType(type, checker, seen = new Set) {
       return symbolName;
     }
   }
-  if (type.isClassOrInterface() || type.getProperties().length > 0 && !(type.flags & ts11.TypeFlags.Object)) {
+  if (type.isClassOrInterface() || type.getProperties().length > 0 && !(type.flags & ts12.TypeFlags.Object)) {
     return "!Object";
   }
   return "?";
@@ -1117,33 +1272,33 @@ function toClosureType(type, checker, seen = new Set) {
 var init_docs = () => {};
 
 // src/stages/native/closure-ir/metadata/enums.ts
-import ts12 from "typescript";
+import ts13 from "typescript";
 function collectUnsafeEnumSymbols(program, checker) {
   const unsafe = new Set;
   const mark = (node) => {
     const symbol = checker.getSymbolAtLocation(node);
     if (symbol) {
-      unsafe.add(symbol.flags & ts12.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol);
+      unsafe.add(symbol.flags & ts13.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol);
     }
   };
   for (const sourceFile of program.getSourceFiles()) {
     const visit = (node) => {
-      if (ts12.isElementAccessExpression(node) && ts12.isIdentifier(node.expression)) {
+      if (ts13.isElementAccessExpression(node) && ts13.isIdentifier(node.expression)) {
         mark(node.expression);
       }
-      if (ts12.isCallExpression(node) && ts12.isPropertyAccessExpression(node.expression) && ts12.isIdentifier(node.expression.expression) && node.expression.expression.text === "Object" && ["entries", "keys", "values"].includes(node.expression.name.text) && node.arguments.length > 0 && ts12.isIdentifier(node.arguments[0])) {
+      if (ts13.isCallExpression(node) && ts13.isPropertyAccessExpression(node.expression) && ts13.isIdentifier(node.expression.expression) && node.expression.expression.text === "Object" && ["entries", "keys", "values"].includes(node.expression.name.text) && node.arguments.length > 0 && ts13.isIdentifier(node.arguments[0])) {
         mark(node.arguments[0]);
       }
-      if (ts12.isIdentifier(node) && !ts12.isPropertyAccessExpression(node.parent) && !ts12.isElementAccessExpression(node.parent) && !ts12.isImportSpecifier(node.parent) && !ts12.isImportClause(node.parent) && !ts12.isExportSpecifier(node.parent) && !ts12.isEnumDeclaration(node.parent) && !ts12.isEnumMember(node.parent)) {
+      if (ts13.isIdentifier(node) && !ts13.isPropertyAccessExpression(node.parent) && !ts13.isElementAccessExpression(node.parent) && !ts13.isImportSpecifier(node.parent) && !ts13.isImportClause(node.parent) && !ts13.isExportSpecifier(node.parent) && !ts13.isEnumDeclaration(node.parent) && !ts13.isEnumMember(node.parent)) {
         const symbol = checker.getSymbolAtLocation(node);
         if (symbol) {
-          const resolved = symbol.flags & ts12.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
-          if (resolved.flags & ts12.SymbolFlags.Enum) {
+          const resolved = symbol.flags & ts13.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+          if (resolved.flags & ts13.SymbolFlags.Enum) {
             unsafe.add(resolved);
           }
         }
       }
-      ts12.forEachChild(node, visit);
+      ts13.forEachChild(node, visit);
     };
     visit(sourceFile);
   }
@@ -1151,7 +1306,7 @@ function collectUnsafeEnumSymbols(program, checker) {
 }
 function buildEnumDeclarationMetadata(statement, checker, unsafeEnumSymbols) {
   const symbol = checker.getSymbolAtLocation(statement.name);
-  const resolved = symbol && symbol.flags & ts12.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+  const resolved = symbol && symbol.flags & ts13.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
   if (resolved && unsafeEnumSymbols.has(resolved)) {
     return null;
   }
@@ -1195,34 +1350,34 @@ function buildEnumDeclarationMetadata(statement, checker, unsafeEnumSymbols) {
   };
 }
 function hasExportModifier2(node) {
-  return (ts12.getCombinedModifierFlags(node) & ts12.ModifierFlags.Export) !== 0;
+  return (ts13.getCombinedModifierFlags(node) & ts13.ModifierFlags.Export) !== 0;
 }
 function hasConstModifier(node) {
-  return (ts12.getCombinedModifierFlags(node) & ts12.ModifierFlags.Const) !== 0;
+  return (ts13.getCombinedModifierFlags(node) & ts13.ModifierFlags.Const) !== 0;
 }
 function getPropertyNameText3(name) {
   if (!name) {
     return null;
   }
-  if (ts12.isIdentifier(name) || ts12.isStringLiteral(name) || ts12.isNumericLiteral(name) || ts12.isPrivateIdentifier(name)) {
+  if (ts13.isIdentifier(name) || ts13.isStringLiteral(name) || ts13.isNumericLiteral(name) || ts13.isPrivateIdentifier(name)) {
     return name.text;
   }
   return null;
 }
 function literalValueFromExpression(expression) {
-  if (ts12.isStringLiteralLike(expression)) {
+  if (ts13.isStringLiteralLike(expression)) {
     return expression.text;
   }
-  if (ts12.isNumericLiteral(expression)) {
+  if (ts13.isNumericLiteral(expression)) {
     return Number(expression.text);
   }
-  if (expression.kind === ts12.SyntaxKind.TrueKeyword) {
+  if (expression.kind === ts13.SyntaxKind.TrueKeyword) {
     return true;
   }
-  if (expression.kind === ts12.SyntaxKind.FalseKeyword) {
+  if (expression.kind === ts13.SyntaxKind.FalseKeyword) {
     return false;
   }
-  if (ts12.isPrefixUnaryExpression(expression) && expression.operator === ts12.SyntaxKind.MinusToken && ts12.isNumericLiteral(expression.operand)) {
+  if (ts13.isPrefixUnaryExpression(expression) && expression.operator === ts13.SyntaxKind.MinusToken && ts13.isNumericLiteral(expression.operand)) {
     return -Number(expression.operand.text);
   }
   return;
@@ -1230,7 +1385,7 @@ function literalValueFromExpression(expression) {
 var init_enums = () => {};
 
 // src/stages/native/closure-ir/metadata.ts
-import ts13 from "typescript";
+import ts14 from "typescript";
 function collectClosureIrFiles({
   compilerOptions,
   fileNames,
@@ -1249,22 +1404,22 @@ function collectClosureIrFiles({
     const topLevelDocs = [];
     const enumDeclarations = [];
     for (const statement of sourceFile.statements) {
-      if (ts13.isInterfaceDeclaration(statement)) {
+      if (ts14.isInterfaceDeclaration(statement)) {
         typeDeclarations.push(buildInterfaceDeclarationSnippet(statement, checker));
         continue;
       }
-      if (ts13.isTypeAliasDeclaration(statement)) {
+      if (ts14.isTypeAliasDeclaration(statement)) {
         typeDeclarations.push(buildTypeAliasDeclarationSnippet(statement, checker));
         continue;
       }
-      if (ts13.isEnumDeclaration(statement)) {
+      if (ts14.isEnumDeclaration(statement)) {
         const enumDeclaration = buildEnumDeclarationMetadata(statement, checker, unsafeEnumSymbols);
         if (enumDeclaration) {
           enumDeclarations.push(enumDeclaration);
         }
         continue;
       }
-      if (ts13.isFunctionDeclaration(statement) && statement.name) {
+      if (ts14.isFunctionDeclaration(statement) && statement.name) {
         const objectParamRecord = buildFunctionObjectParamRecord(statement, checker);
         if (objectParamRecord) {
           typeDeclarations.push({ snippet: objectParamRecord.snippet });
@@ -1279,7 +1434,7 @@ function collectClosureIrFiles({
         }
         continue;
       }
-      if (ts13.isClassDeclaration(statement) && statement.name) {
+      if (ts14.isClassDeclaration(statement) && statement.name) {
         const jsdoc = buildClassJsDoc(statement, checker);
         if (jsdoc) {
           topLevelDocs.push({
@@ -1297,7 +1452,7 @@ function collectClosureIrFiles({
         fileName: sourceFile.fileName,
         sourceText: sourceFile.getFullText()
       });
-      diagnostics.push(...(transpiled.diagnostics ?? []).filter((diagnostic) => diagnostic.category === ts13.DiagnosticCategory.Error));
+      diagnostics.push(...(transpiled.diagnostics ?? []).filter((diagnostic) => diagnostic.category === ts14.DiagnosticCategory.Error));
       decoratedOutputText = transpiled.outputText;
     }
     files.push({
@@ -1317,24 +1472,33 @@ var init_metadata = __esm(() => {
 });
 
 // src/stages/native/closure-ir.ts
-import ts14 from "typescript";
-async function collectNativeTypeAnalysis({
+import ts15 from "typescript";
+async function createNativeTypeAnalysisContext({
   fileNames,
-  preflight,
   tsConfigPath,
   workspaceDir
 }) {
   const compilerOptions = await loadCompilerOptions(tsConfigPath, {
     allowJs: true,
     ignoreDeprecations: "6.0",
-    moduleResolution: ts14.ModuleResolutionKind.Bundler,
+    moduleResolution: ts15.ModuleResolutionKind.Bundler,
     noEmit: true,
     rootDir: workspaceDir,
     skipLibCheck: true,
-    target: ts14.ScriptTarget.ESNext
+    target: ts15.ScriptTarget.ESNext
   });
-  const program = ts14.createProgram(fileNames, compilerOptions);
-  const preflightDiagnostics = preflight === "full" ? [...ts14.getPreEmitDiagnostics(program)].filter((diagnostic) => !shouldIgnorePreflightDiagnostic(diagnostic)) : [];
+  return {
+    compilerOptions,
+    fileNames,
+    program: ts15.createProgram(fileNames, compilerOptions)
+  };
+}
+function collectNativeTypeAnalysisFromContext({
+  context,
+  preflight
+}) {
+  const { compilerOptions, fileNames, program } = context;
+  const preflightDiagnostics = preflight === "full" ? [...ts15.getPreEmitDiagnostics(program)].filter((diagnostic) => !shouldIgnorePreflightDiagnostic(diagnostic)) : [];
   const { diagnostics: closureIrDiagnostics, files } = collectClosureIrFiles({
     compilerOptions,
     fileNames,
@@ -1353,8 +1517,8 @@ var init_closure_ir = __esm(() => {
 
 // src/stages/native/emit.ts
 import fs11 from "fs";
-import path16 from "path";
-import ts15 from "typescript";
+import path17 from "path";
+import ts16 from "typescript";
 async function emitNativeStage({
   cacheDir,
   fileNames,
@@ -1363,32 +1527,20 @@ async function emitNativeStage({
   options,
   packageAliases,
   packageJsonFiles,
+  tsxRuntimeSourceFiles,
   tsConfigPath,
   workspaceDir
 }) {
   const usesPersistentCache = options.cache.mode === "persistent";
-  const outDir = path16.join(cacheDir, "out");
-  const externsPath = path16.join(cacheDir, "native-generated.externs.js");
-  const metadataPathForNative = path16.join(cacheDir, "closure-ir.json");
-  const runtimePackageInputs = await collectTsxRuntimePackageInputs({
-    fileNames,
-    tsConfigPath,
-    workspaceDir
-  });
-  const runtimeSupportFiles = runtimePackageInputs.sourceFiles.map((fileName) => toEmittedPath(fileName, outDir, workspaceDir));
+  const outDir = path17.join(cacheDir, "out");
+  const externsPath = path17.join(cacheDir, "native-generated.externs.js");
+  const metadataPathForNative = path17.join(cacheDir, "closure-ir.json");
+  const runtimeSupportFiles = tsxRuntimeSourceFiles.map((fileName) => toEmittedPath(fileName, outDir, workspaceDir));
   const combinedFileNames = uniqueSortedStrings([
     ...fileNames,
-    ...runtimePackageInputs.sourceFiles
+    ...tsxRuntimeSourceFiles
   ]);
-  const combinedPackageAliases = mergePackageAliases([
-    ...packageAliases,
-    ...runtimePackageInputs.packageAliases
-  ]);
-  const combinedPackageJsonFiles = uniqueSortedStrings([
-    ...packageJsonFiles,
-    ...runtimePackageInputs.packageJsonFiles
-  ]);
-  const dependencyModules = collectDependencyModules(combinedPackageAliases);
+  const dependencyModules = collectDependencyModules(packageAliases);
   const dependencyRuntimeFiles = collectDependencyRuntimeFiles({
     outDir,
     sourceFiles: combinedFileNames,
@@ -1431,12 +1583,15 @@ async function emitNativeStage({
       supportFiles: []
     };
   }
-  const analysis = await collectNativeTypeAnalysis({
+  const analysisContext = await withInternalTiming("native-emit:analysis-context", () => createNativeTypeAnalysisContext({
     fileNames: combinedFileNames,
-    preflight: options.diagnostics.preflight,
     tsConfigPath,
     workspaceDir
-  });
+  }));
+  const analysis = await withInternalTiming("native-emit:closure-ir", () => collectNativeTypeAnalysisFromContext({
+    context: analysisContext,
+    preflight: options.diagnostics.preflight
+  }));
   if (analysis.diagnostics.length > 0) {
     return {
       dependencyModules,
@@ -1450,17 +1605,17 @@ async function emitNativeStage({
     };
   }
   await fs11.promises.writeFile(metadataPathForNative, JSON.stringify(analysis.files, null, 2), "utf-8");
-  const result = transpileSources({
+  const result = await withInternalTiming("native-emit:transpile", () => Promise.resolve(transpileSources({
     chunkMode: options.chunks.mode,
     metadataPath: metadataPathForNative,
     externsPath,
     fileNames: combinedFileNames,
     lazyImports,
     outDir,
-    packageAliases: combinedPackageAliases,
-    packageJsonFiles: combinedPackageJsonFiles,
+    packageAliases,
+    packageJsonFiles,
     workspaceDir
-  });
+  })));
   const finalSupportFiles = uniqueSortedStrings([
     ...runtimeSupportFiles,
     ...result.supportFiles
@@ -1487,47 +1642,6 @@ async function emitNativeStage({
     supportFiles: finalSupportFiles
   };
 }
-async function collectTsxRuntimePackageInputs({
-  fileNames,
-  tsConfigPath,
-  workspaceDir
-}) {
-  if (!fileNames.some((fileName) => fileName.endsWith(".tsx"))) {
-    return {
-      packageAliases: [],
-      packageJsonFiles: [],
-      sourceFiles: []
-    };
-  }
-  const compilerOptions = await loadCompilerOptions(tsConfigPath);
-  const runtimeSpecifier = getJsxRuntimeSpecifier(compilerOptions);
-  if (!runtimeSpecifier) {
-    return {
-      packageAliases: [],
-      packageJsonFiles: [],
-      sourceFiles: []
-    };
-  }
-  const resolvedEntry = require3.resolve(runtimeSpecifier, {
-    paths: [workspaceDir]
-  });
-  const workspaceEntry = toWorkspaceNodeModulesPath(resolvedEntry, workspaceDir);
-  const runtimeAlias = toRuntimePackageAlias(runtimeSpecifier, workspaceEntry);
-  const graph = resolveGraph({
-    entries: [workspaceEntry],
-    packageMode: "esm-only",
-    srcDir: path16.join(workspaceDir, "src"),
-    workspaceDir
-  });
-  return {
-    packageAliases: mergePackageAliases([
-      runtimeAlias,
-      ...graph.packageAliases
-    ]),
-    packageJsonFiles: graph.packageJsonFiles,
-    sourceFiles: graph.sourceFiles
-  };
-}
 async function getMissingInputDiagnostics({
   fileNames,
   preflight,
@@ -1547,24 +1661,13 @@ async function getMissingInputDiagnostics({
 }
 function createSimpleDiagnostic(messageText) {
   return {
-    category: ts15.DiagnosticCategory.Error,
+    category: ts16.DiagnosticCategory.Error,
     code: 0,
     file: undefined,
     length: undefined,
     messageText,
     start: undefined
   };
-}
-function getJsxRuntimeSpecifier(compilerOptions) {
-  const jsxImportSource = compilerOptions.jsxImportSource ?? "react";
-  switch (compilerOptions.jsx) {
-    case ts15.JsxEmit.ReactJSX:
-      return `${jsxImportSource}/jsx-runtime`;
-    case ts15.JsxEmit.ReactJSXDev:
-      return `${jsxImportSource}/jsx-dev-runtime`;
-    default:
-      return null;
-  }
 }
 async function readMetadata(metadataPath) {
   try {
@@ -1590,7 +1693,7 @@ async function readMetadata(metadataPath) {
   }
 }
 function toEmittedPath(sourcePath, outDir, workspaceDir) {
-  return path16.join(outDir, path16.relative(workspaceDir, sourcePath)).replace(/\.[^/.]+$/, ".js");
+  return path17.join(outDir, path17.relative(workspaceDir, sourcePath)).replace(/\.[^/.]+$/, ".js");
 }
 function collectDependencyModules(packageAliases) {
   return uniqueSortedStrings(packageAliases.filter((alias) => isDependencyFile(alias.targetPath)).map((alias) => alias.subpath === "." ? alias.packageName : `${alias.packageName}/${alias.subpath.replace(/^\.\//, "")}`));
@@ -1603,49 +1706,15 @@ function collectDependencyRuntimeFiles({
   return uniqueSortedStrings(sourceFiles.filter((filePath) => isDependencyFile(filePath)).map((filePath) => toEmittedPath(filePath, outDir, workspaceDir)));
 }
 function isDependencyFile(filePath) {
-  return path16.resolve(filePath).includes(`${path16.sep}node_modules${path16.sep}`);
+  return path17.resolve(filePath).includes(`${path17.sep}node_modules${path17.sep}`);
 }
-function mergePackageAliases(aliases) {
-  const merged = new Map;
-  for (const alias of aliases) {
-    merged.set(`${alias.packageName}\x00${alias.subpath}`, alias);
-  }
-  return [...merged.values()].sort((left, right) => {
-    const leftKey = `${left.packageName}\x00${left.subpath}`;
-    const rightKey = `${right.packageName}\x00${right.subpath}`;
-    return leftKey.localeCompare(rightKey);
-  });
-}
-function toWorkspaceNodeModulesPath(resolvedPath, workspaceDir) {
-  const marker = `${path16.sep}node_modules${path16.sep}`;
-  const markerIndex = resolvedPath.lastIndexOf(marker);
-  if (markerIndex === -1) {
-    return resolvedPath;
-  }
-  const relativeNodeModulesPath = resolvedPath.slice(markerIndex + 1);
-  return path16.join(workspaceDir, relativeNodeModulesPath);
-}
-function toRuntimePackageAlias(specifier, targetPath) {
-  const segments = specifier.startsWith("@") ? specifier.split("/", 3) : specifier.split("/", 2);
-  const packageName = specifier.startsWith("@") ? `${segments[0]}/${segments[1]}` : segments[0];
-  const subpath = specifier.startsWith("@") ? segments[2] : segments[1];
-  return {
-    packageName,
-    subpath: subpath ? `./${subpath}` : ".",
-    targetPath
-  };
-}
-var require3, NATIVE_EMIT_METADATA_VERSION = 7;
+var NATIVE_EMIT_METADATA_VERSION = 7;
 var init_emit = __esm(() => {
-  init_bundle_location();
   init_files();
   init_file_state();
+  init_timing();
   init_load();
-  init_load();
-  init_load();
-  init_compiler_options();
   init_closure_ir();
-  require3 = createBundleRequire();
 });
 
 // src/stages/closure/compiler.ts
@@ -1711,13 +1780,13 @@ var init_compiler = () => {};
 
 // src/stages/closure/cache.ts
 import fs12 from "fs/promises";
-import path17 from "path";
+import path18 from "path";
 function getCompileJobOutputFiles(job) {
   if (job.jsOutputFile) {
     return [job.jsOutputFile];
   }
   if (job.chunk && job.chunkOutputPathPrefix) {
-    return job.chunk.map((chunkSpec) => path17.join(job.chunkOutputPathPrefix, `${chunkSpec.split(":", 1)[0]}.js`));
+    return job.chunk.map((chunkSpec) => path18.join(job.chunkOutputPathPrefix, `${chunkSpec.split(":", 1)[0]}.js`));
   }
   throw new Error("Closure compile job is missing output configuration.");
 }
@@ -1735,17 +1804,17 @@ async function tryRestoreCachedClosureJob({
   artifactFiles
 }) {
   const jobCacheDir = await getClosureJobCacheDir(cacheDir, job, compilerVersion);
-  const metadata = await readJsonIfExists(path17.join(jobCacheDir, "meta.json"));
+  const metadata = await readJsonIfExists(path18.join(jobCacheDir, "meta.json"));
   if (!metadata || metadata.version !== CLOSURE_JOB_CACHE_VERSION || metadata.artifactFiles.length !== artifactFiles.length) {
     return false;
   }
-  const cachedFiles = metadata.artifactFiles.map((fileName) => path17.join(jobCacheDir, fileName));
+  const cachedFiles = metadata.artifactFiles.map((fileName) => path18.join(jobCacheDir, fileName));
   const filesReady = await Promise.all(cachedFiles.map((filePath) => fs12.stat(filePath).then(() => true).catch(() => false)));
   if (filesReady.some((ready) => !ready)) {
     return false;
   }
   await Promise.all(artifactFiles.map(async (artifactFile, index) => {
-    await ensureDirectory(path17.dirname(artifactFile));
+    await ensureDirectory(path18.dirname(artifactFile));
     await fs12.copyFile(cachedFiles[index], artifactFile);
   }));
   return true;
@@ -1759,9 +1828,9 @@ async function persistCachedClosureJob({
   const jobCacheDir = await getClosureJobCacheDir(cacheDir, job, compilerVersion);
   await fs12.rm(jobCacheDir, { force: true, recursive: true });
   await ensureDirectory(jobCacheDir);
-  const artifactNames = artifactFiles.map((artifactFile) => path17.basename(artifactFile));
-  await Promise.all(artifactFiles.map((artifactFile, index) => fs12.copyFile(artifactFile, path17.join(jobCacheDir, artifactNames[index]))));
-  await writeJson(path17.join(jobCacheDir, "meta.json"), {
+  const artifactNames = artifactFiles.map((artifactFile) => path18.basename(artifactFile));
+  await Promise.all(artifactFiles.map((artifactFile, index) => fs12.copyFile(artifactFile, path18.join(jobCacheDir, artifactNames[index]))));
+  await writeJson(path18.join(jobCacheDir, "meta.json"), {
     artifactFiles: artifactNames,
     version: CLOSURE_JOB_CACHE_VERSION
   });
@@ -1780,7 +1849,7 @@ async function getClosureJobCacheDir(cacheDir, job, compilerVersion) {
       dependencyMode: job.dependencyMode ?? null,
       entryPoint: job.entryPoint ?? null,
       hasPropertyRenamingReport: Boolean(job.propertyRenamingReportPath),
-      jsOutputKinds: outputFiles.map((outputFile) => path17.basename(outputFile)),
+      jsOutputKinds: outputFiles.map((outputFile) => path18.basename(outputFile)),
       languageIn: job.languageIn,
       languageOut: job.languageOut,
       rewritePolyfills: job.rewritePolyfills,
@@ -1789,7 +1858,7 @@ async function getClosureJobCacheDir(cacheDir, job, compilerVersion) {
     jsHash,
     version: CLOSURE_JOB_CACHE_VERSION
   });
-  return path17.join(cacheDir, cacheKey);
+  return path18.join(cacheDir, cacheKey);
 }
 var CLOSURE_JOB_CACHE_VERSION = 2;
 var init_cache2 = __esm(() => {
@@ -1833,7 +1902,7 @@ var init_concurrency = () => {};
 
 // src/stages/closure/run-closure.ts
 import fs13 from "fs/promises";
-import path18 from "path";
+import path19 from "path";
 async function runClosureStage({
   chunkPlan,
   emittedOutDir,
@@ -1849,8 +1918,8 @@ async function runClosureStage({
 }) {
   await fs13.rm(finalCacheDir, { force: true, recursive: true });
   await ensureDirectory(finalCacheDir);
-  const rawDir = path18.join(finalCacheDir, "raw");
-  const cacheOutputDir = path18.join(finalCacheDir, "outputs");
+  const rawDir = path19.join(finalCacheDir, "raw");
+  const cacheOutputDir = path19.join(finalCacheDir, "outputs");
   await ensureDirectory(rawDir);
   await ensureDirectory(cacheOutputDir);
   await fs13.rm(outDir, { force: true, recursive: true });
@@ -1878,79 +1947,111 @@ async function runClosureStage({
     await ensureParentDirectory(asset.path);
     await fs13.writeFile(asset.path, asset.text, "utf-8");
   }));
-  const closureJobCacheDir = options.cache.mode === "off" ? null : path18.join(projectCacheDir, "closure-jobs");
+  const closureJobCacheDir = options.cache.mode === "off" ? null : path19.join(projectCacheDir, "closure-jobs");
   const concurrency = options.chunks.mode === "bundler-runtime" ? determineClosureConcurrency(prepared.compileJobs.length) : 1;
-  const exitCodes = await runWithConcurrency(prepared.compileJobs, concurrency, async (job) => runPreparedClosureJob({
+  const exitCodes = await withInternalTiming("closure:compile", () => runWithConcurrency(prepared.compileJobs, concurrency, async (job) => runPreparedClosureJob({
     cacheDir: closureJobCacheDir,
     job
-  }));
+  })));
   const failedExitCode = exitCodes.find((exitCode) => exitCode !== 0);
   if (failedExitCode !== undefined) {
     return { cacheOutputFiles: [], exitCode: failedExitCode, outputFiles: [] };
   }
-  const propertyRenamingReports = new Map;
-  const es5HelperRewrite = await rewriteBundlerRuntimeEs5ChunksIfNeeded(prepared, options.chunks.mode, options.languageOut);
-  await Promise.all(prepared.postprocessActions.map(async (action) => {
-    await ensureParentDirectory(action.outputPath);
-    const reportText = action.propertyRenamingReportPath ? await readPropertyRenamingReport(action.propertyRenamingReportPath, propertyRenamingReports) : "";
-    if (action.kind === "copy" && !reportText) {
-      await fs13.copyFile(action.inputPath, action.outputPath);
-      return;
-    }
-    let contents = await fs13.readFile(action.inputPath, "utf-8");
-    if (action.kind === "rewrite-gcc-exports" || action.kind === "rewrite-gcc-exports-and-decorator-metadata") {
-      contents = rewriteGccExports(contents);
-    }
-    if (reportText && (action.kind === "rewrite-decorator-metadata" || action.kind === "rewrite-gcc-exports-and-decorator-metadata")) {
-      contents = rewriteDecoratorMetadata(contents, reportText);
-    }
-    await fs13.writeFile(action.outputPath, contents);
+  await withInternalTiming("closure:postprocess", () => runClosurePostprocess({
+    chunkMode: options.chunks.mode,
+    languageOut: options.languageOut,
+    prepared
   }));
-  if (es5HelperRewrite?.baseOutputPath && es5HelperRewrite.helperBag) {
-    const baseOutput = await fs13.readFile(es5HelperRewrite.baseOutputPath, "utf-8");
-    const injected = injectBundlerRuntimeEs5HelperBag(baseOutput, es5HelperRewrite.helperBag);
-    if (injected !== baseOutput) {
-      await fs13.writeFile(es5HelperRewrite.baseOutputPath, injected);
-    }
-  }
-  await copyOrLinkFiles(prepared.publishedOutputs, cacheOutputDir);
-  const cacheOutputFiles = prepared.publishedOutputs.map((outputFile) => path18.join(cacheOutputDir, path18.relative(outDir, outputFile)));
+  await withInternalTiming("closure:publish", () => copyOrLinkFiles(prepared.publishedOutputs, cacheOutputDir));
+  const cacheOutputFiles = prepared.publishedOutputs.map((outputFile) => path19.join(cacheOutputDir, path19.relative(outDir, outputFile)));
   return {
     cacheOutputFiles,
     exitCode: 0,
     outputFiles: prepared.publishedOutputs
   };
 }
-async function rewriteBundlerRuntimeEs5ChunksIfNeeded(prepared, chunkMode, languageOut) {
-  if (chunkMode !== "bundler-runtime" || !/ECMASCRIPT(?:3|5)/.test(languageOut) || !prepared.bundlerRuntimeBaseInputPath) {
-    return null;
-  }
-  const helperKeys = new Set;
+async function runClosurePostprocess({
+  chunkMode,
+  languageOut,
+  prepared
+}) {
+  const propertyRenamingReports = new Map;
+  const es5Rewrite = createEs5HelperRewriteContext({
+    bundlerRuntimeBaseInputPath: prepared.bundlerRuntimeBaseInputPath,
+    chunkMode,
+    languageOut
+  });
+  const inputContents = new Map;
   const inputPaths = [
     ...new Set(prepared.postprocessActions.map((action) => action.inputPath))
   ];
-  for (const inputPath of inputPaths) {
-    if (inputPath === prepared.bundlerRuntimeBaseInputPath) {
-      continue;
+  await Promise.all(inputPaths.map(async (inputPath) => {
+    if (!es5Rewrite.requiresInputRead()) {
+      return;
     }
-    const contents = await fs13.readFile(inputPath, "utf-8");
-    const rewritten = rewriteBundlerRuntimeEs5Helpers(contents);
-    for (const helperKey of rewritten.helperKeys) {
-      helperKeys.add(helperKey);
+    const originalContents = await readInputContents(inputPath, inputContents);
+    applyEs5HelperRewrite(inputPath, originalContents, es5Rewrite);
+  }));
+  await Promise.all(prepared.postprocessActions.map(async (action) => {
+    await ensureParentDirectory(action.outputPath);
+    const reportText = action.propertyRenamingReportPath ? await readPropertyRenamingReport(action.propertyRenamingReportPath, propertyRenamingReports) : "";
+    if (action.kind === "copy" && !reportText && !es5Rewrite.requiresInputRead()) {
+      await fs13.copyFile(action.inputPath, action.outputPath);
+      return;
     }
-    if (rewritten.code !== contents) {
-      await fs13.writeFile(inputPath, rewritten.code);
+    const originalContents = await readInputContents(action.inputPath, inputContents);
+    let contents = applyEs5HelperRewrite(action.inputPath, originalContents, es5Rewrite);
+    if (action.kind === "rewrite-gcc-exports" || action.kind === "rewrite-gcc-exports-and-decorator-metadata") {
+      contents = rewriteGccExports(contents);
     }
-  }
-  if (helperKeys.size === 0) {
-    return null;
-  }
+    if (reportText && (action.kind === "rewrite-decorator-metadata" || action.kind === "rewrite-gcc-exports-and-decorator-metadata")) {
+      contents = rewriteDecoratorMetadata(contents, reportText);
+    }
+    if (action.inputPath === prepared.bundlerRuntimeBaseInputPath) {
+      contents = injectBundlerRuntimeEs5HelperBag(contents, es5Rewrite.renderHelperBag());
+    }
+    await fs13.writeFile(action.outputPath, contents);
+  }));
+}
+function createEs5HelperRewriteContext({
+  bundlerRuntimeBaseInputPath,
+  chunkMode,
+  languageOut
+}) {
+  const shouldRewriteHelpers = chunkMode === "bundler-runtime" && /ECMASCRIPT(?:3|5)/.test(languageOut) && !!bundlerRuntimeBaseInputPath;
+  const helperKeys = new Set;
+  const rewrittenInputs = new Map;
   return {
-    baseOutputPath: prepared.postprocessActions.find((action) => action.inputPath === prepared.bundlerRuntimeBaseInputPath)?.outputPath,
-    helperBag: renderBundlerRuntimeEs5HelperBag(helperKeys)
+    requiresInputRead() {
+      return shouldRewriteHelpers;
+    },
+    renderHelperBag() {
+      return helperKeys.size === 0 ? "" : renderBundlerRuntimeEs5HelperBag(helperKeys);
+    },
+    rewrite(inputPath, contents) {
+      if (!shouldRewriteHelpers || inputPath === bundlerRuntimeBaseInputPath) {
+        return contents;
+      }
+      const cached = rewrittenInputs.get(inputPath);
+      if (cached !== undefined) {
+        return cached;
+      }
+      const rewritten = rewriteBundlerRuntimeEs5Helpers(contents);
+      for (const helperKey of rewritten.helperKeys) {
+        helperKeys.add(helperKey);
+      }
+      rewrittenInputs.set(inputPath, rewritten.code);
+      return rewritten.code;
+    }
   };
 }
+function applyEs5HelperRewrite(inputPath, contents, rewriteContext) {
+  return rewriteContext.rewrite(inputPath, contents);
+}
 function injectBundlerRuntimeEs5HelperBag(code, helperBag) {
+  if (!helperBag) {
+    return code;
+  }
   const marker = "}).call(this,globalThis);";
   const markerIndex = code.indexOf(marker);
   if (markerIndex === -1) {
@@ -1958,6 +2059,14 @@ function injectBundlerRuntimeEs5HelperBag(code, helperBag) {
   }
   const insertAt = markerIndex + marker.length;
   return `${code.slice(0, insertAt)}${helperBag}${code.slice(insertAt)}`;
+}
+async function readInputContents(inputPath, cache) {
+  let pending = cache.get(inputPath);
+  if (!pending) {
+    pending = fs13.readFile(inputPath, "utf-8");
+    cache.set(inputPath, pending);
+  }
+  return pending;
 }
 function renderBundlerRuntimeEs5HelperBag(helperKeys) {
   const lines = ["var _=globalThis.__g._||(globalThis.__g._=[]);"];
@@ -2046,6 +2155,7 @@ async function readPropertyRenamingReport(reportPath, cache) {
 }
 var init_run_closure = __esm(() => {
   init_files();
+  init_timing();
   init_load();
   init_compiler();
   init_cache2();
@@ -2054,7 +2164,7 @@ var init_run_closure = __esm(() => {
 
 // src/pipeline/build-helpers.ts
 import fs14 from "fs";
-import path19 from "path";
+import path20 from "path";
 async function publishOutputs(outputFiles, outDir) {
   if (await publishedOutputsMatch2(outputFiles, outDir)) {
     return;
@@ -2066,7 +2176,7 @@ function toImportPath(relativePath) {
   return normalized.startsWith(".") ? normalized : `./${normalized}`;
 }
 function toPublishedOutputPaths(publishedOutputs, outDir) {
-  return publishedOutputs.map(({ name }) => path19.join(outDir, name));
+  return publishedOutputs.map(({ name }) => path20.join(outDir, name));
 }
 function createBuildDiagnostic(error) {
   return {
@@ -2089,12 +2199,12 @@ __export(exports_build_pipeline, {
   cleanCache: () => cleanCache,
   build: () => build
 });
-import path20 from "path";
+import path21 from "path";
 async function build(options) {
   const context = await createBuildContext(normalizeBuildOptions(options));
   const usesPersistentCache = context.options.cache.mode === "persistent";
   if (usesPersistentCache) {
-    const fastSnapshot = await readJsonIfExists(path20.join(context.projectCacheDir, "final-fast.json"));
+    const fastSnapshot = await readJsonIfExists(path21.join(context.projectCacheDir, "final-fast.json"));
     if (fastSnapshot && fastSnapshot.optionsSignature === context.optionsSignature && fastSnapshot.packageSignature === context.packageSignature && await trackedFilesMatch(fastSnapshot.trackedFiles) && await publishedOutputsMatchSnapshot(fastSnapshot.publishedOutputs, context.options.outDir)) {
       return {
         cacheHit: true,
@@ -2107,9 +2217,9 @@ async function build(options) {
   }
   let resolved = null;
   try {
-    resolved = await resolveBuild(context);
+    resolved = await withInternalTiming("resolve-build", () => resolveBuild(context));
     const resolvedBuild = resolved;
-    const finalMetadataPath = path20.join(resolvedBuild.finalCacheDir, "meta.json");
+    const finalMetadataPath = path21.join(resolvedBuild.finalCacheDir, "meta.json");
     const finalMetadata = usesPersistentCache ? await readJsonIfExists(finalMetadataPath) : null;
     if (usesPersistentCache && finalMetadata && await filesExist(finalMetadata.outputFiles)) {
       await publishOutputs(finalMetadata.outputFiles, context.options.outDir);
@@ -2119,7 +2229,7 @@ async function build(options) {
         emitSkipped: false,
         exitCode: 0,
         outputFiles: toPublishedOutputPaths(finalMetadata.outputFiles.map((outputFile) => ({
-          name: path20.basename(outputFile)
+          name: path21.basename(outputFile)
         })), context.options.outDir)
       };
     }
@@ -2150,12 +2260,12 @@ async function build(options) {
         entries: resolvedBuild.entryFiles.map((entry) => ({
           exportNames: entry.exportNames,
           hasDefaultExport: entry.hasDefaultExport,
-          importPath: toImportPath(path20.relative(path20.dirname(path20.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`)), entry.sourcePath)),
-          shimPath: path20.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`)
+          importPath: toImportPath(path21.relative(path21.dirname(path21.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`)), entry.sourcePath)),
+          shimPath: path21.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`)
         }))
       });
     }
-    const nativeEmitMetadataPath = path20.join(resolvedBuild.nativeEmitCacheDir, "meta.json");
+    const nativeEmitMetadataPath = path21.join(resolvedBuild.nativeEmitCacheDir, "meta.json");
     const nativeEmitResult = await emitNativeStage({
       cacheDir: resolvedBuild.nativeEmitCacheDir,
       fileNames: context.options.chunks.mode !== "off" ? resolvedBuild.sourceFiles : [...resolvedBuild.sourceFiles, ...resolvedBuild.shimFiles],
@@ -2164,6 +2274,7 @@ async function build(options) {
       options: context.options,
       packageAliases: resolvedBuild.packageAliases,
       packageJsonFiles: resolvedBuild.packageJsonFiles,
+      tsxRuntimeSourceFiles: resolvedBuild.tsxRuntimeSourceFiles,
       tsConfigPath: resolvedBuild.tsConfigPath,
       workspaceDir: resolvedBuild.workspaceDir
     });
@@ -2202,7 +2313,7 @@ async function build(options) {
       await writeJson(finalMetadataPath, {
         outputFiles: closureResult.cacheOutputFiles
       });
-      await writeJson(path20.join(context.projectCacheDir, "final-fast.json"), {
+      await writeJson(path21.join(context.projectCacheDir, "final-fast.json"), {
         finalKey: resolvedBuild.finalKey,
         optionsSignature: context.optionsSignature,
         packageSignature: context.packageSignature,
@@ -2230,8 +2341,8 @@ async function build(options) {
   }
 }
 async function cleanCache(options = {}) {
-  const projectRoot = path20.resolve(options.projectRoot ?? process.cwd());
-  const cacheRoot = path20.resolve(options.cacheDir || getDefaultPersistentCacheRoot());
+  const projectRoot = path21.resolve(options.projectRoot ?? process.cwd());
+  const cacheRoot = path21.resolve(options.cacheDir || getDefaultPersistentCacheRoot());
   const projectCacheDir = getProjectCacheDir(cacheRoot, projectRoot);
   await removeProjectCacheDir(projectCacheDir);
 }
@@ -2243,21 +2354,22 @@ var init_build_pipeline = __esm(() => {
   init_run_closure();
   init_load();
   init_build_helpers();
+  init_timing();
 });
 
 // src/api/externs.ts
-import fs4 from "fs";
-import path5 from "path";
+import fs6 from "fs";
+import path7 from "path";
 
 // src/api/externs/context.ts
 import ts3 from "typescript";
 
 // src/api/externs/contracts/registry.ts
-import path2 from "path";
+import path4 from "path";
 import ts2 from "typescript";
 
 // src/api/externs/shared.ts
-import path from "path";
+import path3 from "path";
 import ts from "typescript";
 var DECLARATION_EXTENSIONS = [
   ".d.ts",
@@ -2359,8 +2471,8 @@ function addMapSetValue(map, key, value) {
   map.set(key, new Set([value]));
 }
 function isProjectAppSourceFile(filePath, projectRoot) {
-  const resolvedFilePath = path.resolve(filePath);
-  return !resolvedFilePath.includes(`${path.sep}node_modules${path.sep}`) && !resolvedFilePath.endsWith(".d.ts") && resolvedFilePath.startsWith(path.resolve(projectRoot) + path.sep);
+  const resolvedFilePath = path3.resolve(filePath);
+  return !resolvedFilePath.includes(`${path3.sep}node_modules${path3.sep}`) && !resolvedFilePath.endsWith(".d.ts") && resolvedFilePath.startsWith(path3.resolve(projectRoot) + path3.sep);
 }
 function isExportedDeclaration(node) {
   return (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Export) !== 0;
@@ -2421,16 +2533,16 @@ function getScriptKindForFile(filePath) {
   return ts.ScriptKind.JS;
 }
 function isScannedDeclarationSymbol(symbol, scannedFiles) {
-  return (symbol.declarations ?? []).some((declaration) => scannedFiles.has(path.resolve(declaration.getSourceFile().fileName)));
+  return (symbol.declarations ?? []).some((declaration) => scannedFiles.has(path3.resolve(declaration.getSourceFile().fileName)));
 }
 function findPackageDir(filePath) {
-  let currentDir = path.dirname(filePath);
+  let currentDir = path3.dirname(filePath);
   while (true) {
-    const packageJsonPath = path.join(currentDir, "package.json");
+    const packageJsonPath = path3.join(currentDir, "package.json");
     if (ts.sys.fileExists(packageJsonPath)) {
       return currentDir;
     }
-    const parentDir = path.dirname(currentDir);
+    const parentDir = path3.dirname(currentDir);
     if (parentDir === currentDir) {
       return null;
     }
@@ -2441,11 +2553,11 @@ function isTypeSourceFile(filePath) {
   return DECLARATION_EXTENSIONS.some((extension) => filePath.endsWith(extension));
 }
 function isTypescriptLibFile(filePath) {
-  return filePath.includes(`${path.sep}node_modules${path.sep}typescript${path.sep}lib${path.sep}`);
+  return filePath.includes(`${path3.sep}node_modules${path3.sep}typescript${path3.sep}lib${path3.sep}`);
 }
 function symbolCacheKey(symbol) {
   const declaration = symbol.declarations?.[0];
-  return declaration ? `${path.resolve(declaration.getSourceFile().fileName)}:${symbol.getName()}` : symbol.getName();
+  return declaration ? `${path3.resolve(declaration.getSourceFile().fileName)}:${symbol.getName()}` : symbol.getName();
 }
 function uniqueStrings(values) {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
@@ -2460,12 +2572,12 @@ function collectContracts({
   program,
   scannedFiles
 }) {
-  const scannedFileSet = new Set(scannedFiles.map((filePath) => path2.resolve(filePath)));
+  const scannedFileSet = new Set(scannedFiles.map((filePath) => path4.resolve(filePath)));
   const interfaceContracts = new Map;
   const typeAliasContracts = new Map;
   const classContracts = new Map;
   for (const sourceFile of program.getSourceFiles()) {
-    if (!scannedFileSet.has(path2.resolve(sourceFile.fileName))) {
+    if (!scannedFileSet.has(path4.resolve(sourceFile.fileName))) {
       continue;
     }
     for (const statement of sourceFile.statements) {
@@ -2682,8 +2794,8 @@ function createExternAnalysisContext({
 
 // src/api/externs/compiler.ts
 init_compiler_options();
-import fs2 from "fs";
-import path4 from "path";
+import fs4 from "fs";
+import path6 from "path";
 import ts5 from "typescript";
 async function loadExternCompilerOptions({
   projectRoot,
@@ -2696,9 +2808,9 @@ async function loadExternCompilerOptions({
     moduleResolution: ts5.ModuleResolutionKind.Bundler,
     target: ts5.ScriptTarget.ESNext
   };
-  const resolvedConfigPath = tsConfigPath ?? path4.join(projectRoot, "tsconfig.json");
+  const resolvedConfigPath = tsConfigPath ?? path6.join(projectRoot, "tsconfig.json");
   try {
-    await fs2.promises.access(resolvedConfigPath, fs2.constants.R_OK);
+    await fs4.promises.access(resolvedConfigPath, fs4.constants.R_OK);
     try {
       return await loadCompilerOptions(resolvedConfigPath, {
         allowJs: true,
@@ -2744,14 +2856,14 @@ function resolveAnalysisEntryFiles({
   srcDir
 }) {
   return entryFiles.map((entry) => {
-    if (path4.isAbsolute(entry)) {
+    if (path6.isAbsolute(entry)) {
       return entry;
     }
-    const fromSrcDir = path4.resolve(srcDir, entry);
+    const fromSrcDir = path6.resolve(srcDir, entry);
     if (ts5.sys.fileExists(fromSrcDir)) {
       return fromSrcDir;
     }
-    return path4.resolve(projectRoot, entry);
+    return path6.resolve(projectRoot, entry);
   });
 }
 async function collectReachableTypeFiles({
@@ -2767,7 +2879,7 @@ async function collectReachableTypeFiles({
     if (!nextFile) {
       continue;
     }
-    const resolvedFile = path4.resolve(nextFile);
+    const resolvedFile = path6.resolve(nextFile);
     if (seen.has(resolvedFile) || !isTypeSourceFile(resolvedFile)) {
       continue;
     }
@@ -2775,7 +2887,7 @@ async function collectReachableTypeFiles({
       continue;
     }
     seen.add(resolvedFile);
-    const sourceText = await fs2.promises.readFile(resolvedFile, "utf8");
+    const sourceText = await fs4.promises.readFile(resolvedFile, "utf8");
     const sourceFile = ts5.createSourceFile(resolvedFile, sourceText, ts5.ScriptTarget.Latest, true);
     for (const specifier of collectReferencedSpecifiers(sourceFile)) {
       const resolvedModule = ts5.resolveModuleName(specifier, resolvedFile, compilerOptions, ts5.sys).resolvedModule;
@@ -2802,14 +2914,14 @@ async function resolveModuleTypeEntry({
   projectRoot,
   specifier
 }) {
-  const containingFile = path4.join(projectRoot, "__gcc_externs_entry__.ts");
+  const containingFile = path6.join(projectRoot, "__gcc_externs_entry__.ts");
   const resolution = ts5.resolveModuleName(specifier, containingFile, compilerOptions, ts5.sys).resolvedModule;
   const resolvedFromTypescript = resolution && normalizeResolvedTypeFile(resolution.resolvedFileName);
   if (resolvedFromTypescript) {
     return resolvedFromTypescript;
   }
-  const require2 = ts5.createModuleResolutionCache(projectRoot, (fileName) => fileName, compilerOptions);
-  const fallbackResolution = ts5.nodeModuleNameResolver(specifier, containingFile, compilerOptions, ts5.sys, require2).resolvedModule;
+  const require3 = ts5.createModuleResolutionCache(projectRoot, (fileName) => fileName, compilerOptions);
+  const fallbackResolution = ts5.nodeModuleNameResolver(specifier, containingFile, compilerOptions, ts5.sys, require3).resolvedModule;
   const resolvedFromFallback = fallbackResolution && normalizeResolvedTypeFile(fallbackResolution.resolvedFileName);
   if (resolvedFromFallback) {
     return resolvedFromFallback;
@@ -2817,14 +2929,14 @@ async function resolveModuleTypeEntry({
   throw new Error(`Unable to resolve TypeScript declarations for module ${JSON.stringify(specifier)} from ${projectRoot}.`);
 }
 function normalizeResolvedTypeFile(resolvedFileName) {
-  const normalizedPath = path4.resolve(resolvedFileName);
+  const normalizedPath = path6.resolve(resolvedFileName);
   if (isTypeSourceFile(normalizedPath)) {
     return normalizedPath;
   }
   for (const extension of DECLARATION_EXTENSIONS) {
     const candidate = withTypeExtension(normalizedPath, extension);
     if (ts5.sys.fileExists(candidate)) {
-      return path4.resolve(candidate);
+      return path6.resolve(candidate);
     }
   }
   return null;
@@ -2833,7 +2945,7 @@ function withTypeExtension(filePath, nextExtension) {
   if (filePath.endsWith(".d.ts") || filePath.endsWith(".d.mts") || filePath.endsWith(".d.cts")) {
     return filePath;
   }
-  const extension = path4.extname(filePath);
+  const extension = path6.extname(filePath);
   return `${filePath.slice(0, filePath.length - extension.length)}${nextExtension}`;
 }
 function collectReferencedSpecifiers(sourceFile) {
@@ -2861,7 +2973,7 @@ function collectReferencedSpecifiers(sourceFile) {
 }
 
 // src/api/externs/runtime-analysis.ts
-import fs3 from "fs";
+import fs5 from "fs";
 import ts6 from "typescript";
 async function analyzeRuntimeUsage(runtimeEntryFiles) {
   const hazards = {
@@ -2869,7 +2981,7 @@ async function analyzeRuntimeUsage(runtimeEntryFiles) {
     definedMembers: new Set
   };
   for (const runtimeEntryFile of runtimeEntryFiles) {
-    const sourceText = await fs3.promises.readFile(runtimeEntryFile, "utf8");
+    const sourceText = await fs5.promises.readFile(runtimeEntryFile, "utf8");
     const sourceFile = ts6.createSourceFile(runtimeEntryFile, sourceText, ts6.ScriptTarget.Latest, true, getScriptKindForFile(runtimeEntryFile));
     const knownConstructors = collectKnownConstructorBindings(sourceFile);
     const visit = (node) => {
@@ -3277,9 +3389,9 @@ async function generateExterns(options) {
     throw new Error("generateExterns requires at least one module specifier.");
   }
   const mode = options.mode ?? "boundary-aware";
-  const projectRoot = path5.resolve(options.projectRoot ?? process.cwd());
-  const srcDir = path5.resolve(projectRoot, options.srcDir ?? ".");
-  const tsConfigPath = options.tsConfigPath && path5.resolve(projectRoot, options.tsConfigPath);
+  const projectRoot = path7.resolve(options.projectRoot ?? process.cwd());
+  const srcDir = path7.resolve(projectRoot, options.srcDir ?? ".");
+  const tsConfigPath = options.tsConfigPath && path7.resolve(projectRoot, options.tsConfigPath);
   const compilerOptions = await loadExternCompilerOptions({
     projectRoot,
     tsConfigPath
@@ -3329,10 +3441,10 @@ async function generateExterns(options) {
     modules: options.modules,
     runtimeEntryFiles: resolvedRuntimeEntryFiles
   });
-  const outputFile = options.outputFile && path5.resolve(projectRoot, options.outputFile);
+  const outputFile = options.outputFile && path7.resolve(projectRoot, options.outputFile);
   if (outputFile) {
-    await fs4.promises.mkdir(path5.dirname(outputFile), { recursive: true });
-    await fs4.promises.writeFile(outputFile, text, "utf8");
+    await fs6.promises.mkdir(path7.dirname(outputFile), { recursive: true });
+    await fs6.promises.writeFile(outputFile, text, "utf8");
   }
   return {
     mode,

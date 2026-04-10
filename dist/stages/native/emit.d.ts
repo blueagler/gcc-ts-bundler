@@ -10,7 +10,7 @@ export interface NativeEmitStageResult {
     outDir: string;
     supportFiles: string[];
 }
-export declare function emitNativeStage({ cacheDir, fileNames, lazyImports, metadataPath, options, packageAliases, packageJsonFiles, tsConfigPath, workspaceDir, }: {
+export declare function emitNativeStage({ cacheDir, fileNames, lazyImports, metadataPath, options, packageAliases, packageJsonFiles, tsxRuntimeSourceFiles, tsConfigPath, workspaceDir, }: {
     cacheDir: string;
     fileNames: string[];
     lazyImports: LazyImport[];
@@ -18,6 +18,7 @@ export declare function emitNativeStage({ cacheDir, fileNames, lazyImports, meta
     options: NormalizedBuildOptions;
     packageAliases: PackageAlias[];
     packageJsonFiles: string[];
+    tsxRuntimeSourceFiles: string[];
     tsConfigPath: string;
     workspaceDir: string;
 }): Promise<NativeEmitStageResult>;

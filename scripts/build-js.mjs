@@ -1,11 +1,56 @@
 import { spawn } from "node:child_process";
+import { performance } from "node:perf_hooks";
 
 const BUN = process.platform === "win32" ? "bun.exe" : "bun";
+const SHOW_TIMINGS = process.env.GCC_BUILD_TIMINGS === "1";
 
 await runCommandsInParallel([
-  [
-    BUN,
-    [
+  {
+    args: [
+      "build",
+      "./src/index.ts",
+      "./src/native/index.ts",
+      "--outdir",
+      "./dist",
+      "--format",
+      "esm",
+      "--packages",
+      "external",
+      "--banner",
+      "const __gcc_current_module_url = import.meta.url;",
+      "--entry-naming",
+      "[dir]/[name].mjs",
+      "--target",
+      "node",
+      "--root",
+      "./src",
+    ],
+    label: "build-js:esm",
+  },
+  {
+    args: [
+      "build",
+      "./src/index.ts",
+      "./src/native/index.ts",
+      "--outdir",
+      "./dist",
+      "--format",
+      "cjs",
+      "--packages",
+      "external",
+      "--banner",
+      "const __gcc_current_module_url = require('node:url').pathToFileURL(__filename).href;",
+      "--entry-naming",
+      "[dir]/[name].cjs",
+      "--target",
+      "node",
+      "--root",
+      "./src",
+    ],
+    label: "build-js:cjs",
+  },
+  {
+    args: [
       "build",
       "./src/entry/cli.ts",
       "--outdir",
@@ -21,89 +66,18 @@ await runCommandsInParallel([
       "--target",
       "node",
     ],
-  ],
-  [
-    BUN,
-    [
-      "build",
-      "./src/index.ts",
-      "--outdir",
-      "./dist",
-      "--format",
-      "esm",
-      "--packages",
-      "external",
-      "--banner",
-      "const __gcc_current_module_url = import.meta.url;",
-      "--entry-naming",
-      "index.mjs",
-      "--target",
-      "node",
-    ],
-  ],
-  [
-    BUN,
-    [
-      "build",
-      "./src/index.ts",
-      "--outdir",
-      "./dist",
-      "--format",
-      "cjs",
-      "--packages",
-      "external",
-      "--banner",
-      "const __gcc_current_module_url = require('node:url').pathToFileURL(__filename).href;",
-      "--entry-naming",
-      "index.cjs",
-      "--target",
-      "node",
-    ],
-  ],
-  [
-    BUN,
-    [
-      "build",
-      "./src/native/index.ts",
-      "--outdir",
-      "./dist/native",
-      "--format",
-      "esm",
-      "--packages",
-      "external",
-      "--banner",
-      "const __gcc_current_module_url = import.meta.url;",
-      "--entry-naming",
-      "index.mjs",
-      "--target",
-      "node",
-    ],
-  ],
-  [
-    BUN,
-    [
-      "build",
-      "./src/native/index.ts",
-      "--outdir",
-      "./dist/native",
-      "--format",
-      "cjs",
-      "--packages",
-      "external",
-      "--banner",
-      "const __gcc_current_module_url = require('node:url').pathToFileURL(__filename).href;",
-      "--entry-naming",
-      "index.cjs",
-      "--target",
-      "node",
-    ],
-  ],
+    label: "build-js:cli",
+  },
 ]);
 
-await runCommand(BUN, ["--bun", "tsc", "-p", "./tsconfig.types.json"]);
+await runCommand(BUN, ["--bun", "tsc", "-p", "./tsconfig.types.json"], {
+  label: "build-js:types",
+});
 
 async function runCommandsInParallel(commands) {
-  const running = commands.map(([command, args]) => startCommand(command, args));
+  const running = commands.map(({ args, label }) =>
+    startCommand(BUN, args, { label }),
+  );
   try {
     await Promise.all(running.map(({ done }) => done));
   } catch (error) {
@@ -114,11 +88,12 @@ async function runCommandsInParallel(commands) {
   }
 }
 
-async function runCommand(command, args) {
-  await startCommand(command, args).done;
+async function runCommand(command, args, options = {}) {
+  await startCommand(command, args, options).done;
 }
 
-function startCommand(command, args) {
+function startCommand(command, args, { label } = {}) {
+  const startedAt = performance.now();
   const child = spawn(command, args, {
     stdio: "inherit",
   });
@@ -126,6 +101,7 @@ function startCommand(command, args) {
     child.on("error", reject);
     child.on("exit", (code, signal) => {
       if (code === 0) {
+        logTiming(label, startedAt);
         resolve();
         return;
       }
@@ -139,4 +115,15 @@ function startCommand(command, args) {
     });
   });
   return { child, done };
+}
+
+function logTiming(label, startedAt) {
+  if (!SHOW_TIMINGS || !label) {
+    return;
+  }
+
+  const durationMs = performance.now() - startedAt;
+  console.error(
+    `[gcc-ts-bundler timing] ${label}: ${durationMs.toFixed(1)}ms`,
+  );
 }
