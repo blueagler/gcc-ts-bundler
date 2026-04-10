@@ -1,5 +1,14 @@
 use super::super::*;
 use super::shared::property_renaming_report_path;
+use regex::Regex;
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct DebugBundlerRuntimeInitManifest(
+    usize,
+    Vec<BundlerRuntimeInitChunk>,
+    BTreeMap<String, usize>,
+    String,
+);
 
 pub(crate) fn prepare_bundler_runtime_jobs(
     input: &PrepareClosureJobsInput,
@@ -23,6 +32,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
     let mut runtime_module_map = BTreeMap::new();
     let mut manifest_chunks = BTreeMap::new();
     let mut module_text_by_chunk = BTreeMap::new();
+    let mut runtime_module_ids = Vec::new();
     let chunk_index_by_name = resolved_chunks
         .iter()
         .enumerate()
@@ -49,6 +59,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
             let module_id =
                 to_goog_module_id(Path::new(file_path), Path::new(&input.emittedOutDir));
             let runtime_module_id = to_bundler_runtime_module_id(&module_id);
+            runtime_module_ids.push(runtime_module_id.clone());
             manifest_modules.push(runtime_module_id.clone());
             module_map.insert(runtime_module_id.clone(), runtime_chunk_id.clone());
             runtime_module_map.insert(runtime_module_id, chunk_index);
@@ -76,6 +87,14 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         module_text_by_chunk.insert(chunk.name.clone(), module_sources.join("\n"));
     }
 
+    let runtime_module_index_by_id = runtime_module_ids
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .enumerate()
+        .map(|(index, module_id)| (module_id, index))
+        .collect::<BTreeMap<_, _>>();
+
     let manifest = BundlerRuntimeManifest {
         baseChunk: runtime_chunk_id_by_name
             .get(&base_chunk.name)
@@ -86,48 +105,67 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         modules: module_map,
         publicPath: input.publicPath.clone(),
     };
-    let runtime_manifest = BundlerRuntimeInitManifest(
-        *chunk_index_by_name
-            .get(&base_chunk.name)
-            .ok_or_else(|| format!("Missing base chunk index for {}", base_chunk.name))?,
-        resolved_chunks
-            .iter()
-            .map(|chunk| {
-                let dependency_indices = chunk
-                    .dependencies
-                    .iter()
-                    .map(|dependency| {
-                        chunk_index_by_name.get(dependency).copied().ok_or_else(|| {
-                            format!("Missing chunk index for dependency {}", dependency)
-                        })
+    let runtime_chunks = resolved_chunks
+        .iter()
+        .map(|chunk| {
+            let dependency_indices = chunk
+                .dependencies
+                .iter()
+                .map(|dependency| {
+                    chunk_index_by_name.get(dependency).copied().ok_or_else(|| {
+                        format!("Missing chunk index for dependency {}", dependency)
                     })
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok::<_, String>(BundlerRuntimeInitChunk(
-                    dependency_indices,
-                    if chunk.name == base_chunk.name {
-                        String::new()
-                    } else {
-                        bundler_runtime_output_file_name(
-                            &chunk.name,
-                            runtime_chunk_id_by_name
-                                .get(&chunk.name)
-                                .map(String::as_str)
-                                .ok_or_else(|| {
-                                    format!("Missing runtime chunk id for {}", chunk.name)
-                                })?,
-                            &base_chunk.name,
-                        )
-                    },
-                ))
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()?,
-        runtime_module_map,
-        if input.publicPath == "./" {
-            String::new()
-        } else {
-            input.publicPath.clone()
-        },
-    );
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok::<_, String>(BundlerRuntimeInitChunk(
+                dependency_indices,
+                if chunk.name == base_chunk.name {
+                    String::new()
+                } else {
+                    bundler_runtime_output_file_name(
+                        &chunk.name,
+                        runtime_chunk_id_by_name
+                            .get(&chunk.name)
+                            .map(String::as_str)
+                            .ok_or_else(|| format!("Missing runtime chunk id for {}", chunk.name))?,
+                        &base_chunk.name,
+                    )
+                },
+            ))
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let base_chunk_index = *chunk_index_by_name
+        .get(&base_chunk.name)
+        .ok_or_else(|| format!("Missing base chunk index for {}", base_chunk.name))?;
+    let public_path = if input.publicPath == "./" {
+        String::new()
+    } else {
+        input.publicPath.clone()
+    };
+    let runtime_manifest_json = if runtime_debug {
+        serde_json::to_string(&DebugBundlerRuntimeInitManifest(
+            base_chunk_index,
+            runtime_chunks.clone(),
+            runtime_module_map.clone(),
+            public_path.clone(),
+        ))
+        .map_err(|error| error.to_string())?
+    } else {
+        let mut runtime_module_chunks = vec![0usize; runtime_module_index_by_id.len()];
+        for (runtime_module_id, chunk_index) in &runtime_module_map {
+            let module_index = *runtime_module_index_by_id
+                .get(runtime_module_id)
+                .ok_or_else(|| format!("Missing module index for {}", runtime_module_id))?;
+            runtime_module_chunks[module_index] = *chunk_index;
+        }
+        serde_json::to_string(&BundlerRuntimeInitManifest(
+            base_chunk_index,
+            runtime_chunks,
+            runtime_module_chunks,
+            public_path,
+        ))
+        .map_err(|error| error.to_string())?
+    };
 
     let mut effective_externs = collect_effective_extern_paths(
         &input.packageRoot,
@@ -153,25 +191,57 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         published_outputs.push(manifest_path.to_string_lossy().to_string());
     }
 
+    let base_entry_points_json = if runtime_debug {
+        serde_json::to_string(
+            &base_chunk
+                .entry_points
+                .iter()
+                .map(|module_id| to_bundler_runtime_module_id(module_id))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| error.to_string())?
+    } else {
+        serde_json::to_string(
+            &base_chunk
+                .entry_points
+                .iter()
+                .map(|module_id| {
+                    let runtime_module_id = to_bundler_runtime_module_id(module_id);
+                    runtime_module_index_by_id
+                        .get(&runtime_module_id)
+                        .copied()
+                        .ok_or_else(|| format!("Missing module index for {}", runtime_module_id))
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+        )
+        .map_err(|error| error.to_string())?
+    };
+    let all_module_contents = module_text_by_chunk
+        .values()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let include_custom_elements_es5_adapter =
+        needs_custom_elements_es5_adapter(&input.languageOut, &all_module_contents);
+
     let mut linked_chunk_paths = Vec::new();
     for chunk in resolved_chunks {
         let module_text = module_text_by_chunk
             .get(&chunk.name)
             .ok_or_else(|| format!("Missing linked chunk source for {}", chunk.name))?;
+        let rewritten_module_text = (!runtime_debug)
+            .then(|| rewrite_runtime_module_ids(module_text, &runtime_module_index_by_id))
+            .transpose()?;
+        let module_text = rewritten_module_text.as_deref().unwrap_or(module_text);
         let source_text = if chunk.name == base_chunk.name {
             render_bundler_runtime_base_chunk(
-                *chunk_index_by_name
-                    .get(&chunk.name)
-                    .ok_or_else(|| format!("Missing chunk index for {}", chunk.name))?,
-                &chunk
-                    .entry_points
-                    .iter()
-                    .map(|module_id| to_bundler_runtime_module_id(module_id))
-                    .collect::<Vec<_>>(),
+                base_chunk_index,
+                &base_entry_points_json,
                 &input.chunkLoader,
-                &runtime_manifest,
+                &runtime_manifest_json,
+                !runtime_debug,
                 module_text,
-                needs_custom_elements_es5_adapter(&input.languageOut),
+                include_custom_elements_es5_adapter,
                 runtime_debug,
             )?
         } else {
@@ -300,9 +370,53 @@ pub(crate) fn prepare_bundler_runtime_jobs(
     }
 
     Ok(PrepareClosureJobsOutput {
+        bundlerRuntimeBaseInputPath: runtime_chunk_id_by_name
+            .get(&base_chunk.name)
+            .map(|internal_chunk_name| raw_dir.join(format!("{internal_chunk_name}.js")))
+            .map(|path| path.to_string_lossy().to_string()),
         compileJobs: compile_jobs,
         generatedAssets: generated_assets,
         postprocessActions: postprocess_actions,
         publishedOutputs: published_outputs,
     })
+}
+
+fn rewrite_runtime_module_ids(
+    source_text: &str,
+    runtime_module_index_by_id: &BTreeMap<String, usize>,
+) -> std::result::Result<String, String> {
+    let rewrites = [
+        (
+            Regex::new(r#"__register\("([^"]+)"\s*,"#).map_err(|error| error.to_string())?,
+            "__register",
+        ),
+        (
+            Regex::new(r#"__require\("([^"]+)"\)"#).map_err(|error| error.to_string())?,
+            "__require",
+        ),
+        (
+            Regex::new(r#"__dynamicImport\("([^"]+)"\)"#).map_err(|error| error.to_string())?,
+            "__dynamicImport",
+        ),
+        (
+            Regex::new(r#"__preloadDynamicImport\("([^"]+)"\)"#)
+                .map_err(|error| error.to_string())?,
+            "__preloadDynamicImport",
+        ),
+    ];
+    let mut current = source_text.to_string();
+    for (regex, callee_name) in rewrites {
+        current = regex
+            .replace_all(&current, |captures: &regex::Captures| {
+                let runtime_module_id = captures.get(1).map(|capture| capture.as_str()).unwrap_or_default();
+                let module_index = runtime_module_index_by_id
+                    .get(runtime_module_id)
+                    .copied()
+                    .unwrap_or_else(|| panic!("Missing module index for {}", runtime_module_id));
+                format!("{callee_name}({module_index}")
+                    + if callee_name == "__register" { "," } else { ")" }
+            })
+            .into_owned();
+    }
+    Ok(current)
 }

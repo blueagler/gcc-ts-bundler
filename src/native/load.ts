@@ -53,6 +53,11 @@ interface NativeGeneratedAsset {
   text: string;
 }
 
+interface NativeEs5HelperRewriteOutput {
+  code: string;
+  helperKeys: string[];
+}
+
 interface NativePostprocessAction {
   inputPath: string;
   kind:
@@ -85,6 +90,7 @@ interface NativePrepareClosureJobsInput {
 }
 
 interface NativePrepareClosureJobsOutput {
+  bundlerRuntimeBaseInputPath?: string;
   compileJobs: NativeClosureCompileJob[];
   generatedAssets: NativeGeneratedAsset[];
   postprocessActions: NativePostprocessAction[];
@@ -186,6 +192,7 @@ interface NativeBinding {
     code: string,
     propertyRenamingReport: string,
   ): string;
+  rewriteBundlerRuntimeEs5Helpers(code: string): NativeEs5HelperRewriteOutput;
   rewriteGccExports(code: string): string;
   transpileSources(
     fileNames: string[],
@@ -297,6 +304,10 @@ export function transpileSources(input: {
 
 export function prepareClosureJobs(input: NativePrepareClosureJobsInput) {
   return loadBinding().prepareClosureJobs(input);
+}
+
+export function rewriteBundlerRuntimeEs5Helpers(code: string) {
+  return loadBinding().rewriteBundlerRuntimeEs5Helpers(code);
 }
 
 export function writeEntryShims(input: {

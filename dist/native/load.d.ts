@@ -40,6 +40,10 @@ interface NativeGeneratedAsset {
     path: string;
     text: string;
 }
+interface NativeEs5HelperRewriteOutput {
+    code: string;
+    helperKeys: string[];
+}
 interface NativePostprocessAction {
     inputPath: string;
     kind: "copy" | "rewrite-decorator-metadata" | "rewrite-gcc-exports" | "rewrite-gcc-exports-and-decorator-metadata";
@@ -66,6 +70,7 @@ interface NativePrepareClosureJobsInput {
     supportFiles: string[];
 }
 interface NativePrepareClosureJobsOutput {
+    bundlerRuntimeBaseInputPath?: string;
     compileJobs: NativeClosureCompileJob[];
     generatedAssets: NativeGeneratedAsset[];
     postprocessActions: NativePostprocessAction[];
@@ -146,6 +151,7 @@ export declare function transpileSources(input: {
     workspaceDir: string;
 }): NativeTranspileOutput;
 export declare function prepareClosureJobs(input: NativePrepareClosureJobsInput): NativePrepareClosureJobsOutput;
+export declare function rewriteBundlerRuntimeEs5Helpers(code: string): NativeEs5HelperRewriteOutput;
 export declare function writeEntryShims(input: {
     entries: Array<{
         exportNames: string[];

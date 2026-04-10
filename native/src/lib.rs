@@ -2,6 +2,7 @@ mod closure_jobs;
 mod closure_metadata;
 mod commonjs;
 mod decorators;
+mod es5_helpers;
 mod exports;
 mod fs_state;
 mod graph;
@@ -108,6 +109,13 @@ pub fn rewrite_decorator_metadata(
     property_renaming_report: String,
 ) -> Result<String> {
     with_globals(|| decorators::rewrite_decorator_metadata(code, property_renaming_report))
+}
+
+#[napi(js_name = "rewriteBundlerRuntimeEs5Helpers")]
+pub fn rewrite_bundler_runtime_es5_helpers(
+    code: String,
+) -> Result<es5_helpers::Es5HelperRewriteOutput> {
+    with_globals(|| es5_helpers::rewrite_bundler_runtime_es5_helpers(code))
 }
 
 #[napi(js_name = "collectFileStates")]

@@ -57,7 +57,8 @@ test.serial("emits smaller script chunks for explicit lazy modules", async () =>
   expect(baseOutput).not.toContain("__gcc_runtime__");
   expect(baseOutput).not.toContain("initialized");
   expect(baseOutput).not.toContain("gcc.src.feature");
-  expect(baseOutput).toMatch(/m[0-9a-f]{8}/);
+  expect(baseOutput).not.toMatch(/m[0-9a-f]{8}/);
+  expect(baseOutput).toContain("globalThis.__g.n([0])");
   expect(baseOutput).not.toMatch(/LAZY_FEATURE/);
   expect(lazyOutput).toMatch(/LAZY_FEATURE/);
 });
@@ -111,14 +112,15 @@ test.serial("emits bundler-runtime chunks for explicit lazy modules", async () =
   expect(baseOutput).not.toContain("sourceURL");
   expect(baseOutput).not.toContain("unknown module");
   expect(baseOutput).not.toContain("unknown chunk");
-  expect(baseOutput).toMatch(/m[0-9a-f]{8}/);
+  expect(baseOutput).not.toMatch(/m[0-9a-f]{8}/);
+  expect(baseOutput).toContain("globalThis.__g.n([0])");
   expect(baseOutput).not.toMatch(/goog\.module/);
   expect(baseOutput).not.toMatch(/ModuleManager/);
   expect(baseOutput).not.toContain('Object.defineProperty(d,"default"');
   expect(lazyOutput).not.toContain("__gcc_runtime__");
   expect(lazyOutput).not.toContain("gcc.src.feature");
   expect(lazyOutput).not.toContain("base chunk missing");
-  expect(lazyOutput).toMatch(/m[0-9a-f]{8}/);
+  expect(lazyOutput).not.toMatch(/m[0-9a-f]{8}/);
   expect(lazyOutput).not.toContain("renderMessage");
   expect(lazyOutput).not.toMatch(/Object\.defineProperty\([^)]*,\s*[0-9]+,/);
   expect(lazyOutput).toMatch(/\[[0-9]+\]=/);

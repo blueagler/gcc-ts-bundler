@@ -21,7 +21,7 @@ pub(super) struct BundlerRuntimeManifestChunk {
 pub(super) struct BundlerRuntimeInitManifest(
     pub(super) usize,
     pub(super) Vec<BundlerRuntimeInitChunk>,
-    pub(super) BTreeMap<String, usize>,
+    pub(super) Vec<usize>,
     pub(super) String,
 );
 
@@ -42,15 +42,21 @@ pub(super) fn bundler_runtime_output_file_name(
 
 pub(super) fn render_bundler_runtime_base_chunk(
     chunk_id: usize,
-    entry_points: &[String],
+    entry_points_json: &str,
     loader: &str,
-    manifest: &BundlerRuntimeInitManifest,
+    manifest_json: &str,
+    numeric_module_ids: bool,
     module_text: &str,
     include_custom_elements_es5_adapter: bool,
     debug_runtime: bool,
 ) -> std::result::Result<String, String> {
     let runtime_global = runtime_global_ref("globalThis");
-    let mut parts = vec![render_bundler_runtime_preamble(loader, manifest, debug_runtime)?];
+    let mut parts = vec![render_bundler_runtime_preamble(
+        loader,
+        manifest_json,
+        numeric_module_ids,
+        debug_runtime,
+    )?];
     if include_custom_elements_es5_adapter {
         parts.push(render_custom_elements_es5_adapter());
     }
@@ -58,10 +64,7 @@ pub(super) fn render_bundler_runtime_base_chunk(
         format!("var __register={runtime_global}.r;"),
         module_text.to_string(),
         format!("{runtime_global}.l({chunk_id:?});"),
-        format!(
-            "{runtime_global}.n({entry_points});",
-            entry_points = serde_json::to_string(entry_points).map_err(|error| error.to_string())?,
-        ),
+        format!("{runtime_global}.n({entry_points_json});"),
         String::new(),
     ]);
     Ok(parts.join("\n"))
@@ -72,30 +75,28 @@ pub(super) fn render_bundler_runtime_lazy_chunk(
     module_text: &str,
     debug_runtime: bool,
 ) -> String {
-    let fallback_error = if debug_runtime {
-        "\"base chunk missing\""
-    } else {
-        "\"b\""
-    };
     let runtime_global = runtime_global_ref("globalThis");
-    format!(
-        "({runtime_global}||{{h:function(){{throw Error({fallback_error});}}}}).h(function(__register){{\n{}\n}},{chunk_id:?});\n",
-        indent_block(module_text),
-        fallback_error = fallback_error,
-    )
+    if debug_runtime {
+        let fallback_error = "\"base chunk missing\"";
+        format!(
+            "({runtime_global}||{{h:function(){{throw Error({fallback_error});}}}}).h(function(__register){{\n{}\n}},{chunk_id:?});\n",
+            indent_block(module_text),
+            fallback_error = fallback_error,
+        )
+    } else {
+        format!(
+            "{runtime_global}.h(function(__register){{\n{}\n}},{chunk_id:?});\n",
+            indent_block(module_text),
+        )
+    }
 }
 
 pub(super) fn render_bundler_runtime_preamble(
     loader: &str,
-    manifest: &BundlerRuntimeInitManifest,
+    manifest_json: &str,
+    numeric_module_ids: bool,
     debug_runtime: bool,
 ) -> std::result::Result<String, String> {
-    let manifest_json = serde_json::to_string(manifest).map_err(|error| error.to_string())?;
-    let loader_code = match loader {
-        "script" => 1,
-        "fetch" => 2,
-        _ => 0,
-    };
     let missing_chunk_error = if debug_runtime {
         "\"unknown chunk \"+a"
     } else {
@@ -121,6 +122,58 @@ pub(super) fn render_bundler_runtime_preamble(
     } else {
         "(0,global.eval)(c);"
     };
+    let storage_init = if numeric_module_ids {
+        ["r.f=[];", "r.c=[];", "r.s=[];", "r.d=[];", "r.k=null;", "r.m=[];"]
+    } else {
+        [
+            "r.f=Object.create(null);",
+            "r.c=Object.create(null);",
+            "r.s=Object.create(null);",
+            "r.d=Object.create(null);",
+            "r.k=null;",
+            "r.m=Object.create(null);",
+        ]
+    };
+    let module_lookup = if numeric_module_ids {
+        format!("r.j=function(a){{var b=r.m[a];if(b===void 0)throw Error({missing_module_error});return e(b).then(function(){{return r.q(a);}});}};")
+    } else {
+        format!("r.j=function(a){{var b=r.m&&r.m[a];if(!b)throw Error({missing_module_error});return e(b).then(function(){{return r.q(a);}});}};")
+    };
+    let module_preload = if numeric_module_ids {
+        format!("r.x=function(a){{var b=r.m[a];if(b===void 0)throw Error({missing_module_error});return e(b).then(function(){{}});}};")
+    } else {
+        format!("r.x=function(a){{var b=r.m&&r.m[a];if(!b)throw Error({missing_module_error});return e(b).then(function(){{}});}};")
+    };
+    let manifest_apply = if matches!(loader, "script" | "fetch") {
+        format!("r.a({manifest_json});")
+    } else {
+        let loader_code = match loader {
+            "script" => 1,
+            "fetch" => 2,
+            _ => 0,
+        };
+        format!("r.a({manifest_json},{loader_code});")
+    };
+    let loader_specific = match loader {
+        "script" => render_script_loader_runtime(
+            missing_chunk_error,
+            script_error,
+            numeric_module_ids,
+        ),
+        "fetch" => render_fetch_loader_runtime(
+            missing_chunk_error,
+            fetch_error,
+            fetch_eval,
+            numeric_module_ids,
+        ),
+        _ => render_auto_loader_runtime(
+            missing_chunk_error,
+            script_error,
+            fetch_error,
+            fetch_eval,
+            numeric_module_ids,
+        ),
+    };
     Ok([
         "(function(global){".to_string(),
         format!(
@@ -128,33 +181,23 @@ pub(super) fn render_bundler_runtime_preamble(
             runtime_global = runtime_global_ref("global"),
         ),
         "if(!r.i){".to_string(),
-        "r.f=Object.create(null);".to_string(),
-        "r.c=Object.create(null);".to_string(),
-        "r.s=Object.create(null);".to_string(),
-        "r.d=Object.create(null);".to_string(),
+        storage_init.join("\n"),
         "r.b=\"\";".to_string(),
-        "r.o=0;".to_string(),
-        "r.k=null;".to_string(),
-        "r.m=null;".to_string(),
-        format!("function u(a){{var b=r.k&&r.k[a];if(!b)throw Error({missing_chunk_error});return new URL(b[1],r.b||(global.location&&global.location.href?global.location.href:\"./\")).toString();}}"),
         "function g(a){var b=r.d[a];if(b)return b;b={};b.p=new Promise(function(c,d){b.r=c;b.j=d});r.d[a]=b;return b;}".to_string(),
         "r.l=function(a){r.s[a]=1;var b=r.d[a];if(b){b.r();delete r.d[a];}};".to_string(),
         "function h(a,b){r.s[a]=2;var c=r.d[a];if(c){c.j(b);delete r.d[a];}}".to_string(),
         "r.r=function(a,b){r.f[a]=b;};".to_string(),
         "r.g=function(a,b,c){Object.defineProperty(a,b,{configurable:!0,enumerable:!0,get:c});};".to_string(),
         "r.h=function(a,b){a(r.r);r.l(b);};".to_string(),
-        format!("r.q=function(a){{if(Object.prototype.hasOwnProperty.call(r.c,a))return r.c[a];var b=r.f[a];if(!b)throw Error({missing_module_error});var c=[];r.c[a]=c;b(r.q,c,r.j,r.x,r.g);return c;}};"),
-        format!("function p(a,b){{return new Promise(function(c,d){{var e=global.document.createElement(\"script\");e.async=true;e.src=b;e.onload=function(){{c();}};e.onerror=function(){{d(Error({script_error}));}};(global.document.head||global.document.documentElement).appendChild(e);}});}}"),
-        format!("function w(a,b){{return Promise.resolve(global.fetch(b)).then(function(c){{if(!c.ok)throw Error({fetch_error});return c.text();}}).then(function(c){{{fetch_eval}}});}}"),
-        "function t(){return r.o===1?1:r.o===2?2:global.document?1:2;}".to_string(),
-        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;var c=r.k&&r.k[a];if(!c)throw Error({missing_chunk_error});r.s[a]=0;var d=g(a),f=t();return Promise.all((c[0]||[]).map(function(j){{return e(j);}})).then(function(){{var j=u(a);return f===2?w(a,j):p(a,j);}}).then(function(){{return d.p;}}).catch(function(j){{h(a,j);throw j;}});}}"),
-        format!("r.j=function(a){{var b=r.m&&r.m[a];if(!b)throw Error({missing_module_error});return e(b).then(function(){{return r.q(a);}});}};"),
-        format!("r.x=function(a){{var b=r.m&&r.m[a];if(!b)throw Error({missing_module_error});return e(b).then(function(){{}});}};"),
+        format!("r.q=function(a){{if(Object.prototype.hasOwnProperty.call(r.c,a))return r.c[a];var b=r.f[a];if(b===void 0)throw Error({missing_module_error});var c=[];r.c[a]=c;b(r.q,c,r.j,r.x,r.g);return c;}};"),
+        loader_specific,
+        module_lookup,
+        module_preload,
         "r.n=function(a){for(var b=0;b<a.length;b+=1)r.q(a[b]);};".to_string(),
-        "r.a=function(a,b){r.k=a[1];r.m=a[2];r.o=b;var c=global.document&&global.document.currentScript&&global.document.currentScript.src?global.document.currentScript.src:(global.location&&global.location.href?global.location.href:\"./\");r.b=new URL(a[3]||\"./\",c).toString();r.s[a[0]]=1;};".to_string(),
+        "r.a=function(a,b){r.k=a[1];r.m=a[2];if(arguments.length>1)r.o=b;var c=global.document&&global.document.currentScript&&global.document.currentScript.src?global.document.currentScript.src:(global.location&&global.location.href?global.location.href:\"./\");r.b=new URL(a[3]||\"./\",c).toString();r.s[a[0]]=1;};".to_string(),
         "r.i=1;".to_string(),
         "}".to_string(),
-        format!("r.a({manifest_json},{loader_code});"),
+        manifest_apply,
         "}).call(this,globalThis);".to_string(),
         String::new(),
     ]
@@ -165,8 +208,20 @@ fn runtime_global_ref(global_name: &str) -> String {
     format!("{global_name}[{BUNDLER_RUNTIME_GLOBAL:?}]")
 }
 
-pub(super) fn needs_custom_elements_es5_adapter(language_out: &str) -> bool {
+pub(super) fn language_out_requires_es5_adapter(language_out: &str) -> bool {
     matches!(language_out, "ECMASCRIPT3" | "ECMASCRIPT5")
+}
+
+pub(super) fn needs_custom_elements_es5_adapter(
+    language_out: &str,
+    candidate_contents: &str,
+) -> bool {
+    language_out_requires_es5_adapter(language_out)
+        && regex::Regex::new(
+            r"\bextends\s+(HTMLElement|Event|CustomEvent|MouseEvent|KeyboardEvent|FocusEvent|UIEvent)\b",
+        )
+        .map(|regex| regex.is_match(candidate_contents))
+        .unwrap_or(true)
 }
 
 pub(super) fn render_custom_elements_es5_adapter() -> String {
@@ -210,4 +265,70 @@ fn indent_block(source: &str) -> String {
         .map(|line| format!("  {line}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn render_script_loader_runtime(
+    missing_chunk_error: &str,
+    script_error: &str,
+    numeric_module_ids: bool,
+) -> String {
+    let chunk_lookup = if numeric_module_ids {
+        "var b=r.k[a];"
+    } else {
+        "var b=r.k&&r.k[a];"
+    };
+    [
+        format!(
+            "function u(a){{{chunk_lookup}if(!b)throw Error({missing_chunk_error});return new URL(b[1],r.b||(global.location&&global.location.href?global.location.href:\"./\")).toString();}}"
+        ),
+        format!("function p(a,b){{return new Promise(function(c,d){{var e=global.document.createElement(\"script\");e.async=true;e.src=b;e.onload=function(){{c();}};e.onerror=function(){{d(Error({script_error}));}};(global.document.head||global.document.documentElement).appendChild(e);}});}}"),
+        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!b)throw Error({missing_chunk_error});r.s[a]=0;var c=g(a);return Promise.all((b[0]||[]).map(function(d){{return e(d);}})).then(function(){{return p(a,u(a));}}).then(function(){{return c.p;}}).catch(function(d){{h(a,d);throw d;}});}}"),
+    ]
+    .join("\n")
+}
+
+fn render_fetch_loader_runtime(
+    missing_chunk_error: &str,
+    fetch_error: &str,
+    fetch_eval: &str,
+    numeric_module_ids: bool,
+) -> String {
+    let chunk_lookup = if numeric_module_ids {
+        "var b=r.k[a];"
+    } else {
+        "var b=r.k&&r.k[a];"
+    };
+    [
+        format!(
+            "function u(a){{{chunk_lookup}if(!b)throw Error({missing_chunk_error});return new URL(b[1],r.b||(global.location&&global.location.href?global.location.href:\"./\")).toString();}}"
+        ),
+        format!("function w(a,b){{return Promise.resolve(global.fetch(b)).then(function(c){{if(!c.ok)throw Error({fetch_error});return c.text();}}).then(function(c){{{fetch_eval}}});}}"),
+        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!b)throw Error({missing_chunk_error});r.s[a]=0;var c=g(a);return Promise.all((b[0]||[]).map(function(d){{return e(d);}})).then(function(){{return w(a,u(a));}}).then(function(){{return c.p;}}).catch(function(d){{h(a,d);throw d;}});}}"),
+    ]
+    .join("\n")
+}
+
+fn render_auto_loader_runtime(
+    missing_chunk_error: &str,
+    script_error: &str,
+    fetch_error: &str,
+    fetch_eval: &str,
+    numeric_module_ids: bool,
+) -> String {
+    let chunk_lookup = if numeric_module_ids {
+        "var c=r.k[a];"
+    } else {
+        "var c=r.k&&r.k[a];"
+    };
+    [
+        "r.o=0;".to_string(),
+        format!(
+            "function u(a){{var b=r.k&&r.k[a];if(!b)throw Error({missing_chunk_error});return new URL(b[1],r.b||(global.location&&global.location.href?global.location.href:\"./\")).toString();}}"
+        ),
+        format!("function p(a,b){{return new Promise(function(c,d){{var e=global.document.createElement(\"script\");e.async=true;e.src=b;e.onload=function(){{c();}};e.onerror=function(){{d(Error({script_error}));}};(global.document.head||global.document.documentElement).appendChild(e);}});}}"),
+        format!("function w(a,b){{return Promise.resolve(global.fetch(b)).then(function(c){{if(!c.ok)throw Error({fetch_error});return c.text();}}).then(function(c){{{fetch_eval}}});}}"),
+        "function t(){return r.o===1?1:r.o===2?2:global.document?1:2;}".to_string(),
+        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!c)throw Error({missing_chunk_error});r.s[a]=0;var d=g(a),f=t();return Promise.all((c[0]||[]).map(function(j){{return e(j);}})).then(function(){{var j=u(a);return f===2?w(a,j):p(a,j);}}).then(function(){{return d.p;}}).catch(function(j){{h(a,j);throw j;}});}}"),
+    ]
+    .join("\n")
 }

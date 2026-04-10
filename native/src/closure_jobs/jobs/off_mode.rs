@@ -33,7 +33,21 @@ pub(crate) fn prepare_off_mode_jobs(
     let property_renaming_report_path =
         property_renaming_report_path(raw_dir, &input.compilationLevel);
     let mut explicit_js_inputs = input.explicitJsInputs.clone();
-    if needs_custom_elements_es5_adapter(&input.languageOut) {
+    let adapter_scan_contents = read_candidate_contents(
+        &unique_paths(
+            input
+                .supportFiles
+                .iter()
+                .cloned()
+                .chain(
+                    resolved_chunks
+                        .iter()
+                        .flat_map(|chunk| chunk.files.iter().cloned()),
+                )
+                .collect(),
+        ),
+    )?;
+    if needs_custom_elements_es5_adapter(&input.languageOut, &adapter_scan_contents) {
         let adapter_path = raw_dir.join("custom-elements-es5-adapter.js");
         generated_assets.push(GeneratedAsset {
             path: adapter_path.to_string_lossy().to_string(),
@@ -166,6 +180,7 @@ pub(crate) fn prepare_off_mode_jobs(
         .collect::<Vec<_>>();
 
     Ok(PrepareClosureJobsOutput {
+        bundlerRuntimeBaseInputPath: None,
         compileJobs: compile_jobs,
         generatedAssets: generated_assets,
         postprocessActions: postprocess_actions,

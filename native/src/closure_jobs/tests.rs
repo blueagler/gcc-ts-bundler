@@ -101,6 +101,8 @@ fn prepares_bundler_runtime_jobs_with_runtime_assets() {
             && !asset.text.contains("__gcc_runtime__")
             && !asset.text.contains("initialized")
             && asset.text.contains("globalThis[\"__g\"].l(")
+            && !asset.text.contains("global.fetch(")
+            && !asset.text.contains("__register(\"m")
     }));
     assert!(output.compileJobs[0].chunk.is_some());
     assert!(output.compileJobs[0]
@@ -119,6 +121,58 @@ fn prepares_bundler_runtime_jobs_with_runtime_assets() {
         .propertyRenamingReportPath
         .as_deref()
         .is_some_and(|path| path.ends_with("property-renaming-report.txt"))));
+}
+
+#[test]
+fn skips_es5_custom_elements_adapter_when_no_native_dom_subclasses_exist() {
+    let root = make_temp_dir("off-no-es5-adapter");
+    let emitted_out_dir = root.join("native-out");
+    let out_dir = root.join("dist");
+    let final_cache_dir = root.join("cache/final");
+    let package_root = root.join("pkg");
+    fs::create_dir_all(emitted_out_dir.join("src")).unwrap();
+    fs::create_dir_all(&out_dir).unwrap();
+    fs::create_dir_all(package_root.join("closure-lib")).unwrap();
+    fs::write(
+        emitted_out_dir.join("src/entry.js"),
+        "goog.module(\"gcc.src.entry\");\nexports.value = 1;\n",
+    )
+    .unwrap();
+    fs::write(package_root.join("closure-lib/base.js"), "").unwrap();
+    let native_extern = root.join("native.externs.js");
+    fs::write(&native_extern, "/** @externs */\n").unwrap();
+
+    let output = prepare_closure_jobs(PrepareClosureJobsInput {
+        chunkMode: "off".to_string(),
+        chunkLoader: "auto".to_string(),
+        chunkPlan: vec![ClosureJobChunkPlanChunkInput {
+            dependencies: vec![],
+            entryFiles: Some(vec!["src/entry.ts".to_string()]),
+            files: vec!["src/entry.ts".to_string()],
+            kind: Some("base".to_string()),
+            lazyModuleIds: None,
+            name: "entry".to_string(),
+        }],
+        compilationLevel: "ADVANCED".to_string(),
+        diagnosticsVerbose: false,
+        emittedOutDir: emitted_out_dir.to_string_lossy().to_string(),
+        explicitExternPaths: vec![],
+        explicitJsInputs: vec![],
+        finalCacheDir: final_cache_dir.to_string_lossy().to_string(),
+        generatedExternPaths: vec![],
+        languageOut: "ECMASCRIPT5".to_string(),
+        manifestFile: "".to_string(),
+        nativeExternPath: native_extern.to_string_lossy().to_string(),
+        outDir: out_dir.to_string_lossy().to_string(),
+        packageRoot: package_root.to_string_lossy().to_string(),
+        publicPath: "./".to_string(),
+        supportFiles: vec![],
+    })
+    .unwrap();
+
+    assert!(!output.generatedAssets.iter().any(|asset| {
+        asset.path.ends_with("custom-elements-es5-adapter.js")
+    }));
 }
 
 #[test]

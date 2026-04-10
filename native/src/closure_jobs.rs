@@ -100,6 +100,7 @@ pub struct PostprocessAction {
 #[napi(object)]
 #[derive(Clone, Debug)]
 pub struct PrepareClosureJobsOutput {
+    pub bundlerRuntimeBaseInputPath: Option<String>,
     pub compileJobs: Vec<ClosureCompileJob>,
     pub generatedAssets: Vec<GeneratedAsset>,
     pub postprocessActions: Vec<PostprocessAction>,

@@ -377,14 +377,6 @@ impl VisitMut for PropertyProtocolRewriter<'_> {
         }
     }
 
-    fn visit_mut_array_lit(&mut self, array_lit: &mut ArrayLit) {
-        array_lit.visit_mut_children_with(self);
-
-        if self.maybe_rewrite_property_name_array(array_lit) {
-            self.changed = true;
-        }
-    }
-
     fn visit_mut_assign_expr(&mut self, assign_expr: &mut AssignExpr) {
         assign_expr.visit_mut_children_with(self);
 
@@ -825,6 +817,32 @@ mod tests {
         .expect("rewrite");
 
         assert!(output.contains("[\"i\",\"j\",\"k\",\"l\"]"), "{output}");
+    }
+
+    #[test]
+    fn leaves_plain_string_arrays_untouched() {
+        let input = "const letters=[\"L\",\"I\",\"T\"];".to_string();
+        let output = rewrite_decorator_metadata(
+            input.clone(),
+            "L:fc\nI:qb\nT:Pa\n".to_string(),
+        )
+        .expect("rewrite");
+
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn leaves_plain_css_property_arrays_untouched() {
+        let input =
+            "const props=[\"left\",\"top\",\"width\",\"height\",\"opacity\",\"color\",\"background\"];"
+                .to_string();
+        let output = rewrite_decorator_metadata(
+            input.clone(),
+            "left:a\ntop:b\nwidth:c\nheight:d\nopacity:e\ncolor:0\nbackground:g\n".to_string(),
+        )
+        .expect("rewrite");
+
+        assert_eq!(output, input);
     }
 
     #[test]
