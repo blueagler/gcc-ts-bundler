@@ -46,24 +46,25 @@ pub(super) fn render_bundler_runtime_base_chunk(
     loader: &str,
     manifest: &BundlerRuntimeInitManifest,
     module_text: &str,
+    include_custom_elements_es5_adapter: bool,
     debug_runtime: bool,
 ) -> std::result::Result<String, String> {
-    Ok([
-        render_bundler_runtime_preamble(loader, manifest, debug_runtime)?,
-        "var __register=globalThis.__g.r;".to_string(),
+    let runtime_global = runtime_global_ref("globalThis");
+    let mut parts = vec![render_bundler_runtime_preamble(loader, manifest, debug_runtime)?];
+    if include_custom_elements_es5_adapter {
+        parts.push(render_custom_elements_es5_adapter());
+    }
+    parts.extend([
+        format!("var __register={runtime_global}.r;"),
         module_text.to_string(),
+        format!("{runtime_global}.l({chunk_id:?});"),
         format!(
-            "globalThis.{runtime_key}.l({chunk_id:?});",
-            runtime_key = BUNDLER_RUNTIME_GLOBAL
-        ),
-        format!(
-            "globalThis.{runtime_key}.n({entry_points});",
-            runtime_key = BUNDLER_RUNTIME_GLOBAL,
+            "{runtime_global}.n({entry_points});",
             entry_points = serde_json::to_string(entry_points).map_err(|error| error.to_string())?,
         ),
         String::new(),
-    ]
-    .join("\n"))
+    ]);
+    Ok(parts.join("\n"))
 }
 
 pub(super) fn render_bundler_runtime_lazy_chunk(
@@ -76,10 +77,10 @@ pub(super) fn render_bundler_runtime_lazy_chunk(
     } else {
         "\"b\""
     };
+    let runtime_global = runtime_global_ref("globalThis");
     format!(
-        "(globalThis.{runtime_key}||{{h:function(){{throw Error({fallback_error});}}}}).h(function(__register){{\n{}\n}},{chunk_id:?});\n",
+        "({runtime_global}||{{h:function(){{throw Error({fallback_error});}}}}).h(function(__register){{\n{}\n}},{chunk_id:?});\n",
         indent_block(module_text),
-        runtime_key = BUNDLER_RUNTIME_GLOBAL,
         fallback_error = fallback_error,
     )
 }
@@ -122,7 +123,10 @@ pub(super) fn render_bundler_runtime_preamble(
     };
     Ok([
         "(function(global){".to_string(),
-        format!("var r=global.{BUNDLER_RUNTIME_GLOBAL}||(global.{BUNDLER_RUNTIME_GLOBAL}={{}});"),
+        format!(
+            "var r={runtime_global}||({runtime_global}={{}});",
+            runtime_global = runtime_global_ref("global"),
+        ),
         "if(!r.i){".to_string(),
         "r.f=Object.create(null);".to_string(),
         "r.c=Object.create(null);".to_string(),
@@ -155,6 +159,46 @@ pub(super) fn render_bundler_runtime_preamble(
         String::new(),
     ]
     .join("\n"))
+}
+
+fn runtime_global_ref(global_name: &str) -> String {
+    format!("{global_name}[{BUNDLER_RUNTIME_GLOBAL:?}]")
+}
+
+pub(super) fn needs_custom_elements_es5_adapter(language_out: &str) -> bool {
+    matches!(language_out, "ECMASCRIPT3" | "ECMASCRIPT5")
+}
+
+pub(super) fn render_custom_elements_es5_adapter() -> String {
+    [
+        "var __gccNativeClassGlobal=globalThis;".to_string(),
+        "if(__gccNativeClassGlobal.customElements&&__gccNativeClassGlobal.Reflect&&__gccNativeClassGlobal.Reflect.construct){".to_string(),
+        "var __gccPatchNativeClass=function(NativeCtor){".to_string(),
+        "if(typeof NativeCtor!=='function')return null;".to_string(),
+        "function PatchedCtor(){return __gccNativeClassGlobal.Reflect.construct(NativeCtor,Array.prototype.slice.call(arguments),this.constructor);}".to_string(),
+        "PatchedCtor.prototype=NativeCtor.prototype;".to_string(),
+        "PatchedCtor.prototype.constructor=PatchedCtor;".to_string(),
+        "if(Object.setPrototypeOf){Object.setPrototypeOf(PatchedCtor,NativeCtor);}else{PatchedCtor.__proto__=NativeCtor;}".to_string(),
+        "return PatchedCtor;".to_string(),
+        "};".to_string(),
+        "var __gccPatchedHTMLElement=__gccPatchNativeClass(__gccNativeClassGlobal.HTMLElement);".to_string(),
+        "if(__gccPatchedHTMLElement){HTMLElement=__gccNativeClassGlobal.HTMLElement=__gccPatchedHTMLElement;}".to_string(),
+        "var __gccPatchedEvent=__gccPatchNativeClass(__gccNativeClassGlobal.Event);".to_string(),
+        "if(__gccPatchedEvent){Event=__gccNativeClassGlobal.Event=__gccPatchedEvent;}".to_string(),
+        "var __gccPatchedCustomEvent=__gccPatchNativeClass(__gccNativeClassGlobal.CustomEvent);".to_string(),
+        "if(__gccPatchedCustomEvent){CustomEvent=__gccNativeClassGlobal.CustomEvent=__gccPatchedCustomEvent;}".to_string(),
+        "var __gccPatchedMouseEvent=__gccPatchNativeClass(__gccNativeClassGlobal.MouseEvent);".to_string(),
+        "if(__gccPatchedMouseEvent){MouseEvent=__gccNativeClassGlobal.MouseEvent=__gccPatchedMouseEvent;}".to_string(),
+        "var __gccPatchedKeyboardEvent=__gccPatchNativeClass(__gccNativeClassGlobal.KeyboardEvent);".to_string(),
+        "if(__gccPatchedKeyboardEvent){KeyboardEvent=__gccNativeClassGlobal.KeyboardEvent=__gccPatchedKeyboardEvent;}".to_string(),
+        "var __gccPatchedFocusEvent=__gccPatchNativeClass(__gccNativeClassGlobal.FocusEvent);".to_string(),
+        "if(__gccPatchedFocusEvent){FocusEvent=__gccNativeClassGlobal.FocusEvent=__gccPatchedFocusEvent;}".to_string(),
+        "var __gccPatchedUIEvent=__gccPatchNativeClass(__gccNativeClassGlobal.UIEvent);".to_string(),
+        "if(__gccPatchedUIEvent){UIEvent=__gccNativeClassGlobal.UIEvent=__gccPatchedUIEvent;}".to_string(),
+        "}".to_string(),
+        String::new(),
+    ]
+    .join("\n")
 }
 
 fn indent_block(source: &str) -> String {

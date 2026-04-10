@@ -1337,3 +1337,259 @@ fn bundler_runtime_rewrites_promise_consumer_callback_params_to_slots() {
     assert!(transformed.contains("module[0](anchor)"), "{transformed}");
     assert!(!transformed.contains(".default"), "{transformed}");
 }
+
+#[test]
+fn bundler_runtime_rewrites_wrapped_promise_consumer_callback_params_to_slots() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("gcc-ts-bundler-slot-callback-wrapped-{unique}"));
+    let src_dir = root.join("src");
+    let feature_file = src_dir.join("feature.ts");
+    let main_file = src_dir.join("main.ts");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(
+        &feature_file,
+        "export default function feature() { return 'ok'; }\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_file,
+        [
+            "const modules = [{ id: 'button', label: 'Button', note: 'lazy panel', load: () => __dynamicImport('gcc.src.feature') }];",
+            "const active = state(null);",
+            "setState(active, modules.find(Boolean) ?? modules[0]);",
+            "const selected = state(null);",
+            "setState(selected, get(active).load());",
+            "awaitLike(() => get(selected), null, (anchor, module) => get(module).default(anchor));",
+            "",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    let feature_module_id = to_goog_module_id(&feature_file, &root);
+    let main_module_id = to_goog_module_id(&main_file, &root);
+    let transformed = GLOBALS
+        .set(&Globals::new(), || {
+            transform_source_file(
+                &main_file,
+                &super::TranspileContext {
+                    bundler_module_slots: HashMap::from([
+                        (
+                            feature_module_id.clone(),
+                            super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
+                                "default".to_string(),
+                            ])),
+                        ),
+                        (
+                            main_module_id,
+                            super::BundlerModuleSlots::from_export_names(&BTreeSet::new()),
+                        ),
+                    ]),
+                    bundler_runtime_logical_ids: HashMap::new(),
+                    chunk_mode: super::ChunkMode::BundlerRuntime,
+                    commonjs_specifiers: HashSet::new(),
+                    file_metadata: HashMap::new(),
+                    global_property_names: HashSet::new(),
+                    preserved_property_names: HashSet::new(),
+                    lazy_imports_by_file: HashMap::new(),
+                    package_aliases: Vec::new(),
+                    static_property_names: HashSet::new(),
+                    workspace_dir: root.clone(),
+                },
+            )
+        })
+        .unwrap();
+
+    assert!(transformed.contains("get(module)[0](anchor)"), "{transformed}");
+    assert!(!transformed.contains(".default"), "{transformed}");
+}
+
+#[test]
+fn bundler_runtime_rewrites_nested_wrapped_promise_consumer_callback_params_to_slots() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("gcc-ts-bundler-slot-callback-nested-{unique}"));
+    let src_dir = root.join("src");
+    let feature_file = src_dir.join("feature.ts");
+    let main_file = src_dir.join("main.ts");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(
+        &feature_file,
+        "export default function feature() { return 'ok'; }\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_file,
+        [
+            "const modules = [{ id: 'button', label: 'Button', note: 'lazy panel', load: () => __dynamicImport('gcc.src.feature') }];",
+            "const active = state(null);",
+            "setState(active, modules.find(Boolean) ?? modules[0]);",
+            "const selected = state(null);",
+            "setState(selected, get(active).load());",
+            "awaitLike(anchor, () => get(selected), null, (outer, module) => {",
+            "  renderComponent(outer, () => get(module).default, (inner, component) => {",
+            "    component(inner, {});",
+            "  });",
+            "});",
+            "",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    let feature_module_id = to_goog_module_id(&feature_file, &root);
+    let main_module_id = to_goog_module_id(&main_file, &root);
+    let transformed = GLOBALS
+        .set(&Globals::new(), || {
+            transform_source_file(
+                &main_file,
+                &super::TranspileContext {
+                    bundler_module_slots: HashMap::from([
+                        (
+                            feature_module_id.clone(),
+                            super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
+                                "default".to_string(),
+                            ])),
+                        ),
+                        (
+                            main_module_id,
+                            super::BundlerModuleSlots::from_export_names(&BTreeSet::new()),
+                        ),
+                    ]),
+                    bundler_runtime_logical_ids: HashMap::new(),
+                    chunk_mode: super::ChunkMode::BundlerRuntime,
+                    commonjs_specifiers: HashSet::new(),
+                    file_metadata: HashMap::new(),
+                    global_property_names: HashSet::new(),
+                    preserved_property_names: HashSet::new(),
+                    lazy_imports_by_file: HashMap::new(),
+                    package_aliases: Vec::new(),
+                    static_property_names: HashSet::new(),
+                    workspace_dir: root.clone(),
+                },
+            )
+        })
+        .unwrap();
+
+    assert!(transformed.contains("get(module)[0]"), "{transformed}");
+    assert!(!transformed.contains(".default"), "{transformed}");
+}
+
+#[test]
+fn bundler_runtime_rewrites_realistic_helper_wrapped_consumer_callbacks_to_slots() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("gcc-ts-bundler-slot-callback-real-{unique}"));
+    let src_dir = root.join("src");
+    let feature_file = src_dir.join("feature.ts");
+    let main_file = src_dir.join("main.ts");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(
+        &feature_file,
+        "export default function feature() { return 'ok'; }\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_file,
+        [
+            "const modules = [{ id: 'button', label: 'Button', note: 'lazy panel', load: function(){ return __dynamicImport('gcc.src.feature'); } }];",
+            "const component = __gcc_import_0[30]('button');",
+            "const hasMounted = __gcc_import_0[30](false);",
+            "const selectedModule = __gcc_import_0[30](null);",
+            "const activePanel = __gcc_import_0[30](modules[0]);",
+            "__gcc_import_0[27](function(){ return __gcc_import_0[22](component); }, function(){ var _a; __gcc_import_0[38](activePanel, (_a = modules.find(function(panel){ return panel.id === __gcc_import_0[22](component); })) != null ? _a : modules[0]); });",
+            "__gcc_import_0[27](function(){ return __gcc_import_0[22](hasMounted), __gcc_import_0[22](activePanel); }, function(){ if (__gcc_import_0[22](hasMounted)) __gcc_import_0[38](selectedModule, __gcc_import_0[22](activePanel).load()); });",
+            "__gcc_import_0[12](node, function(){ return __gcc_import_0[22](selectedModule); }, null, function(anchor, module){ __gcc_import_0[16](anchor, function(){ return __gcc_import_0[22](module).default; }, function(inner, component){ component(inner, {}); }); });",
+            "",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    let feature_module_id = to_goog_module_id(&feature_file, &root);
+    let main_module_id = to_goog_module_id(&main_file, &root);
+    let transformed = GLOBALS
+        .set(&Globals::new(), || {
+            transform_source_file(
+                &main_file,
+                &super::TranspileContext {
+                    bundler_module_slots: HashMap::from([
+                        (
+                            feature_module_id.clone(),
+                            super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
+                                "default".to_string(),
+                            ])),
+                        ),
+                        (
+                            main_module_id,
+                            super::BundlerModuleSlots::from_export_names(&BTreeSet::new()),
+                        ),
+                    ]),
+                    bundler_runtime_logical_ids: HashMap::new(),
+                    chunk_mode: super::ChunkMode::BundlerRuntime,
+                    commonjs_specifiers: HashSet::new(),
+                    file_metadata: HashMap::new(),
+                    global_property_names: HashSet::new(),
+                    preserved_property_names: HashSet::new(),
+                    lazy_imports_by_file: HashMap::new(),
+                    package_aliases: Vec::new(),
+                    static_property_names: HashSet::new(),
+                    workspace_dir: root.clone(),
+                },
+            )
+        })
+        .unwrap();
+
+    assert!(
+        transformed.contains("__gcc_import_0[22](module)[0]"),
+        "{transformed}"
+    );
+    assert!(!transformed.contains(".default"), "{transformed}");
+}
+
+#[test]
+fn collects_realistic_helper_wrapped_object_and_promise_carriers() {
+    let source = [
+        "const modules = [{ id: 'button', label: 'Button', note: 'lazy panel', load: function(){ return __dynamicImport('gcc.src.feature'); } }];",
+        "const component = __gcc_import_0[30]('button');",
+        "const hasMounted = __gcc_import_0[30](false);",
+        "const selectedModule = __gcc_import_0[30](null);",
+        "const activePanel = __gcc_import_0[30](modules[0]);",
+        "__gcc_import_0[27](function(){ return __gcc_import_0[22](component); }, function(){ var _a; __gcc_import_0[38](activePanel, (_a = modules.find(function(panel){ return panel.id === __gcc_import_0[22](component); })) != null ? _a : modules[0]); });",
+        "__gcc_import_0[27](function(){ return __gcc_import_0[22](hasMounted), __gcc_import_0[22](activePanel); }, function(){ if (__gcc_import_0[22](hasMounted)) __gcc_import_0[38](selectedModule, __gcc_import_0[22](activePanel).load()); });",
+        "",
+    ]
+    .join("\n");
+    let file_path = PathBuf::from("/tmp/realistic-helper-carriers.js");
+    let module = crate::module_cache::parse_module(&file_path, &source).unwrap();
+    let wrappers = super::collect_dynamic_import_wrappers(&module);
+    let object_carriers = super::collect_dynamic_import_object_carriers(&module, &wrappers);
+    let promise_carriers =
+        super::collect_dynamic_import_promise_carriers(&module, &object_carriers, &wrappers);
+
+    assert!(
+        wrappers
+            .object_wrappers
+            .keys()
+            .any(|id| id.0.as_ref() == "modules"),
+        "{wrappers:?}"
+    );
+    assert!(
+        object_carriers.keys().any(|id| id.0.as_ref() == "activePanel"),
+        "{object_carriers:?}"
+    );
+    assert!(
+        promise_carriers
+            .keys()
+            .any(|id| id.0.as_ref() == "selectedModule"),
+        "{promise_carriers:?}"
+    );
+}

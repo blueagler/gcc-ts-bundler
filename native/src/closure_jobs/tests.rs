@@ -100,7 +100,7 @@ fn prepares_bundler_runtime_jobs_with_runtime_assets() {
         asset.path.ends_with("main.linked.js")
             && !asset.text.contains("__gcc_runtime__")
             && !asset.text.contains("initialized")
-            && asset.text.contains("globalThis.__g.l(")
+            && asset.text.contains("globalThis[\"__g\"].l(")
     }));
     assert!(output.compileJobs[0].chunk.is_some());
     assert!(output.compileJobs[0]

@@ -25,7 +25,7 @@ pub fn rewrite_decorator_metadata(
     let mut module = parse_module(&PathBuf::from("property-protocol-bundle.js"), &code)?;
     let mut rewriter = PropertyProtocolRewriter {
         changed: false,
-        property_key_scopes: vec![HashSet::new()],
+        property_key_scopes: vec![PropertyKeyScope::default()],
         renames: &renames,
     };
     module.visit_mut_with(&mut rewriter);
@@ -55,8 +55,14 @@ fn parse_property_renaming_report(report: &str) -> HashMap<String, String> {
 
 struct PropertyProtocolRewriter<'a> {
     changed: bool,
-    property_key_scopes: Vec<HashSet<String>>,
+    property_key_scopes: Vec<PropertyKeyScope>,
     renames: &'a HashMap<String, String>,
+}
+
+#[derive(Default)]
+struct PropertyKeyScope {
+    identifiers: HashSet<String>,
+    member_paths: HashSet<String>,
 }
 
 impl PropertyProtocolRewriter<'_> {
@@ -184,7 +190,13 @@ impl PropertyProtocolRewriter<'_> {
                 .property_key_scopes
                 .iter()
                 .rev()
-                .any(|scope| scope.contains(ident.sym.as_ref())),
+                .any(|scope| scope.identifiers.contains(ident.sym.as_ref())),
+            Expr::Member(member) => property_key_member_path(member).is_some_and(|path| {
+                self.property_key_scopes
+                    .iter()
+                    .rev()
+                    .any(|scope| scope.member_paths.contains(&path))
+            }),
             Expr::Paren(paren) => self.is_property_key_expr(&paren.expr),
             Expr::Seq(sequence) => sequence
                 .exprs
@@ -195,11 +207,74 @@ impl PropertyProtocolRewriter<'_> {
     }
 
     fn push_property_key_scope(&mut self, binding_names: HashSet<String>) {
-        self.property_key_scopes.push(binding_names);
+        self.property_key_scopes.push(PropertyKeyScope {
+            identifiers: binding_names,
+            member_paths: HashSet::new(),
+        });
     }
 
     fn pop_property_key_scope(&mut self) {
         self.property_key_scopes.pop();
+    }
+
+    fn current_scope_mut(&mut self) -> &mut PropertyKeyScope {
+        self.property_key_scopes
+            .last_mut()
+            .expect("property key scope should always exist")
+    }
+
+    fn track_property_key_pat(&mut self, pattern: &Pat) {
+        if let Pat::Ident(binding) = pattern {
+            self.current_scope_mut()
+                .identifiers
+                .insert(binding.id.sym.to_string());
+        }
+    }
+
+    fn clear_property_key_binding(&mut self, binding_name: &str) {
+        let scope = self.current_scope_mut();
+        scope.identifiers.remove(binding_name);
+        let member_prefix = format!("{binding_name}.");
+        scope
+            .member_paths
+            .retain(|path| !path.starts_with(&member_prefix));
+    }
+
+    fn clear_property_key_pat(&mut self, pattern: &Pat) {
+        if let Pat::Ident(binding) = pattern {
+            self.clear_property_key_binding(binding.id.sym.as_ref());
+        }
+    }
+
+    fn track_property_key_assign_target(&mut self, target: &AssignTarget) {
+        match target {
+            AssignTarget::Simple(SimpleAssignTarget::Ident(binding)) => {
+                self.current_scope_mut()
+                    .identifiers
+                    .insert(binding.id.sym.to_string());
+            }
+            AssignTarget::Simple(SimpleAssignTarget::Member(member)) => {
+                if let Some(path) = property_key_member_path(member) {
+                    self.current_scope_mut().member_paths.insert(path);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn clear_property_key_assign_target(&mut self, target: &AssignTarget) {
+        match target {
+            AssignTarget::Simple(SimpleAssignTarget::Ident(binding)) => {
+                self.clear_property_key_binding(binding.id.sym.as_ref());
+            }
+            AssignTarget::Simple(SimpleAssignTarget::Member(member)) => {
+                let Some(path) = property_key_member_path(member) else {
+                    return;
+                };
+                self.current_scope_mut().member_paths.remove(&path);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -241,6 +316,19 @@ impl VisitMut for PropertyProtocolRewriter<'_> {
             if let Expr::Object(object) = &mut *argument.expr {
                 self.maybe_rewrite_metadata_object(object);
             }
+        }
+    }
+
+    fn visit_mut_var_declarator(&mut self, declarator: &mut VarDeclarator) {
+        declarator.visit_mut_children_with(self);
+
+        let Some(init) = declarator.init.as_deref() else {
+            return;
+        };
+        if self.is_property_key_expr(init) {
+            self.track_property_key_pat(&declarator.name);
+        } else {
+            self.clear_property_key_pat(&declarator.name);
         }
     }
 
@@ -294,6 +382,16 @@ impl VisitMut for PropertyProtocolRewriter<'_> {
 
         if self.maybe_rewrite_property_name_array(array_lit) {
             self.changed = true;
+        }
+    }
+
+    fn visit_mut_assign_expr(&mut self, assign_expr: &mut AssignExpr) {
+        assign_expr.visit_mut_children_with(self);
+
+        if self.is_property_key_expr(&assign_expr.right) {
+            self.track_property_key_assign_target(&assign_expr.left);
+        } else {
+            self.clear_property_key_assign_target(&assign_expr.left);
         }
     }
 
@@ -493,6 +591,37 @@ fn looks_like_property_name(value: &str) -> bool {
         && value
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '$')
+}
+
+fn property_key_member_path(member: &MemberExpr) -> Option<String> {
+    let object_path = match &*member.obj {
+        Expr::Ident(ident) => ident.sym.to_string(),
+        Expr::Member(inner_member) => property_key_member_path(inner_member)?,
+        Expr::Paren(paren) => property_key_member_path_from_expr(&paren.expr)?,
+        _ => return None,
+    };
+    let prop_name = member_prop_name(&member.prop)?;
+    Some(format!("{object_path}.{prop_name}"))
+}
+
+fn property_key_member_path_from_expr(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Member(member) => property_key_member_path(member),
+        Expr::Paren(paren) => property_key_member_path_from_expr(&paren.expr),
+        _ => None,
+    }
+}
+
+fn member_prop_name(prop: &MemberProp) -> Option<String> {
+    match prop {
+        MemberProp::Ident(ident) => Some(ident.sym.to_string()),
+        MemberProp::Computed(computed) => match &*computed.expr {
+            Expr::Lit(Lit::Str(value)) => Some(value.value.to_string_lossy().to_string()),
+            Expr::Lit(Lit::Num(value)) => Some(value.value.to_string()),
+            _ => None,
+        },
+        MemberProp::PrivateName(_) => None,
+    }
 }
 
 fn collect_key_list_param_indexes(callee_expr: &Expr) -> Option<HashSet<usize>> {
@@ -719,5 +848,17 @@ mod tests {
         .expect("rewrite");
 
         assert!(output.contains("\"sa\"in props"), "{output}");
+    }
+
+    #[test]
+    fn rewrites_member_carrier_comparisons_for_property_keys() {
+        let output = rewrite_decorator_metadata(
+            "for(var key in attrs){state.current=key;if(state.current===\"class\"){apply(attrs[key])}}"
+                .to_string(),
+            "class:o\n".to_string(),
+        )
+        .expect("rewrite");
+
+        assert!(output.contains("state.current===\"o\""), "{output}");
     }
 }

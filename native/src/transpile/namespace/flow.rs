@@ -6,12 +6,15 @@ pub(crate) fn rewrite_bundler_runtime_namespace_usage(
     context: &TranspileContext,
 ) -> std::result::Result<(), String> {
     let dynamic_import_wrappers = collect_dynamic_import_wrappers(module);
+    let object_carriers =
+        collect_dynamic_import_object_carriers(module, &dynamic_import_wrappers);
     let promise_carriers =
-        collect_dynamic_import_promise_carriers(module, &dynamic_import_wrappers);
+        collect_dynamic_import_promise_carriers(module, &object_carriers, &dynamic_import_wrappers);
     let mut visitor = BundlerRuntimeNamespaceVisitor::new(
         file_path,
         context,
         dynamic_import_wrappers,
+        object_carriers,
         promise_carriers,
     );
     module.visit_mut_with(&mut visitor);
@@ -28,6 +31,7 @@ struct BundlerRuntimeNamespaceVisitor<'a> {
     errors: Vec<String>,
     file_path: String,
     namespace_bindings: HashMap<Id, BTreeSet<String>>,
+    object_carriers: HashMap<Id, DynamicImportObjectWrapper>,
     promise_carriers: HashMap<Id, BTreeSet<String>>,
 }
 
@@ -36,6 +40,7 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a> {
         file_path: &Path,
         context: &'a TranspileContext,
         dynamic_import_wrappers: DynamicImportWrappers,
+        object_carriers: HashMap<Id, DynamicImportObjectWrapper>,
         promise_carriers: HashMap<Id, BTreeSet<String>>,
     ) -> Self {
         Self {
@@ -44,6 +49,7 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a> {
             errors: Vec::new(),
             file_path: file_path.display().to_string(),
             namespace_bindings: HashMap::new(),
+            object_carriers,
             promise_carriers,
         }
     }
@@ -57,6 +63,7 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a> {
         resolve_dynamic_import_module_ids(
             expr,
             &self.promise_carriers,
+            &self.object_carriers,
             &self.dynamic_import_wrappers,
         )
     }
@@ -66,10 +73,7 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a> {
             Expr::Ident(ident) => self.namespace_bindings.get(&ident.to_id()).cloned(),
             Expr::Await(await_expr) => self.module_ids_for_promise_expr(&await_expr.arg),
             Expr::Call(call_expr) if call_expr.args.len() == 1 => {
-                let Expr::Ident(binding_ident) = &*call_expr.args[0].expr else {
-                    return None;
-                };
-                self.namespace_bindings.get(&binding_ident.to_id()).cloned()
+                self.module_ids_for_namespace_expr(&call_expr.args[0].expr)
             }
             Expr::Paren(paren) => self.module_ids_for_namespace_expr(&paren.expr),
             _ => None,

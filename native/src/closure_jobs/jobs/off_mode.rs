@@ -7,6 +7,7 @@ pub(crate) fn prepare_off_mode_jobs(
     raw_dir: &Path,
     warning_level: &str,
 ) -> std::result::Result<PrepareClosureJobsOutput, String> {
+    let mut generated_assets = Vec::new();
     let closure_lib_files = select_closure_lib_files(
         &input.packageRoot,
         &unique_paths(
@@ -31,6 +32,16 @@ pub(crate) fn prepare_off_mode_jobs(
     )?;
     let property_renaming_report_path =
         property_renaming_report_path(raw_dir, &input.compilationLevel);
+    let mut explicit_js_inputs = input.explicitJsInputs.clone();
+    if needs_custom_elements_es5_adapter(&input.languageOut) {
+        let adapter_path = raw_dir.join("custom-elements-es5-adapter.js");
+        generated_assets.push(GeneratedAsset {
+            path: adapter_path.to_string_lossy().to_string(),
+            text: render_custom_elements_es5_adapter(),
+        });
+        explicit_js_inputs.push(adapter_path.to_string_lossy().to_string());
+    }
+    explicit_js_inputs = unique_paths(explicit_js_inputs);
 
     let compile_jobs = if resolved_chunks.len() == 1 {
         let entry_chunk = resolved_chunks
@@ -46,8 +57,7 @@ pub(crate) fn prepare_off_mode_jobs(
                 .then_some(entry_chunk.entry_points.clone()),
             externs,
             js: unique_paths(
-                input
-                    .explicitJsInputs
+                explicit_js_inputs
                     .iter()
                     .cloned()
                     .chain(closure_lib_files.iter().cloned())
@@ -69,8 +79,7 @@ pub(crate) fn prepare_off_mode_jobs(
         }]
     } else {
         let leading_js = unique_paths(
-            input
-                .explicitJsInputs
+            explicit_js_inputs
                 .iter()
                 .cloned()
                 .chain(closure_lib_files.iter().cloned())
@@ -158,7 +167,7 @@ pub(crate) fn prepare_off_mode_jobs(
 
     Ok(PrepareClosureJobsOutput {
         compileJobs: compile_jobs,
-        generatedAssets: Vec::new(),
+        generatedAssets: generated_assets,
         postprocessActions: postprocess_actions,
         publishedOutputs: published_outputs,
     })

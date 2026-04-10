@@ -139,6 +139,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
     effective_externs = unique_paths(effective_externs);
     let property_renaming_report_path =
         property_renaming_report_path(raw_dir, &input.compilationLevel);
+    let leading_js_inputs = unique_paths(input.explicitJsInputs.clone());
 
     if !input.manifestFile.is_empty() {
         let manifest_path = PathBuf::from(&input.outDir).join(&input.manifestFile);
@@ -170,6 +171,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
                 &input.chunkLoader,
                 &runtime_manifest,
                 module_text,
+                needs_custom_elements_es5_adapter(&input.languageOut),
                 runtime_debug,
             )?
         } else {
@@ -192,8 +194,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
     let closure_lib_files = select_bundler_runtime_closure_lib_files(
         &input.packageRoot,
         &unique_paths(
-            input
-                .explicitJsInputs
+            leading_js_inputs
                 .iter()
                 .cloned()
                 .chain(
@@ -236,7 +237,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
                 "{}:{}{}",
                 chunk_output_name,
                 1 + if index == 0 {
-                    input.explicitJsInputs.len() + closure_lib_files.len()
+                    leading_js_inputs.len() + closure_lib_files.len()
                 } else {
                     0
                 },
@@ -261,8 +262,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         entryPoint: None,
         externs: effective_externs,
         js: unique_paths(
-            input
-                .explicitJsInputs
+            leading_js_inputs
                 .iter()
                 .cloned()
                 .chain(closure_lib_files.into_iter())

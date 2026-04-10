@@ -17,6 +17,7 @@ const result = await build({
   outDir: "./dist",
   projectRoot,
   srcDir: "./.lit-compiled",
+  languageOut: "ECMASCRIPT5",
 });
 
 if (result.exitCode !== 0) {
