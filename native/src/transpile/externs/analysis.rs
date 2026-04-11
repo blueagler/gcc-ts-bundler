@@ -47,9 +47,8 @@ struct ParsedExternFileAnalysis {
 
 pub(crate) fn collect_extern_property_names(
     file_names: &[String],
-    global_property_names: &HashSet<String>,
 ) -> std::result::Result<ExternPropertyAnalysis, String> {
-    let mut preserved_property_names = global_property_names.clone();
+    let mut preserved_property_names = HashSet::new();
     let mut static_property_names = HashSet::new();
 
     for file_name in file_names {
@@ -90,10 +89,9 @@ pub(crate) fn collect_extern_property_names(
 #[cfg(test)]
 pub(crate) fn collect_preserved_property_names(
     file_names: &[String],
-    global_property_names: &HashSet<String>,
     _static_property_names: &HashSet<String>,
 ) -> std::result::Result<HashSet<String>, String> {
-    Ok(collect_extern_property_names(file_names, global_property_names)?.preserved_property_names)
+    Ok(collect_extern_property_names(file_names)?.preserved_property_names)
 }
 
 pub(crate) fn collect_static_property_names_from_text(source_text: &str) -> HashSet<String> {
@@ -116,21 +114,6 @@ pub(crate) fn collect_static_property_names_from_text(source_text: &str) -> Hash
         }
     }
     names
-}
-
-pub(crate) fn collect_names_from_files(
-    file_names: &[String],
-    collect_names: fn(&str) -> HashSet<String>,
-) -> std::result::Result<HashSet<String>, String> {
-    let mut names = HashSet::new();
-    for file_name in file_names {
-        if file_name.ends_with(".d.ts") {
-            continue;
-        }
-        let source_text = fs::read_to_string(file_name).map_err(|error| error.to_string())?;
-        names.extend(collect_names(&source_text));
-    }
-    Ok(names)
 }
 
 pub(crate) fn is_valid_js_identifier(name: &str) -> bool {

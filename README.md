@@ -145,6 +145,7 @@ Only the documented dashed CLI flags are supported. Deprecated underscore and ca
 - `examples/lazy-chunks-demo` is a minimal browser fixture that uses native `import()` to lazy load a feature chunk.
 - `examples/jquery-externs-demo` is a small browser fixture that uses `jquery` and `@types/jquery` to exercise boundary-aware extern generation.
 - `examples/svelte-spa` uses the latest Svelte compiler, then prebundles the Svelte runtime with `esbuild` before running the result through gcc-ts-bundler.
+- `examples/vue-vapor-spa` precompiles `.vue` single-file components through `vue/compiler-sfc` with Vapor mode enabled, then runs the generated ESM through gcc-ts-bundler with lazy async panels.
 
 ## License
 

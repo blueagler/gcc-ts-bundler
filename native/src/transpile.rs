@@ -112,11 +112,10 @@ pub fn transpile_sources(
         .map(|module_id| (to_bundler_runtime_module_id(module_id), module_id.clone()))
         .collect::<HashMap<_, _>>();
     let file_metadata = load_closure_metadata(&metadata_path)?;
-    let global_property_names = collect_global_property_names(&file_names)?;
     let ExternPropertyAnalysis {
         preserved_property_names,
         static_property_names,
-    } = collect_extern_property_names(&file_names, &global_property_names)?;
+    } = collect_extern_property_names(&file_names)?;
     let context = TranspileContext {
         bundler_module_slots,
         bundler_runtime_logical_ids,
@@ -125,7 +124,6 @@ pub fn transpile_sources(
             .into_iter()
             .collect(),
         file_metadata,
-        global_property_names,
         lazy_imports_by_file: group_lazy_imports_by_file(lazy_imports),
         package_aliases,
         preserved_property_names,
@@ -152,10 +150,7 @@ pub fn transpile_sources(
 
     fs::write(
         &externs_path,
-        render_generated_externs(
-            &context.global_property_names,
-            &context.static_property_names,
-        ),
+        render_generated_externs(&context.static_property_names),
     )
     .map_err(|error| error.to_string())?;
 

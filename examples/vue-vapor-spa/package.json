@@ -1,0 +1,11 @@
+{
+  "name": "vue-vapor-spa-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ./build.mjs"
+  },
+  "dependencies": {
+    "vue": "3.6.0-beta.9"
+  }
+}

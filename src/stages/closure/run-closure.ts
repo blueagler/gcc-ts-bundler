@@ -174,6 +174,7 @@ async function runClosurePostprocess({
   await Promise.all(
     prepared.postprocessActions.map(async (action) => {
       await ensureParentDirectory(action.outputPath);
+      const wrapBundlerRuntimeOutput = chunkMode === "bundler-runtime";
       const reportText = action.propertyRenamingReportPath
         ? await readPropertyRenamingReport(
             action.propertyRenamingReportPath,
@@ -183,7 +184,8 @@ async function runClosurePostprocess({
       if (
         action.kind === "copy" &&
         !reportText &&
-        !es5Rewrite.requiresInputRead()
+        !es5Rewrite.requiresInputRead() &&
+        !wrapBundlerRuntimeOutput
       ) {
         await fs.copyFile(action.inputPath, action.outputPath);
         return;
@@ -216,6 +218,9 @@ async function runClosurePostprocess({
           contents,
           es5Rewrite.renderHelperBag(),
         );
+      }
+      if (wrapBundlerRuntimeOutput) {
+        contents = wrapBundlerRuntimeOutputFile(contents);
       }
       await fs.writeFile(action.outputPath, contents);
     }),
@@ -277,13 +282,18 @@ function injectBundlerRuntimeEs5HelperBag(code: string, helperBag: string) {
   if (!helperBag) {
     return code;
   }
-  const marker = "}).call(this,globalThis);";
-  const markerIndex = code.indexOf(marker);
-  if (markerIndex === -1) {
-    return `${helperBag}${code}`;
+  for (const marker of ["G.u(", "globalThis.__g.u(", 'globalThis["__g"].u(']) {
+    const markerIndex = code.lastIndexOf(marker);
+    if (markerIndex !== -1) {
+      return `${code.slice(0, markerIndex)}${helperBag}${code.slice(markerIndex)}`;
+    }
   }
-  const insertAt = markerIndex + marker.length;
-  return `${code.slice(0, insertAt)}${helperBag}${code.slice(insertAt)}`;
+  return `${code}${helperBag}`;
+}
+
+function wrapBundlerRuntimeOutputFile(code: string) {
+  const trimmed = code.trimEnd();
+  return `!function(){\n${trimmed}\n}();\n`;
 }
 
 async function readInputContents(
@@ -299,7 +309,7 @@ async function readInputContents(
 }
 
 function renderBundlerRuntimeEs5HelperBag(helperKeys: Set<string>) {
-  const lines = ["var _=globalThis.__g._||(globalThis.__g._=[]);"];
+  const lines = ["var G=globalThis.__g,_=G._||(G._=[]);"];
   if (helperKeys.has("class-private-field-set")) {
     lines.push(
       '_[0]=function(a,b,c,d,e){if(d==="m")throw new TypeError("Private method is not writable");if(d==="a"&&!e)throw new TypeError("Private accessor was defined without a setter");if(typeof b==="function"?a!==b||!e:!b.has(a))throw new TypeError("Cannot write private member to an object whose class did not declare it");return d==="a"?e.call(a,c):e?e.value=c:b.set(a,c),c;};',
@@ -323,6 +333,16 @@ function renderBundlerRuntimeEs5HelperBag(helperKeys: Set<string>) {
   if (helperKeys.has("es-decorate")) {
     lines.push(
       '_[4]=function(a,b,c,d,e,f){function g(h){if(h!==void 0&&typeof h!=="function")throw new TypeError("Function expected");return h;}var i=d.kind,j=i==="getter"?"get":i==="setter"?"set":"value";a=!b&&a?d["static"]?a:a.prototype:null;b=b||(a?Object.getOwnPropertyDescriptor(a,d.name):{});for(var k,l=!1,m=c.length-1;m>=0;m--){k={};for(var n in d)k[n]=n==="access"?{}:d[n];for(n in d.access)k.access[n]=d.access[n];k.addInitializer=function(h){if(l)throw new TypeError("Cannot add initializers after decoration has completed");f.push(g(h||null));};var o=(0,c[m])(i==="accessor"?{get:b.get,set:b.set}:b[j],k);if(i==="accessor"){if(o!==void 0){if(o===null||typeof o!=="object")throw new TypeError("Object expected");if(k=g(o.get))b.get=k;if(k=g(o.set))b.set=k;(k=g(o.init))&&e.unshift(k);}}else if(k=g(o))i==="field"?e.unshift(k):b[j]=k;}a&&Object.defineProperty(a,d.name,b);l=!0;};',
+    );
+  }
+  if (helperKeys.has("closure-template-object")) {
+    lines.push(
+      "_[5]=function(a){a.raw=a;Object.freeze&&Object.freeze(a);return a;};",
+    );
+  }
+  if (helperKeys.has("closure-inherits")) {
+    lines.push(
+      '_[6]=function(a,b){a.prototype=Object.create(b.prototype);a.prototype.constructor=a;if(Object.setPrototypeOf)Object.setPrototypeOf(a,b);else for(var c in b)if(c!=\"prototype\")if(Object.defineProperties){var d=Object.getOwnPropertyDescriptor(b,c);d&&Object.defineProperty(a,c,d);}else a[c]=b[c];a.lc=b.prototype;};',
     );
   }
   return lines.join("");

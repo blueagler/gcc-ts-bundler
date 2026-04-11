@@ -20,7 +20,6 @@ fn empty_context() -> super::TranspileContext {
         chunk_mode: super::ChunkMode::Off,
         commonjs_specifiers: HashSet::new(),
         file_metadata: HashMap::new(),
-        global_property_names: HashSet::new(),
         preserved_property_names: HashSet::new(),
         lazy_imports_by_file: HashMap::new(),
         package_aliases: Vec::new(),
@@ -84,7 +83,6 @@ fn preserves_js_source_verbatim() {
                     chunk_mode: super::ChunkMode::Off,
                     commonjs_specifiers: HashSet::new(),
                     file_metadata: HashMap::new(),
-                    global_property_names: HashSet::new(),
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     package_aliases: vec![super::PackageAliasInput {
@@ -137,7 +135,6 @@ fn leaves_non_platform_static_fallbacks_renamable() {
                     chunk_mode: super::ChunkMode::Off,
                     commonjs_specifiers: HashSet::new(),
                     file_metadata: HashMap::new(),
-                    global_property_names: HashSet::new(),
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     package_aliases: vec![super::PackageAliasInput {
@@ -196,7 +193,6 @@ fn rewrites_global_alias_property_accesses_in_js_pass_through() {
                     chunk_mode: super::ChunkMode::Off,
                     commonjs_specifiers: HashSet::new(),
                     file_metadata: HashMap::new(),
-                    global_property_names: HashSet::new(),
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     package_aliases: vec![super::PackageAliasInput {
@@ -269,19 +265,12 @@ fn annotates_static_class_members_with_nocollapse() {
 }
 
 #[test]
-fn generated_externs_include_global_and_static_protocols() {
-    let externs = render_generated_externs(
-        &HashSet::from(["reactiveElementVersions".to_string()]),
-        &HashSet::from([
-            "formAssociated".to_string(),
-            "observedAttributes".to_string(),
-        ]),
-    );
+fn generated_externs_include_only_hard_static_protocols() {
+    let externs = render_generated_externs(&HashSet::from([
+        "formAssociated".to_string(),
+        "observedAttributes".to_string(),
+    ]));
 
-    assert!(
-        externs.contains("Window.prototype.reactiveElementVersions;"),
-        "{externs}"
-    );
     assert!(
         externs.contains("Function.prototype.formAssociated;"),
         "{externs}"
@@ -290,6 +279,7 @@ fn generated_externs_include_global_and_static_protocols() {
         externs.contains("Function.prototype.observedAttributes;"),
         "{externs}"
     );
+    assert!(!externs.contains("Window.prototype"), "{externs}");
 }
 
 #[test]
@@ -414,7 +404,6 @@ fn rewrites_commonjs_namespace_imports_in_native_stage() {
             chunk_mode: super::ChunkMode::Off,
             commonjs_specifiers: HashSet::from(["demo-pkg".to_string()]),
             file_metadata: HashMap::new(),
-            global_property_names: HashSet::new(),
             preserved_property_names: HashSet::new(),
             lazy_imports_by_file: HashMap::new(),
             package_aliases: Vec::new(),
@@ -484,7 +473,6 @@ fn preserves_commonjs_alias_member_reads() {
         chunk_mode: super::ChunkMode::Off,
         commonjs_specifiers: HashSet::new(),
         file_metadata: HashMap::new(),
-        global_property_names: HashSet::new(),
         preserved_property_names: HashSet::new(),
         lazy_imports_by_file: HashMap::new(),
         package_aliases: vec![super::PackageAliasInput {
@@ -606,9 +594,8 @@ fn collects_hard_static_interop_names_from_static_method_accesses() {
     )
     .unwrap();
 
-    let analysis =
-        collect_extern_property_names(&[file_path.to_string_lossy().to_string()], &HashSet::new())
-            .expect("analysis");
+    let analysis = collect_extern_property_names(&[file_path.to_string_lossy().to_string()])
+        .expect("analysis");
 
     assert!(analysis
         .static_property_names
@@ -689,39 +676,6 @@ fn leaves_non_reflective_lit_style_members_renamable() {
 }
 
 #[test]
-fn rewrites_hard_global_interop_property_reads_to_bracket_access() {
-    let source = "const root = globalThis;\nroot.litElementVersions = root.litElementVersions || [];\nexport const value = globalThis.litElementVersions ?? root.litElementVersions;\n";
-    let transformed = transform_js_pass_through_module(
-        parse_module(std::path::Path::new("fixture.js"), source).expect("module"),
-        source.to_string(),
-        std::path::Path::new("fixture.js"),
-        &super::TranspileContext {
-            bundler_module_slots: HashMap::new(),
-            bundler_runtime_logical_ids: HashMap::new(),
-            chunk_mode: super::ChunkMode::Off,
-            commonjs_specifiers: HashSet::new(),
-            file_metadata: HashMap::new(),
-            global_property_names: HashSet::from(["litElementVersions".to_string()]),
-            preserved_property_names: HashSet::from(["litElementVersions".to_string()]),
-            lazy_imports_by_file: HashMap::new(),
-            package_aliases: vec![],
-            static_property_names: HashSet::new(),
-            workspace_dir: PathBuf::from("/tmp"),
-        },
-    )
-    .expect("transform");
-
-    assert!(
-        transformed.contains("root[\"litElementVersions\"]"),
-        "{transformed}"
-    );
-    assert!(
-        transformed.contains("globalThis[\"litElementVersions\"]"),
-        "{transformed}"
-    );
-}
-
-#[test]
 fn rewrites_hard_static_interop_property_reads_to_bracket_access() {
     let source = "class Base { static finalize(ctor) { return ctor.observedAttributes && this.formAssociated; } }\nclass Demo extends Base {}\nDemo.observedAttributes = [];\nDemo.formAssociated = true;\n";
     let transformed = transform_js_pass_through_module(
@@ -734,7 +688,6 @@ fn rewrites_hard_static_interop_property_reads_to_bracket_access() {
             chunk_mode: super::ChunkMode::Off,
             commonjs_specifiers: HashSet::new(),
             file_metadata: HashMap::new(),
-            global_property_names: HashSet::new(),
             preserved_property_names: HashSet::from([
                 "formAssociated".to_string(),
                 "observedAttributes".to_string(),
@@ -794,7 +747,6 @@ fn collects_string_defined_property_hazards_without_hard_coded_framework_names()
             define_file.to_string_lossy().to_string(),
             read_file.to_string_lossy().to_string(),
         ],
-        &HashSet::new(),
         &HashSet::new(),
     )
     .expect("collect preserved properties");
@@ -970,7 +922,6 @@ fn bundler_runtime_rewrites_namespace_member_reads_to_numeric_slots() {
                     chunk_mode: super::ChunkMode::BundlerRuntime,
                     commonjs_specifiers: HashSet::new(),
                     file_metadata: HashMap::new(),
-                    global_property_names: HashSet::new(),
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     package_aliases: Vec::new(),
@@ -1075,7 +1026,6 @@ fn bundler_runtime_rejects_reflective_namespace_usage() {
                     chunk_mode: super::ChunkMode::BundlerRuntime,
                     commonjs_specifiers: HashSet::new(),
                     file_metadata: HashMap::new(),
-                    global_property_names: HashSet::new(),
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     package_aliases: Vec::new(),
@@ -1139,7 +1089,6 @@ fn bundler_runtime_keeps_namespace_import_bindings_before_top_level_destructures
                     chunk_mode: super::ChunkMode::BundlerRuntime,
                     commonjs_specifiers: HashSet::new(),
                     file_metadata: HashMap::new(),
-                    global_property_names: HashSet::new(),
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     package_aliases: Vec::new(),
@@ -1203,7 +1152,6 @@ fn bundler_runtime_keeps_named_imports_live_instead_of_snapshotting_slots() {
                     chunk_mode: super::ChunkMode::BundlerRuntime,
                     commonjs_specifiers: HashSet::new(),
                     file_metadata: HashMap::new(),
-                    global_property_names: HashSet::new(),
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     package_aliases: Vec::new(),
@@ -1257,7 +1205,6 @@ fn bundler_runtime_keeps_exported_let_bindings_live() {
                     chunk_mode: super::ChunkMode::BundlerRuntime,
                     commonjs_specifiers: HashSet::new(),
                     file_metadata: HashMap::new(),
-                    global_property_names: HashSet::new(),
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     package_aliases: Vec::new(),
@@ -1323,7 +1270,6 @@ fn bundler_runtime_rewrites_promise_consumer_callback_params_to_slots() {
                     chunk_mode: super::ChunkMode::BundlerRuntime,
                     commonjs_specifiers: HashSet::new(),
                     file_metadata: HashMap::new(),
-                    global_property_names: HashSet::new(),
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     package_aliases: Vec::new(),
@@ -1392,7 +1338,6 @@ fn bundler_runtime_rewrites_wrapped_promise_consumer_callback_params_to_slots() 
                     chunk_mode: super::ChunkMode::BundlerRuntime,
                     commonjs_specifiers: HashSet::new(),
                     file_metadata: HashMap::new(),
-                    global_property_names: HashSet::new(),
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     package_aliases: Vec::new(),
@@ -1466,7 +1411,6 @@ fn bundler_runtime_rewrites_nested_wrapped_promise_consumer_callback_params_to_s
                     chunk_mode: super::ChunkMode::BundlerRuntime,
                     commonjs_specifiers: HashSet::new(),
                     file_metadata: HashMap::new(),
-                    global_property_names: HashSet::new(),
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     package_aliases: Vec::new(),
@@ -1537,7 +1481,6 @@ fn bundler_runtime_rewrites_realistic_helper_wrapped_consumer_callbacks_to_slots
                     chunk_mode: super::ChunkMode::BundlerRuntime,
                     commonjs_specifiers: HashSet::new(),
                     file_metadata: HashMap::new(),
-                    global_property_names: HashSet::new(),
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     package_aliases: Vec::new(),

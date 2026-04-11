@@ -1,0 +1,3 @@
+.vue-compiled/
+dist/
+node_modules/

@@ -1,0 +1,215 @@
+{
+  "chunkPlan": [
+    {
+      "dependencies": [],
+      "files": [
+        "node_modules/@tanstack/history/dist/esm/index.js",
+        "node_modules/react/cjs/react.production.js",
+        "node_modules/react/index.js",
+        "node_modules/react/cjs/react-jsx-runtime.production.js",
+        "node_modules/react/jsx-runtime.js",
+        "node_modules/@tanstack/react-router/dist/esm/ClientOnly.js",
+        "node_modules/@tanstack/react-router/dist/esm/routerContext.js",
+        "node_modules/@tanstack/react-router/dist/esm/useRouter.js",
+        "node_modules/@tanstack/router-core/dist/esm/isServer/client.js",
+        "node_modules/@tanstack/react-router/dist/esm/Asset.js",
+        "node_modules/@tanstack/react-router/dist/esm/CatchBoundary.js",
+        "node_modules/use-sync-external-store/cjs/use-sync-external-store-shim.production.js",
+        "node_modules/use-sync-external-store/shim/index.js",
+        "node_modules/use-sync-external-store/cjs/use-sync-external-store-shim/with-selector.production.js",
+        "node_modules/use-sync-external-store/shim/with-selector.js",
+        "node_modules/@tanstack/react-store/dist/esm/useStore.js",
+        "node_modules/@tanstack/store/dist/esm/alien.js",
+        "node_modules/@tanstack/store/dist/esm/atom.js",
+        "node_modules/@tanstack/store/dist/esm/store.js",
+        "node_modules/@tanstack/store/dist/esm/index.js",
+        "node_modules/@tanstack/react-store/dist/esm/index.js",
+        "node_modules/@tanstack/router-core/dist/esm/Matches.js",
+        "node_modules/@tanstack/router-core/dist/esm/config.js",
+        "node_modules/@tanstack/router-core/dist/esm/invariant.js",
+        "node_modules/@tanstack/router-core/dist/esm/not-found.js",
+        "node_modules/@tanstack/router-core/dist/esm/redirect.js",
+        "node_modules/@tanstack/router-core/dist/esm/root.js",
+        "node_modules/@tanstack/router-core/dist/esm/utils.js",
+        "node_modules/@tanstack/router-core/dist/esm/load-matches.js",
+        "node_modules/@tanstack/router-core/dist/esm/lru-cache.js",
+        "node_modules/@tanstack/router-core/dist/esm/new-process-route-tree.js",
+        "node_modules/@tanstack/router-core/dist/esm/path.js",
+        "node_modules/@tanstack/router-core/dist/esm/rewrite.js",
+        "node_modules/@tanstack/router-core/dist/esm/scroll-restoration.js",
+        "node_modules/@tanstack/router-core/dist/esm/qss.js",
+        "node_modules/@tanstack/router-core/dist/esm/searchParams.js",
+        "node_modules/@tanstack/router-core/dist/esm/stores.js",
+        "node_modules/@tanstack/router-core/dist/esm/router.js",
+        "node_modules/@tanstack/router-core/dist/esm/defer.js",
+        "node_modules/@tanstack/router-core/dist/esm/hash-scroll.js",
+        "node_modules/@tanstack/router-core/dist/esm/link.js",
+        "node_modules/@tanstack/router-core/dist/esm/manifest.js",
+        "node_modules/@tanstack/router-core/dist/esm/route.js",
+        "node_modules/@tanstack/router-core/dist/esm/searchMiddleware.js",
+        "node_modules/seroval/dist/esm/production/index.mjs",
+        "node_modules/@tanstack/router-core/dist/esm/ssr/serializer/RawStream.js",
+        "node_modules/@tanstack/router-core/dist/esm/ssr/serializer/ShallowErrorPlugin.js",
+        "node_modules/seroval-plugins/dist/esm/production/web.mjs",
+        "node_modules/@tanstack/router-core/dist/esm/ssr/serializer/seroval-plugins.js",
+        "node_modules/@tanstack/router-core/dist/esm/ssr/constants.js",
+        "node_modules/@tanstack/router-core/dist/esm/ssr/serializer/transformer.js",
+        "node_modules/@tanstack/router-core/dist/esm/index.js",
+        "node_modules/@tanstack/react-router/dist/esm/headContentUtils.js",
+        "node_modules/@tanstack/react-router/dist/esm/HeadContent.js",
+        "node_modules/@tanstack/react-router/dist/esm/SafeFragment.js",
+        "node_modules/@tanstack/react-router/dist/esm/matchContext.js",
+        "node_modules/@tanstack/react-router/dist/esm/not-found.js",
+        "node_modules/@tanstack/react-router/dist/esm/renderRouteNotFound.js",
+        "node_modules/@tanstack/react-router/dist/esm/ScriptOnce.js",
+        "node_modules/@tanstack/router-core/dist/esm/scroll-restoration-script/client.js",
+        "node_modules/@tanstack/react-router/dist/esm/scroll-restoration.js",
+        "node_modules/@tanstack/react-router/dist/esm/utils.js",
+        "node_modules/@tanstack/react-router/dist/esm/Match.js",
+        "node_modules/@tanstack/react-router/dist/esm/Transitioner.js",
+        "node_modules/@tanstack/react-router/dist/esm/Matches.js",
+        "node_modules/@tanstack/react-router/dist/esm/RouterProvider.js",
+        "node_modules/@tanstack/react-router/dist/esm/Scripts.js",
+        "node_modules/@tanstack/react-router/dist/esm/ScrollRestoration.js",
+        "node_modules/@tanstack/react-router/dist/esm/awaited.js",
+        "node_modules/react-dom/cjs/react-dom.production.js",
+        "node_modules/react-dom/index.js",
+        "node_modules/@tanstack/react-router/dist/esm/link.js",
+        "node_modules/@tanstack/react-router/dist/esm/useMatch.js",
+        "node_modules/@tanstack/react-router/dist/esm/useLoaderData.js",
+        "node_modules/@tanstack/react-router/dist/esm/useLoaderDeps.js",
+        "node_modules/@tanstack/react-router/dist/esm/useNavigate.js",
+        "node_modules/@tanstack/react-router/dist/esm/useParams.js",
+        "node_modules/@tanstack/react-router/dist/esm/useRouteContext.js",
+        "node_modules/@tanstack/react-router/dist/esm/useSearch.js",
+        "node_modules/@tanstack/react-router/dist/esm/route.js",
+        "node_modules/@tanstack/react-router/dist/esm/fileRoute.js",
+        "node_modules/@tanstack/react-router/dist/esm/lazyRouteComponent.js",
+        "node_modules/@tanstack/react-router/dist/esm/routerStores.js",
+        "node_modules/@tanstack/react-router/dist/esm/router.js",
+        "node_modules/@tanstack/react-router/dist/esm/useBlocker.js",
+        "node_modules/@tanstack/react-router/dist/esm/useCanGoBack.js",
+        "node_modules/@tanstack/react-router/dist/esm/useLocation.js",
+        "node_modules/@tanstack/react-router/dist/esm/useRouterState.js",
+        "node_modules/@tanstack/react-router/dist/esm/index.js",
+        "node_modules/scheduler/cjs/scheduler.production.js",
+        "node_modules/scheduler/index.js",
+        "node_modules/react-dom/cjs/react-dom-client.production.js",
+        "node_modules/react-dom/client.js",
+        "src/AppShell.tsx",
+        "src/routes/HomePage.tsx",
+        "src/routes/LabPage.tsx",
+        "src/router.tsx",
+        "src/main.tsx",
+        "entries/main.ts"
+      ],
+      "name": "main"
+    }
+  ],
+  "entryFiles": [
+    {
+      "chunkName": "main",
+      "exportNames": [],
+      "hasDefaultExport": false,
+      "outputName": "main.js",
+      "sourceRelativePath": "main.tsx"
+    }
+  ],
+  "lazyImports": [],
+  "packageAliases": [
+    {
+      "packageName": "@tanstack/history",
+      "subpath": ".",
+      "targetPath": "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/@tanstack/history/dist/esm/index.js"
+    },
+    {
+      "packageName": "@tanstack/react-router",
+      "subpath": ".",
+      "targetPath": "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/@tanstack/react-router/dist/esm/index.js"
+    },
+    {
+      "packageName": "@tanstack/react-store",
+      "subpath": ".",
+      "targetPath": "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/@tanstack/react-store/dist/esm/index.js"
+    },
+    {
+      "packageName": "@tanstack/router-core",
+      "subpath": ".",
+      "targetPath": "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/@tanstack/router-core/dist/esm/index.js"
+    },
+    {
+      "packageName": "@tanstack/router-core",
+      "subpath": "./isServer",
+      "targetPath": "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/@tanstack/router-core/dist/esm/isServer/client.js"
+    },
+    {
+      "packageName": "@tanstack/router-core",
+      "subpath": "./scroll-restoration-script",
+      "targetPath": "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/@tanstack/router-core/dist/esm/scroll-restoration-script/client.js"
+    },
+    {
+      "packageName": "@tanstack/store",
+      "subpath": ".",
+      "targetPath": "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/@tanstack/store/dist/esm/index.js"
+    },
+    {
+      "packageName": "react-dom",
+      "subpath": ".",
+      "targetPath": "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/react-dom/index.js"
+    },
+    {
+      "packageName": "react-dom",
+      "subpath": "./client",
+      "targetPath": "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/react-dom/client.js"
+    },
+    {
+      "packageName": "react",
+      "subpath": ".",
+      "targetPath": "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/react/index.js"
+    },
+    {
+      "packageName": "react",
+      "subpath": "./jsx-runtime",
+      "targetPath": "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/react/jsx-runtime.js"
+    },
+    {
+      "packageName": "scheduler",
+      "subpath": ".",
+      "targetPath": "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/scheduler/index.js"
+    },
+    {
+      "packageName": "seroval-plugins",
+      "subpath": "./web",
+      "targetPath": "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/seroval-plugins/dist/esm/production/web.mjs"
+    },
+    {
+      "packageName": "seroval",
+      "subpath": ".",
+      "targetPath": "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/seroval/dist/esm/production/index.mjs"
+    },
+    {
+      "packageName": "use-sync-external-store",
+      "subpath": "./shim",
+      "targetPath": "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/use-sync-external-store/shim/index.js"
+    },
+    {
+      "packageName": "use-sync-external-store",
+      "subpath": "./shim/with-selector",
+      "targetPath": "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/use-sync-external-store/shim/with-selector.js"
+    }
+  ],
+  "packageJsonFiles": [
+    "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/@tanstack/history/package.json",
+    "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/@tanstack/react-router/package.json",
+    "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/@tanstack/react-store/package.json",
+    "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/@tanstack/router-core/package.json",
+    "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/@tanstack/store/package.json",
+    "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/react-dom/package.json",
+    "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/react/package.json",
+    "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/scheduler/package.json",
+    "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/seroval-plugins/package.json",
+    "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/seroval/package.json",
+    "/Users/Blueagle/Code/gcc-ts-bundler/examples/react-spa/.investigate-cache/c73b78c8eb32974795874fb918466feace76b8259545d81c0cbdfff3a198f869/workspace/node_modules/use-sync-external-store/package.json"
+  ],
+  "tsxRuntimeSourceFiles": []
+}

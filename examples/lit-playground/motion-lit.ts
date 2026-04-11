@@ -44,6 +44,7 @@ export class MotionLit extends LitElement {
               keyframeOptions: {
                 delay: index * delayTime,
               },
+              properties: ["opacity"],
               in: fade,
               out: flyBelow,
             })}

@@ -32,19 +32,9 @@ pub(crate) fn render_externs(
 }
 
 pub(crate) fn render_generated_externs(
-    global_property_names: &HashSet<String>,
     static_property_names: &HashSet<String>,
 ) -> String {
     let mut lines = vec!["/** @externs */".to_string()];
-    let mut global_names = global_property_names.iter().cloned().collect::<Vec<_>>();
-    global_names.sort();
-    for name in global_names {
-        if is_valid_js_identifier(&name) {
-            lines.push(format!("Window.prototype.{name};"));
-        } else {
-            lines.push(format!("Window.prototype[{name:?}];"));
-        }
-    }
     let mut static_names = static_property_names.iter().cloned().collect::<Vec<_>>();
     static_names.sort();
     for name in static_names {

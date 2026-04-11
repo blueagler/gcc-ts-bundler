@@ -1,22 +1,10 @@
 use super::*;
 
 pub(crate) fn apply_js_compat_text_fixes(source_text: String) -> String {
-    let global_properties = collect_global_this_property_names(&source_text);
     let mut source_text =
         rewrite_async_function_comment_placement(rewrite_typescript_helper_this_fallbacks(
             rewrite_process_env_node_env(rewrite_directory_module_specifiers(source_text)),
         ));
-    for property_name in global_properties {
-        let pattern = format!(r"(?m)(?P<prefix>^|[^\w$.]){property_name}(?P<suffix>\.)");
-        let replacement = format!("${{prefix}}globalThis.{property_name}${{suffix}}");
-        source_text = regex::Regex::new(&pattern)
-            .map(|regex| {
-                regex
-                    .replace_all(&source_text, replacement.as_str())
-                    .into_owned()
-            })
-            .unwrap_or(source_text);
-    }
     source_text = annotate_nocollapse_static_members(source_text);
 
     for property_name in collect_closure_protocol_properties(&source_text) {
@@ -236,67 +224,6 @@ pub(super) fn rewrite_directory_module_specifiers(source_text: String) -> String
                 .into_owned()
         })
         .unwrap_or(source_text)
-}
-
-pub(super) fn collect_global_this_property_names(source_text: &str) -> HashSet<String> {
-    let mut global_aliases = HashSet::from(["globalThis".to_string()]);
-    if let Ok(alias_regex) = regex::Regex::new(
-        r"(?m)(?:^|[;,]\s*|\b(?:const|let|var)\s+)([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*([A-Za-z_$][A-Za-z0-9_$]*)\b",
-    ) {
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for captures in alias_regex.captures_iter(source_text) {
-                let alias = captures
-                    .get(1)
-                    .map(|capture| capture.as_str())
-                    .unwrap_or_default();
-                let target = captures
-                    .get(2)
-                    .map(|capture| capture.as_str())
-                    .unwrap_or_default();
-                if global_aliases.contains(target) && global_aliases.insert(alias.to_string()) {
-                    changed = true;
-                }
-            }
-        }
-    }
-
-    let mut properties = HashSet::new();
-    for alias in global_aliases {
-        if let Ok(regex) = regex::Regex::new(&format!(r"{alias}\.([A-Za-z_$][A-Za-z0-9_$]*)")) {
-            for captures in regex.captures_iter(source_text) {
-                if let Some(capture) = captures.get(1) {
-                    let property_name = capture.as_str();
-                    if is_global_protocol_name(property_name) {
-                        properties.insert(property_name.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    properties
-}
-
-pub(super) fn is_global_protocol_name(name: &str) -> bool {
-    matches!(
-        name,
-        "litElementHydrateSupport"
-            | "litElementPolyfillSupport"
-            | "litElementVersions"
-            | "litHtmlPolyfillSupport"
-            | "litHtmlVersions"
-            | "litPropertyMetadata"
-            | "reactiveElementPolyfillSupport"
-            | "reactiveElementVersions"
-    )
-}
-
-pub(crate) fn collect_global_property_names(
-    file_names: &[String],
-) -> std::result::Result<HashSet<String>, String> {
-    collect_names_from_files(file_names, collect_global_this_property_names)
 }
 
 fn is_hard_static_interop_name(name: &str) -> bool {

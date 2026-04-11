@@ -23,6 +23,8 @@ enum SharedEs5HelperKind {
     SetFunctionName,
     RunInitializers,
     EsDecorate,
+    ClosureTemplateObject,
+    ClosureInherits,
 }
 
 impl SharedEs5HelperKind {
@@ -33,6 +35,8 @@ impl SharedEs5HelperKind {
             Self::SetFunctionName => "set-function-name",
             Self::RunInitializers => "run-initializers",
             Self::EsDecorate => "es-decorate",
+            Self::ClosureTemplateObject => "closure-template-object",
+            Self::ClosureInherits => "closure-inherits",
         }
     }
 
@@ -43,6 +47,8 @@ impl SharedEs5HelperKind {
             Self::SetFunctionName => 2,
             Self::RunInitializers => 3,
             Self::EsDecorate => 4,
+            Self::ClosureTemplateObject => 5,
+            Self::ClosureInherits => 6,
         }
     }
 }
@@ -54,6 +60,8 @@ pub fn rewrite_bundler_runtime_es5_helpers(
     let mut rewriter = Es5HelperChunkRewriter {
         changed: false,
         helper_kinds: BTreeSet::new(),
+        shared_module_aliases: None,
+        module_alias_used: Vec::new(),
     };
     module.visit_mut_with(&mut rewriter);
     let rewritten_code = if rewriter.changed {
@@ -74,10 +82,42 @@ pub fn rewrite_bundler_runtime_es5_helpers(
 struct Es5HelperChunkRewriter {
     changed: bool,
     helper_kinds: BTreeSet<SharedEs5HelperKind>,
+    shared_module_aliases: Option<(String, String)>,
+    module_alias_used: Vec<bool>,
 }
 
 impl Es5HelperChunkRewriter {
-    fn rewrite_block_stmt(&mut self, block: &mut BlockStmt) {
+    fn rewrite_block_stmt(
+        &mut self,
+        block: &mut BlockStmt,
+        mut names: HashSet<String>,
+    ) {
+        collect_function_scope_names(block, &mut names);
+        let (runtime_alias, helper_alias, insert_local_alias) =
+            if let Some((shared_runtime_alias, shared_helper_alias)) =
+                self.shared_module_aliases.as_ref()
+            {
+                if !names.contains(shared_runtime_alias) && !names.contains(shared_helper_alias) {
+                    (
+                        shared_runtime_alias.clone(),
+                        shared_helper_alias.clone(),
+                        false,
+                    )
+                } else {
+                    let runtime_alias =
+                        next_available_alias(&names, &["G", "$G", "G$", "_G", "__G"]);
+                    names.insert(runtime_alias.clone());
+                    let helper_alias =
+                        next_available_alias(&names, &["_", "$", "$_", "_$", "__"]);
+                    (runtime_alias, helper_alias, true)
+                }
+            } else {
+                let runtime_alias =
+                    next_available_alias(&names, &["G", "$G", "G$", "_G", "__G"]);
+                names.insert(runtime_alias.clone());
+                let helper_alias = next_available_alias(&names, &["_", "$", "$_", "_$", "__"]);
+                (runtime_alias, helper_alias, true)
+            };
         let helper_bindings = block
             .stmts
             .iter()
@@ -90,10 +130,6 @@ impl Es5HelperChunkRewriter {
             })
             .collect::<Vec<_>>();
 
-        if helper_bindings.is_empty() {
-            return;
-        }
-
         let removed_indices = helper_bindings
             .iter()
             .map(|(index, _, _)| *index)
@@ -105,27 +141,83 @@ impl Es5HelperChunkRewriter {
             .filter_map(|(index, stmt)| (!removed_indices.contains(&index)).then_some(stmt.clone()))
             .collect();
 
+        let mut current_scope_names = names.clone();
         let mut helper_name_to_kind = HashMap::new();
-        for (_, helper_name, kind) in helper_bindings {
-            helper_name_to_kind.insert(helper_name, kind);
-            self.helper_kinds.insert(kind);
+        for (_, helper_name, kind) in &helper_bindings {
+            current_scope_names.remove(helper_name);
+            helper_name_to_kind.insert(helper_name.clone(), *kind);
         }
-
-        let helper_alias = next_available_helper_alias(block);
-        block.stmts.insert(0, helper_alias_decl(&helper_alias));
-        block.visit_mut_with(&mut HelperReferenceRewriter {
+        if !current_scope_names.contains("ta") {
+            helper_name_to_kind.insert("ta".to_string(), SharedEs5HelperKind::ClosureTemplateObject);
+        }
+        if !current_scope_names.contains("qa") {
+            helper_name_to_kind.insert("qa".to_string(), SharedEs5HelperKind::ClosureInherits);
+        }
+        let mut rewriter = HelperReferenceRewriter {
             helper_alias,
             helper_name_to_kind,
             scope_stack: Vec::new(),
-        });
+            rewritten_helper_kinds: BTreeSet::new(),
+            rewrite_closure_global: !current_scope_names.contains("ha"),
+            rewrote_closure_global: false,
+        };
+        rewriter.scope_stack.push(current_scope_names);
+        block.visit_mut_with(&mut rewriter);
+        rewriter.scope_stack.pop();
+        if rewriter.rewritten_helper_kinds.is_empty() && !rewriter.rewrote_closure_global {
+            return;
+        }
+
+        if insert_local_alias {
+            block
+                .stmts
+                .insert(0, helper_alias_decl(&runtime_alias, &rewriter.helper_alias));
+        } else if let Some(module_alias_used) = self.module_alias_used.last_mut() {
+            *module_alias_used = true;
+        }
+        self.helper_kinds.extend(rewriter.rewritten_helper_kinds);
         self.changed = true;
     }
 }
 
 impl VisitMut for Es5HelperChunkRewriter {
+    fn visit_mut_module(&mut self, module: &mut Module) {
+        let mut names = HashSet::new();
+        collect_module_scope_names(module, &mut names);
+        let runtime_alias = next_available_alias(&names, &["G", "$G", "G$", "_G", "__G"]);
+        names.insert(runtime_alias.clone());
+        let helper_alias = next_available_alias(&names, &["_", "$", "$_", "_$", "__"]);
+        let previous_aliases = self
+            .shared_module_aliases
+            .replace((runtime_alias.clone(), helper_alias.clone()));
+        self.module_alias_used.push(false);
+        let top_level_helper_kinds = self.rewrite_module_items(module, &helper_alias);
+        if !top_level_helper_kinds.is_empty() {
+            if let Some(module_alias_used) = self.module_alias_used.last_mut() {
+                *module_alias_used = true;
+            }
+            self.helper_kinds.extend(top_level_helper_kinds);
+            self.changed = true;
+        }
+        for item in &mut module.body {
+            item.visit_mut_children_with(self);
+        }
+        let should_insert_module_alias = self.module_alias_used.pop().unwrap_or(false);
+        self.shared_module_aliases = previous_aliases;
+        if should_insert_module_alias {
+            module
+                .body
+                .insert(0, ModuleItem::Stmt(helper_alias_decl(&runtime_alias, &helper_alias)));
+        }
+    }
+
     fn visit_mut_function(&mut self, function: &mut Function) {
         if let Some(body) = function.body.as_mut() {
-            self.rewrite_block_stmt(body);
+            let mut current_scope_names = HashSet::new();
+            for param in &function.params {
+                collect_binding_names_from_pat(&param.pat, &mut current_scope_names);
+            }
+            self.rewrite_block_stmt(body, current_scope_names);
             for stmt in &mut body.stmts {
                 stmt.visit_mut_children_with(self);
             }
@@ -133,10 +225,82 @@ impl VisitMut for Es5HelperChunkRewriter {
     }
 }
 
+impl Es5HelperChunkRewriter {
+    fn rewrite_module_items(
+        &mut self,
+        module: &mut Module,
+        helper_alias: &str,
+    ) -> BTreeSet<SharedEs5HelperKind> {
+        if module
+            .body
+            .iter()
+            .any(|item| matches!(item, ModuleItem::ModuleDecl(_)))
+        {
+            return BTreeSet::new();
+        }
+
+        let helper_bindings = module
+            .body
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(fn_decl))) = item else {
+                    return None;
+                };
+                classify_shared_es5_helper(fn_decl)
+                    .map(|kind| (index, fn_decl.ident.sym.to_string(), kind))
+            })
+            .collect::<Vec<_>>();
+
+        let removed_indices = helper_bindings
+            .iter()
+            .map(|(index, _, _)| *index)
+            .collect::<HashSet<_>>();
+        module.body = module
+            .body
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| (!removed_indices.contains(&index)).then_some(item.clone()))
+            .collect();
+
+        let mut module_scope_names = HashSet::new();
+        collect_module_scope_names(module, &mut module_scope_names);
+
+        let mut helper_name_to_kind = HashMap::new();
+        for (_, helper_name, kind) in helper_bindings {
+            helper_name_to_kind.insert(helper_name, kind);
+        }
+        if !module_scope_names.contains("ta") {
+            helper_name_to_kind.insert(
+                "ta".to_string(),
+                SharedEs5HelperKind::ClosureTemplateObject,
+            );
+        }
+        if !module_scope_names.contains("qa") {
+            helper_name_to_kind.insert("qa".to_string(), SharedEs5HelperKind::ClosureInherits);
+        }
+        let mut rewriter = TopLevelHelperReferenceRewriter {
+            helper_alias: helper_alias.to_string(),
+            helper_name_to_kind,
+            rewritten_helper_kinds: BTreeSet::new(),
+            rewrite_closure_global: !module_scope_names.contains("ha"),
+            rewrote_closure_global: false,
+        };
+        module.visit_mut_with(&mut rewriter);
+        if rewriter.rewrote_closure_global {
+            self.changed = true;
+        }
+        rewriter.rewritten_helper_kinds
+    }
+}
+
 struct HelperReferenceRewriter {
     helper_alias: String,
     helper_name_to_kind: HashMap<String, SharedEs5HelperKind>,
+    rewritten_helper_kinds: BTreeSet<SharedEs5HelperKind>,
     scope_stack: Vec<HashSet<String>>,
+    rewrite_closure_global: bool,
+    rewrote_closure_global: bool,
 }
 
 impl HelperReferenceRewriter {
@@ -148,32 +312,114 @@ impl HelperReferenceRewriter {
     }
 }
 
-impl VisitMut for HelperReferenceRewriter {
+struct TopLevelHelperReferenceRewriter {
+    helper_alias: String,
+    helper_name_to_kind: HashMap<String, SharedEs5HelperKind>,
+    rewritten_helper_kinds: BTreeSet<SharedEs5HelperKind>,
+    rewrite_closure_global: bool,
+    rewrote_closure_global: bool,
+}
+
+impl VisitMut for TopLevelHelperReferenceRewriter {
     fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        match expr {
+            Expr::Fn(fn_expr) => {
+                self.visit_mut_fn_expr(fn_expr);
+                return;
+            }
+            Expr::Arrow(arrow) => {
+                self.visit_mut_arrow_expr(arrow);
+                return;
+            }
+            _ => {}
+        }
         expr.visit_mut_children_with(self);
         let Expr::Ident(ident) = expr else {
             return;
         };
         let helper_name = ident.sym.to_string();
+        if self.rewrite_closure_global && helper_name == "ha" {
+            self.rewrote_closure_global = true;
+            *expr = global_this_expr();
+            return;
+        }
+        let Some(kind) = self.helper_name_to_kind.get(&helper_name).copied() else {
+            return;
+        };
+        self.rewritten_helper_kinds.insert(kind);
+        *expr = helper_slot_expr(&self.helper_alias, kind.slot());
+    }
+
+    fn visit_mut_function(&mut self, _: &mut Function) {}
+
+    fn visit_mut_fn_expr(&mut self, _: &mut FnExpr) {}
+
+    fn visit_mut_fn_decl(&mut self, _: &mut FnDecl) {}
+
+    fn visit_mut_arrow_expr(&mut self, _: &mut ArrowExpr) {}
+}
+
+impl VisitMut for HelperReferenceRewriter {
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        match expr {
+            Expr::Fn(fn_expr) => {
+                self.visit_mut_fn_expr(fn_expr);
+                return;
+            }
+            Expr::Arrow(arrow) => {
+                self.visit_mut_arrow_expr(arrow);
+                return;
+            }
+            _ => {}
+        }
+        expr.visit_mut_children_with(self);
+        let Expr::Ident(ident) = expr else {
+            return;
+        };
+        let helper_name = ident.sym.to_string();
+        if self.rewrite_closure_global && helper_name == "ha" && !self.is_shadowed(&helper_name) {
+            self.rewrote_closure_global = true;
+            *expr = global_this_expr();
+            return;
+        }
         let Some(kind) = self.helper_name_to_kind.get(&helper_name).copied() else {
             return;
         };
         if self.is_shadowed(&helper_name) {
             return;
         }
+        self.rewritten_helper_kinds.insert(kind);
         *expr = helper_slot_expr(&self.helper_alias, kind.slot());
     }
 
     fn visit_mut_function(&mut self, function: &mut Function) {
         let mut scope = HashSet::new();
-        for param in &function.params {
-            collect_binding_names_from_pat(&param.pat, &mut scope);
-        }
-        if let Some(body) = function.body.as_ref() {
-            collect_function_scope_names(body, &mut scope);
-        }
+        collect_function_scope(function, &mut scope);
         self.scope_stack.push(scope);
         function.visit_mut_children_with(self);
+        self.scope_stack.pop();
+    }
+
+    fn visit_mut_fn_expr(&mut self, function_expr: &mut FnExpr) {
+        let mut scope = HashSet::new();
+        if let Some(ident) = function_expr.ident.as_ref() {
+            scope.insert(ident.sym.to_string());
+        }
+        collect_function_scope(&function_expr.function, &mut scope);
+        self.scope_stack.push(scope);
+        if let Some(ident) = function_expr.ident.as_mut() {
+            ident.visit_mut_children_with(self);
+        }
+        function_expr.function.visit_mut_children_with(self);
+        self.scope_stack.pop();
+    }
+
+    fn visit_mut_fn_decl(&mut self, function_decl: &mut FnDecl) {
+        let mut scope = HashSet::new();
+        scope.insert(function_decl.ident.sym.to_string());
+        collect_function_scope(&function_decl.function, &mut scope);
+        self.scope_stack.push(scope);
+        function_decl.function.visit_mut_children_with(self);
         self.scope_stack.pop();
     }
 
@@ -188,6 +434,15 @@ impl VisitMut for HelperReferenceRewriter {
         self.scope_stack.push(scope);
         arrow.visit_mut_children_with(self);
         self.scope_stack.pop();
+    }
+}
+
+fn collect_function_scope(function: &Function, names: &mut HashSet<String>) {
+    for param in &function.params {
+        collect_binding_names_from_pat(&param.pat, names);
+    }
+    if let Some(body) = function.body.as_ref() {
+        collect_function_scope_names(body, names);
     }
 }
 
@@ -230,50 +485,72 @@ fn helper_slot_expr(helper_alias: &str, slot: usize) -> Expr {
     })
 }
 
-fn helper_alias_decl(helper_alias: &str) -> Stmt {
+fn global_this_expr() -> Expr {
+    Expr::Ident(Ident::new(
+        "globalThis".into(),
+        Default::default(),
+        Default::default(),
+    ))
+}
+
+fn helper_alias_decl(runtime_alias: &str, helper_alias: &str) -> Stmt {
     Stmt::Decl(Decl::Var(Box::new(VarDecl {
         span: Default::default(),
         ctxt: Default::default(),
         declare: false,
         kind: VarDeclKind::Var,
-        decls: vec![VarDeclarator {
-            span: Default::default(),
-            name: Pat::Ident(BindingIdent {
-                id: Ident::new(
-                    helper_alias.into(),
-                    Default::default(),
-                    Default::default(),
-                ),
-                type_ann: None,
-            }),
-            init: Some(Box::new(Expr::Member(MemberExpr {
+        decls: vec![
+            VarDeclarator {
                 span: Default::default(),
-                obj: Box::new(Expr::Member(MemberExpr {
+                name: Pat::Ident(BindingIdent {
+                    id: Ident::new(
+                        runtime_alias.into(),
+                        Default::default(),
+                        Default::default(),
+                    ),
+                    type_ann: None,
+                }),
+                init: Some(Box::new(Expr::Member(MemberExpr {
                     span: Default::default(),
                     obj: Box::new(Expr::Ident(Ident::new(
                         "globalThis".into(),
                         Default::default(),
                         Default::default(),
                     ))),
-                    prop: MemberProp::Ident(IdentName::new(
-                        "__g".into(),
+                    prop: MemberProp::Ident(IdentName::new("__g".into(), Default::default())),
+                }))),
+                definite: false,
+            },
+            VarDeclarator {
+                span: Default::default(),
+                name: Pat::Ident(BindingIdent {
+                    id: Ident::new(
+                        helper_alias.into(),
                         Default::default(),
-                    )),
-                })),
-                prop: MemberProp::Ident(IdentName::new("_".into(), Default::default())),
-            }))),
-            definite: false,
-        }],
+                        Default::default(),
+                    ),
+                    type_ann: None,
+                }),
+                init: Some(Box::new(Expr::Member(MemberExpr {
+                    span: Default::default(),
+                    obj: Box::new(Expr::Ident(Ident::new(
+                        runtime_alias.into(),
+                        Default::default(),
+                        Default::default(),
+                    ))),
+                    prop: MemberProp::Ident(IdentName::new("_".into(), Default::default())),
+                }))),
+                definite: false,
+            },
+        ],
         ..Default::default()
     })))
 }
 
-fn next_available_helper_alias(block: &BlockStmt) -> String {
-    let mut names = HashSet::new();
-    collect_function_scope_names(block, &mut names);
-    for candidate in ["_", "$", "$_", "_$", "__"] {
-        if !names.contains(candidate) {
-            return candidate.to_string();
+fn next_available_alias(names: &HashSet<String>, candidates: &[&str]) -> String {
+    for candidate in candidates {
+        if !names.contains(*candidate) {
+            return (*candidate).to_string();
         }
     }
     let mut suffix = 0usize;
@@ -289,6 +566,11 @@ fn next_available_helper_alias(block: &BlockStmt) -> String {
 fn collect_function_scope_names(block: &BlockStmt, names: &mut HashSet<String>) {
     let mut collector = FunctionScopeNameCollector { names };
     block.visit_with(&mut collector);
+}
+
+fn collect_module_scope_names(module: &Module, names: &mut HashSet<String>) {
+    let mut collector = FunctionScopeNameCollector { names };
+    module.visit_with(&mut collector);
 }
 
 struct FunctionScopeNameCollector<'a> {
@@ -392,7 +674,7 @@ mod tests {
           });
         "#;
         let rewritten = rewrite_bundler_runtime_es5_helpers(code.to_string()).unwrap();
-        assert!(rewritten.code.contains("var _=globalThis.__g._;"));
+        assert!(rewritten.code.contains("var G=globalThis.__g,_=G._;"));
         assert!(rewritten.helper_keys.contains(&"es-decorate".to_string()));
         assert!(rewritten.helper_keys.contains(&"run-initializers".to_string()));
         assert!(rewritten.helper_keys.contains(&"set-function-name".to_string()));
@@ -401,5 +683,81 @@ mod tests {
         assert!(!rewritten
             .code
             .contains("Cannot add initializers after decoration has completed"));
+    }
+
+    #[test]
+    fn rewrites_shared_closure_support_references() {
+        let code = r#"
+          M("m0", function(a){
+            var tpl = ta(["x"]);
+            function Child() { return Parent.apply(this, arguments) || this; }
+            qa(Child, Parent);
+            ha.Object.defineProperties(Child.prototype, {});
+            return tpl;
+          });
+        "#;
+        let rewritten = rewrite_bundler_runtime_es5_helpers(code.to_string()).unwrap();
+        assert!(rewritten.code.contains("var G=globalThis.__g,_=G._;"));
+        assert!(rewritten
+            .helper_keys
+            .contains(&"closure-template-object".to_string()));
+        assert!(rewritten
+            .helper_keys
+            .contains(&"closure-inherits".to_string()));
+        assert!(!rewritten.code.contains("ta(["));
+        assert!(!rewritten.code.contains("qa(Child,Parent)"));
+        assert!(rewritten
+            .code
+            .contains("globalThis.Object.defineProperties"));
+    }
+
+    #[test]
+    fn leaves_shadowed_short_local_names_alone() {
+        let code = r#"
+          M("m0", function(a){
+            function render(){
+              var tpl = 0, ta = 1, qa = 2, ha = {};
+              x(ta, qa, ha);
+            }
+            render();
+          });
+        "#;
+        let rewritten = rewrite_bundler_runtime_es5_helpers(code.to_string()).unwrap();
+        assert!(!rewritten.code.contains("var G=globalThis.__g,_=G._;"));
+        assert!(rewritten.code.contains("x(ta, qa, ha)"));
+        assert!(!rewritten.code.contains("_[5]"));
+        assert!(!rewritten.code.contains("_[6]"));
+    }
+
+    #[test]
+    fn rewrites_top_level_closure_global_without_helper_slot() {
+        let code = r#"
+          M("m0", function(a){
+            function Child() {}
+            ha.Object.defineProperties(Child.prototype, {});
+          });
+        "#;
+        let rewritten = rewrite_bundler_runtime_es5_helpers(code.to_string()).unwrap();
+        assert!(!rewritten.helper_keys.contains(&"closure-global".to_string()));
+        assert!(rewritten
+            .code
+            .contains("globalThis.Object.defineProperties"));
+        assert!(!rewritten.code.contains("ha.Object.defineProperties"));
+    }
+
+    #[test]
+    fn leaves_shadowed_nested_function_params_alone() {
+        let code = r#"
+          M("m0", function(a){
+            p(0, {
+              children: function(ha){
+                var ia = q();
+                k(ha, ia);
+              }
+            });
+          });
+        "#;
+        let rewritten = rewrite_bundler_runtime_es5_helpers(code.to_string()).unwrap();
+        assert!(rewritten.code.contains("k(ha, ia)"));
     }
 }

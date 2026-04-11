@@ -5,8 +5,8 @@ mod render;
 use super::*;
 
 pub(super) use self::analysis::{
-    collect_extern_property_names, collect_names_from_files, is_valid_js_identifier,
-    prop_name_to_string, ExternPropertyAnalysis,
+    collect_extern_property_names, is_valid_js_identifier, prop_name_to_string,
+    ExternPropertyAnalysis,
 };
 #[cfg(test)]
 pub(super) use self::analysis::{
