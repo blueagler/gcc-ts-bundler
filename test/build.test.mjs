@@ -1,10 +1,18 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import ts from "typescript";
 import { expect, test } from "bun:test";
 
 import { build } from "../dist/index.mjs";
 import { createFixture } from "./helpers.mjs";
+
+function flattenDiagnosticText(diagnostic) {
+  return ts.flattenDiagnosticMessageText(
+    diagnostic?.messageText ?? diagnostic,
+    "\n",
+  );
+}
 
 test.serial("builds an ESM package from node_modules in ADVANCED mode", async () => {
   const fixture = await createFixture();
@@ -231,6 +239,68 @@ test.serial("full preflight accepts JS dependencies from node_modules", async ()
   });
 
   expect(result.exitCode).toBe(0);
+});
+
+test.serial("full preflight surfaces authored TypeScript semantic diagnostics", async () => {
+  const fixture = await createFixture();
+  await fixture.write(
+    "src/index.ts",
+    [
+      'const label: number = "bad";',
+      "export default label;",
+      "",
+    ].join("\n"),
+  );
+
+  const result = await build({
+    cache: { mode: "off" },
+    diagnostics: { preflight: "full" },
+    entries: ["./index.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  expect(result.exitCode).toBe(1);
+  expect(result.emitSkipped).toBe(true);
+  expect(
+    result.diagnostics.some((diagnostic) =>
+      flattenDiagnosticText(diagnostic).includes(
+        "Type 'string' is not assignable to type 'number'",
+      ),
+    ),
+  ).toBe(true);
+});
+
+test.serial("errors-only preflight surfaces authored TypeScript errors", async () => {
+  const fixture = await createFixture();
+  await fixture.write(
+    "src/index.ts",
+    [
+      'const label: number = "bad";',
+      "export default label;",
+      "",
+    ].join("\n"),
+  );
+
+  const result = await build({
+    cache: { mode: "off" },
+    diagnostics: { preflight: "errors-only" },
+    entries: ["./index.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  expect(result.exitCode).toBe(1);
+  expect(result.emitSkipped).toBe(true);
+  expect(
+    result.diagnostics.some((diagnostic) =>
+      flattenDiagnosticText(diagnostic).includes(
+        "Type 'string' is not assignable to type 'number'",
+      ),
+    ),
+  ).toBe(true);
 });
 
 test.serial("persistent cache restores published outputs after the outDir is removed", async () => {

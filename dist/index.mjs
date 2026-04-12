@@ -984,6 +984,12 @@ function logInternalTiming(label, durationMs) {
   }
   console.error(`[gcc-ts-bundler timing] ${label}: ${durationMs.toFixed(1)}ms`);
 }
+function logInternalDetail(label, detail) {
+  if (!SHOW_INTERNAL_TIMINGS) {
+    return;
+  }
+  console.error(`[gcc-ts-bundler timing] ${label}: ${detail}`);
+}
 async function withInternalTiming(label, work) {
   if (!SHOW_INTERNAL_TIMINGS) {
     return await work();
@@ -1000,31 +1006,19 @@ var init_timing = __esm(() => {
   SHOW_INTERNAL_TIMINGS = process.env.GCC_BUILD_TIMINGS === "1";
 });
 
-// src/stages/native/closure-ir/diagnostics.ts
-import ts10 from "typescript";
-function shouldIgnorePreflightDiagnostic(diagnostic) {
-  if (diagnostic.code !== 7016) {
-    return false;
-  }
-  const message = ts10.flattenDiagnosticMessageText(diagnostic.messageText, `
-`);
-  return message.includes("node_modules") && message.includes("implicitly has an 'any' type");
-}
-var init_diagnostics = () => {};
-
 // src/stages/native/closure-ir/decorators.ts
-import ts11 from "typescript";
+import ts10 from "typescript";
 function containsDecorators(sourceFile) {
   let found = false;
   const visit = (node) => {
     if (found) {
       return;
     }
-    if (ts11.canHaveDecorators(node) && (ts11.getDecorators(node)?.length ?? 0) > 0) {
+    if (ts10.canHaveDecorators(node) && (ts10.getDecorators(node)?.length ?? 0) > 0) {
       found = true;
       return;
     }
-    ts11.forEachChild(node, visit);
+    ts10.forEachChild(node, visit);
   };
   visit(sourceFile);
   return found;
@@ -1034,13 +1028,13 @@ function transpileDecoratedSource({
   fileName,
   sourceText
 }) {
-  return ts11.transpileModule(sourceText, {
+  return ts10.transpileModule(sourceText, {
     compilerOptions: {
       ...compilerOptions,
-      module: ts11.ModuleKind.ESNext,
-      moduleResolution: ts11.ModuleResolutionKind.Bundler,
+      module: ts10.ModuleKind.ESNext,
+      moduleResolution: ts10.ModuleResolutionKind.Bundler,
       sourceMap: false,
-      target: ts11.ScriptTarget.ES2018
+      target: ts10.ScriptTarget.ES2018
     },
     fileName,
     reportDiagnostics: true
@@ -1049,7 +1043,7 @@ function transpileDecoratedSource({
 var init_decorators = () => {};
 
 // src/stages/native/closure-ir/metadata/docs.ts
-import ts12 from "typescript";
+import ts11 from "typescript";
 function buildInterfaceDeclarationSnippet(statement, checker) {
   const lines = ["/**"];
   lines.push(" * @record");
@@ -1063,13 +1057,13 @@ function buildInterfaceDeclarationSnippet(statement, checker) {
     if (!memberName) {
       continue;
     }
-    if (ts12.isPropertySignature(member)) {
+    if (ts11.isPropertySignature(member)) {
       const propertyType = member.type ? toClosureType(checker.getTypeFromTypeNode(member.type), checker) : "?";
       lines.push(`/** @type {${propertyType}} */`);
       lines.push(`${statement.name.text}.prototype.${renderPropertyName(memberName)};`);
       continue;
     }
-    if (ts12.isMethodSignature(member)) {
+    if (ts11.isMethodSignature(member)) {
       const signature = checker.getSignatureFromDeclaration(member);
       if (!signature) {
         continue;
@@ -1135,7 +1129,7 @@ function buildFunctionObjectParamRecord(statement, checker) {
     return null;
   }
   const firstParameter = statement.parameters[0];
-  if (!firstParameter || !ts12.isObjectBindingPattern(firstParameter.name) || hasRestElement(firstParameter.name)) {
+  if (!firstParameter || !ts11.isObjectBindingPattern(firstParameter.name) || hasRestElement(firstParameter.name)) {
     return null;
   }
   const parameterType = checker.getTypeAtLocation(firstParameter);
@@ -1168,9 +1162,9 @@ function buildClassJsDoc(statement, checker) {
     for (const clause of statement.heritageClauses) {
       for (const typeNode of clause.types) {
         const closureType = toClosureType(checker.getTypeAtLocation(typeNode), checker);
-        if (clause.token === ts12.SyntaxKind.ExtendsKeyword) {
+        if (clause.token === ts11.SyntaxKind.ExtendsKeyword) {
           lines.push(` * @extends {${closureType}}`);
-        } else if (clause.token === ts12.SyntaxKind.ImplementsKeyword) {
+        } else if (clause.token === ts11.SyntaxKind.ImplementsKeyword) {
           lines.push(` * @implements {${closureType}}`);
         }
       }
@@ -1185,13 +1179,13 @@ function getTemplateNames(typeParameters) {
   return (typeParameters ?? []).map((parameter) => parameter.name.text);
 }
 function hasExportModifier(node) {
-  return (ts12.getCombinedModifierFlags(node) & ts12.ModifierFlags.Export) !== 0;
+  return (ts11.getCombinedModifierFlags(node) & ts11.ModifierFlags.Export) !== 0;
 }
 function getPropertyNameText2(name) {
   if (!name) {
     return null;
   }
-  if (ts12.isIdentifier(name) || ts12.isStringLiteral(name) || ts12.isNumericLiteral(name) || ts12.isPrivateIdentifier(name)) {
+  if (ts11.isIdentifier(name) || ts11.isStringLiteral(name) || ts11.isNumericLiteral(name) || ts11.isPrivateIdentifier(name)) {
     return name.text;
   }
   return null;
@@ -1219,25 +1213,25 @@ function toClosureType(type, checker, seen = new Set) {
     return "?";
   }
   seen.add(type);
-  if (type.flags & ts12.TypeFlags.Any)
+  if (type.flags & ts11.TypeFlags.Any)
     return "?";
-  if (type.flags & ts12.TypeFlags.Unknown)
+  if (type.flags & ts11.TypeFlags.Unknown)
     return "?";
-  if (type.flags & ts12.TypeFlags.StringLike)
+  if (type.flags & ts11.TypeFlags.StringLike)
     return "string";
-  if (type.flags & ts12.TypeFlags.NumberLike)
+  if (type.flags & ts11.TypeFlags.NumberLike)
     return "number";
-  if (type.flags & ts12.TypeFlags.BooleanLike)
+  if (type.flags & ts11.TypeFlags.BooleanLike)
     return "boolean";
-  if (type.flags & ts12.TypeFlags.Void)
+  if (type.flags & ts11.TypeFlags.Void)
     return "void";
-  if (type.flags & ts12.TypeFlags.Undefined)
+  if (type.flags & ts11.TypeFlags.Undefined)
     return "undefined";
-  if (type.flags & ts12.TypeFlags.Null)
+  if (type.flags & ts11.TypeFlags.Null)
     return "null";
-  if (type.flags & ts12.TypeFlags.Never)
+  if (type.flags & ts11.TypeFlags.Never)
     return "never";
-  if (type.flags & ts12.TypeFlags.TypeParameter)
+  if (type.flags & ts11.TypeFlags.TypeParameter)
     return checker.typeToString(type);
   if (type.isUnion()) {
     return `(${type.types.map((item) => toClosureType(item, checker, seen)).join("|")})`;
@@ -1264,7 +1258,7 @@ function toClosureType(type, checker, seen = new Set) {
       return symbolName;
     }
   }
-  if (type.isClassOrInterface() || type.getProperties().length > 0 && !(type.flags & ts12.TypeFlags.Object)) {
+  if (type.isClassOrInterface() || type.getProperties().length > 0 && !(type.flags & ts11.TypeFlags.Object)) {
     return "!Object";
   }
   return "?";
@@ -1272,33 +1266,33 @@ function toClosureType(type, checker, seen = new Set) {
 var init_docs = () => {};
 
 // src/stages/native/closure-ir/metadata/enums.ts
-import ts13 from "typescript";
-function collectUnsafeEnumSymbols(program, checker) {
+import ts12 from "typescript";
+function collectUnsafeEnumSymbols(sourceFiles, checker) {
   const unsafe = new Set;
   const mark = (node) => {
     const symbol = checker.getSymbolAtLocation(node);
     if (symbol) {
-      unsafe.add(symbol.flags & ts13.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol);
+      unsafe.add(symbol.flags & ts12.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol);
     }
   };
-  for (const sourceFile of program.getSourceFiles()) {
+  for (const sourceFile of sourceFiles) {
     const visit = (node) => {
-      if (ts13.isElementAccessExpression(node) && ts13.isIdentifier(node.expression)) {
+      if (ts12.isElementAccessExpression(node) && ts12.isIdentifier(node.expression)) {
         mark(node.expression);
       }
-      if (ts13.isCallExpression(node) && ts13.isPropertyAccessExpression(node.expression) && ts13.isIdentifier(node.expression.expression) && node.expression.expression.text === "Object" && ["entries", "keys", "values"].includes(node.expression.name.text) && node.arguments.length > 0 && ts13.isIdentifier(node.arguments[0])) {
+      if (ts12.isCallExpression(node) && ts12.isPropertyAccessExpression(node.expression) && ts12.isIdentifier(node.expression.expression) && node.expression.expression.text === "Object" && ["entries", "keys", "values"].includes(node.expression.name.text) && node.arguments.length > 0 && ts12.isIdentifier(node.arguments[0])) {
         mark(node.arguments[0]);
       }
-      if (ts13.isIdentifier(node) && !ts13.isPropertyAccessExpression(node.parent) && !ts13.isElementAccessExpression(node.parent) && !ts13.isImportSpecifier(node.parent) && !ts13.isImportClause(node.parent) && !ts13.isExportSpecifier(node.parent) && !ts13.isEnumDeclaration(node.parent) && !ts13.isEnumMember(node.parent)) {
+      if (ts12.isIdentifier(node) && !ts12.isPropertyAccessExpression(node.parent) && !ts12.isElementAccessExpression(node.parent) && !ts12.isImportSpecifier(node.parent) && !ts12.isImportClause(node.parent) && !ts12.isExportSpecifier(node.parent) && !ts12.isEnumDeclaration(node.parent) && !ts12.isEnumMember(node.parent)) {
         const symbol = checker.getSymbolAtLocation(node);
         if (symbol) {
-          const resolved = symbol.flags & ts13.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
-          if (resolved.flags & ts13.SymbolFlags.Enum) {
+          const resolved = symbol.flags & ts12.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+          if (resolved.flags & ts12.SymbolFlags.Enum) {
             unsafe.add(resolved);
           }
         }
       }
-      ts13.forEachChild(node, visit);
+      ts12.forEachChild(node, visit);
     };
     visit(sourceFile);
   }
@@ -1306,7 +1300,7 @@ function collectUnsafeEnumSymbols(program, checker) {
 }
 function buildEnumDeclarationMetadata(statement, checker, unsafeEnumSymbols) {
   const symbol = checker.getSymbolAtLocation(statement.name);
-  const resolved = symbol && symbol.flags & ts13.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+  const resolved = symbol && symbol.flags & ts12.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
   if (resolved && unsafeEnumSymbols.has(resolved)) {
     return null;
   }
@@ -1350,129 +1344,473 @@ function buildEnumDeclarationMetadata(statement, checker, unsafeEnumSymbols) {
   };
 }
 function hasExportModifier2(node) {
-  return (ts13.getCombinedModifierFlags(node) & ts13.ModifierFlags.Export) !== 0;
+  return (ts12.getCombinedModifierFlags(node) & ts12.ModifierFlags.Export) !== 0;
 }
 function hasConstModifier(node) {
-  return (ts13.getCombinedModifierFlags(node) & ts13.ModifierFlags.Const) !== 0;
+  return (ts12.getCombinedModifierFlags(node) & ts12.ModifierFlags.Const) !== 0;
 }
 function getPropertyNameText3(name) {
   if (!name) {
     return null;
   }
-  if (ts13.isIdentifier(name) || ts13.isStringLiteral(name) || ts13.isNumericLiteral(name) || ts13.isPrivateIdentifier(name)) {
+  if (ts12.isIdentifier(name) || ts12.isStringLiteral(name) || ts12.isNumericLiteral(name) || ts12.isPrivateIdentifier(name)) {
     return name.text;
   }
   return null;
 }
 function literalValueFromExpression(expression) {
-  if (ts13.isStringLiteralLike(expression)) {
+  if (ts12.isStringLiteralLike(expression)) {
     return expression.text;
   }
-  if (ts13.isNumericLiteral(expression)) {
+  if (ts12.isNumericLiteral(expression)) {
     return Number(expression.text);
   }
-  if (expression.kind === ts13.SyntaxKind.TrueKeyword) {
+  if (expression.kind === ts12.SyntaxKind.TrueKeyword) {
     return true;
   }
-  if (expression.kind === ts13.SyntaxKind.FalseKeyword) {
+  if (expression.kind === ts12.SyntaxKind.FalseKeyword) {
     return false;
   }
-  if (ts13.isPrefixUnaryExpression(expression) && expression.operator === ts13.SyntaxKind.MinusToken && ts13.isNumericLiteral(expression.operand)) {
+  if (ts12.isPrefixUnaryExpression(expression) && expression.operator === ts12.SyntaxKind.MinusToken && ts12.isNumericLiteral(expression.operand)) {
     return -Number(expression.operand.text);
   }
   return;
 }
 var init_enums = () => {};
 
-// src/stages/native/closure-ir/metadata.ts
-import ts14 from "typescript";
-function collectClosureIrFiles({
-  compilerOptions,
-  fileNames,
-  program
-}) {
-  const checker = program.getTypeChecker();
-  const unsafeEnumSymbols = collectUnsafeEnumSymbols(program, checker);
-  const inputFiles = new Set(fileNames);
-  const diagnostics = [];
-  const files = [];
-  for (const sourceFile of program.getSourceFiles()) {
-    if (!inputFiles.has(sourceFile.fileName)) {
+// src/stages/native/closure-ir/metadata/doc-eligibility.ts
+import ts13 from "typescript";
+function classifyClosureIrDocEligibility(sourceFile) {
+  const exportedDeclarationNames = collectExportedTopLevelDeclarationNames(sourceFile);
+  const hasJsDocText = sourceFile.text.includes("/**");
+  const hasTsCheckText = sourceFile.text.includes("@ts-check");
+  const isTypeScriptLike = isTypeScriptLikeSourceFile(sourceFile);
+  let hasTopLevelDocs = false;
+  for (const statement of sourceFile.statements) {
+    if (isDocRelevantTopLevelDeclaration(statement, {
+      exportedDeclarationNames,
+      hasJsDocText,
+      isTypeScriptLike
+    })) {
+      hasTopLevelDocs = true;
+      break;
+    }
+  }
+  return {
+    exportedDeclarationNames,
+    hasJsDocText,
+    hasTsCheckText,
+    hasTopLevelDocs,
+    isTypeScriptLike
+  };
+}
+function isDocRelevantTopLevelDeclaration(statement, eligibility) {
+  if (!((ts13.isFunctionDeclaration(statement) || ts13.isClassDeclaration(statement)) && statement.name)) {
+    return false;
+  }
+  if (eligibility.isTypeScriptLike && hasNamedExport(statement, eligibility.exportedDeclarationNames)) {
+    return true;
+  }
+  if (ts13.isFunctionDeclaration(statement) && canGenerateComponentObjectParamRecord(statement)) {
+    return true;
+  }
+  return eligibility.hasJsDocText && ts13.getJSDocCommentsAndTags(statement).length > 0;
+}
+function collectExportedTopLevelDeclarationNames(sourceFile) {
+  const exportedNames = new Set;
+  for (const statement of sourceFile.statements) {
+    if ((ts13.isFunctionDeclaration(statement) || ts13.isClassDeclaration(statement)) && statement.name && hasExportModifier3(statement)) {
+      exportedNames.add(statement.name.text);
       continue;
     }
-    const typeDeclarations = [];
-    const topLevelDocs = [];
-    const enumDeclarations = [];
-    for (const statement of sourceFile.statements) {
-      if (ts14.isInterfaceDeclaration(statement)) {
-        typeDeclarations.push(buildInterfaceDeclarationSnippet(statement, checker));
-        continue;
-      }
-      if (ts14.isTypeAliasDeclaration(statement)) {
-        typeDeclarations.push(buildTypeAliasDeclarationSnippet(statement, checker));
-        continue;
-      }
-      if (ts14.isEnumDeclaration(statement)) {
-        const enumDeclaration = buildEnumDeclarationMetadata(statement, checker, unsafeEnumSymbols);
-        if (enumDeclaration) {
-          enumDeclarations.push(enumDeclaration);
-        }
-        continue;
-      }
-      if (ts14.isFunctionDeclaration(statement) && statement.name) {
-        const objectParamRecord = buildFunctionObjectParamRecord(statement, checker);
-        if (objectParamRecord) {
-          typeDeclarations.push({ snippet: objectParamRecord.snippet });
-        }
-        const jsdoc = buildFunctionJsDoc(statement, checker, objectParamRecord?.typeName);
-        if (jsdoc) {
-          topLevelDocs.push({
-            jsdoc,
-            kind: "function",
-            name: statement.name.text
-          });
-        }
-        continue;
-      }
-      if (ts14.isClassDeclaration(statement) && statement.name) {
-        const jsdoc = buildClassJsDoc(statement, checker);
-        if (jsdoc) {
-          topLevelDocs.push({
-            jsdoc,
-            kind: "class",
-            name: statement.name.text
-          });
+    if (ts13.isExportDeclaration(statement) && statement.exportClause) {
+      if (ts13.isNamedExports(statement.exportClause) && !statement.moduleSpecifier) {
+        for (const element of statement.exportClause.elements) {
+          exportedNames.add(element.propertyName?.text ?? element.name.text);
         }
       }
+      continue;
     }
-    let decoratedOutputText;
-    if (containsDecorators(sourceFile)) {
-      const transpiled = transpileDecoratedSource({
-        compilerOptions,
-        fileName: sourceFile.fileName,
-        sourceText: sourceFile.getFullText()
-      });
-      diagnostics.push(...(transpiled.diagnostics ?? []).filter((diagnostic) => diagnostic.category === ts14.DiagnosticCategory.Error));
-      decoratedOutputText = transpiled.outputText;
+    if (ts13.isExportAssignment(statement) && ts13.isIdentifier(statement.expression)) {
+      exportedNames.add(statement.expression.text);
     }
-    files.push({
+  }
+  return exportedNames;
+}
+function hasNamedExport(statement, exportedNames) {
+  return !!statement.name && exportedNames.has(statement.name.text);
+}
+function hasExportModifier3(node) {
+  return (ts13.getCombinedModifierFlags(node) & ts13.ModifierFlags.Export) !== 0;
+}
+function canGenerateComponentObjectParamRecord(statement) {
+  const firstParameter = statement.parameters[0];
+  return !!statement.name && /^[A-Z]/.test(statement.name.text) && !!firstParameter && ts13.isObjectBindingPattern(firstParameter.name) && !firstParameter.name.elements.some((element) => element.dotDotDotToken);
+}
+function isTypeScriptLikeSourceFile(sourceFile) {
+  return /\.(?:cts|mts|ts|tsx)$/u.test(sourceFile.fileName);
+}
+var init_doc_eligibility = () => {};
+
+// src/stages/native/closure-ir/metadata/collect.ts
+import ts14 from "typescript";
+function collectClosureIrFileMetadata({
+  compilerOptions,
+  checker,
+  features,
+  sourceFile,
+  unsafeEnumSymbols
+}) {
+  const diagnostics = [];
+  const typeDeclarations = features.hasTypeDeclarations ? collectTypeDeclarationsForSourceFile(sourceFile, checker) : [];
+  const topLevelDocs = features.hasTopLevelDocs ? collectTopLevelDocsForSourceFile(sourceFile, checker, features, typeDeclarations) : [];
+  const enumDeclarations = features.hasEnumDeclarations ? collectEnumDeclarationsForSourceFile(sourceFile, checker, unsafeEnumSymbols) : [];
+  const decoratedOutputText = features.hasDecorators ? collectDecoratedOutputText({
+    compilerOptions,
+    diagnostics,
+    fileName: sourceFile.fileName,
+    sourceText: sourceFile.getFullText()
+  }) : undefined;
+  return {
+    diagnostics,
+    file: {
       decoratedOutputText,
       enumDeclarations,
       filePath: sourceFile.fileName,
       topLevelDocs,
       typeDeclarations
-    });
-  }
-  return { diagnostics, files };
+    }
+  };
 }
-var init_metadata = __esm(() => {
+function collectTypeDeclarationsForSourceFile(sourceFile, checker) {
+  const typeDeclarations = [];
+  for (const statement of sourceFile.statements) {
+    if (ts14.isInterfaceDeclaration(statement)) {
+      typeDeclarations.push(buildInterfaceDeclarationSnippet(statement, checker));
+      continue;
+    }
+    if (ts14.isTypeAliasDeclaration(statement)) {
+      typeDeclarations.push(buildTypeAliasDeclarationSnippet(statement, checker));
+    }
+  }
+  return typeDeclarations;
+}
+function collectTopLevelDocsForSourceFile(sourceFile, checker, features, typeDeclarations) {
+  const topLevelDocs = [];
+  for (const statement of sourceFile.statements) {
+    if (!isDocRelevantTopLevelDeclaration(statement, features.docEligibility)) {
+      continue;
+    }
+    if (ts14.isFunctionDeclaration(statement)) {
+      const objectParamRecord = buildFunctionObjectParamRecord(statement, checker);
+      if (objectParamRecord) {
+        typeDeclarations.push({ snippet: objectParamRecord.snippet });
+      }
+      const jsdoc = buildFunctionJsDoc(statement, checker, objectParamRecord?.typeName);
+      if (jsdoc) {
+        topLevelDocs.push({
+          jsdoc,
+          kind: "function",
+          name: statement.name.text
+        });
+      }
+      continue;
+    }
+    if (ts14.isClassDeclaration(statement)) {
+      const jsdoc = buildClassJsDoc(statement, checker);
+      if (jsdoc) {
+        topLevelDocs.push({
+          jsdoc,
+          kind: "class",
+          name: statement.name.text
+        });
+      }
+    }
+  }
+  return topLevelDocs;
+}
+function collectEnumDeclarationsForSourceFile(sourceFile, checker, unsafeEnumSymbols) {
+  const enumDeclarations = [];
+  for (const statement of sourceFile.statements) {
+    if (!ts14.isEnumDeclaration(statement)) {
+      continue;
+    }
+    const enumDeclaration = buildEnumDeclarationMetadata(statement, checker, unsafeEnumSymbols);
+    if (enumDeclaration) {
+      enumDeclarations.push(enumDeclaration);
+    }
+  }
+  return enumDeclarations;
+}
+function collectDecoratedOutputText({
+  compilerOptions,
+  diagnostics,
+  fileName,
+  sourceText
+}) {
+  const transpiled = transpileDecoratedSource({
+    compilerOptions,
+    fileName,
+    sourceText
+  });
+  diagnostics.push(...(transpiled.diagnostics ?? []).filter((diagnostic) => diagnostic.category === ts14.DiagnosticCategory.Error));
+  return transpiled.outputText;
+}
+var init_collect = __esm(() => {
   init_decorators();
   init_docs();
   init_enums();
+  init_doc_eligibility();
+});
+
+// src/stages/native/closure-ir/metadata/scan.ts
+import ts15 from "typescript";
+function scanClosureIrSourceFiles({
+  fileNames,
+  program
+}) {
+  const inputFiles = new Set(fileNames);
+  const files = [];
+  let analyzedFileCount = 0;
+  let hasEnumDeclarations = false;
+  for (const sourceFile of program.getSourceFiles()) {
+    if (!inputFiles.has(sourceFile.fileName)) {
+      continue;
+    }
+    const features = classifyClosureIrFile(sourceFile);
+    if (features.shouldAnalyze) {
+      analyzedFileCount += 1;
+    }
+    if (features.hasEnumDeclarations) {
+      hasEnumDeclarations = true;
+    }
+    files.push({ features, sourceFile });
+  }
+  return {
+    analyzedFileCount,
+    files,
+    hasEnumDeclarations,
+    scannedFileCount: files.length
+  };
+}
+function classifyClosureIrFile(sourceFile) {
+  let hasEnumDeclarations = false;
+  let hasTypeDeclarations = false;
+  for (const statement of sourceFile.statements) {
+    if (ts15.isInterfaceDeclaration(statement) || ts15.isTypeAliasDeclaration(statement)) {
+      hasTypeDeclarations = true;
+      continue;
+    }
+    if (ts15.isEnumDeclaration(statement)) {
+      hasEnumDeclarations = true;
+      continue;
+    }
+  }
+  const docEligibility = classifyClosureIrDocEligibility(sourceFile);
+  const hasDecorators = sourceFile.text.includes("@") && containsDecorators(sourceFile);
+  const needsSemanticPreflight = docEligibility.hasJsDocText || docEligibility.hasTsCheckText || hasDecorators || hasEnumDeclarations || hasTypeDeclarations || sourceFile.statements.some(containsExplicitTypeSignal);
+  return {
+    docEligibility,
+    filePath: sourceFile.fileName,
+    hasDecorators,
+    hasEnumDeclarations,
+    needsSemanticPreflight,
+    hasTopLevelDocs: docEligibility.hasTopLevelDocs,
+    hasTypeDeclarations,
+    shouldAnalyze: hasDecorators || hasEnumDeclarations || docEligibility.hasTopLevelDocs || hasTypeDeclarations
+  };
+}
+function containsExplicitTypeSignal(node) {
+  if (ts15.isAsExpression(node) || ts15.isEnumDeclaration(node) || ts15.isInterfaceDeclaration(node) || ts15.isSatisfiesExpression(node) || ts15.isTypeAliasDeclaration(node) || ts15.isTypeAssertionExpression(node) || ts15.isTypeParameterDeclaration(node)) {
+    return true;
+  }
+  if ("type" in node && node.type) {
+    return true;
+  }
+  return ts15.forEachChild(node, containsExplicitTypeSignal) ?? false;
+}
+var init_scan = __esm(() => {
+  init_decorators();
+  init_doc_eligibility();
+});
+
+// src/stages/native/closure-ir/metadata.ts
+function scanClosureIrFiles({
+  fileNames,
+  program
+}) {
+  return scanClosureIrSourceFiles({ fileNames, program });
+}
+function collectClosureIrFiles({
+  compilerOptions,
+  fileNames,
+  program,
+  scan = scanClosureIrFiles({ fileNames, program })
+}) {
+  const files = scan.files.map(({ features, sourceFile }) => ({
+    features,
+    sourceFile
+  }));
+  const needsChecker = files.some(({ features }) => features.hasEnumDeclarations || features.hasTopLevelDocs || features.hasTypeDeclarations);
+  const hasDecorators = files.some(({ features }) => features.hasDecorators);
+  if (!needsChecker && !hasDecorators) {
+    return {
+      diagnostics: [],
+      files: files.map(({ sourceFile }) => ({
+        decoratedOutputText: undefined,
+        enumDeclarations: [],
+        filePath: sourceFile.fileName,
+        topLevelDocs: [],
+        typeDeclarations: []
+      })),
+      scan
+    };
+  }
+  const checker = program.getTypeChecker();
+  const unsafeEnumSymbols = scan.hasEnumDeclarations ? collectUnsafeEnumSymbols(scan.files.filter(({ features }) => features.hasEnumDeclarations).map(({ sourceFile }) => sourceFile), checker) : new Set;
+  const diagnostics = [];
+  const collectedFiles = [];
+  for (const { features, sourceFile } of files) {
+    if (!features.shouldAnalyze) {
+      collectedFiles.push({
+        decoratedOutputText: undefined,
+        enumDeclarations: [],
+        filePath: sourceFile.fileName,
+        topLevelDocs: [],
+        typeDeclarations: []
+      });
+      continue;
+    }
+    const result = collectClosureIrFileMetadata({
+      compilerOptions,
+      checker,
+      features,
+      sourceFile,
+      unsafeEnumSymbols
+    });
+    diagnostics.push(...result.diagnostics);
+    collectedFiles.push(result.file);
+  }
+  return { diagnostics, files: collectedFiles, scan };
+}
+var init_metadata = __esm(() => {
+  init_collect();
+  init_enums();
+  init_scan();
+});
+
+// src/stages/native/closure-ir/diagnostics.ts
+import ts16 from "typescript";
+function shouldIgnorePreflightDiagnostic(diagnostic) {
+  const message = ts16.flattenDiagnosticMessageText(diagnostic.messageText, `
+`);
+  if (message.includes("implicitly has an 'any' type") && diagnostic.file && !fileHasExplicitTypeSignals(diagnostic.file)) {
+    return true;
+  }
+  switch (diagnostic.code) {
+    case 7016:
+      return message.includes("node_modules") && message.includes("implicitly has an 'any' type");
+    case 7017:
+      return message.includes("type 'typeof globalThis'");
+    case 2307:
+      return message.includes("corresponding type declarations") && isBareModuleResolutionDiagnostic(diagnostic);
+    case 5097:
+      return isLocalTsExtensionImportDiagnostic(diagnostic);
+    default:
+      return false;
+  }
+}
+function isBareModuleResolutionDiagnostic(diagnostic) {
+  const specifier = getDiagnosticModuleSpecifier(diagnostic);
+  if (!specifier) {
+    return false;
+  }
+  return !specifier.startsWith(".") && !specifier.startsWith("/") && !specifier.startsWith("#");
+}
+function isLocalTsExtensionImportDiagnostic(diagnostic) {
+  const specifier = getDiagnosticModuleSpecifier(diagnostic);
+  return !!specifier && specifier.startsWith(".") && specifier.endsWith(".ts");
+}
+function getDiagnosticModuleSpecifier(diagnostic) {
+  if (!diagnostic.file || diagnostic.start == null || diagnostic.length == null || diagnostic.length <= 0) {
+    return null;
+  }
+  const moduleText = diagnostic.file.text.slice(diagnostic.start, diagnostic.start + diagnostic.length);
+  if (moduleText.length < 2 || !(moduleText.startsWith('"') && moduleText.endsWith('"') || moduleText.startsWith("'") && moduleText.endsWith("'"))) {
+    return null;
+  }
+  return moduleText.slice(1, -1);
+}
+function fileHasExplicitTypeSignals(sourceFile) {
+  const cached = explicitTypeSignalCache.get(sourceFile);
+  if (cached != null) {
+    return cached;
+  }
+  const hasSignal = sourceFile.text.includes("/**") || sourceFile.text.includes("@ts-check") || sourceFile.statements.some(containsExplicitTypeSignal2);
+  explicitTypeSignalCache.set(sourceFile, hasSignal);
+  return hasSignal;
+}
+function containsExplicitTypeSignal2(node) {
+  if (ts16.isEnumDeclaration(node) || ts16.isInterfaceDeclaration(node) || ts16.isTypeAliasDeclaration(node) || ts16.isAsExpression(node) || ts16.isSatisfiesExpression(node) || ts16.isTypeAssertionExpression(node) || ts16.isTypeParameterDeclaration(node)) {
+    return true;
+  }
+  if ("type" in node && node.type) {
+    return true;
+  }
+  return ts16.forEachChild(node, containsExplicitTypeSignal2) ?? false;
+}
+var explicitTypeSignalCache;
+var init_diagnostics = __esm(() => {
+  explicitTypeSignalCache = new WeakMap;
+});
+
+// src/stages/native/closure-ir/preflight.ts
+import ts17 from "typescript";
+function collectNativePreflightDiagnostics({
+  preflight,
+  program,
+  scan
+}) {
+  if (preflight === "off") {
+    return [];
+  }
+  const diagnostics = [
+    ...program.getOptionsDiagnostics(),
+    ...program.getGlobalDiagnostics(),
+    ...collectSyntacticDiagnostics(program),
+    ...collectSemanticDiagnostics({ program, scan })
+  ].filter((diagnostic) => !shouldIgnorePreflightDiagnostic(diagnostic));
+  if (preflight === "errors-only") {
+    return diagnostics.filter((diagnostic) => diagnostic.category === ts17.DiagnosticCategory.Error);
+  }
+  return diagnostics;
+}
+function collectSyntacticDiagnostics(program) {
+  const diagnostics = [];
+  for (const sourceFile of program.getSourceFiles()) {
+    diagnostics.push(...program.getSyntacticDiagnostics(sourceFile));
+  }
+  return diagnostics;
+}
+function collectSemanticDiagnostics({
+  program,
+  scan
+}) {
+  const diagnostics = [];
+  const semanticFiles = scan.files.filter(({ features }) => features.needsSemanticPreflight);
+  logInternalDetail("native-emit:preflight:files", `${semanticFiles.length}/${scan.scannedFileCount}`);
+  for (const { sourceFile } of semanticFiles) {
+    diagnostics.push(...program.getSemanticDiagnostics(sourceFile));
+  }
+  return diagnostics;
+}
+var init_preflight = __esm(() => {
+  init_timing();
+  init_diagnostics();
 });
 
 // src/stages/native/closure-ir.ts
-import ts15 from "typescript";
+import ts18 from "typescript";
 async function createNativeTypeAnalysisContext({
   fileNames,
   tsConfigPath,
@@ -1481,44 +1819,61 @@ async function createNativeTypeAnalysisContext({
   const compilerOptions = await loadCompilerOptions(tsConfigPath, {
     allowJs: true,
     ignoreDeprecations: "6.0",
-    moduleResolution: ts15.ModuleResolutionKind.Bundler,
+    moduleResolution: ts18.ModuleResolutionKind.Bundler,
     noEmit: true,
     rootDir: workspaceDir,
     skipLibCheck: true,
-    target: ts15.ScriptTarget.ESNext
+    target: ts18.ScriptTarget.ESNext
   });
   return {
     compilerOptions,
     fileNames,
-    program: ts15.createProgram(fileNames, compilerOptions)
+    program: ts18.createProgram(fileNames, compilerOptions)
   };
 }
-function collectNativeTypeAnalysisFromContext({
+function scanNativeTypeAnalysisContext({
+  context
+}) {
+  const { fileNames, program } = context;
+  return scanClosureIrFiles({ fileNames, program });
+}
+function collectNativePreflightDiagnosticsFromContext({
   context,
-  preflight
+  preflight,
+  scan
+}) {
+  const closureIrScan = scan ?? scanNativeTypeAnalysisContext({ context });
+  return collectNativePreflightDiagnostics({
+    preflight,
+    program: context.program,
+    scan: closureIrScan
+  });
+}
+function collectNativeClosureIrFromContext({
+  context,
+  scan
 }) {
   const { compilerOptions, fileNames, program } = context;
-  const preflightDiagnostics = preflight === "full" ? [...ts15.getPreEmitDiagnostics(program)].filter((diagnostic) => !shouldIgnorePreflightDiagnostic(diagnostic)) : [];
-  const { diagnostics: closureIrDiagnostics, files } = collectClosureIrFiles({
+  const closureIrScan = scan ?? scanNativeTypeAnalysisContext({ context });
+  logInternalDetail("native-emit:analysis-scan:files", `${closureIrScan.analyzedFileCount}/${closureIrScan.scannedFileCount}`);
+  return collectClosureIrFiles({
     compilerOptions,
     fileNames,
-    program
+    program,
+    scan: closureIrScan
   });
-  return {
-    diagnostics: [...preflightDiagnostics, ...closureIrDiagnostics],
-    files
-  };
 }
 var init_closure_ir = __esm(() => {
+  init_timing();
   init_compiler_options();
-  init_diagnostics();
   init_metadata();
+  init_preflight();
 });
 
 // src/stages/native/emit.ts
 import fs11 from "fs";
 import path17 from "path";
-import ts16 from "typescript";
+import ts19 from "typescript";
 async function emitNativeStage({
   cacheDir,
   fileNames,
@@ -1532,40 +1887,31 @@ async function emitNativeStage({
   workspaceDir
 }) {
   const usesPersistentCache = options.cache.mode === "persistent";
-  const outDir = path17.join(cacheDir, "out");
-  const externsPath = path17.join(cacheDir, "native-generated.externs.js");
-  const metadataPathForNative = path17.join(cacheDir, "closure-ir.json");
-  const runtimeSupportFiles = tsxRuntimeSourceFiles.map((fileName) => toEmittedPath(fileName, outDir, workspaceDir));
+  const paths = createNativeEmitPaths({
+    cacheDir,
+    tsxRuntimeSourceFiles,
+    workspaceDir
+  });
   const combinedFileNames = uniqueSortedStrings([
     ...fileNames,
     ...tsxRuntimeSourceFiles
   ]);
   const dependencyModules = collectDependencyModules(packageAliases);
   const dependencyRuntimeFiles = collectDependencyRuntimeFiles({
-    outDir,
+    outDir: paths.outDir,
     sourceFiles: combinedFileNames,
     workspaceDir
   });
-  const cachedMetadata = usesPersistentCache ? await readMetadata(metadataPath) : null;
-  if (cachedMetadata && await filesExist([
-    cachedMetadata.externsPath,
-    cachedMetadata.metadataPath,
-    ...cachedMetadata.emittedFiles,
-    ...cachedMetadata.supportFiles
-  ])) {
-    return {
-      dependencyModules: cachedMetadata.dependencyModules,
-      dependencyRuntimeFiles: cachedMetadata.dependencyRuntimeFiles,
-      diagnostics: [],
-      emitSkipped: false,
-      emittedFiles: cachedMetadata.emittedFiles,
-      externsPath: cachedMetadata.externsPath,
-      outDir,
-      supportFiles: cachedMetadata.supportFiles
-    };
+  const cachedResult = await restoreCachedNativeEmitResult({
+    dependencyModules,
+    dependencyRuntimeFiles,
+    metadataPath,
+    outDir: paths.outDir,
+    usesPersistentCache
+  });
+  if (cachedResult) {
+    return cachedResult;
   }
-  await fs11.promises.rm(outDir, { force: true, recursive: true });
-  await fs11.promises.mkdir(outDir, { recursive: true });
   const missingInputDiagnostics = await getMissingInputDiagnostics({
     fileNames: combinedFileNames,
     preflight: options.diagnostics.preflight,
@@ -1578,58 +1924,69 @@ async function emitNativeStage({
       diagnostics: missingInputDiagnostics,
       emitSkipped: true,
       emittedFiles: [],
-      externsPath,
-      outDir,
+      externsPath: paths.externsPath,
+      outDir: paths.outDir,
       supportFiles: []
     };
   }
+  await resetNativeEmitOutDir(paths.outDir);
   const analysisContext = await withInternalTiming("native-emit:analysis-context", () => createNativeTypeAnalysisContext({
     fileNames: combinedFileNames,
     tsConfigPath,
     workspaceDir
   }));
-  const analysis = await withInternalTiming("native-emit:closure-ir", () => collectNativeTypeAnalysisFromContext({
+  const analysisScan = await withInternalTiming("native-emit:analysis-scan", () => Promise.resolve(scanNativeTypeAnalysisContext({ context: analysisContext })));
+  const preflightDiagnostics = await withInternalTiming("native-emit:preflight", () => Promise.resolve(collectNativePreflightDiagnosticsFromContext({
     context: analysisContext,
-    preflight: options.diagnostics.preflight
-  }));
-  if (analysis.diagnostics.length > 0) {
+    preflight: options.diagnostics.preflight,
+    scan: analysisScan
+  })));
+  const analysis = await withInternalTiming("native-emit:closure-ir", () => Promise.resolve(collectNativeClosureIrFromContext({
+    context: analysisContext,
+    scan: analysisScan
+  })));
+  const analysisDiagnostics = [
+    ...preflightDiagnostics,
+    ...analysis.diagnostics
+  ];
+  if (analysisDiagnostics.length > 0) {
     return {
       dependencyModules,
       dependencyRuntimeFiles,
-      diagnostics: analysis.diagnostics,
+      diagnostics: analysisDiagnostics,
       emitSkipped: true,
       emittedFiles: [],
-      externsPath,
-      outDir,
+      externsPath: paths.externsPath,
+      outDir: paths.outDir,
       supportFiles: []
     };
   }
-  await fs11.promises.writeFile(metadataPathForNative, JSON.stringify(analysis.files, null, 2), "utf-8");
-  const result = await withInternalTiming("native-emit:transpile", () => Promise.resolve(transpileSources({
+  await fs11.promises.writeFile(paths.metadataPathForNative, JSON.stringify(analysis.files, null, 2), "utf-8");
+  const result = await withInternalTiming("native-emit:transpile", () => Promise.resolve(runNativeTranspile({
     chunkMode: options.chunks.mode,
-    metadataPath: metadataPathForNative,
-    externsPath,
-    fileNames: combinedFileNames,
+    combinedFileNames,
+    externsPath: paths.externsPath,
     lazyImports,
-    outDir,
+    metadataPath: paths.metadataPathForNative,
+    outDir: paths.outDir,
     packageAliases,
     packageJsonFiles,
     workspaceDir
   })));
   const finalSupportFiles = uniqueSortedStrings([
-    ...runtimeSupportFiles,
+    ...paths.runtimeSupportFiles,
     ...result.supportFiles
   ]);
   if (usesPersistentCache) {
-    await fs11.promises.writeFile(metadataPath, JSON.stringify({
+    await persistNativeEmitMetadata({
       dependencyModules,
       dependencyRuntimeFiles,
       emittedFiles: result.emittedFiles,
       externsPath: result.externsPath,
-      metadataPath: metadataPathForNative,
-      supportFiles: finalSupportFiles,
-      version: NATIVE_EMIT_METADATA_VERSION
-    }, null, 2), "utf-8");
+      metadataPath,
+      metadataPathForNative: paths.metadataPathForNative,
+      supportFiles: finalSupportFiles
+    });
   }
   return {
     dependencyModules,
@@ -1638,9 +1995,98 @@ async function emitNativeStage({
     emitSkipped: false,
     emittedFiles: result.emittedFiles,
     externsPath: result.externsPath,
-    outDir,
+    outDir: paths.outDir,
     supportFiles: finalSupportFiles
   };
+}
+function createNativeEmitPaths({
+  cacheDir,
+  tsxRuntimeSourceFiles,
+  workspaceDir
+}) {
+  const outDir = path17.join(cacheDir, "out");
+  return {
+    externsPath: path17.join(cacheDir, "native-generated.externs.js"),
+    metadataPathForNative: path17.join(cacheDir, "closure-ir.json"),
+    outDir,
+    runtimeSupportFiles: tsxRuntimeSourceFiles.map((fileName) => toEmittedPath(fileName, outDir, workspaceDir))
+  };
+}
+async function restoreCachedNativeEmitResult({
+  dependencyModules,
+  dependencyRuntimeFiles,
+  metadataPath,
+  outDir,
+  usesPersistentCache
+}) {
+  if (!usesPersistentCache) {
+    return null;
+  }
+  const cachedMetadata = await readMetadata(metadataPath);
+  if (!cachedMetadata || !await filesExist([
+    cachedMetadata.externsPath,
+    cachedMetadata.metadataPath,
+    ...cachedMetadata.emittedFiles,
+    ...cachedMetadata.supportFiles
+  ])) {
+    return null;
+  }
+  return {
+    dependencyModules: cachedMetadata.dependencyModules.length > 0 ? cachedMetadata.dependencyModules : dependencyModules,
+    dependencyRuntimeFiles: cachedMetadata.dependencyRuntimeFiles.length > 0 ? cachedMetadata.dependencyRuntimeFiles : dependencyRuntimeFiles,
+    diagnostics: [],
+    emitSkipped: false,
+    emittedFiles: cachedMetadata.emittedFiles,
+    externsPath: cachedMetadata.externsPath,
+    outDir,
+    supportFiles: cachedMetadata.supportFiles
+  };
+}
+async function resetNativeEmitOutDir(outDir) {
+  await fs11.promises.rm(outDir, { force: true, recursive: true });
+  await fs11.promises.mkdir(outDir, { recursive: true });
+}
+function runNativeTranspile({
+  chunkMode,
+  combinedFileNames,
+  externsPath,
+  lazyImports,
+  metadataPath,
+  outDir,
+  packageAliases,
+  packageJsonFiles,
+  workspaceDir
+}) {
+  return transpileSources({
+    chunkMode,
+    metadataPath,
+    externsPath,
+    fileNames: combinedFileNames,
+    lazyImports,
+    outDir,
+    packageAliases,
+    packageJsonFiles,
+    workspaceDir
+  });
+}
+async function persistNativeEmitMetadata({
+  dependencyModules,
+  dependencyRuntimeFiles,
+  emittedFiles,
+  externsPath,
+  metadataPath,
+  metadataPathForNative,
+  supportFiles
+}) {
+  await fs11.promises.writeFile(metadataPath, JSON.stringify({
+    dependencyModules,
+    dependencyRuntimeFiles,
+    emittedFiles,
+    externsPath,
+    metadataPath: metadataPathForNative,
+    supportFiles,
+    version: NATIVE_EMIT_METADATA_VERSION
+  }, null, 2), "utf-8");
 }
 async function getMissingInputDiagnostics({
   fileNames,
@@ -1661,7 +2107,7 @@ async function getMissingInputDiagnostics({
 }
 function createSimpleDiagnostic(messageText) {
   return {
-    category: ts16.DiagnosticCategory.Error,
+    category: ts19.DiagnosticCategory.Error,
     code: 0,
     file: undefined,
     length: undefined,
@@ -1900,125 +2346,7 @@ async function runWithConcurrency(items, concurrency, worker) {
 }
 var init_concurrency = () => {};
 
-// src/stages/closure/run-closure.ts
-import fs13 from "fs/promises";
-import path19 from "path";
-async function runClosureStage({
-  chunkPlan,
-  emittedOutDir,
-  explicitExternPaths,
-  finalCacheDir,
-  generatedExternPaths,
-  nativeExternPath,
-  options,
-  outDir,
-  projectCacheDir,
-  supportFiles,
-  packageRoot: packageRoot2
-}) {
-  await fs13.rm(finalCacheDir, { force: true, recursive: true });
-  await ensureDirectory(finalCacheDir);
-  const rawDir = path19.join(finalCacheDir, "raw");
-  const cacheOutputDir = path19.join(finalCacheDir, "outputs");
-  await ensureDirectory(rawDir);
-  await ensureDirectory(cacheOutputDir);
-  await fs13.rm(outDir, { force: true, recursive: true });
-  await ensureDirectory(outDir);
-  const prepared = prepareClosureJobs({
-    chunkLoader: options.chunks.loader,
-    chunkMode: options.chunks.mode,
-    chunkPlan,
-    compilationLevel: options.compilationLevel,
-    diagnosticsVerbose: options.diagnostics.verbose,
-    emittedOutDir,
-    explicitExternPaths,
-    explicitJsInputs: options.js,
-    finalCacheDir,
-    generatedExternPaths,
-    languageOut: options.languageOut,
-    manifestFile: options.chunks.manifestFile,
-    nativeExternPath,
-    outDir,
-    packageRoot: packageRoot2,
-    publicPath: options.chunks.publicPath,
-    supportFiles
-  });
-  await Promise.all(prepared.generatedAssets.map(async (asset) => {
-    await ensureParentDirectory(asset.path);
-    await fs13.writeFile(asset.path, asset.text, "utf-8");
-  }));
-  const closureJobCacheDir = options.cache.mode === "off" ? null : path19.join(projectCacheDir, "closure-jobs");
-  const concurrency = options.chunks.mode === "bundler-runtime" ? determineClosureConcurrency(prepared.compileJobs.length) : 1;
-  const exitCodes = await withInternalTiming("closure:compile", () => runWithConcurrency(prepared.compileJobs, concurrency, async (job) => runPreparedClosureJob({
-    cacheDir: closureJobCacheDir,
-    job
-  })));
-  const failedExitCode = exitCodes.find((exitCode) => exitCode !== 0);
-  if (failedExitCode !== undefined) {
-    return { cacheOutputFiles: [], exitCode: failedExitCode, outputFiles: [] };
-  }
-  await withInternalTiming("closure:postprocess", () => runClosurePostprocess({
-    chunkMode: options.chunks.mode,
-    languageOut: options.languageOut,
-    prepared
-  }));
-  await withInternalTiming("closure:publish", () => copyOrLinkFiles(prepared.publishedOutputs, cacheOutputDir));
-  const cacheOutputFiles = prepared.publishedOutputs.map((outputFile) => path19.join(cacheOutputDir, path19.relative(outDir, outputFile)));
-  return {
-    cacheOutputFiles,
-    exitCode: 0,
-    outputFiles: prepared.publishedOutputs
-  };
-}
-async function runClosurePostprocess({
-  chunkMode,
-  languageOut,
-  prepared
-}) {
-  const propertyRenamingReports = new Map;
-  const es5Rewrite = createEs5HelperRewriteContext({
-    bundlerRuntimeBaseInputPath: prepared.bundlerRuntimeBaseInputPath,
-    chunkMode,
-    languageOut
-  });
-  const inputContents = new Map;
-  const inputPaths = [
-    ...new Set(prepared.postprocessActions.map((action) => action.inputPath))
-  ];
-  await Promise.all(inputPaths.map(async (inputPath) => {
-    if (!es5Rewrite.requiresInputRead()) {
-      return;
-    }
-    const originalContents = await readInputContents(inputPath, inputContents);
-    applyEs5HelperRewrite(inputPath, originalContents, es5Rewrite);
-  }));
-  await Promise.all(prepared.postprocessActions.map(async (action) => {
-    await ensureParentDirectory(action.outputPath);
-    const wrapBundlerRuntimeOutput = chunkMode === "bundler-runtime";
-    const reportText = action.propertyRenamingReportPath ? await readPropertyRenamingReport(action.propertyRenamingReportPath, propertyRenamingReports) : "";
-    if (action.kind === "copy" && !reportText && !es5Rewrite.requiresInputRead() && !wrapBundlerRuntimeOutput) {
-      await fs13.copyFile(action.inputPath, action.outputPath);
-      return;
-    }
-    const originalContents = await readInputContents(action.inputPath, inputContents);
-    let contents = applyEs5HelperRewrite(action.inputPath, originalContents, es5Rewrite);
-    if (action.kind === "rewrite-gcc-exports" || action.kind === "rewrite-gcc-exports-and-decorator-metadata") {
-      contents = rewriteGccExports(contents);
-    }
-    if (reportText && (action.kind === "rewrite-decorator-metadata" || action.kind === "rewrite-gcc-exports-and-decorator-metadata")) {
-      contents = rewriteDecoratorMetadata(contents, reportText);
-    }
-    if (action.inputPath === prepared.bundlerRuntimeBaseInputPath) {
-      const runtimeAlias = findBundlerRuntimeFinalizeAlias(contents);
-      contents = injectBundlerRuntimeEs5HelperBag(contents, es5Rewrite.renderHelperBag(runtimeAlias));
-    }
-    contents = canonicalizeBundlerRuntimeRootAccess(contents);
-    if (wrapBundlerRuntimeOutput) {
-      contents = wrapBundlerRuntimeOutputFile(contents);
-    }
-    await fs13.writeFile(action.outputPath, contents);
-  }));
-}
+// src/stages/closure/postprocess/es5.ts
 function createEs5HelperRewriteContext({
   bundlerRuntimeBaseInputPath,
   chunkMode,
@@ -2054,6 +2382,53 @@ function createEs5HelperRewriteContext({
 function applyEs5HelperRewrite(inputPath, contents, rewriteContext) {
   return rewriteContext.rewrite(inputPath, contents);
 }
+function renderBundlerRuntimeEs5HelperBag(helperKeys, runtimeAlias) {
+  const lines = [
+    runtimeAlias ? `var _=${runtimeAlias}._||(${runtimeAlias}._=[]);` : "var G=globalThis.__g,_=G._||(G._=[]);"
+  ];
+  if (helperKeys.has("class-private-field-set")) {
+    lines.push('_[0]=function(a,b,c,d,e){if(d==="m")throw new TypeError("Private method is not writable");if(d==="a"&&!e)throw new TypeError("Private accessor was defined without a setter");if(typeof b==="function"?a!==b||!e:!b.has(a))throw new TypeError("Cannot write private member to an object whose class did not declare it");return d==="a"?e.call(a,c):e?e.value=c:b.set(a,c),c;};');
+  }
+  if (helperKeys.has("class-private-field-get")) {
+    lines.push('_[1]=function(a,b,c,d){if(c==="a"&&!d)throw new TypeError("Private accessor was defined without a getter");if(typeof b==="function"?a!==b||!d:!b.has(a))throw new TypeError("Cannot read private member from an object whose class did not declare it");return c==="m"?d:c==="a"?d.call(a):d?d.value:b.get(a);};');
+  }
+  if (helperKeys.has("set-function-name")) {
+    lines.push('_[2]=function(a,b,c){typeof b==="symbol"&&(b=b.description?"["+b.description+"]":"");return Object.defineProperty(a,"name",{configurable:!0,value:c?c+" "+b:b});};');
+  }
+  if (helperKeys.has("run-initializers")) {
+    lines.push("_[3]=function(a,b,c){for(var d=arguments.length>2,e=0;e<b.length;e++)c=d?b[e].call(a,c):b[e].call(a);return d?c:void 0;};");
+  }
+  if (helperKeys.has("es-decorate")) {
+    lines.push('_[4]=function(a,b,c,d,e,f){function g(h){if(h!==void 0&&typeof h!=="function")throw new TypeError("Function expected");return h;}var i=d.kind,j=i==="getter"?"get":i==="setter"?"set":"value";a=!b&&a?d["static"]?a:a.prototype:null;b=b||(a?Object.getOwnPropertyDescriptor(a,d.name):{});for(var k,l=!1,m=c.length-1;m>=0;m--){k={};for(var n in d)k[n]=n==="access"?{}:d[n];for(n in d.access)k.access[n]=d.access[n];k.addInitializer=function(h){if(l)throw new TypeError("Cannot add initializers after decoration has completed");f.push(g(h||null));};var o=(0,c[m])(i==="accessor"?{get:b.get,set:b.set}:b[j],k);if(i==="accessor"){if(o!==void 0){if(o===null||typeof o!=="object")throw new TypeError("Object expected");if(k=g(o.get))b.get=k;if(k=g(o.set))b.set=k;(k=g(o.init))&&e.unshift(k);}}else if(k=g(o))i==="field"?e.unshift(k):b[j]=k;}a&&Object.defineProperty(a,d.name,b);l=!0;};');
+  }
+  if (helperKeys.has("closure-template-object")) {
+    lines.push("_[5]=function(a){a.raw=a;Object.freeze&&Object.freeze(a);return a;};");
+  }
+  if (helperKeys.has("closure-inherits")) {
+    lines.push('_[6]=function(a,b){a.prototype=Object.create(b.prototype);a.prototype.constructor=a;if(Object.setPrototypeOf)Object.setPrototypeOf(a,b);else for(var c in b)if(c!="prototype")if(Object.defineProperties){var d=Object.getOwnPropertyDescriptor(b,c);d&&Object.defineProperty(a,c,d);}else a[c]=b[c];a.lc=b.prototype;};');
+  }
+  return lines.join("");
+}
+var init_es5 = __esm(() => {
+  init_load();
+});
+
+// src/stages/closure/postprocess/io.ts
+import fs13 from "fs/promises";
+async function readCachedText(filePath, cache) {
+  let pending = cache.get(filePath);
+  if (!pending) {
+    pending = fs13.readFile(filePath, "utf-8");
+    cache.set(filePath, pending);
+  }
+  return pending;
+}
+async function readPropertyRenamingReport(reportPath, cache) {
+  return readCachedText(reportPath, cache);
+}
+var init_io = () => {};
+
+// src/stages/closure/postprocess/runtime.ts
 function injectBundlerRuntimeEs5HelperBag(code, helperBag) {
   if (!helperBag) {
     return code;
@@ -2091,6 +2466,13 @@ function findBundlerRuntimeFinalizeAlias(code) {
   }
   return;
 }
+function wrapBundlerRuntimeOutputFile(code) {
+  const trimmed = code.trimEnd();
+  return `!function(){
+${trimmed}
+}();
+`;
+}
 function findBundlerRuntimeRootAliases(code) {
   const aliases = new Set;
   for (const pattern of [
@@ -2113,47 +2495,164 @@ function stripStandaloneRuntimeAlias(code, runtimeAlias) {
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-function wrapBundlerRuntimeOutputFile(code) {
-  const trimmed = code.trimEnd();
-  return `!function(){
-${trimmed}
-}();
-`;
-}
-async function readInputContents(inputPath, cache) {
-  let pending = cache.get(inputPath);
-  if (!pending) {
-    pending = fs13.readFile(inputPath, "utf-8");
-    cache.set(inputPath, pending);
-  }
-  return pending;
-}
-function renderBundlerRuntimeEs5HelperBag(helperKeys, runtimeAlias) {
-  const lines = [
-    runtimeAlias ? `var _=${runtimeAlias}._||(${runtimeAlias}._=[]);` : "var G=globalThis.__g,_=G._||(G._=[]);"
+
+// src/stages/closure/postprocess.ts
+import fs14 from "fs/promises";
+async function runClosurePostprocess({
+  chunkMode,
+  languageOut,
+  prepared
+}) {
+  const propertyRenamingReports = new Map;
+  const es5Rewrite = createEs5HelperRewriteContext({
+    bundlerRuntimeBaseInputPath: prepared.bundlerRuntimeBaseInputPath,
+    chunkMode,
+    languageOut
+  });
+  const inputContents = new Map;
+  const inputPaths = [
+    ...new Set(prepared.postprocessActions.map((action) => action.inputPath))
   ];
-  if (helperKeys.has("class-private-field-set")) {
-    lines.push('_[0]=function(a,b,c,d,e){if(d==="m")throw new TypeError("Private method is not writable");if(d==="a"&&!e)throw new TypeError("Private accessor was defined without a setter");if(typeof b==="function"?a!==b||!e:!b.has(a))throw new TypeError("Cannot write private member to an object whose class did not declare it");return d==="a"?e.call(a,c):e?e.value=c:b.set(a,c),c;};');
+  await Promise.all(inputPaths.map(async (inputPath) => {
+    if (!es5Rewrite.requiresInputRead()) {
+      return;
+    }
+    const originalContents = await readCachedText(inputPath, inputContents);
+    applyEs5HelperRewrite(inputPath, originalContents, es5Rewrite);
+  }));
+  await Promise.all(prepared.postprocessActions.map(async (action) => {
+    await ensureParentDirectory(action.outputPath);
+    const wrapBundlerRuntimeOutput = chunkMode === "bundler-runtime";
+    const reportText = action.propertyRenamingReportPath ? await readPropertyRenamingReport(action.propertyRenamingReportPath, propertyRenamingReports) : "";
+    const hasNoRewriteActions = action.kind === "copy" && !reportText && !es5Rewrite.requiresInputRead() && !wrapBundlerRuntimeOutput;
+    if (hasNoRewriteActions) {
+      await fs14.copyFile(action.inputPath, action.outputPath);
+      return;
+    }
+    const originalContents = await readCachedText(action.inputPath, inputContents);
+    let contents = applyEs5HelperRewrite(action.inputPath, originalContents, es5Rewrite);
+    if (action.kind === "rewrite-gcc-exports" || action.kind === "rewrite-gcc-exports-and-decorator-metadata") {
+      contents = rewriteGccExports(contents);
+    }
+    if (reportText && (action.kind === "rewrite-decorator-metadata" || action.kind === "rewrite-gcc-exports-and-decorator-metadata")) {
+      contents = rewriteDecoratorMetadata(contents, reportText);
+    }
+    if (action.inputPath === prepared.bundlerRuntimeBaseInputPath) {
+      const runtimeAlias = findBundlerRuntimeFinalizeAlias(contents);
+      contents = injectBundlerRuntimeEs5HelperBag(contents, es5Rewrite.renderHelperBag(runtimeAlias));
+    }
+    contents = canonicalizeBundlerRuntimeRootAccess(contents);
+    if (wrapBundlerRuntimeOutput) {
+      contents = wrapBundlerRuntimeOutputFile(contents);
+    }
+    await fs14.writeFile(action.outputPath, contents);
+  }));
+}
+var init_postprocess = __esm(() => {
+  init_files();
+  init_load();
+  init_es5();
+  init_io();
+});
+
+// src/stages/closure/run-closure.ts
+import fs15 from "fs/promises";
+import path19 from "path";
+async function runClosureStage({
+  chunkPlan,
+  emittedOutDir,
+  explicitExternPaths,
+  finalCacheDir,
+  generatedExternPaths,
+  nativeExternPath,
+  options,
+  outDir,
+  projectCacheDir,
+  supportFiles,
+  packageRoot: packageRoot2
+}) {
+  const { cacheOutputDir } = await prepareClosureStageDirectories({
+    finalCacheDir,
+    outDir
+  });
+  const prepared = prepareClosureJobs({
+    chunkLoader: options.chunks.loader,
+    chunkMode: options.chunks.mode,
+    chunkPlan,
+    compilationLevel: options.compilationLevel,
+    diagnosticsVerbose: options.diagnostics.verbose,
+    emittedOutDir,
+    explicitExternPaths,
+    explicitJsInputs: options.js,
+    finalCacheDir,
+    generatedExternPaths,
+    languageOut: options.languageOut,
+    manifestFile: options.chunks.manifestFile,
+    nativeExternPath,
+    outDir,
+    packageRoot: packageRoot2,
+    publicPath: options.chunks.publicPath,
+    supportFiles
+  });
+  await writeGeneratedAssets(prepared.generatedAssets);
+  const exitCodes = await withInternalTiming("closure:compile", () => compilePreparedClosureJobs({
+    chunkMode: options.chunks.mode,
+    prepared,
+    projectCacheDir,
+    usesPersistentCache: options.cache.mode !== "off"
+  }));
+  const failedExitCode = exitCodes.find((exitCode) => exitCode !== 0);
+  if (failedExitCode !== undefined) {
+    return { cacheOutputFiles: [], exitCode: failedExitCode, outputFiles: [] };
   }
-  if (helperKeys.has("class-private-field-get")) {
-    lines.push('_[1]=function(a,b,c,d){if(c==="a"&&!d)throw new TypeError("Private accessor was defined without a getter");if(typeof b==="function"?a!==b||!d:!b.has(a))throw new TypeError("Cannot read private member from an object whose class did not declare it");return c==="m"?d:c==="a"?d.call(a):d?d.value:b.get(a);};');
-  }
-  if (helperKeys.has("set-function-name")) {
-    lines.push('_[2]=function(a,b,c){typeof b==="symbol"&&(b=b.description?"["+b.description+"]":"");return Object.defineProperty(a,"name",{configurable:!0,value:c?c+" "+b:b});};');
-  }
-  if (helperKeys.has("run-initializers")) {
-    lines.push("_[3]=function(a,b,c){for(var d=arguments.length>2,e=0;e<b.length;e++)c=d?b[e].call(a,c):b[e].call(a);return d?c:void 0;};");
-  }
-  if (helperKeys.has("es-decorate")) {
-    lines.push('_[4]=function(a,b,c,d,e,f){function g(h){if(h!==void 0&&typeof h!=="function")throw new TypeError("Function expected");return h;}var i=d.kind,j=i==="getter"?"get":i==="setter"?"set":"value";a=!b&&a?d["static"]?a:a.prototype:null;b=b||(a?Object.getOwnPropertyDescriptor(a,d.name):{});for(var k,l=!1,m=c.length-1;m>=0;m--){k={};for(var n in d)k[n]=n==="access"?{}:d[n];for(n in d.access)k.access[n]=d.access[n];k.addInitializer=function(h){if(l)throw new TypeError("Cannot add initializers after decoration has completed");f.push(g(h||null));};var o=(0,c[m])(i==="accessor"?{get:b.get,set:b.set}:b[j],k);if(i==="accessor"){if(o!==void 0){if(o===null||typeof o!=="object")throw new TypeError("Object expected");if(k=g(o.get))b.get=k;if(k=g(o.set))b.set=k;(k=g(o.init))&&e.unshift(k);}}else if(k=g(o))i==="field"?e.unshift(k):b[j]=k;}a&&Object.defineProperty(a,d.name,b);l=!0;};');
-  }
-  if (helperKeys.has("closure-template-object")) {
-    lines.push("_[5]=function(a){a.raw=a;Object.freeze&&Object.freeze(a);return a;};");
-  }
-  if (helperKeys.has("closure-inherits")) {
-    lines.push('_[6]=function(a,b){a.prototype=Object.create(b.prototype);a.prototype.constructor=a;if(Object.setPrototypeOf)Object.setPrototypeOf(a,b);else for(var c in b)if(c!="prototype")if(Object.defineProperties){var d=Object.getOwnPropertyDescriptor(b,c);d&&Object.defineProperty(a,c,d);}else a[c]=b[c];a.lc=b.prototype;};');
-  }
-  return lines.join("");
+  await withInternalTiming("closure:postprocess", () => runClosurePostprocess({
+    chunkMode: options.chunks.mode,
+    languageOut: options.languageOut,
+    prepared
+  }));
+  await withInternalTiming("closure:publish", () => publishPreparedClosureOutputs(prepared.publishedOutputs, cacheOutputDir));
+  const cacheOutputFiles = prepared.publishedOutputs.map((outputFile) => path19.join(cacheOutputDir, path19.relative(outDir, outputFile)));
+  return {
+    cacheOutputFiles,
+    exitCode: 0,
+    outputFiles: prepared.publishedOutputs
+  };
+}
+async function prepareClosureStageDirectories({
+  finalCacheDir,
+  outDir
+}) {
+  await fs15.rm(finalCacheDir, { force: true, recursive: true });
+  await ensureDirectory(finalCacheDir);
+  const rawDir = path19.join(finalCacheDir, "raw");
+  const cacheOutputDir = path19.join(finalCacheDir, "outputs");
+  await ensureDirectory(rawDir);
+  await ensureDirectory(cacheOutputDir);
+  await fs15.rm(outDir, { force: true, recursive: true });
+  await ensureDirectory(outDir);
+  return { cacheOutputDir, rawDir };
+}
+async function writeGeneratedAssets(assets) {
+  await Promise.all(assets.map(async (asset) => {
+    await ensureParentDirectory(asset.path);
+    await fs15.writeFile(asset.path, asset.text, "utf-8");
+  }));
+}
+async function compilePreparedClosureJobs({
+  chunkMode,
+  prepared,
+  projectCacheDir,
+  usesPersistentCache
+}) {
+  const cacheDir = usesPersistentCache ? path19.join(projectCacheDir, "closure-jobs") : null;
+  const concurrency = chunkMode === "bundler-runtime" ? determineClosureConcurrency(prepared.compileJobs.length) : 1;
+  return runWithConcurrency(prepared.compileJobs, concurrency, async (job) => runPreparedClosureJob({
+    cacheDir,
+    job
+  }));
+}
+async function publishPreparedClosureOutputs(outputFiles, cacheOutputDir) {
+  await copyOrLinkFiles(outputFiles, cacheOutputDir);
 }
 async function runPreparedClosureJob({
   cacheDir,
@@ -2213,14 +2712,6 @@ async function runPreparedClosureJob({
   }
   return 0;
 }
-async function readPropertyRenamingReport(reportPath, cache) {
-  let pending = cache.get(reportPath);
-  if (!pending) {
-    pending = fs13.readFile(reportPath, "utf-8");
-    cache.set(reportPath, pending);
-  }
-  return pending;
-}
 var init_run_closure = __esm(() => {
   init_files();
   init_timing();
@@ -2228,10 +2719,11 @@ var init_run_closure = __esm(() => {
   init_compiler();
   init_cache2();
   init_concurrency();
+  init_postprocess();
 });
 
 // src/pipeline/build-helpers.ts
-import fs14 from "fs";
+import fs16 from "fs";
 import path20 from "path";
 async function publishOutputs(outputFiles, outDir) {
   if (await publishedOutputsMatch2(outputFiles, outDir)) {
@@ -2254,7 +2746,7 @@ function createBuildDiagnostic(error) {
   };
 }
 async function removeProjectCacheDir(projectCacheDir) {
-  await fs14.promises.rm(projectCacheDir, { force: true, recursive: true });
+  await fs16.promises.rm(projectCacheDir, { force: true, recursive: true });
 }
 var init_build_helpers = __esm(() => {
   init_files();

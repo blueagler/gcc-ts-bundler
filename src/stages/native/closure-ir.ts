@@ -1,9 +1,14 @@
 import ts from "typescript";
 
 import { DiagnosticsPreflight } from "../../api/types";
+import { logInternalDetail } from "../../internal/timing";
 import { loadCompilerOptions } from "./compiler-options";
-import { shouldIgnorePreflightDiagnostic } from "./closure-ir/diagnostics";
-import { collectClosureIrFiles } from "./closure-ir/metadata";
+import {
+  collectClosureIrFiles,
+  scanClosureIrFiles,
+} from "./closure-ir/metadata";
+import type { ClosureIrScanResult } from "./closure-ir/metadata/scan";
+import { collectNativePreflightDiagnostics } from "./closure-ir/preflight";
 export type {
   ClosureIrEnumDeclaration,
   ClosureIrFileMetadata,
@@ -16,6 +21,8 @@ export interface NativeTypeAnalysisContext {
   fileNames: string[];
   program: ts.Program;
 }
+
+export type NativeTypeAnalysisScanResult = ClosureIrScanResult;
 
 export async function createNativeTypeAnalysisContext({
   fileNames,
@@ -42,30 +49,73 @@ export async function createNativeTypeAnalysisContext({
   };
 }
 
+export function scanNativeTypeAnalysisContext({
+  context,
+}: {
+  context: NativeTypeAnalysisContext;
+}): NativeTypeAnalysisScanResult {
+  const { fileNames, program } = context;
+  return scanClosureIrFiles({ fileNames, program });
+}
+
 export function collectNativeTypeAnalysisFromContext({
   context,
   preflight,
+  scan,
 }: {
   context: NativeTypeAnalysisContext;
   preflight: DiagnosticsPreflight;
+  scan?: NativeTypeAnalysisScanResult;
 }) {
-  const { compilerOptions, fileNames, program } = context;
-  const preflightDiagnostics =
-    preflight === "full"
-      ? [...ts.getPreEmitDiagnostics(program)].filter(
-          (diagnostic) => !shouldIgnorePreflightDiagnostic(diagnostic),
-        )
-      : [];
-  const { diagnostics: closureIrDiagnostics, files } = collectClosureIrFiles({
-    compilerOptions,
-    fileNames,
-    program,
+  const preflightDiagnostics = collectNativePreflightDiagnosticsFromContext({
+    context,
+    preflight,
+    scan,
   });
-
+  const { diagnostics: closureIrDiagnostics, files } =
+    collectNativeClosureIrFromContext({ context, scan });
   return {
     diagnostics: [...preflightDiagnostics, ...closureIrDiagnostics],
     files,
   };
+}
+
+export function collectNativePreflightDiagnosticsFromContext({
+  context,
+  preflight,
+  scan,
+}: {
+  context: NativeTypeAnalysisContext;
+  preflight: DiagnosticsPreflight;
+  scan?: NativeTypeAnalysisScanResult;
+}) {
+  const closureIrScan = scan ?? scanNativeTypeAnalysisContext({ context });
+  return collectNativePreflightDiagnostics({
+    preflight,
+    program: context.program,
+    scan: closureIrScan,
+  });
+}
+
+export function collectNativeClosureIrFromContext({
+  context,
+  scan,
+}: {
+  context: NativeTypeAnalysisContext;
+  scan?: NativeTypeAnalysisScanResult;
+}) {
+  const { compilerOptions, fileNames, program } = context;
+  const closureIrScan = scan ?? scanNativeTypeAnalysisContext({ context });
+  logInternalDetail(
+    "native-emit:analysis-scan:files",
+    `${closureIrScan.analyzedFileCount}/${closureIrScan.scannedFileCount}`,
+  );
+  return collectClosureIrFiles({
+    compilerOptions,
+    fileNames,
+    program,
+    scan: closureIrScan,
+  });
 }
 
 export async function collectNativeTypeAnalysis({

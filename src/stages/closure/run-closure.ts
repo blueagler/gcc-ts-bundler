@@ -8,12 +8,7 @@ import {
 } from "../../internal/files";
 import { withInternalTiming } from "../../internal/timing";
 import { ChunkPlanChunk, NormalizedBuildOptions } from "../../internal/types";
-import {
-  prepareClosureJobs,
-  rewriteBundlerRuntimeEs5Helpers,
-  rewriteDecoratorMetadata,
-  rewriteGccExports,
-} from "../../native/load";
+import { prepareClosureJobs } from "../../native/load";
 import {
   ClosureCompilerOptions,
   configureClosureCompilerOptions,
@@ -26,6 +21,7 @@ import {
   tryRestoreCachedClosureJob,
 } from "./cache";
 import { determineClosureConcurrency, runWithConcurrency } from "./concurrency";
+import { runClosurePostprocess } from "./postprocess";
 
 export interface ClosureStageResult {
   cacheOutputFiles: string[];
@@ -58,15 +54,10 @@ export async function runClosureStage({
   supportFiles: string[];
   packageRoot: string;
 }): Promise<ClosureStageResult> {
-  await fs.rm(finalCacheDir, { force: true, recursive: true });
-  await ensureDirectory(finalCacheDir);
-
-  const rawDir = path.join(finalCacheDir, "raw");
-  const cacheOutputDir = path.join(finalCacheDir, "outputs");
-  await ensureDirectory(rawDir);
-  await ensureDirectory(cacheOutputDir);
-  await fs.rm(outDir, { force: true, recursive: true });
-  await ensureDirectory(outDir);
+  const { cacheOutputDir } = await prepareClosureStageDirectories({
+    finalCacheDir,
+    outDir,
+  });
 
   const prepared = prepareClosureJobs({
     chunkLoader: options.chunks.loader,
@@ -88,28 +79,15 @@ export async function runClosureStage({
     supportFiles,
   });
 
-  await Promise.all(
-    prepared.generatedAssets.map(async (asset) => {
-      await ensureParentDirectory(asset.path);
-      await fs.writeFile(asset.path, asset.text, "utf-8");
-    }),
-  );
+  await writeGeneratedAssets(prepared.generatedAssets);
 
-  const closureJobCacheDir =
-    options.cache.mode === "off"
-      ? null
-      : path.join(projectCacheDir, "closure-jobs");
-  const concurrency =
-    options.chunks.mode === "bundler-runtime"
-      ? determineClosureConcurrency(prepared.compileJobs.length)
-      : 1;
   const exitCodes = await withInternalTiming("closure:compile", () =>
-    runWithConcurrency(prepared.compileJobs, concurrency, async (job) =>
-      runPreparedClosureJob({
-        cacheDir: closureJobCacheDir,
-        job,
-      }),
-    ),
+    compilePreparedClosureJobs({
+      chunkMode: options.chunks.mode,
+      prepared,
+      projectCacheDir,
+      usesPersistentCache: options.cache.mode !== "off",
+    }),
   );
   const failedExitCode = exitCodes.find((exitCode) => exitCode !== 0);
   if (failedExitCode !== undefined) {
@@ -125,7 +103,7 @@ export async function runClosureStage({
   );
 
   await withInternalTiming("closure:publish", () =>
-    copyOrLinkFiles(prepared.publishedOutputs, cacheOutputDir),
+    publishPreparedClosureOutputs(prepared.publishedOutputs, cacheOutputDir),
   );
   const cacheOutputFiles = prepared.publishedOutputs.map((outputFile) =>
     path.join(cacheOutputDir, path.relative(outDir, outputFile)),
@@ -138,292 +116,68 @@ export async function runClosureStage({
   };
 }
 
-async function runClosurePostprocess({
+async function prepareClosureStageDirectories({
+  finalCacheDir,
+  outDir,
+}: {
+  finalCacheDir: string;
+  outDir: string;
+}) {
+  await fs.rm(finalCacheDir, { force: true, recursive: true });
+  await ensureDirectory(finalCacheDir);
+
+  const rawDir = path.join(finalCacheDir, "raw");
+  const cacheOutputDir = path.join(finalCacheDir, "outputs");
+  await ensureDirectory(rawDir);
+  await ensureDirectory(cacheOutputDir);
+  await fs.rm(outDir, { force: true, recursive: true });
+  await ensureDirectory(outDir);
+
+  return { cacheOutputDir, rawDir };
+}
+
+async function writeGeneratedAssets(
+  assets: ReturnType<typeof prepareClosureJobs>["generatedAssets"],
+) {
+  await Promise.all(
+    assets.map(async (asset) => {
+      await ensureParentDirectory(asset.path);
+      await fs.writeFile(asset.path, asset.text, "utf-8");
+    }),
+  );
+}
+
+async function compilePreparedClosureJobs({
   chunkMode,
-  languageOut,
   prepared,
+  projectCacheDir,
+  usesPersistentCache,
 }: {
   chunkMode: string;
-  languageOut: string;
   prepared: ReturnType<typeof prepareClosureJobs>;
+  projectCacheDir: string;
+  usesPersistentCache: boolean;
 }) {
-  const propertyRenamingReports = new Map<string, Promise<string>>();
-  const es5Rewrite = createEs5HelperRewriteContext({
-    bundlerRuntimeBaseInputPath: prepared.bundlerRuntimeBaseInputPath,
-    chunkMode,
-    languageOut,
-  });
-  const inputContents = new Map<string, Promise<string>>();
-  const inputPaths = [
-    ...new Set(prepared.postprocessActions.map((action) => action.inputPath)),
-  ];
-
-  await Promise.all(
-    inputPaths.map(async (inputPath) => {
-      if (!es5Rewrite.requiresInputRead()) {
-        return;
-      }
-      const originalContents = await readInputContents(
-        inputPath,
-        inputContents,
-      );
-      applyEs5HelperRewrite(inputPath, originalContents, es5Rewrite);
-    }),
-  );
-
-  await Promise.all(
-    prepared.postprocessActions.map(async (action) => {
-      await ensureParentDirectory(action.outputPath);
-      const wrapBundlerRuntimeOutput = chunkMode === "bundler-runtime";
-      const reportText = action.propertyRenamingReportPath
-        ? await readPropertyRenamingReport(
-            action.propertyRenamingReportPath,
-            propertyRenamingReports,
-          )
-        : "";
-      if (
-        action.kind === "copy" &&
-        !reportText &&
-        !es5Rewrite.requiresInputRead() &&
-        !wrapBundlerRuntimeOutput
-      ) {
-        await fs.copyFile(action.inputPath, action.outputPath);
-        return;
-      }
-
-      const originalContents = await readInputContents(
-        action.inputPath,
-        inputContents,
-      );
-      let contents = applyEs5HelperRewrite(
-        action.inputPath,
-        originalContents,
-        es5Rewrite,
-      );
-      if (
-        action.kind === "rewrite-gcc-exports" ||
-        action.kind === "rewrite-gcc-exports-and-decorator-metadata"
-      ) {
-        contents = rewriteGccExports(contents);
-      }
-      if (
-        reportText &&
-        (action.kind === "rewrite-decorator-metadata" ||
-          action.kind === "rewrite-gcc-exports-and-decorator-metadata")
-      ) {
-        contents = rewriteDecoratorMetadata(contents, reportText);
-      }
-      if (action.inputPath === prepared.bundlerRuntimeBaseInputPath) {
-        const runtimeAlias = findBundlerRuntimeFinalizeAlias(contents);
-        contents = injectBundlerRuntimeEs5HelperBag(
-          contents,
-          es5Rewrite.renderHelperBag(runtimeAlias),
-        );
-      }
-      contents = canonicalizeBundlerRuntimeRootAccess(contents);
-      if (wrapBundlerRuntimeOutput) {
-        contents = wrapBundlerRuntimeOutputFile(contents);
-      }
-      await fs.writeFile(action.outputPath, contents);
+  const cacheDir = usesPersistentCache
+    ? path.join(projectCacheDir, "closure-jobs")
+    : null;
+  const concurrency =
+    chunkMode === "bundler-runtime"
+      ? determineClosureConcurrency(prepared.compileJobs.length)
+      : 1;
+  return runWithConcurrency(prepared.compileJobs, concurrency, async (job) =>
+    runPreparedClosureJob({
+      cacheDir,
+      job,
     }),
   );
 }
 
-function createEs5HelperRewriteContext({
-  bundlerRuntimeBaseInputPath,
-  chunkMode,
-  languageOut,
-}: {
-  bundlerRuntimeBaseInputPath?: string;
-  chunkMode: string;
-  languageOut: string;
-}) {
-  const shouldRewriteHelpers =
-    chunkMode === "bundler-runtime" &&
-    /ECMASCRIPT(?:3|5)/.test(languageOut) &&
-    !!bundlerRuntimeBaseInputPath;
-  const helperKeys = new Set<string>();
-  const rewrittenInputs = new Map<string, string>();
-
-  return {
-    requiresInputRead() {
-      return shouldRewriteHelpers;
-    },
-    renderHelperBag(runtimeAlias?: string) {
-      return helperKeys.size === 0
-        ? ""
-        : renderBundlerRuntimeEs5HelperBag(helperKeys, runtimeAlias);
-    },
-    rewrite(inputPath: string, contents: string) {
-      if (!shouldRewriteHelpers || inputPath === bundlerRuntimeBaseInputPath) {
-        return contents;
-      }
-      const cached = rewrittenInputs.get(inputPath);
-      if (cached !== undefined) {
-        return cached;
-      }
-      const rewritten = rewriteBundlerRuntimeEs5Helpers(contents);
-      for (const helperKey of rewritten.helperKeys) {
-        helperKeys.add(helperKey);
-      }
-      rewrittenInputs.set(inputPath, rewritten.code);
-      return rewritten.code;
-    },
-  };
-}
-
-function applyEs5HelperRewrite(
-  inputPath: string,
-  contents: string,
-  rewriteContext: ReturnType<typeof createEs5HelperRewriteContext>,
+async function publishPreparedClosureOutputs(
+  outputFiles: string[],
+  cacheOutputDir: string,
 ) {
-  return rewriteContext.rewrite(inputPath, contents);
-}
-
-function injectBundlerRuntimeEs5HelperBag(code: string, helperBag: string) {
-  if (!helperBag) {
-    return code;
-  }
-  const runtimeAlias = findBundlerRuntimeFinalizeAlias(code);
-  const markers = runtimeAlias
-    ? [`${runtimeAlias}.u(`, `${runtimeAlias}.n(`]
-    : ["G.u(", "globalThis.__g.u(", 'globalThis["__g"].u('];
-  for (const marker of markers) {
-    const markerIndex = code.lastIndexOf(marker);
-    if (markerIndex !== -1) {
-      return `${code.slice(0, markerIndex)}${helperBag}${code.slice(markerIndex)}`;
-    }
-  }
-  return `${code}${helperBag}`;
-}
-
-function canonicalizeBundlerRuntimeRootAccess(code: string) {
-  if (!code.includes("var G=globalThis.__g,_=G._")) {
-    return code;
-  }
-  let next = code
-    .replaceAll("globalThis.__g.", "G.")
-    .replaceAll('globalThis["__g"].', "G.");
-  for (const runtimeAlias of findBundlerRuntimeRootAliases(next)) {
-    if (runtimeAlias === "G") {
-      continue;
-    }
-    next = next.replaceAll(`${runtimeAlias}.`, "G.");
-    next = stripStandaloneRuntimeAlias(next, runtimeAlias);
-  }
-  return next;
-}
-
-function findBundlerRuntimeFinalizeAlias(code: string) {
-  const aliases = findBundlerRuntimeRootAliases(code);
-  for (const alias of aliases) {
-    if (code.includes(`${alias}.u(`) || code.includes(`${alias}.n(`)) {
-      return alias;
-    }
-  }
-  return undefined;
-}
-
-function findBundlerRuntimeRootAliases(code: string) {
-  const aliases = new Set<string>();
-  for (const pattern of [
-    /\bvar\s+([A-Za-z_$][\w$]*)=globalThis(?:\.__g|\["__g"\])(?=[,;])/g,
-    /,([A-Za-z_$][\w$]*)=globalThis(?:\.__g|\["__g"\])(?=[,;])/g,
-    /(?:^|[;(])([A-Za-z_$][\w$]*)=globalThis(?:\.__g|\["__g"\])(?=;)/gm,
-  ]) {
-    for (const match of code.matchAll(pattern)) {
-      aliases.add(match[1]!);
-    }
-  }
-  return [...aliases];
-}
-
-function stripStandaloneRuntimeAlias(code: string, runtimeAlias: string) {
-  const escapedAlias = escapeRegex(runtimeAlias);
-  return code
-    .replace(
-      new RegExp(
-        `\\bvar ${escapedAlias}=globalThis(?:\\.__g|\\["__g"\\]);(?=G\\.)`,
-        "g",
-      ),
-      "",
-    )
-    .replace(
-      new RegExp(
-        `(^|[;\\n])${escapedAlias}=globalThis(?:\\.__g|\\["__g"\\]);(?=G\\.)`,
-        "gm",
-      ),
-      "$1",
-    )
-    .replace(/\n{3,}/g, "\n\n");
-}
-
-function escapeRegex(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function wrapBundlerRuntimeOutputFile(code: string) {
-  const trimmed = code.trimEnd();
-  return `!function(){\n${trimmed}\n}();\n`;
-}
-
-async function readInputContents(
-  inputPath: string,
-  cache: Map<string, Promise<string>>,
-) {
-  let pending = cache.get(inputPath);
-  if (!pending) {
-    pending = fs.readFile(inputPath, "utf-8");
-    cache.set(inputPath, pending);
-  }
-  return pending;
-}
-
-function renderBundlerRuntimeEs5HelperBag(
-  helperKeys: Set<string>,
-  runtimeAlias?: string,
-) {
-  const lines = [
-    runtimeAlias
-      ? `var _=${runtimeAlias}._||(${runtimeAlias}._=[]);`
-      : "var G=globalThis.__g,_=G._||(G._=[]);",
-  ];
-  if (helperKeys.has("class-private-field-set")) {
-    lines.push(
-      '_[0]=function(a,b,c,d,e){if(d==="m")throw new TypeError("Private method is not writable");if(d==="a"&&!e)throw new TypeError("Private accessor was defined without a setter");if(typeof b==="function"?a!==b||!e:!b.has(a))throw new TypeError("Cannot write private member to an object whose class did not declare it");return d==="a"?e.call(a,c):e?e.value=c:b.set(a,c),c;};',
-    );
-  }
-  if (helperKeys.has("class-private-field-get")) {
-    lines.push(
-      '_[1]=function(a,b,c,d){if(c==="a"&&!d)throw new TypeError("Private accessor was defined without a getter");if(typeof b==="function"?a!==b||!d:!b.has(a))throw new TypeError("Cannot read private member from an object whose class did not declare it");return c==="m"?d:c==="a"?d.call(a):d?d.value:b.get(a);};',
-    );
-  }
-  if (helperKeys.has("set-function-name")) {
-    lines.push(
-      '_[2]=function(a,b,c){typeof b==="symbol"&&(b=b.description?"["+b.description+"]":"");return Object.defineProperty(a,"name",{configurable:!0,value:c?c+" "+b:b});};',
-    );
-  }
-  if (helperKeys.has("run-initializers")) {
-    lines.push(
-      "_[3]=function(a,b,c){for(var d=arguments.length>2,e=0;e<b.length;e++)c=d?b[e].call(a,c):b[e].call(a);return d?c:void 0;};",
-    );
-  }
-  if (helperKeys.has("es-decorate")) {
-    lines.push(
-      '_[4]=function(a,b,c,d,e,f){function g(h){if(h!==void 0&&typeof h!=="function")throw new TypeError("Function expected");return h;}var i=d.kind,j=i==="getter"?"get":i==="setter"?"set":"value";a=!b&&a?d["static"]?a:a.prototype:null;b=b||(a?Object.getOwnPropertyDescriptor(a,d.name):{});for(var k,l=!1,m=c.length-1;m>=0;m--){k={};for(var n in d)k[n]=n==="access"?{}:d[n];for(n in d.access)k.access[n]=d.access[n];k.addInitializer=function(h){if(l)throw new TypeError("Cannot add initializers after decoration has completed");f.push(g(h||null));};var o=(0,c[m])(i==="accessor"?{get:b.get,set:b.set}:b[j],k);if(i==="accessor"){if(o!==void 0){if(o===null||typeof o!=="object")throw new TypeError("Object expected");if(k=g(o.get))b.get=k;if(k=g(o.set))b.set=k;(k=g(o.init))&&e.unshift(k);}}else if(k=g(o))i==="field"?e.unshift(k):b[j]=k;}a&&Object.defineProperty(a,d.name,b);l=!0;};',
-    );
-  }
-  if (helperKeys.has("closure-template-object")) {
-    lines.push(
-      "_[5]=function(a){a.raw=a;Object.freeze&&Object.freeze(a);return a;};",
-    );
-  }
-  if (helperKeys.has("closure-inherits")) {
-    lines.push(
-      '_[6]=function(a,b){a.prototype=Object.create(b.prototype);a.prototype.constructor=a;if(Object.setPrototypeOf)Object.setPrototypeOf(a,b);else for(var c in b)if(c!="prototype")if(Object.defineProperties){var d=Object.getOwnPropertyDescriptor(b,c);d&&Object.defineProperty(a,c,d);}else a[c]=b[c];a.lc=b.prototype;};',
-    );
-  }
-  return lines.join("");
+  await copyOrLinkFiles(outputFiles, cacheOutputDir);
 }
 
 async function runPreparedClosureJob({
@@ -495,16 +249,4 @@ async function runPreparedClosureJob({
   }
 
   return 0;
-}
-
-async function readPropertyRenamingReport(
-  reportPath: string,
-  cache: Map<string, Promise<string>>,
-) {
-  let pending = cache.get(reportPath);
-  if (!pending) {
-    pending = fs.readFile(reportPath, "utf-8");
-    cache.set(reportPath, pending);
-  }
-  return pending;
 }

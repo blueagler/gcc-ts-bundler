@@ -14,6 +14,14 @@ export function logInternalTiming(label: string, durationMs: number) {
   console.error(`[gcc-ts-bundler timing] ${label}: ${durationMs.toFixed(1)}ms`);
 }
 
+export function logInternalDetail(label: string, detail: string) {
+  if (!SHOW_INTERNAL_TIMINGS) {
+    return;
+  }
+
+  console.error(`[gcc-ts-bundler timing] ${label}: ${detail}`);
+}
+
 export async function withInternalTiming<T>(
   label: string,
   work: () => Promise<T> | T,

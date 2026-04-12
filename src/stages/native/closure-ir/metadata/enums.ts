@@ -3,7 +3,7 @@ import ts from "typescript";
 import { ClosureIrEnumDeclaration } from "../types";
 
 export function collectUnsafeEnumSymbols(
-  program: ts.Program,
+  sourceFiles: Iterable<ts.SourceFile>,
   checker: ts.TypeChecker,
 ) {
   const unsafe = new Set<ts.Symbol>();
@@ -18,7 +18,7 @@ export function collectUnsafeEnumSymbols(
     }
   };
 
-  for (const sourceFile of program.getSourceFiles()) {
+  for (const sourceFile of sourceFiles) {
     const visit = (node: ts.Node) => {
       if (
         ts.isElementAccessExpression(node) &&

@@ -13,8 +13,10 @@ import {
 } from "../../internal/types";
 import { collectFileStates, transpileSources } from "../../native/load";
 import {
-  collectNativeTypeAnalysisFromContext,
+  collectNativeClosureIrFromContext,
+  collectNativePreflightDiagnosticsFromContext,
   createNativeTypeAnalysisContext,
+  scanNativeTypeAnalysisContext,
 } from "./closure-ir";
 
 export interface NativeEmitStageResult {
@@ -64,49 +66,32 @@ export async function emitNativeStage({
   workspaceDir: string;
 }): Promise<NativeEmitStageResult> {
   const usesPersistentCache = options.cache.mode === "persistent";
-  const outDir = path.join(cacheDir, "out");
-  const externsPath = path.join(cacheDir, "native-generated.externs.js");
-  const metadataPathForNative = path.join(cacheDir, "closure-ir.json");
-  const runtimeSupportFiles = tsxRuntimeSourceFiles.map((fileName) =>
-    toEmittedPath(fileName, outDir, workspaceDir),
-  );
+  const paths = createNativeEmitPaths({
+    cacheDir,
+    tsxRuntimeSourceFiles,
+    workspaceDir,
+  });
   const combinedFileNames = uniqueSortedStrings([
     ...fileNames,
     ...tsxRuntimeSourceFiles,
   ]);
   const dependencyModules = collectDependencyModules(packageAliases);
   const dependencyRuntimeFiles = collectDependencyRuntimeFiles({
-    outDir,
+    outDir: paths.outDir,
     sourceFiles: combinedFileNames,
     workspaceDir,
   });
 
-  const cachedMetadata = usesPersistentCache
-    ? await readMetadata(metadataPath)
-    : null;
-  if (
-    cachedMetadata &&
-    (await filesExist([
-      cachedMetadata.externsPath,
-      cachedMetadata.metadataPath,
-      ...cachedMetadata.emittedFiles,
-      ...cachedMetadata.supportFiles,
-    ]))
-  ) {
-    return {
-      dependencyModules: cachedMetadata.dependencyModules,
-      dependencyRuntimeFiles: cachedMetadata.dependencyRuntimeFiles,
-      diagnostics: [],
-      emitSkipped: false,
-      emittedFiles: cachedMetadata.emittedFiles,
-      externsPath: cachedMetadata.externsPath,
-      outDir,
-      supportFiles: cachedMetadata.supportFiles,
-    };
+  const cachedResult = await restoreCachedNativeEmitResult({
+    dependencyModules,
+    dependencyRuntimeFiles,
+    metadataPath,
+    outDir: paths.outDir,
+    usesPersistentCache,
+  });
+  if (cachedResult) {
+    return cachedResult;
   }
-
-  await fs.promises.rm(outDir, { force: true, recursive: true });
-  await fs.promises.mkdir(outDir, { recursive: true });
 
   const missingInputDiagnostics = await getMissingInputDiagnostics({
     fileNames: combinedFileNames,
@@ -120,11 +105,13 @@ export async function emitNativeStage({
       diagnostics: missingInputDiagnostics,
       emitSkipped: true,
       emittedFiles: [],
-      externsPath,
-      outDir,
+      externsPath: paths.externsPath,
+      outDir: paths.outDir,
       supportFiles: [],
     };
   }
+
+  await resetNativeEmitOutDir(paths.outDir);
 
   const analysisContext = await withInternalTiming(
     "native-emit:analysis-context",
@@ -135,39 +122,63 @@ export async function emitNativeStage({
         workspaceDir,
       }),
   );
-  const analysis = await withInternalTiming("native-emit:closure-ir", () =>
-    collectNativeTypeAnalysisFromContext({
-      context: analysisContext,
-      preflight: options.diagnostics.preflight,
-    }),
+  const analysisScan = await withInternalTiming(
+    "native-emit:analysis-scan",
+    () =>
+      Promise.resolve(
+        scanNativeTypeAnalysisContext({ context: analysisContext }),
+      ),
   );
-  if (analysis.diagnostics.length > 0) {
+  const preflightDiagnostics = await withInternalTiming(
+    "native-emit:preflight",
+    () =>
+      Promise.resolve(
+        collectNativePreflightDiagnosticsFromContext({
+          context: analysisContext,
+          preflight: options.diagnostics.preflight,
+          scan: analysisScan,
+        }),
+      ),
+  );
+  const analysis = await withInternalTiming("native-emit:closure-ir", () =>
+    Promise.resolve(
+      collectNativeClosureIrFromContext({
+        context: analysisContext,
+        scan: analysisScan,
+      }),
+    ),
+  );
+  const analysisDiagnostics = [
+    ...preflightDiagnostics,
+    ...analysis.diagnostics,
+  ];
+  if (analysisDiagnostics.length > 0) {
     return {
       dependencyModules,
       dependencyRuntimeFiles,
-      diagnostics: analysis.diagnostics,
+      diagnostics: analysisDiagnostics,
       emitSkipped: true,
       emittedFiles: [],
-      externsPath,
-      outDir,
+      externsPath: paths.externsPath,
+      outDir: paths.outDir,
       supportFiles: [],
     };
   }
 
   await fs.promises.writeFile(
-    metadataPathForNative,
+    paths.metadataPathForNative,
     JSON.stringify(analysis.files, null, 2),
     "utf-8",
   );
   const result = await withInternalTiming("native-emit:transpile", () =>
     Promise.resolve(
-      transpileSources({
+      runNativeTranspile({
         chunkMode: options.chunks.mode,
-        metadataPath: metadataPathForNative,
-        externsPath,
-        fileNames: combinedFileNames,
+        combinedFileNames,
+        externsPath: paths.externsPath,
         lazyImports,
-        outDir,
+        metadataPath: paths.metadataPathForNative,
+        outDir: paths.outDir,
         packageAliases,
         packageJsonFiles,
         workspaceDir,
@@ -175,28 +186,20 @@ export async function emitNativeStage({
     ),
   );
   const finalSupportFiles = uniqueSortedStrings([
-    ...runtimeSupportFiles,
+    ...paths.runtimeSupportFiles,
     ...result.supportFiles,
   ]);
 
   if (usesPersistentCache) {
-    await fs.promises.writeFile(
+    await persistNativeEmitMetadata({
+      dependencyModules,
+      dependencyRuntimeFiles,
+      emittedFiles: result.emittedFiles,
+      externsPath: result.externsPath,
       metadataPath,
-      JSON.stringify(
-        {
-          dependencyModules,
-          dependencyRuntimeFiles,
-          emittedFiles: result.emittedFiles,
-          externsPath: result.externsPath,
-          metadataPath: metadataPathForNative,
-          supportFiles: finalSupportFiles,
-          version: NATIVE_EMIT_METADATA_VERSION,
-        } satisfies NativeEmitMetadata,
-        null,
-        2,
-      ),
-      "utf-8",
-    );
+      metadataPathForNative: paths.metadataPathForNative,
+      supportFiles: finalSupportFiles,
+    });
   }
 
   return {
@@ -206,9 +209,152 @@ export async function emitNativeStage({
     emitSkipped: false,
     emittedFiles: result.emittedFiles,
     externsPath: result.externsPath,
-    outDir,
+    outDir: paths.outDir,
     supportFiles: finalSupportFiles,
   };
+}
+
+function createNativeEmitPaths({
+  cacheDir,
+  tsxRuntimeSourceFiles,
+  workspaceDir,
+}: {
+  cacheDir: string;
+  tsxRuntimeSourceFiles: string[];
+  workspaceDir: string;
+}) {
+  const outDir = path.join(cacheDir, "out");
+  return {
+    externsPath: path.join(cacheDir, "native-generated.externs.js"),
+    metadataPathForNative: path.join(cacheDir, "closure-ir.json"),
+    outDir,
+    runtimeSupportFiles: tsxRuntimeSourceFiles.map((fileName) =>
+      toEmittedPath(fileName, outDir, workspaceDir),
+    ),
+  };
+}
+
+async function restoreCachedNativeEmitResult({
+  dependencyModules,
+  dependencyRuntimeFiles,
+  metadataPath,
+  outDir,
+  usesPersistentCache,
+}: {
+  dependencyModules: string[];
+  dependencyRuntimeFiles: string[];
+  metadataPath: string;
+  outDir: string;
+  usesPersistentCache: boolean;
+}) {
+  if (!usesPersistentCache) {
+    return null;
+  }
+
+  const cachedMetadata = await readMetadata(metadataPath);
+  if (
+    !cachedMetadata ||
+    !(await filesExist([
+      cachedMetadata.externsPath,
+      cachedMetadata.metadataPath,
+      ...cachedMetadata.emittedFiles,
+      ...cachedMetadata.supportFiles,
+    ]))
+  ) {
+    return null;
+  }
+
+  return {
+    dependencyModules:
+      cachedMetadata.dependencyModules.length > 0
+        ? cachedMetadata.dependencyModules
+        : dependencyModules,
+    dependencyRuntimeFiles:
+      cachedMetadata.dependencyRuntimeFiles.length > 0
+        ? cachedMetadata.dependencyRuntimeFiles
+        : dependencyRuntimeFiles,
+    diagnostics: [],
+    emitSkipped: false,
+    emittedFiles: cachedMetadata.emittedFiles,
+    externsPath: cachedMetadata.externsPath,
+    outDir,
+    supportFiles: cachedMetadata.supportFiles,
+  } satisfies NativeEmitStageResult;
+}
+
+async function resetNativeEmitOutDir(outDir: string) {
+  await fs.promises.rm(outDir, { force: true, recursive: true });
+  await fs.promises.mkdir(outDir, { recursive: true });
+}
+
+function runNativeTranspile({
+  chunkMode,
+  combinedFileNames,
+  externsPath,
+  lazyImports,
+  metadataPath,
+  outDir,
+  packageAliases,
+  packageJsonFiles,
+  workspaceDir,
+}: {
+  chunkMode: string;
+  combinedFileNames: string[];
+  externsPath: string;
+  lazyImports: LazyImport[];
+  metadataPath: string;
+  outDir: string;
+  packageAliases: PackageAlias[];
+  packageJsonFiles: string[];
+  workspaceDir: string;
+}) {
+  return transpileSources({
+    chunkMode,
+    metadataPath,
+    externsPath,
+    fileNames: combinedFileNames,
+    lazyImports,
+    outDir,
+    packageAliases,
+    packageJsonFiles,
+    workspaceDir,
+  });
+}
+
+async function persistNativeEmitMetadata({
+  dependencyModules,
+  dependencyRuntimeFiles,
+  emittedFiles,
+  externsPath,
+  metadataPath,
+  metadataPathForNative,
+  supportFiles,
+}: {
+  dependencyModules: string[];
+  dependencyRuntimeFiles: string[];
+  emittedFiles: string[];
+  externsPath: string;
+  metadataPath: string;
+  metadataPathForNative: string;
+  supportFiles: string[];
+}) {
+  await fs.promises.writeFile(
+    metadataPath,
+    JSON.stringify(
+      {
+        dependencyModules,
+        dependencyRuntimeFiles,
+        emittedFiles,
+        externsPath,
+        metadataPath: metadataPathForNative,
+        supportFiles,
+        version: NATIVE_EMIT_METADATA_VERSION,
+      } satisfies NativeEmitMetadata,
+      null,
+      2,
+    ),
+    "utf-8",
+  );
 }
 
 async function getMissingInputDiagnostics({

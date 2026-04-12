@@ -1,133 +1,99 @@
 import ts from "typescript";
 
-import { containsDecorators, transpileDecoratedSource } from "./decorators";
+import { collectClosureIrFileMetadata } from "./metadata/collect";
+import { collectUnsafeEnumSymbols } from "./metadata/enums";
 import {
-  buildClassJsDoc,
-  buildFunctionJsDoc,
-  buildFunctionObjectParamRecord,
-  buildInterfaceDeclarationSnippet,
-  buildTypeAliasDeclarationSnippet,
-} from "./metadata/docs";
-import {
-  buildEnumDeclarationMetadata,
-  collectUnsafeEnumSymbols,
-} from "./metadata/enums";
-import {
-  ClosureIrEnumDeclaration,
-  ClosureIrFileMetadata,
-  ClosureIrTypeDeclaration,
-} from "./types";
+  scanClosureIrSourceFiles,
+  type ClosureIrScanResult,
+} from "./metadata/scan";
+import { ClosureIrFileMetadata } from "./types";
+
+export interface ClosureIrCollectionResult {
+  diagnostics: ts.Diagnostic[];
+  files: ClosureIrFileMetadata[];
+  scan: ClosureIrScanResult;
+}
+
+export function scanClosureIrFiles({
+  fileNames,
+  program,
+}: {
+  fileNames: string[];
+  program: ts.Program;
+}) {
+  return scanClosureIrSourceFiles({ fileNames, program });
+}
 
 export function collectClosureIrFiles({
   compilerOptions,
   fileNames,
   program,
+  scan = scanClosureIrFiles({ fileNames, program }),
 }: {
   compilerOptions: ts.CompilerOptions;
   fileNames: string[];
   program: ts.Program;
-}): { diagnostics: ts.Diagnostic[]; files: ClosureIrFileMetadata[] } {
+  scan?: ClosureIrScanResult;
+}): ClosureIrCollectionResult {
+  const files = scan.files.map(({ features, sourceFile }) => ({
+    features,
+    sourceFile,
+  }));
+  const needsChecker = files.some(
+    ({ features }) =>
+      features.hasEnumDeclarations ||
+      features.hasTopLevelDocs ||
+      features.hasTypeDeclarations,
+  );
+  const hasDecorators = files.some(({ features }) => features.hasDecorators);
+  if (!needsChecker && !hasDecorators) {
+    return {
+      diagnostics: [],
+      files: files.map(({ sourceFile }) => ({
+        decoratedOutputText: undefined,
+        enumDeclarations: [],
+        filePath: sourceFile.fileName,
+        topLevelDocs: [],
+        typeDeclarations: [],
+      })),
+      scan,
+    };
+  }
+
   const checker = program.getTypeChecker();
-  const unsafeEnumSymbols = collectUnsafeEnumSymbols(program, checker);
-  const inputFiles = new Set(fileNames);
-
+  const unsafeEnumSymbols = scan.hasEnumDeclarations
+    ? collectUnsafeEnumSymbols(
+        scan.files
+          .filter(({ features }) => features.hasEnumDeclarations)
+          .map(({ sourceFile }) => sourceFile),
+        checker,
+      )
+    : new Set<ts.Symbol>();
   const diagnostics: ts.Diagnostic[] = [];
-  const files: ClosureIrFileMetadata[] = [];
+  const collectedFiles: ClosureIrFileMetadata[] = [];
 
-  for (const sourceFile of program.getSourceFiles()) {
-    if (!inputFiles.has(sourceFile.fileName)) {
+  for (const { features, sourceFile } of files) {
+    if (!features.shouldAnalyze) {
+      collectedFiles.push({
+        decoratedOutputText: undefined,
+        enumDeclarations: [],
+        filePath: sourceFile.fileName,
+        topLevelDocs: [],
+        typeDeclarations: [],
+      });
       continue;
     }
 
-    const typeDeclarations: ClosureIrTypeDeclaration[] = [];
-    const topLevelDocs: ClosureIrFileMetadata["topLevelDocs"] = [];
-    const enumDeclarations: ClosureIrEnumDeclaration[] = [];
-
-    for (const statement of sourceFile.statements) {
-      if (ts.isInterfaceDeclaration(statement)) {
-        typeDeclarations.push(
-          buildInterfaceDeclarationSnippet(statement, checker),
-        );
-        continue;
-      }
-
-      if (ts.isTypeAliasDeclaration(statement)) {
-        typeDeclarations.push(
-          buildTypeAliasDeclarationSnippet(statement, checker),
-        );
-        continue;
-      }
-
-      if (ts.isEnumDeclaration(statement)) {
-        const enumDeclaration = buildEnumDeclarationMetadata(
-          statement,
-          checker,
-          unsafeEnumSymbols,
-        );
-        if (enumDeclaration) {
-          enumDeclarations.push(enumDeclaration);
-        }
-        continue;
-      }
-
-      if (ts.isFunctionDeclaration(statement) && statement.name) {
-        const objectParamRecord = buildFunctionObjectParamRecord(
-          statement,
-          checker,
-        );
-        if (objectParamRecord) {
-          typeDeclarations.push({ snippet: objectParamRecord.snippet });
-        }
-        const jsdoc = buildFunctionJsDoc(
-          statement,
-          checker,
-          objectParamRecord?.typeName,
-        );
-        if (jsdoc) {
-          topLevelDocs.push({
-            jsdoc,
-            kind: "function",
-            name: statement.name.text,
-          });
-        }
-        continue;
-      }
-
-      if (ts.isClassDeclaration(statement) && statement.name) {
-        const jsdoc = buildClassJsDoc(statement, checker);
-        if (jsdoc) {
-          topLevelDocs.push({
-            jsdoc,
-            kind: "class",
-            name: statement.name.text,
-          });
-        }
-      }
-    }
-
-    let decoratedOutputText: string | undefined;
-    if (containsDecorators(sourceFile)) {
-      const transpiled = transpileDecoratedSource({
-        compilerOptions,
-        fileName: sourceFile.fileName,
-        sourceText: sourceFile.getFullText(),
-      });
-      diagnostics.push(
-        ...(transpiled.diagnostics ?? []).filter(
-          (diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error,
-        ),
-      );
-      decoratedOutputText = transpiled.outputText;
-    }
-
-    files.push({
-      decoratedOutputText,
-      enumDeclarations,
-      filePath: sourceFile.fileName,
-      topLevelDocs,
-      typeDeclarations,
+    const result = collectClosureIrFileMetadata({
+      compilerOptions,
+      checker,
+      features,
+      sourceFile,
+      unsafeEnumSymbols,
     });
+    diagnostics.push(...result.diagnostics);
+    collectedFiles.push(result.file);
   }
 
-  return { diagnostics, files };
+  return { diagnostics, files: collectedFiles, scan };
 }
