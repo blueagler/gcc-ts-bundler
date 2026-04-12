@@ -3,6 +3,7 @@ import path from "node:path";
 import { expect, test } from "bun:test";
 
 import { build } from "../dist/index.mjs";
+import { UNSUPPORTED_FETCH_LOADER_ERROR } from "../src/pipeline/resolve-build/options.ts";
 import {
   createFixture,
   getProjectCacheDir,
@@ -62,6 +63,53 @@ test.serial("emits smaller script chunks for explicit lazy modules", async () =>
   expect(baseOutput).toMatch(/(?:globalThis\.__g|[A-Za-z_$][\w$]*)\.n\(\[0\]\)/);
   expect(baseOutput).not.toMatch(/LAZY_FEATURE/);
   expect(lazyOutput).toMatch(/LAZY_FEATURE/);
+});
+
+test.serial("normalizes the legacy auto chunk loader alias to script", async () => {
+  const fixture = await createFixture();
+  await fixture.write(
+    "src/main.ts",
+    [
+      'const loadFeature = () => import("./feature");',
+      "globalThis.__lazyLoader = loadFeature;",
+      'document.body.textContent = "base";',
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "src/feature.ts",
+    'export const marker = "AUTO_LOADER";\n',
+  );
+
+  const result = await build({
+    cache: { mode: "off" },
+    chunks: { loader: "auto", mode: "bundler-runtime" },
+    entries: ["./main.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  expect(result.exitCode).toBe(0);
+  const baseOutput = await fixture.read("dist/main.js");
+  expect(baseOutput).toContain('createElement("script")');
+  expect(baseOutput).not.toContain("global.fetch(");
+});
+
+test.serial("rejects the removed fetch chunk loader", async () => {
+  const fixture = await createFixture();
+  await fixture.write("src/main.ts", 'export const marker = "FETCH";\n');
+
+  await expect(
+    build({
+      cache: { mode: "off" },
+      chunks: { loader: "fetch", mode: "bundler-runtime" },
+      entries: ["./main.ts"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    }),
+  ).rejects.toThrow(UNSUPPORTED_FETCH_LOADER_ERROR);
 });
 
 test.serial("emits bundler-runtime chunks for explicit lazy modules", async () => {

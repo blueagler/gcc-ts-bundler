@@ -6,6 +6,7 @@ import { expect, test } from "bun:test";
 
 import { materializeCapturedGraph } from "../src/vite/capture.ts";
 import {
+  VITE_FETCH_LOADER_ERROR,
   resolveViteLanguageOut,
   VITE_LANGUAGE_OUT_ERROR,
 } from "../src/vite/config.ts";
@@ -49,9 +50,6 @@ async function buildViteFixture(fixture, overrides = {}) {
       "    gccTsBundler({",
       "      compiler: {",
       '        cache: { mode: "off" },',
-      "      },",
-      "      runtime: {",
-      '        loader: "script",',
       "      },",
       ...(overrides.debugDir
         ? [
@@ -478,6 +476,55 @@ test.serial(
       }),
     ).rejects.toMatchObject({
       stderr: expect.stringContaining(VITE_LANGUAGE_OUT_ERROR),
+    });
+  },
+);
+
+test.serial(
+  'gccTsBundler rejects runtime.loader="fetch" in Vite mode with an actionable error',
+  async () => {
+    const fixture = await createFixture();
+    const pluginUrl = pathToFileURL(
+      path.join(process.cwd(), "dist/vite/index.mjs"),
+    ).href;
+    const viteBin = path.join(process.cwd(), "node_modules", "vite", "bin", "vite.js");
+    await fixture.write(
+      "index.html",
+      [
+        "<!doctype html>",
+        "<html>",
+        "  <body>",
+        '    <script type="module" src="/src/main.js"></script>',
+        "  </body>",
+        "</html>",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write("src/main.js", 'console.log("vite");\n');
+    await fixture.write(
+      "vite.config.mjs",
+      [
+        `import { gccTsBundler } from ${JSON.stringify(pluginUrl)};`,
+        "",
+        "export default {",
+        "  plugins: [",
+        "    gccTsBundler({",
+        "      runtime: {",
+        '        loader: "fetch",',
+        "      },",
+        "    }),",
+        "  ],",
+        "};",
+        "",
+      ].join("\n"),
+    );
+
+    await expect(
+      execFileAsync(process.execPath, [viteBin, "build"], {
+        cwd: fixture.projectRoot,
+      }),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining(VITE_FETCH_LOADER_ERROR),
     });
   },
 );

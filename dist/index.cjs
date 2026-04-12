@@ -238,7 +238,7 @@ var init_types = __esm(() => {
     compilationLevel: "ADVANCED",
     chunks: {
       baseChunkName: "main",
-      loader: "auto",
+      loader: "script",
       manifestFile: "",
       mode: "off",
       publicPath: "./"
@@ -782,7 +782,7 @@ function normalizeBuildOptions(options) {
     },
     chunks: {
       baseChunkName: options.chunks?.baseChunkName ?? DEFAULT_BUILD_OPTIONS.chunks.baseChunkName,
-      loader: options.chunks?.loader ?? DEFAULT_BUILD_OPTIONS.chunks.loader,
+      loader: normalizeChunkLoader(options.chunks?.loader ?? DEFAULT_BUILD_OPTIONS.chunks.loader),
       manifestFile: chunkManifestFile,
       mode: options.chunks?.mode ?? DEFAULT_BUILD_OPTIONS.chunks.mode,
       publicPath: chunkPublicPath
@@ -812,7 +812,13 @@ function normalizeChunkPublicPath(publicPath) {
   }
   return publicPath.endsWith("/") ? publicPath : `${publicPath}/`;
 }
-var import_path15;
+function normalizeChunkLoader(loader) {
+  if (loader === "fetch") {
+    throw new Error(UNSUPPORTED_FETCH_LOADER_ERROR);
+  }
+  return "script";
+}
+var import_path15, UNSUPPORTED_FETCH_LOADER_ERROR = 'gcc-ts-bundler does not support chunks.loader="fetch". Use "script" instead.';
 var init_options = __esm(() => {
   init_types();
   import_path15 = __toESM(require("path"));

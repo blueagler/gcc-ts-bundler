@@ -1,6 +1,7 @@
 import type {
   BuildOptions,
   CacheOptions,
+  ChunkLoader,
   ChunkOptions,
   CompilationLevel,
   DiagnosticsOptions,
@@ -11,7 +12,7 @@ import type { FileStateSnapshot } from "./file-state";
 
 export interface NormalizedBuildOptions {
   cache: Required<CacheOptions>;
-  chunks: Required<ChunkOptions>;
+  chunks: Omit<Required<ChunkOptions>, "loader"> & { loader: ChunkLoader };
   compilationLevel: CompilationLevel;
   diagnostics: Required<DiagnosticsOptions>;
   entries: string[];

@@ -1,7 +1,8 @@
 import type { ResolvedConfig, UserConfig } from "vite";
 
 import { DEFAULT_BUILD_OPTIONS } from "../api/types";
-import type { BuildOptions, LanguageOut } from "../api/types";
+import type { BuildOptions, ChunkLoaderInput, LanguageOut } from "../api/types";
+import { normalizeChunkLoader } from "../pipeline/resolve-build/options";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type { ManifestFileSettings } from "./internal-types";
 
@@ -12,6 +13,8 @@ export const INTERNAL_VITE_AUTHORED_FILES_FILE =
   ".gcc-ts-bundler-vite-authored-files.json";
 export const VITE_LANGUAGE_OUT_ERROR =
   "gccTsBundler() does not accept compiler.languageOut. Set Vite build.target instead.";
+export const VITE_FETCH_LOADER_ERROR =
+  'gccTsBundler() does not support runtime.loader="fetch". Use "script" instead.';
 
 export function applyViteBuildGuards(userConfig: UserConfig): UserConfig {
   if (userConfig.build?.ssr) {
@@ -84,6 +87,7 @@ export function createCompilerOptions(input: {
   srcDir: string;
 }): BuildOptions {
   assertNoViteLanguageOut(input.options);
+  assertNoViteFetchLoader(input.options);
   const compiler = input.options.compiler ?? {};
   const compilerChunks = compiler.chunks ?? {};
 
@@ -101,10 +105,11 @@ export function createCompilerOptions(input: {
       baseChunkName:
         compilerChunks.baseChunkName ??
         DEFAULT_BUILD_OPTIONS.chunks.baseChunkName,
-      loader:
-        input.options.runtime?.loader ??
-        compilerChunks.loader ??
-        DEFAULT_BUILD_OPTIONS.chunks.loader,
+      loader: normalizeChunkLoader(
+        (input.options.runtime?.loader ??
+          compilerChunks.loader ??
+          DEFAULT_BUILD_OPTIONS.chunks.loader) as ChunkLoaderInput | "fetch",
+      ),
       manifestFile: input.manifestFile,
       mode: "bundler-runtime",
       publicPath: input.publicPath,
@@ -121,6 +126,16 @@ export function assertNoViteLanguageOut(
     return;
   }
   throw new Error(VITE_LANGUAGE_OUT_ERROR);
+}
+
+export function assertNoViteFetchLoader(
+  options: GccTsBundlerVitePluginOptions,
+) {
+  const loader = (options.runtime as { loader?: string } | undefined)?.loader;
+  if (loader !== "fetch") {
+    return;
+  }
+  throw new Error(VITE_FETCH_LOADER_ERROR);
 }
 
 export function resolveViteLanguageOut(config: ResolvedConfig): LanguageOut {

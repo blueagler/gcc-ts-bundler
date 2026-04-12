@@ -48,7 +48,7 @@ pub(super) fn bundler_runtime_output_file_name(
 pub(super) fn render_bundler_runtime_base_chunk(
     chunk_id: usize,
     entry_points_json: &str,
-    loader: &str,
+    _loader: &str,
     manifest_json: &str,
     numeric_module_ids: bool,
     module_text: &str,
@@ -57,7 +57,6 @@ pub(super) fn render_bundler_runtime_base_chunk(
 ) -> std::result::Result<String, String> {
     let runtime_global = runtime_global_ref("globalThis");
     let mut parts = vec![render_bundler_runtime_preamble(
-        loader,
         manifest_json,
         numeric_module_ids,
         debug_runtime,
@@ -97,7 +96,6 @@ pub(super) fn render_bundler_runtime_lazy_chunk(
 }
 
 pub(super) fn render_bundler_runtime_preamble(
-    loader: &str,
     manifest_json: &str,
     numeric_module_ids: bool,
     debug_runtime: bool,
@@ -117,20 +115,10 @@ pub(super) fn render_bundler_runtime_preamble(
     } else {
         "\"l\"+a"
     };
-    let fetch_error = if debug_runtime {
-        "\"fetch \"+a+\" failed (\"+c.status+\")\""
-    } else {
-        "\"f\"+a"
-    };
     let style_error = if debug_runtime {
         "\"style \"+a+\" failed\""
     } else {
         "\"s\"+a"
-    };
-    let fetch_eval = if debug_runtime {
-        "(0,global.eval)(c+\"\\n//# sourceURL=\"+b);"
-    } else {
-        "(0,global.eval)(c);"
     };
     let storage_init = if numeric_module_ids {
         ["r.f=[];", "r.c=[];", "r.s=[];", "r.d=[];", "r.k=null;", "r.m=[];"]
@@ -154,32 +142,15 @@ pub(super) fn render_bundler_runtime_preamble(
     } else {
         format!("r.x=function(a){{var b=r.m&&r.m[a];if(!b)throw Error({missing_module_error});return e(b).then(function(){{}});}};")
     };
-    let manifest_apply = render_manifest_apply(loader, manifest_json);
-    let manifest_init = render_manifest_init(loader);
-    let env_setup = render_loader_env_setup(loader);
-    let loader_specific = match loader {
-        "script" => render_script_loader_runtime(
-            missing_chunk_error,
-            script_error,
-            style_error,
-            numeric_module_ids,
-        ),
-        "fetch" => render_fetch_loader_runtime(
-            missing_chunk_error,
-            fetch_error,
-            style_error,
-            fetch_eval,
-            numeric_module_ids,
-        ),
-        _ => render_auto_loader_runtime(
-            missing_chunk_error,
-            script_error,
-            fetch_error,
-            style_error,
-            fetch_eval,
-            numeric_module_ids,
-        ),
-    };
+    let manifest_apply = render_manifest_apply(manifest_json);
+    let manifest_init = render_manifest_init();
+    let env_setup = render_loader_env_setup();
+    let loader_specific = render_script_loader_runtime(
+        missing_chunk_error,
+        script_error,
+        style_error,
+        numeric_module_ids,
+    );
     Ok([
         "(function(global){".to_string(),
         format!(
@@ -211,33 +182,16 @@ pub(super) fn render_bundler_runtime_preamble(
     .join("\n"))
 }
 
-fn render_manifest_apply(loader: &str, manifest_json: &str) -> String {
-    if matches!(loader, "script" | "fetch") {
-        format!("r.a({manifest_json});")
-    } else {
-        let loader_code = match loader {
-            "script" => 1,
-            "fetch" => 2,
-            _ => 0,
-        };
-        format!("r.a({manifest_json},{loader_code});")
-    }
+fn render_manifest_apply(manifest_json: &str) -> String {
+    format!("r.a({manifest_json});")
 }
 
-fn render_loader_env_setup(loader: &str) -> String {
-    if matches!(loader, "script" | "fetch" | "auto") {
-        "var d=global.document,l=global.location;".to_string()
-    } else {
-        String::new()
-    }
+fn render_loader_env_setup() -> String {
+    "var d=global.document,l=global.location;".to_string()
 }
 
-fn render_manifest_init(loader: &str) -> String {
-    if matches!(loader, "script" | "fetch") {
-        "r.a=function(a){r.k=a[1];r.m=a[2];var c=d&&d.currentScript&&d.currentScript.src||l&&l.href||\"./\";r.b=new URL(a[3]||\"./\",c).toString();r.s[a[0]]=1;};".to_string()
-    } else {
-        "r.a=function(a,b){r.k=a[1];r.m=a[2];if(arguments.length>1)r.o=b;var c=global.document&&global.document.currentScript&&global.document.currentScript.src?global.document.currentScript.src:(global.location&&global.location.href?global.location.href:\"./\");r.b=new URL(a[3]||\"./\",c).toString();r.s[a[0]]=1;};".to_string()
-    }
+fn render_manifest_init() -> String {
+    "r.a=function(a){r.k=a[1];r.m=a[2];var c=d&&d.currentScript&&d.currentScript.src||l&&l.href||\"./\";r.b=new URL(a[3]||\"./\",c).toString();r.s[a[0]]=1;};".to_string()
 }
 
 fn runtime_global_ref(global_name: &str) -> String {
@@ -325,56 +279,6 @@ fn render_script_loader_runtime(
     .join("\n")
 }
 
-fn render_fetch_loader_runtime(
-    missing_chunk_error: &str,
-    fetch_error: &str,
-    style_error: &str,
-    fetch_eval: &str,
-    numeric_module_ids: bool,
-) -> String {
-    let chunk_lookup = if numeric_module_ids {
-        "var b=r.k[a];"
-    } else {
-        "var b=r.k&&r.k[a];"
-    };
-    [
-        format!(
-            "function u(a){{{chunk_lookup}if(!b)throw Error({missing_chunk_error});return new URL(b[1],r.b).toString();}}"
-        ),
-        format!("function w(a){{return Promise.resolve(global.fetch(a)).then(function(c){{if(!c.ok)throw Error({fetch_error});return c.text();}}).then(function(c){{{fetch_eval}}});}}"),
-        render_css_loader_runtime(style_error),
-        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!b)throw Error({missing_chunk_error});r.s[a]=0;var c=g(a);return Promise.all((b[0]||[]).map(e)).then(function(){{return Promise.all([z(a),w(u(a))]);}}).then(function(){{return c.p;}}).catch(function(d){{h(a,d);throw d;}});}}"),
-    ]
-    .join("\n")
-}
-
-fn render_auto_loader_runtime(
-    missing_chunk_error: &str,
-    script_error: &str,
-    fetch_error: &str,
-    style_error: &str,
-    fetch_eval: &str,
-    numeric_module_ids: bool,
-) -> String {
-    let chunk_lookup = if numeric_module_ids {
-        "var c=r.k[a];"
-    } else {
-        "var c=r.k&&r.k[a];"
-    };
-    [
-        "r.o=0;".to_string(),
-        format!(
-            "function u(a){{var b=r.k&&r.k[a];if(!b)throw Error({missing_chunk_error});return new URL(b[1],r.b).toString();}}"
-        ),
-        format!("function p(a,b){{return new Promise(function(c,e){{var f=d.createElement(\"script\");f.async=true;f.src=b;f.onload=function(){{c();}};f.onerror=function(){{e(Error({script_error}));}};(d.head||d.documentElement).appendChild(f);}});}}"),
-        format!("function w(a,b){{return Promise.resolve(global.fetch(b)).then(function(c){{if(!c.ok)throw Error({fetch_error});return c.text();}}).then(function(c){{{fetch_eval}}});}}"),
-        render_css_loader_runtime(style_error),
-        "function t(){return r.o===1?1:r.o===2?2:d?1:2;}".to_string(),
-        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!c)throw Error({missing_chunk_error});r.s[a]=0;var f=g(a),j=t();return Promise.all((c[0]||[]).map(function(k){{return e(k);}})).then(function(){{var k=u(a);return Promise.all([z(a),j===2?w(a,k):p(a,k)]);}}).then(function(){{return f.p;}}).catch(function(k){{h(a,k);throw k;}});}}"),
-    ]
-    .join("\n")
-}
-
 fn render_css_loader_runtime(style_error: &str) -> String {
     [
         "var m=null,n=Object.create(null);".to_string(),
@@ -420,14 +324,13 @@ __runtime.h(function(__register){\n  __register(1,function(){});\n},3);\n"
 
     #[test]
     fn specialized_script_preamble_hoists_environment_access() {
-        let rendered =
-            render_bundler_runtime_preamble("script", "[0,[],[],\"./\"]", true, false)
-                .expect("render preamble");
+        let rendered = render_bundler_runtime_preamble("[0,[],[],\"./\"]", true, false)
+            .expect("render preamble");
         assert!(rendered.contains("var d=global.document,l=global.location;"));
         assert!(rendered.contains("return new URL(b[1],r.b).toString();"));
         assert!(rendered.contains("createElement(\"link\")"));
         assert!(rendered.contains("b&&b[2]||[]"));
         assert!(!rendered.contains("r.b||(global.location"));
-        assert!(!rendered.contains("if(arguments.length>1)r.o=b;"));
+        assert!(!rendered.contains("global.fetch("));
     }
 }

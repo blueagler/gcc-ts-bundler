@@ -1,7 +1,15 @@
 import path from "path";
 
-import { BuildOptions, DEFAULT_BUILD_OPTIONS } from "../../api/types";
+import {
+  BuildOptions,
+  ChunkLoader,
+  ChunkLoaderInput,
+  DEFAULT_BUILD_OPTIONS,
+} from "../../api/types";
 import { NormalizedBuildOptions } from "../../internal/types";
+
+export const UNSUPPORTED_FETCH_LOADER_ERROR =
+  'gcc-ts-bundler does not support chunks.loader="fetch". Use "script" instead.';
 
 export function normalizeBuildOptions(
   options: BuildOptions,
@@ -33,7 +41,9 @@ export function normalizeBuildOptions(
       baseChunkName:
         options.chunks?.baseChunkName ??
         DEFAULT_BUILD_OPTIONS.chunks.baseChunkName,
-      loader: options.chunks?.loader ?? DEFAULT_BUILD_OPTIONS.chunks.loader,
+      loader: normalizeChunkLoader(
+        options.chunks?.loader ?? DEFAULT_BUILD_OPTIONS.chunks.loader,
+      ),
       manifestFile: chunkManifestFile,
       mode: options.chunks?.mode ?? DEFAULT_BUILD_OPTIONS.chunks.mode,
       publicPath: chunkPublicPath,
@@ -80,4 +90,13 @@ function normalizeChunkPublicPath(publicPath: string) {
     return "./";
   }
   return publicPath.endsWith("/") ? publicPath : `${publicPath}/`;
+}
+
+export function normalizeChunkLoader(
+  loader: ChunkLoaderInput | "fetch",
+): ChunkLoader {
+  if (loader === "fetch") {
+    throw new Error(UNSUPPORTED_FETCH_LOADER_ERROR);
+  }
+  return "script";
 }

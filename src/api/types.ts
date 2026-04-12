@@ -8,7 +8,8 @@ export type CacheMode = "off" | "temp" | "persistent";
 export type DiagnosticsPreflight = "off" | "errors-only" | "full";
 export type PackageMode = "off" | "esm-only";
 export type ChunkMode = "off" | "bundler-runtime";
-export type ChunkLoader = "auto" | "script" | "fetch";
+export type ChunkLoader = "script";
+export type ChunkLoaderInput = ChunkLoader | "auto";
 
 export interface CacheOptions {
   dir?: string;
@@ -27,7 +28,7 @@ export interface PackageOptions {
 
 export interface ChunkOptions {
   baseChunkName?: string;
-  loader?: ChunkLoader;
+  loader?: ChunkLoaderInput;
   manifestFile?: string;
   mode?: ChunkMode;
   publicPath?: string;
@@ -70,7 +71,7 @@ export const DEFAULT_BUILD_OPTIONS = Object.freeze({
   compilationLevel: "ADVANCED" as CompilationLevel,
   chunks: {
     baseChunkName: "main",
-    loader: "auto" as ChunkLoader,
+    loader: "script" as ChunkLoaderInput,
     manifestFile: "",
     mode: "off" as ChunkMode,
     publicPath: "./",

@@ -4,7 +4,8 @@ export type CacheMode = "off" | "temp" | "persistent";
 export type DiagnosticsPreflight = "off" | "errors-only" | "full";
 export type PackageMode = "off" | "esm-only";
 export type ChunkMode = "off" | "bundler-runtime";
-export type ChunkLoader = "auto" | "script" | "fetch";
+export type ChunkLoader = "script";
+export type ChunkLoaderInput = ChunkLoader | "auto";
 export interface CacheOptions {
     dir?: string;
     mode?: CacheMode;
@@ -19,7 +20,7 @@ export interface PackageOptions {
 }
 export interface ChunkOptions {
     baseChunkName?: string;
-    loader?: ChunkLoader;
+    loader?: ChunkLoaderInput;
     manifestFile?: string;
     mode?: ChunkMode;
     publicPath?: string;
@@ -58,7 +59,7 @@ export declare const DEFAULT_BUILD_OPTIONS: Readonly<{
     compilationLevel: CompilationLevel;
     chunks: {
         baseChunkName: string;
-        loader: ChunkLoader;
+        loader: ChunkLoaderInput;
         manifestFile: string;
         mode: ChunkMode;
         publicPath: string;

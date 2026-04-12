@@ -1,4 +1,4 @@
-import type { BuildOptions, ChunkLoader } from "../api/types";
+import type { BuildOptions, ChunkLoaderInput } from "../api/types";
 import type { GenerateExternsMode } from "../api/externs";
 
 export interface GccTsBundlerGeneratedExternsOptions {
@@ -15,7 +15,7 @@ export interface GccTsBundlerVitePluginOptions {
     "entries" | "languageOut" | "outDir" | "packages" | "projectRoot" | "srcDir"
   >;
   runtime?: {
-    loader?: ChunkLoader;
+    loader?: ChunkLoaderInput;
     manifestFile?: string;
     publicPath?: string;
   };

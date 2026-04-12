@@ -20,9 +20,6 @@ export default defineConfig({
           modules: ["m3-svelte", "svelte"],
         },
       },
-      runtime: {
-        loader: "fetch",
-      },
     }),
   ],
 });

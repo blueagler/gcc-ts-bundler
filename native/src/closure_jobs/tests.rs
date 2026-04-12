@@ -149,7 +149,7 @@ fn skips_es5_custom_elements_adapter_when_no_native_dom_subclasses_exist() {
 
     let output = prepare_closure_jobs(PrepareClosureJobsInput {
         chunkMode: "off".to_string(),
-        chunkLoader: "auto".to_string(),
+        chunkLoader: "script".to_string(),
         chunkPlan: vec![ClosureJobChunkPlanChunkInput {
             dependencies: vec![],
             entryFiles: Some(vec!["src/entry.ts".to_string()]),
@@ -223,7 +223,7 @@ fn prepares_off_mode_jobs_and_filters_empty_externs() {
 
     let output = prepare_closure_jobs(PrepareClosureJobsInput {
         chunkMode: "off".to_string(),
-        chunkLoader: "auto".to_string(),
+        chunkLoader: "script".to_string(),
         chunkPlan: vec![
             ClosureJobChunkPlanChunkInput {
                 dependencies: vec![],
