@@ -137,6 +137,69 @@ test.serial("emits bundler-runtime chunks for explicit lazy modules", async () =
   expect(lazyOutput).not.toMatch(/goog\.module/);
 });
 
+test.serial(
+  "bundler-runtime ES5 reuses the helper alias for lazy registration and base finalization",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/main.ts",
+      [
+        'const loadFeature = () => import("./feature");',
+        "globalThis.__lazyLoader = loadFeature;",
+        'document.body.textContent = "base";',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/feature.ts",
+      [
+        "function __runInitializers(a, b, c) {",
+        "  for (var d = arguments.length > 2, e = 0; e < b.length; e += 1) {",
+        "    c = d ? b[e].call(a, c) : b[e].call(a);",
+        "  }",
+        "  return d ? c : void 0;",
+        "}",
+        "",
+        "export default function renderMessage() {",
+        "  return String(__runInitializers({}, [function(value) { return value + 1; }], 0));",
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await build({
+      cache: { mode: "off" },
+      chunks: { loader: "script", mode: "bundler-runtime" },
+      entries: ["./main.ts"],
+      languageOut: "ECMASCRIPT5",
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+
+    expect(result.exitCode).toBe(0);
+    const outputBasenames = result.outputFiles
+      .map((filePath) => path.basename(filePath))
+      .sort((left, right) => left.localeCompare(right));
+    const lazyOutputName = outputBasenames.find((name) => name !== "main.js");
+    expect(lazyOutputName).toBeTruthy();
+
+    const baseOutput = await fixture.read("dist/main.js");
+    const lazyOutput = await fixture.read(`dist/${lazyOutputName}`);
+
+    expect(baseOutput).not.toContain("globalThis.__g.u(");
+    expect(baseOutput).not.toContain('globalThis["__g"].u(');
+    expect(baseOutput).not.toContain("globalThis.__g.n(");
+    expect(baseOutput).toMatch(/\bvar _=[A-Za-z_$][\w$]*\._\|\|\([A-Za-z_$][\w$]*\._=\[\]\);/);
+
+    expect(lazyOutput).toContain("var G=globalThis.__g,_=G._;");
+    expect(lazyOutput).toMatch(/G\.[A-Za-z_$][\w$]*\(function\(/);
+    expect(lazyOutput).not.toContain("globalThis.__g.i(");
+    expect(lazyOutput).not.toContain('globalThis["__g"].i(');
+    expect(lazyOutput).not.toMatch(/(?:^|[;\n])\s*[A-Za-z_$][\w$]*=globalThis(?:\.__g|\["__g"\]);/m);
+  },
+);
+
 test.serial("bundler-runtime rejects reflective namespace operations", async () => {
   const fixture = await createFixture();
   await fixture.write(

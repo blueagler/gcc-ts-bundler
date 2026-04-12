@@ -100,7 +100,11 @@ fn prepares_bundler_runtime_jobs_with_runtime_assets() {
         asset.path.ends_with("main.linked.js")
             && !asset.text.contains("__gcc_runtime__")
             && !asset.text.contains("initialized")
-            && asset.text.contains("globalThis[\"__g\"].l(")
+            && asset
+                .text
+                .contains("var __runtime=globalThis[\"__g\"],__register=__runtime.r;")
+            && asset.text.contains("__runtime.l(")
+            && asset.text.contains("__runtime.n(")
             && !asset.text.contains("global.fetch(")
             && !asset.text.contains("__register(\"m")
     }));

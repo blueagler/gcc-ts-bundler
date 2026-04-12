@@ -61,10 +61,10 @@ pub(super) fn render_bundler_runtime_base_chunk(
         parts.push(render_custom_elements_es5_adapter());
     }
     parts.extend([
-        format!("var __register={runtime_global}.r;"),
+        format!("var __runtime={runtime_global},__register=__runtime.r;"),
         module_text.to_string(),
-        format!("{runtime_global}.l({chunk_id:?});"),
-        format!("{runtime_global}.n({entry_points_json});"),
+        format!("__runtime.l({chunk_id:?});"),
+        format!("__runtime.n({entry_points_json});"),
         String::new(),
     ]);
     Ok(parts.join("\n"))
@@ -79,13 +79,13 @@ pub(super) fn render_bundler_runtime_lazy_chunk(
     if debug_runtime {
         let fallback_error = "\"base chunk missing\"";
         format!(
-            "({runtime_global}||{{h:function(){{throw Error({fallback_error});}}}}).h(function(__register){{\n{}\n}},{chunk_id:?});\n",
+            "var __runtime={runtime_global};(__runtime||{{h:function(){{throw Error({fallback_error});}}}}).h(function(__register){{\n{}\n}},{chunk_id:?});\n",
             indent_block(module_text),
             fallback_error = fallback_error,
         )
     } else {
         format!(
-            "{runtime_global}.h(function(__register){{\n{}\n}},{chunk_id:?});\n",
+            "var __runtime={runtime_global};__runtime.h(function(__register){{\n{}\n}},{chunk_id:?});\n",
             indent_block(module_text),
         )
     }
@@ -144,16 +144,9 @@ pub(super) fn render_bundler_runtime_preamble(
     } else {
         format!("r.x=function(a){{var b=r.m&&r.m[a];if(!b)throw Error({missing_module_error});return e(b).then(function(){{}});}};")
     };
-    let manifest_apply = if matches!(loader, "script" | "fetch") {
-        format!("r.a({manifest_json});")
-    } else {
-        let loader_code = match loader {
-            "script" => 1,
-            "fetch" => 2,
-            _ => 0,
-        };
-        format!("r.a({manifest_json},{loader_code});")
-    };
+    let manifest_apply = render_manifest_apply(loader, manifest_json);
+    let manifest_init = render_manifest_init(loader);
+    let env_setup = render_loader_env_setup(loader);
     let loader_specific = match loader {
         "script" => render_script_loader_runtime(
             missing_chunk_error,
@@ -183,6 +176,7 @@ pub(super) fn render_bundler_runtime_preamble(
         "if(!r.i){".to_string(),
         storage_init.join("\n"),
         "r.b=\"\";".to_string(),
+        env_setup,
         "function g(a){var b=r.d[a];if(b)return b;b={};b.p=new Promise(function(c,d){b.r=c;b.j=d});r.d[a]=b;return b;}".to_string(),
         "r.l=function(a){r.s[a]=1;var b=r.d[a];if(b){b.r();delete r.d[a];}};".to_string(),
         "function h(a,b){r.s[a]=2;var c=r.d[a];if(c){c.j(b);delete r.d[a];}}".to_string(),
@@ -194,7 +188,7 @@ pub(super) fn render_bundler_runtime_preamble(
         module_lookup,
         module_preload,
         "r.n=function(a){for(var b=0;b<a.length;b+=1)r.q(a[b]);};".to_string(),
-        "r.a=function(a,b){r.k=a[1];r.m=a[2];if(arguments.length>1)r.o=b;var c=global.document&&global.document.currentScript&&global.document.currentScript.src?global.document.currentScript.src:(global.location&&global.location.href?global.location.href:\"./\");r.b=new URL(a[3]||\"./\",c).toString();r.s[a[0]]=1;};".to_string(),
+        manifest_init,
         "r.i=1;".to_string(),
         "}".to_string(),
         manifest_apply,
@@ -202,6 +196,35 @@ pub(super) fn render_bundler_runtime_preamble(
         String::new(),
     ]
     .join("\n"))
+}
+
+fn render_manifest_apply(loader: &str, manifest_json: &str) -> String {
+    if matches!(loader, "script" | "fetch") {
+        format!("r.a({manifest_json});")
+    } else {
+        let loader_code = match loader {
+            "script" => 1,
+            "fetch" => 2,
+            _ => 0,
+        };
+        format!("r.a({manifest_json},{loader_code});")
+    }
+}
+
+fn render_loader_env_setup(loader: &str) -> String {
+    if matches!(loader, "script" | "fetch") {
+        "var d=global.document,l=global.location;".to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn render_manifest_init(loader: &str) -> String {
+    if matches!(loader, "script" | "fetch") {
+        "r.a=function(a){r.k=a[1];r.m=a[2];var c=d&&d.currentScript&&d.currentScript.src||l&&l.href||\"./\";r.b=new URL(a[3]||\"./\",c).toString();r.s[a[0]]=1;};".to_string()
+    } else {
+        "r.a=function(a,b){r.k=a[1];r.m=a[2];if(arguments.length>1)r.o=b;var c=global.document&&global.document.currentScript&&global.document.currentScript.src?global.document.currentScript.src:(global.location&&global.location.href?global.location.href:\"./\");r.b=new URL(a[3]||\"./\",c).toString();r.s[a[0]]=1;};".to_string()
+    }
 }
 
 fn runtime_global_ref(global_name: &str) -> String {
@@ -279,10 +302,10 @@ fn render_script_loader_runtime(
     };
     [
         format!(
-            "function u(a){{{chunk_lookup}if(!b)throw Error({missing_chunk_error});return new URL(b[1],r.b||(global.location&&global.location.href?global.location.href:\"./\")).toString();}}"
+            "function u(a){{{chunk_lookup}if(!b)throw Error({missing_chunk_error});return new URL(b[1],r.b).toString();}}"
         ),
-        format!("function p(a,b){{return new Promise(function(c,d){{var e=global.document.createElement(\"script\");e.async=true;e.src=b;e.onload=function(){{c();}};e.onerror=function(){{d(Error({script_error}));}};(global.document.head||global.document.documentElement).appendChild(e);}});}}"),
-        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!b)throw Error({missing_chunk_error});r.s[a]=0;var c=g(a);return Promise.all((b[0]||[]).map(function(d){{return e(d);}})).then(function(){{return p(a,u(a));}}).then(function(){{return c.p;}}).catch(function(d){{h(a,d);throw d;}});}}"),
+        format!("function p(a){{return new Promise(function(c,e){{var f=d.createElement(\"script\");f.async=true;f.src=a;f.onload=function(){{c();}};f.onerror=function(){{e(Error({script_error}));}};(d.head||d.documentElement).appendChild(f);}});}}"),
+        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!b)throw Error({missing_chunk_error});r.s[a]=0;var c=g(a);return Promise.all((b[0]||[]).map(e)).then(function(){{return p(u(a));}}).then(function(){{return c.p;}}).catch(function(d){{h(a,d);throw d;}});}}"),
     ]
     .join("\n")
 }
@@ -300,10 +323,10 @@ fn render_fetch_loader_runtime(
     };
     [
         format!(
-            "function u(a){{{chunk_lookup}if(!b)throw Error({missing_chunk_error});return new URL(b[1],r.b||(global.location&&global.location.href?global.location.href:\"./\")).toString();}}"
+            "function u(a){{{chunk_lookup}if(!b)throw Error({missing_chunk_error});return new URL(b[1],r.b).toString();}}"
         ),
-        format!("function w(a,b){{return Promise.resolve(global.fetch(b)).then(function(c){{if(!c.ok)throw Error({fetch_error});return c.text();}}).then(function(c){{{fetch_eval}}});}}"),
-        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!b)throw Error({missing_chunk_error});r.s[a]=0;var c=g(a);return Promise.all((b[0]||[]).map(function(d){{return e(d);}})).then(function(){{return w(a,u(a));}}).then(function(){{return c.p;}}).catch(function(d){{h(a,d);throw d;}});}}"),
+        format!("function w(a){{return Promise.resolve(global.fetch(a)).then(function(c){{if(!c.ok)throw Error({fetch_error});return c.text();}}).then(function(c){{{fetch_eval}}});}}"),
+        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!b)throw Error({missing_chunk_error});r.s[a]=0;var c=g(a);return Promise.all((b[0]||[]).map(e)).then(function(){{return w(u(a));}}).then(function(){{return c.p;}}).catch(function(d){{h(a,d);throw d;}});}}"),
     ]
     .join("\n")
 }
@@ -331,4 +354,49 @@ fn render_auto_loader_runtime(
         format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!c)throw Error({missing_chunk_error});r.s[a]=0;var d=g(a),f=t();return Promise.all((c[0]||[]).map(function(j){{return e(j);}})).then(function(){{var j=u(a);return f===2?w(a,j):p(a,j);}}).then(function(){{return d.p;}}).catch(function(j){{h(a,j);throw j;}});}}"),
     ]
     .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_chunk_uses_local_runtime_alias_before_closure() {
+        let rendered = render_bundler_runtime_base_chunk(
+            0,
+            "[0]",
+            "script",
+            "[0,[],[],\"./\"]",
+            true,
+            "__register(0,function(){});",
+            false,
+            false,
+        )
+        .expect("render base chunk");
+
+        assert!(rendered.contains("var __runtime=globalThis[\"__g\"],__register=__runtime.r;"));
+        assert!(rendered.contains("__runtime.l(0);"));
+        assert!(rendered.contains("__runtime.n([0]);"));
+    }
+
+    #[test]
+    fn lazy_chunk_uses_local_runtime_alias_before_closure() {
+        let rendered = render_bundler_runtime_lazy_chunk(3, "__register(1,function(){});", false);
+        assert_eq!(
+            rendered,
+            "var __runtime=globalThis[\"__g\"];\
+__runtime.h(function(__register){\n  __register(1,function(){});\n},3);\n"
+        );
+    }
+
+    #[test]
+    fn specialized_script_preamble_hoists_environment_access() {
+        let rendered =
+            render_bundler_runtime_preamble("script", "[0,[],[],\"./\"]", true, false)
+                .expect("render preamble");
+        assert!(rendered.contains("var d=global.document,l=global.location;"));
+        assert!(rendered.contains("return new URL(b[1],r.b).toString();"));
+        assert!(!rendered.contains("r.b||(global.location"));
+        assert!(!rendered.contains("if(arguments.length>1)r.o=b;"));
+    }
 }

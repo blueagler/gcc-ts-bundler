@@ -2062,8 +2062,10 @@ async function runClosurePostprocess({
       contents = rewriteDecoratorMetadata(contents, reportText);
     }
     if (action.inputPath === prepared.bundlerRuntimeBaseInputPath) {
-      contents = injectBundlerRuntimeEs5HelperBag(contents, es5Rewrite.renderHelperBag());
+      const runtimeAlias = findBundlerRuntimeFinalizeAlias(contents);
+      contents = injectBundlerRuntimeEs5HelperBag(contents, es5Rewrite.renderHelperBag(runtimeAlias));
     }
+    contents = canonicalizeBundlerRuntimeRootAccess(contents);
     if (wrapBundlerRuntimeOutput) {
       contents = wrapBundlerRuntimeOutputFile(contents);
     }
@@ -2082,8 +2084,8 @@ function createEs5HelperRewriteContext({
     requiresInputRead() {
       return shouldRewriteHelpers;
     },
-    renderHelperBag() {
-      return helperKeys.size === 0 ? "" : renderBundlerRuntimeEs5HelperBag(helperKeys);
+    renderHelperBag(runtimeAlias) {
+      return helperKeys.size === 0 ? "" : renderBundlerRuntimeEs5HelperBag(helperKeys, runtimeAlias);
     },
     rewrite(inputPath, contents) {
       if (!shouldRewriteHelpers || inputPath === bundlerRuntimeBaseInputPath) {
@@ -2109,13 +2111,60 @@ function injectBundlerRuntimeEs5HelperBag(code, helperBag) {
   if (!helperBag) {
     return code;
   }
-  for (const marker of ["G.u(", "globalThis.__g.u(", 'globalThis["__g"].u(']) {
+  const runtimeAlias = findBundlerRuntimeFinalizeAlias(code);
+  const markers = runtimeAlias ? [`${runtimeAlias}.u(`, `${runtimeAlias}.n(`] : ["G.u(", "globalThis.__g.u(", 'globalThis["__g"].u('];
+  for (const marker of markers) {
     const markerIndex = code.lastIndexOf(marker);
     if (markerIndex !== -1) {
       return `${code.slice(0, markerIndex)}${helperBag}${code.slice(markerIndex)}`;
     }
   }
   return `${code}${helperBag}`;
+}
+function canonicalizeBundlerRuntimeRootAccess(code) {
+  if (!code.includes("var G=globalThis.__g,_=G._")) {
+    return code;
+  }
+  let next = code.replaceAll("globalThis.__g.", "G.").replaceAll('globalThis["__g"].', "G.");
+  for (const runtimeAlias of findBundlerRuntimeRootAliases(next)) {
+    if (runtimeAlias === "G") {
+      continue;
+    }
+    next = next.replaceAll(`${runtimeAlias}.`, "G.");
+    next = stripStandaloneRuntimeAlias(next, runtimeAlias);
+  }
+  return next;
+}
+function findBundlerRuntimeFinalizeAlias(code) {
+  const aliases = findBundlerRuntimeRootAliases(code);
+  for (const alias of aliases) {
+    if (code.includes(`${alias}.u(`) || code.includes(`${alias}.n(`)) {
+      return alias;
+    }
+  }
+  return;
+}
+function findBundlerRuntimeRootAliases(code) {
+  const aliases = new Set;
+  for (const pattern of [
+    /\bvar\s+([A-Za-z_$][\w$]*)=globalThis(?:\.__g|\["__g"\])(?=[,;])/g,
+    /,([A-Za-z_$][\w$]*)=globalThis(?:\.__g|\["__g"\])(?=[,;])/g,
+    /(?:^|[;(])([A-Za-z_$][\w$]*)=globalThis(?:\.__g|\["__g"\])(?=;)/gm
+  ]) {
+    for (const match of code.matchAll(pattern)) {
+      aliases.add(match[1]);
+    }
+  }
+  return [...aliases];
+}
+function stripStandaloneRuntimeAlias(code, runtimeAlias) {
+  const escapedAlias = escapeRegex(runtimeAlias);
+  return code.replace(new RegExp(`\\bvar ${escapedAlias}=globalThis(?:\\.__g|\\["__g"\\]);(?=G\\.)`, "g"), "").replace(new RegExp(`(^|[;\\n])${escapedAlias}=globalThis(?:\\.__g|\\["__g"\\]);(?=G\\.)`, "gm"), "$1").replace(/\n{3,}/g, `
+
+`);
+}
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 function wrapBundlerRuntimeOutputFile(code) {
   const trimmed = code.trimEnd();
@@ -2132,8 +2181,10 @@ async function readInputContents(inputPath, cache) {
   }
   return pending;
 }
-function renderBundlerRuntimeEs5HelperBag(helperKeys) {
-  const lines = ["var G=globalThis.__g,_=G._||(G._=[]);"];
+function renderBundlerRuntimeEs5HelperBag(helperKeys, runtimeAlias) {
+  const lines = [
+    runtimeAlias ? `var _=${runtimeAlias}._||(${runtimeAlias}._=[]);` : "var G=globalThis.__g,_=G._||(G._=[]);"
+  ];
   if (helperKeys.has("class-private-field-set")) {
     lines.push('_[0]=function(a,b,c,d,e){if(d==="m")throw new TypeError("Private method is not writable");if(d==="a"&&!e)throw new TypeError("Private accessor was defined without a setter");if(typeof b==="function"?a!==b||!e:!b.has(a))throw new TypeError("Cannot write private member to an object whose class did not declare it");return d==="a"?e.call(a,c):e?e.value=c:b.set(a,c),c;};');
   }
