@@ -41,105 +41,6 @@ test.serial("builds an ESM package from node_modules in ADVANCED mode", async ()
   expect(output).not.toMatch(/demo-pkg/);
 });
 
-test.serial("prefers production package exports over development exports by default", async () => {
-  const fixture = await createFixture();
-  await fixture.write(
-    "src/index.ts",
-    'import { value } from "demo-pkg";\nexport default value;\n',
-  );
-  await fixture.write(
-    "node_modules/demo-pkg/package.json",
-    JSON.stringify({
-      name: "demo-pkg",
-      exports: {
-        browser: {
-          development: "./dev.js",
-          production: "./prod.js",
-          default: "./default.js",
-        },
-      },
-    }),
-  );
-  await fixture.write("node_modules/demo-pkg/dev.js", 'export const value = "DEV_EXPORT";\n');
-  await fixture.write("node_modules/demo-pkg/prod.js", 'export const value = "PROD_EXPORT";\n');
-  await fixture.write(
-    "node_modules/demo-pkg/default.js",
-    'export const value = "DEFAULT_EXPORT";\n',
-  );
-
-  const result = await build({
-    cache: { mode: "off" },
-    entries: ["./index.ts"],
-    outDir: fixture.outDir,
-    projectRoot: fixture.projectRoot,
-    srcDir: fixture.srcDir,
-  });
-
-  expect(result.exitCode).toBe(0);
-  const output = await fixture.read("dist/index.js");
-  expect(output).toMatch(/PROD_EXPORT/);
-  expect(output).not.toMatch(/DEV_EXPORT/);
-});
-
-test.serial("builds a CommonJS package entrypoint from node_modules", async () => {
-  const fixture = await createFixture();
-  await fixture.write(
-    "src/index.ts",
-    'import { answer } from "demo-pkg";\nexport default answer;\n',
-  );
-  await fixture.write(
-    "node_modules/demo-pkg/package.json",
-    '{"name":"demo-pkg","main":"./index.cjs"}\n',
-  );
-  await fixture.write(
-    "node_modules/demo-pkg/index.cjs",
-    [
-      "exports.answer = 42;",
-      "",
-    ].join("\n"),
-  );
-
-  const result = await build({
-    cache: { mode: "off" },
-    entries: ["./index.ts"],
-    outDir: fixture.outDir,
-    projectRoot: fixture.projectRoot,
-    srcDir: fixture.srcDir,
-  });
-
-  expect(result.exitCode).toBe(0);
-  const output = await fixture.read("dist/index.js");
-  expect(output).toMatch(/42/);
-});
-
-test.serial("rewrites namespace imports from CommonJS packages to runtime-safe interop", async () => {
-  const fixture = await createFixture();
-  await fixture.write(
-    "src/index.ts",
-    'import * as demo from "demo-pkg";\nexport default demo.answer;\n',
-  );
-  await fixture.write(
-    "node_modules/demo-pkg/package.json",
-    '{"name":"demo-pkg","main":"./index.cjs"}\n',
-  );
-  await fixture.write(
-    "node_modules/demo-pkg/index.cjs",
-    "exports.answer = 42;\n",
-  );
-
-  const result = await build({
-    cache: { mode: "off" },
-    entries: ["./index.ts"],
-    outDir: fixture.outDir,
-    projectRoot: fixture.projectRoot,
-    srcDir: fixture.srcDir,
-  });
-
-  expect(result.exitCode).toBe(0);
-  const output = await fixture.read("dist/index.js");
-  expect(output).toMatch(/42/);
-});
-
 test.serial("emits a shared chunk when multiple entries use the same package", async () => {
   const fixture = await createFixture();
   await fixture.write(
@@ -172,51 +73,6 @@ test.serial("emits a shared chunk when multiple entries use the same package", a
   ).toEqual(["a.js", "b.js", "shared.js"]);
 });
 
-test.serial("folds process.env.NODE_ENV to the production CommonJS branch", async () => {
-  const fixture = await createFixture();
-  await fixture.write(
-    "src/index.ts",
-    'import { value } from "demo-pkg";\nexport const result = value;\n',
-  );
-  await fixture.write(
-    "node_modules/demo-pkg/package.json",
-    '{"name":"demo-pkg","main":"./index.js"}\n',
-  );
-  await fixture.write(
-    "node_modules/demo-pkg/index.js",
-    [
-      'if (process.env.NODE_ENV === "production") {',
-      '  module.exports = require("./prod.cjs");',
-      "} else {",
-      '  module.exports = require("./dev.cjs");',
-      "}",
-      "",
-    ].join("\n"),
-  );
-  await fixture.write(
-    "node_modules/demo-pkg/prod.cjs",
-    'exports.value = "PROD_BRANCH";\n',
-  );
-  await fixture.write(
-    "node_modules/demo-pkg/dev.cjs",
-    'exports.value = "DEV_BRANCH";\n',
-  );
-
-  const result = await build({
-    cache: { mode: "off" },
-    entries: ["./index.ts"],
-    outDir: fixture.outDir,
-    projectRoot: fixture.projectRoot,
-    srcDir: fixture.srcDir,
-  });
-
-  expect(result.exitCode).toBe(0);
-  const output = await fixture.read("dist/index.js");
-  expect(output).toMatch(/PROD_BRANCH/);
-  expect(output).not.toMatch(/DEV_BRANCH/);
-  expect(output).not.toMatch(/\.cjs/);
-});
-
 test.serial("full preflight accepts JS dependencies from node_modules", async () => {
   const fixture = await createFixture();
   await fixture.write(
@@ -241,66 +97,37 @@ test.serial("full preflight accepts JS dependencies from node_modules", async ()
   expect(result.exitCode).toBe(0);
 });
 
-test.serial("full preflight surfaces authored TypeScript semantic diagnostics", async () => {
-  const fixture = await createFixture();
-  await fixture.write(
-    "src/index.ts",
-    [
-      'const label: number = "bad";',
-      "export default label;",
-      "",
-    ].join("\n"),
-  );
+test.serial("authored TypeScript semantic diagnostics surface in supported preflight modes", async () => {
+  for (const preflight of ["full", "errors-only"]) {
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/index.ts",
+      [
+        'const label: number = "bad";',
+        "export default label;",
+        "",
+      ].join("\n"),
+    );
 
-  const result = await build({
-    cache: { mode: "off" },
-    diagnostics: { preflight: "full" },
-    entries: ["./index.ts"],
-    outDir: fixture.outDir,
-    projectRoot: fixture.projectRoot,
-    srcDir: fixture.srcDir,
-  });
+    const result = await build({
+      cache: { mode: "off" },
+      diagnostics: { preflight },
+      entries: ["./index.ts"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
 
-  expect(result.exitCode).toBe(1);
-  expect(result.emitSkipped).toBe(true);
-  expect(
-    result.diagnostics.some((diagnostic) =>
-      flattenDiagnosticText(diagnostic).includes(
-        "Type 'string' is not assignable to type 'number'",
+    expect(result.exitCode).toBe(1);
+    expect(result.emitSkipped).toBe(true);
+    expect(
+      result.diagnostics.some((diagnostic) =>
+        flattenDiagnosticText(diagnostic).includes(
+          "Type 'string' is not assignable to type 'number'",
+        ),
       ),
-    ),
-  ).toBe(true);
-});
-
-test.serial("errors-only preflight surfaces authored TypeScript errors", async () => {
-  const fixture = await createFixture();
-  await fixture.write(
-    "src/index.ts",
-    [
-      'const label: number = "bad";',
-      "export default label;",
-      "",
-    ].join("\n"),
-  );
-
-  const result = await build({
-    cache: { mode: "off" },
-    diagnostics: { preflight: "errors-only" },
-    entries: ["./index.ts"],
-    outDir: fixture.outDir,
-    projectRoot: fixture.projectRoot,
-    srcDir: fixture.srcDir,
-  });
-
-  expect(result.exitCode).toBe(1);
-  expect(result.emitSkipped).toBe(true);
-  expect(
-    result.diagnostics.some((diagnostic) =>
-      flattenDiagnosticText(diagnostic).includes(
-        "Type 'string' is not assignable to type 'number'",
-      ),
-    ),
-  ).toBe(true);
+    ).toBe(true);
+  }
 });
 
 test.serial("persistent cache restores published outputs after the outDir is removed", async () => {

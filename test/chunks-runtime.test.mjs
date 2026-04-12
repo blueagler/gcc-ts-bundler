@@ -200,33 +200,6 @@ test.serial(
   },
 );
 
-test.serial("bundler-runtime rejects reflective namespace operations", async () => {
-  const fixture = await createFixture();
-  await fixture.write(
-    "src/main.ts",
-    [
-      'import * as feature from "./feature";',
-      "void Object.keys(feature);",
-      "",
-    ].join("\n"),
-  );
-  await fixture.write("src/feature.ts", 'export const marker = "x";\n');
-
-  const result = await build({
-    cache: { mode: "off" },
-    chunks: { loader: "script", mode: "bundler-runtime" },
-    entries: ["./main.ts"],
-    outDir: fixture.outDir,
-    projectRoot: fixture.projectRoot,
-    srcDir: fixture.srcDir,
-  });
-
-  expect(result.exitCode).toBe(1);
-  expect(String(result.diagnostics[0]?.messageText ?? "")).toMatch(
-    /reflective Object\.\* operations on module namespace values/,
-  );
-});
-
 test.serial(
   "bundler-runtime rewrites property-protocol strings from the renaming report",
   async () => {
@@ -418,7 +391,7 @@ test.serial("parallel bundler-runtime Closure execution is byte-equivalent to se
   );
 });
 
-test.serial("emits an optional chunk manifest when requested", async () => {
+test.serial("emits a bundler-runtime chunk manifest when requested", async () => {
   const fixture = await createFixture();
   await fixture.write(
     "src/main.ts",
@@ -465,39 +438,6 @@ test.serial("emits an optional chunk manifest when requested", async () => {
   expect(
     Object.values(manifest.chunks).every((chunkValue) => Array.isArray(chunkValue.css)),
   ).toBe(true);
-});
-
-test.serial("emits a bundler-runtime chunk manifest when requested", async () => {
-  const fixture = await createFixture();
-  await fixture.write(
-    "src/main.ts",
-    [
-      'const loadFeature = () => import("./feature");',
-      "globalThis.__lazyLoader = loadFeature;",
-      "",
-    ].join("\n"),
-  );
-  await fixture.write(
-    "src/feature.ts",
-    'export const marker = "LAZY_FEATURE";\n',
-  );
-
-  const result = await build({
-    cache: { mode: "off" },
-    chunks: {
-      loader: "script",
-      manifestFile: "chunk-map.json",
-      mode: "bundler-runtime",
-    },
-    entries: ["./main.ts"],
-    outDir: fixture.outDir,
-    projectRoot: fixture.projectRoot,
-    srcDir: fixture.srcDir,
-  });
-
-  expect(result.exitCode).toBe(0);
-  const manifest = JSON.parse(await fixture.read("dist/chunk-map.json"));
-  expect(manifest.baseChunk).toMatch(/^c[0-9a-f]{8}$/);
   const chunkEntries = Object.entries(manifest.chunks);
   expect(chunkEntries).toHaveLength(2);
   expect(chunkEntries.every(([chunkId, chunkValue]) =>

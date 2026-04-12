@@ -98,32 +98,9 @@ test.serial("generateExterns boundary-aware mode ignores app-only object protoco
   expect(result.text).not.toContain("Object.prototype.values;");
 });
 
-test.serial("generateExterns runtime-aware mode captures helper-lowered dependency fields without noise", async () => {
-  const fixture = await createRuntimeExternFixture();
-
-  const result = await generateExterns({
-    appEntryFiles: ["./index.ts"],
-    mode: "runtime-aware",
-    modules: ["runtime-pkg"],
-    projectRoot: fixture.projectRoot,
-    runtimeEntryFiles: ["./node_modules/runtime-pkg/index.js"],
-    srcDir: fixture.srcDir,
-  });
-
-  expect(result.mode).toBe("runtime-aware");
-  expect(result.text).toContain("Object.prototype.counts;");
-  expect(result.text).toContain("Object.prototype.label;");
-  expect(result.text).not.toContain("Object.prototype.reset;");
-  expect(result.text).not.toContain("Object.prototype.from;");
-  expect(result.text).not.toContain("Object.prototype.bump;");
-  expect(result.text).not.toContain("Object.prototype.addEventListener;");
-  expect(result.text).not.toContain("Object.prototype.apply;");
-  expect(result.text).not.toContain("Object.prototype.length;");
-});
-
-test.serial("generateExterns runtime-aware mode keeps string-defined members used from app code", async () => {
-  const fixture = await createRuntimeExternFixture();
-  await fixture.write(
+test.serial("generateExterns runtime-aware mode captures public runtime protocols without noise", async () => {
+  const runtimeFixture = await createRuntimeExternFixture();
+  await runtimeFixture.write(
     "src/index.ts",
     [
       'import { Counter } from "runtime-pkg";',
@@ -134,22 +111,27 @@ test.serial("generateExterns runtime-aware mode keeps string-defined members use
     ].join("\n"),
   );
 
-  const result = await generateExterns({
+  const runtimeResult = await generateExterns({
     appEntryFiles: ["./index.ts"],
     mode: "runtime-aware",
     modules: ["runtime-pkg"],
-    projectRoot: fixture.projectRoot,
+    projectRoot: runtimeFixture.projectRoot,
     runtimeEntryFiles: ["./node_modules/runtime-pkg/index.js"],
-    srcDir: fixture.srcDir,
+    srcDir: runtimeFixture.srcDir,
   });
 
-  expect(result.text).toContain("Object.prototype.reset;");
-  expect(result.text).toContain("Object.prototype.from;");
-});
+  expect(runtimeResult.mode).toBe("runtime-aware");
+  expect(runtimeResult.text).toContain("Object.prototype.counts;");
+  expect(runtimeResult.text).toContain("Object.prototype.label;");
+  expect(runtimeResult.text).toContain("Object.prototype.reset;");
+  expect(runtimeResult.text).toContain("Object.prototype.from;");
+  expect(runtimeResult.text).not.toContain("Object.prototype.bump;");
+  expect(runtimeResult.text).not.toContain("Object.prototype.addEventListener;");
+  expect(runtimeResult.text).not.toContain("Object.prototype.apply;");
+  expect(runtimeResult.text).not.toContain("Object.prototype.length;");
 
-test.serial("generateExterns runtime-aware mode captures precompiled helper protocol keys", async () => {
-  const fixture = await createFixture();
-  await fixture.write(
+  const protocolFixture = await createFixture();
+  await protocolFixture.write(
     "src/runtime.js",
     [
       "const helpers = {",
@@ -167,27 +149,27 @@ test.serial("generateExterns runtime-aware mode captures precompiled helper prot
     ].join("\n"),
   );
 
-  const result = await generateExterns({
+  const protocolResult = await generateExterns({
     mode: "runtime-aware",
     modules: ["demo-runtime"],
-    projectRoot: fixture.projectRoot,
+    projectRoot: protocolFixture.projectRoot,
     runtimeEntryFiles: ["./runtime.js"],
-    srcDir: fixture.srcDir,
+    srcDir: protocolFixture.srcDir,
   });
 
-  expect(result.text).toContain("Object.prototype.$$slots;");
-  expect(result.text).toContain("Object.prototype.$$events;");
-  expect(result.text).toContain("Object.prototype.$$legacy;");
-  expect(result.text).toContain("Object.prototype.variant;");
-  expect(result.text).toContain("Object.prototype.size;");
-  expect(result.text).not.toContain("Object.prototype.prop;");
-  expect(result.text).not.toContain("Object.prototype.rest_props;");
+  expect(protocolResult.text).toContain("Object.prototype.$$slots;");
+  expect(protocolResult.text).toContain("Object.prototype.$$events;");
+  expect(protocolResult.text).toContain("Object.prototype.$$legacy;");
+  expect(protocolResult.text).toContain("Object.prototype.variant;");
+  expect(protocolResult.text).toContain("Object.prototype.size;");
+  expect(protocolResult.text).not.toContain("Object.prototype.prop;");
+  expect(protocolResult.text).not.toContain("Object.prototype.rest_props;");
 });
 
-test.serial("externs CLI writes generated output with bun-compatible tests", async () => {
-  const fixture = await createExternFixture();
-  const outputFile = path.join(
-    fixture.projectRoot,
+test.serial("externs CLI emits boundary-aware and runtime-aware outputs", async () => {
+  const boundaryFixture = await createExternFixture();
+  const boundaryOutputFile = path.join(
+    boundaryFixture.projectRoot,
     "closure-externs",
     "contract.generated.js",
   );
@@ -198,27 +180,25 @@ test.serial("externs CLI writes generated output with bun-compatible tests", asy
     "--entry",
     "./main.ts",
     "--project-root",
-    fixture.projectRoot,
+    boundaryFixture.projectRoot,
     "--src-dir",
-    fixture.srcDir,
+    boundaryFixture.srcDir,
     "--module",
     "contract-pkg",
     "--output-file",
-    outputFile,
+    boundaryOutputFile,
   ]);
 
-  const externsOutput = await fs.readFile(outputFile, "utf8");
-  expect(externsOutput).toContain("/** @externs */");
-  expect(externsOutput).toContain("Object.prototype.addController;");
-  expect(externsOutput).toContain("Object.prototype.updateComplete;");
-  expect(externsOutput).not.toContain("Object.prototype.togglePlay;");
-  expect(externsOutput).not.toContain("Object.prototype.attribute;");
-});
+  const boundaryOutput = await fs.readFile(boundaryOutputFile, "utf8");
+  expect(boundaryOutput).toContain("/** @externs */");
+  expect(boundaryOutput).toContain("Object.prototype.addController;");
+  expect(boundaryOutput).toContain("Object.prototype.updateComplete;");
+  expect(boundaryOutput).not.toContain("Object.prototype.togglePlay;");
+  expect(boundaryOutput).not.toContain("Object.prototype.attribute;");
 
-test.serial("externs CLI runtime-aware mode accepts runtime-entry files", async () => {
-  const fixture = await createRuntimeExternFixture();
-  const outputFile = path.join(
-    fixture.projectRoot,
+  const runtimeFixture = await createRuntimeExternFixture();
+  const runtimeOutputFile = path.join(
+    runtimeFixture.projectRoot,
     "closure-externs",
     "runtime.generated.js",
   );
@@ -229,9 +209,9 @@ test.serial("externs CLI runtime-aware mode accepts runtime-entry files", async 
     "--entry",
     "./index.ts",
     "--project-root",
-    fixture.projectRoot,
+    runtimeFixture.projectRoot,
     "--src-dir",
-    fixture.srcDir,
+    runtimeFixture.srcDir,
     "--runtime-entry",
     "./node_modules/runtime-pkg/index.js",
     "--mode",
@@ -239,19 +219,19 @@ test.serial("externs CLI runtime-aware mode accepts runtime-entry files", async 
     "--module",
     "runtime-pkg",
     "--output-file",
-    outputFile,
+    runtimeOutputFile,
   ]);
 
-  const externsOutput = await fs.readFile(outputFile, "utf8");
-  expect(externsOutput).toContain("Object.prototype.counts;");
-  expect(externsOutput).toContain("Object.prototype.label;");
-  expect(externsOutput).not.toContain("Object.prototype.addEventListener;");
+  const runtimeOutput = await fs.readFile(runtimeOutputFile, "utf8");
+  expect(runtimeOutput).toContain("Object.prototype.counts;");
+  expect(runtimeOutput).toContain("Object.prototype.label;");
+  expect(runtimeOutput).not.toContain("Object.prototype.addEventListener;");
 });
 
-test.serial("build uses explicit runtime-aware dependency externs for helper-lowered fields", async () => {
-  const fixture = await createRuntimeExternFixture();
-  const externsFile = path.join(
-    fixture.projectRoot,
+test.serial("build uses explicit runtime-aware externs to preserve runtime and protocol contracts", async () => {
+  const runtimeFixture = await createRuntimeExternFixture();
+  const runtimeExternsFile = path.join(
+    runtimeFixture.projectRoot,
     "closure-externs",
     "runtime.generated.js",
   );
@@ -260,40 +240,38 @@ test.serial("build uses explicit runtime-aware dependency externs for helper-low
     appEntryFiles: ["./index.ts"],
     mode: "runtime-aware",
     modules: ["runtime-pkg"],
-    outputFile: externsFile,
-    projectRoot: fixture.projectRoot,
+    outputFile: runtimeExternsFile,
+    projectRoot: runtimeFixture.projectRoot,
     runtimeEntryFiles: ["./node_modules/runtime-pkg/index.js"],
-    srcDir: fixture.srcDir,
+    srcDir: runtimeFixture.srcDir,
   });
 
-  const result = await build({
+  const runtimeResult = await build({
     cache: { mode: "off" },
     entries: ["./index.ts"],
     externs: ["./closure-externs/runtime.generated.js"],
-    outDir: fixture.outDir,
-    projectRoot: fixture.projectRoot,
-    srcDir: fixture.srcDir,
+    outDir: runtimeFixture.outDir,
+    projectRoot: runtimeFixture.projectRoot,
+    srcDir: runtimeFixture.srcDir,
   });
 
-  expect(result.exitCode).toBe(0);
-  const output = await fixture.read("dist/index.js");
-  expect(output).not.toMatch(/runtime-pkg/);
+  expect(runtimeResult.exitCode).toBe(0);
+  const runtimeOutput = await runtimeFixture.read("dist/index.js");
+  expect(runtimeOutput).not.toMatch(/runtime-pkg/);
 
   const builtModule = await import(
-    `${pathToFileURL(path.join(fixture.outDir, "index.js")).href}?runtime=${Date.now()}`
+    `${pathToFileURL(path.join(runtimeFixture.outDir, "index.js")).href}?runtime=${Date.now()}`
   );
   expect(builtModule.first).toBe("demo:1");
   expect(builtModule.second).toBe("demo:2");
-});
 
-test.serial("build uses explicit runtime-aware externs to keep precompiled helper keys aligned", async () => {
-  const fixture = await createFixture();
-  const externsFile = path.join(
-    fixture.projectRoot,
+  const protocolFixture = await createFixture();
+  const protocolExternsFile = path.join(
+    protocolFixture.projectRoot,
     "closure-externs",
     "protocol.generated.js",
   );
-  await fixture.write(
+  await protocolFixture.write(
     "src/helpers.js",
     [
       "export function prop(props, key) {",
@@ -317,7 +295,7 @@ test.serial("build uses explicit runtime-aware externs to keep precompiled helpe
       "",
     ].join("\n"),
   );
-  await fixture.write(
+  await protocolFixture.write(
     "src/main.js",
     [
       'import { render } from "./helpers.js";',
@@ -335,24 +313,24 @@ test.serial("build uses explicit runtime-aware externs to keep precompiled helpe
   await generateExterns({
     mode: "runtime-aware",
     modules: ["demo-runtime"],
-    outputFile: externsFile,
-    projectRoot: fixture.projectRoot,
+    outputFile: protocolExternsFile,
+    projectRoot: protocolFixture.projectRoot,
     runtimeEntryFiles: ["./helpers.js"],
-    srcDir: fixture.srcDir,
+    srcDir: protocolFixture.srcDir,
   });
 
-  const result = await build({
+  const protocolResult = await build({
     cache: { mode: "off" },
     entries: ["./main.js"],
     externs: ["./closure-externs/protocol.generated.js"],
-    outDir: fixture.outDir,
-    projectRoot: fixture.projectRoot,
-    srcDir: fixture.srcDir,
+    outDir: protocolFixture.outDir,
+    projectRoot: protocolFixture.projectRoot,
+    srcDir: protocolFixture.srcDir,
   });
 
-  expect(result.exitCode).toBe(0);
+  expect(protocolResult.exitCode).toBe(0);
   await import(
-    `${pathToFileURL(path.join(fixture.outDir, "main.js")).href}?protocol=${Date.now()}`
+    `${pathToFileURL(path.join(protocolFixture.outDir, "main.js")).href}?protocol=${Date.now()}`
   );
   expect(globalThis.__protocolHasObjectValue).toBe(false);
   expect(globalThis.__protocolVariant).toBe("filled");
