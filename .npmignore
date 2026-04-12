@@ -1,0 +1,12 @@
+.DS_Store
+.vscode/
+node_modules/
+native/
+scripts/
+src/
+test/
+examples/
+.gcc-ts-bundler-vite/
+package-lock.json
+yarn.lock
+bun.lockb

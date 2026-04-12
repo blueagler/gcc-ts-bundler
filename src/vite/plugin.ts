@@ -1,15 +1,20 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 
 import type { Plugin, ResolvedConfig, UserConfig } from "vite";
 import type { PluginContext } from "rollup";
 
 import { build } from "../api/build";
+import { logInternalDetail } from "../internal/timing";
 import {
   materializeCapturedGraph,
   normalizeCapturedCode,
   prepareCaptureRoot,
+  resolveRetainedCapturedModuleIds,
+  resolveRetainedModuleIds,
   resolveCompilerExterns,
   resolveEntryModuleIds,
+  summarizeModuleIdsByPackage,
   shouldCaptureModule,
 } from "./capture";
 import {
@@ -23,6 +28,7 @@ import {
 import { analyzeViteCssOwnership, augmentCompiledViteCss } from "./css";
 import type { CapturedModule, ViteCssOwnership } from "./internal-types";
 import {
+  collectOutputByteBreakdown,
   emitCompiledOutputs,
   listJavaScriptChunks,
   removeRollupJavaScript,
@@ -85,8 +91,34 @@ export function gccTsBundler(
         this.error("gccTsBundler() could not find Vite JS chunks to replace.");
       }
 
-      const usedModuleIds = [...capturedModules.keys()].sort((left, right) =>
-        left.localeCompare(right),
+      const entryModuleIds = resolveEntryModuleIds(bundle, jsChunks);
+      const retainedModuleIds = resolveRetainedModuleIds(
+        jsChunks,
+        entryModuleIds,
+      );
+      const retainedCaptured = await resolveRetainedCapturedModuleIds.call(
+        this,
+        {
+          capturedModules,
+          retainedModuleIds,
+        },
+      );
+      if (retainedCaptured.missingModuleIds.length > 0) {
+        this.error(
+          "gccTsBundler() could not capture transformed code for retained Rollup modules:\n" +
+            retainedCaptured.missingModuleIds.join("\n"),
+        );
+      }
+      logInternalDetail("vite:captured-modules", `${capturedModules.size}`);
+      logInternalDetail("vite:retained-modules", `${retainedModuleIds.length}`);
+      logInternalDetail(
+        "vite:retained-captured-modules",
+        `${retainedCaptured.materializedModuleIds.length}`,
+      );
+      logInternalDetail(
+        "vite:retained-packages",
+        summarizeModuleIdsByPackage(retainedCaptured.materializedModuleIds) ||
+          "none",
       );
       const captureRoot = await prepareCaptureRoot({
         debugDir: options.debug?.dumpCapturedGraphDir,
@@ -108,8 +140,8 @@ export function gccTsBundler(
       const materialized = await materializeCapturedGraph.call(this, {
         capturedModules,
         config: resolvedConfig,
-        entryModuleIds: resolveEntryModuleIds(bundle, jsChunks),
-        moduleIds: usedModuleIds,
+        entryModuleIds,
+        moduleIds: retainedCaptured.materializedModuleIds,
         srcDir,
       });
       const externs = await resolveCompilerExterns({
@@ -163,6 +195,13 @@ export function gccTsBundler(
       }
 
       const manifestFilePath = path.join(outDir, manifestSettings.fileName);
+      const manifest = JSON.parse(
+        await fs.readFile(manifestFilePath, "utf8"),
+      ) as { modules?: Record<string, string> };
+      logInternalDetail(
+        "vite:gcc-runtime-modules",
+        `${Object.keys(manifest.modules ?? {}).length}`,
+      );
       if (cssOwnership.enabled) {
         await augmentCompiledViteCss({
           baseChunkFilePath: path.join(
@@ -186,6 +225,14 @@ export function gccTsBundler(
         : result.outputFiles.filter(
             (filePath) => filePath !== runtimeModuleSourceMapFilePath,
           );
+      const outputBytes = await collectOutputByteBreakdown({
+        bundle,
+        emittedOutputFiles,
+      });
+      logInternalDetail(
+        "vite:output-bytes",
+        `js=${outputBytes.js} css=${outputBytes.css} fonts=${outputBytes.fonts} assets=${outputBytes.assets}`,
+      );
       await emitCompiledOutputs(this, emittedOutputFiles, outDir);
 
       if (options.html?.rewriteEntryScripts ?? REWRITE_ENTRY_SCRIPTS_DEFAULT) {

@@ -11,4 +11,6 @@ dist/
 npm/
 examples/**/dist/
 examples/**/node_modules/
+examples/**/.gcc-ts-bundler-vite/
+examples/**/.gcc-debug/
 examples/**/*.generated.externs.js

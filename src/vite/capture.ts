@@ -129,6 +129,98 @@ export function resolveEntryModuleIds(
     .map((chunk) => chunk.facadeModuleId as string);
 }
 
+export function resolveRetainedModuleIds(
+  chunks: OutputChunk[],
+  entryModuleIds: string[],
+) {
+  const moduleIds = new Set<string>(entryModuleIds);
+  for (const chunk of chunks) {
+    for (const moduleId of Object.keys(chunk.modules)) {
+      moduleIds.add(moduleId);
+    }
+  }
+  return [...moduleIds].sort((left, right) => left.localeCompare(right));
+}
+
+export async function resolveRetainedCapturedModuleIds(
+  this: PluginContext,
+  input: {
+    capturedModules: Map<string, CapturedModule>;
+    retainedModuleIds: string[];
+  },
+) {
+  const retainedModuleIds = new Set(input.retainedModuleIds);
+  const materializedModuleIds = new Set<string>();
+  const missingModuleIds = new Set<string>();
+  const pendingModuleIds: string[] = [];
+
+  for (const moduleId of input.retainedModuleIds) {
+    if (input.capturedModules.has(moduleId)) {
+      materializedModuleIds.add(moduleId);
+      pendingModuleIds.push(moduleId);
+      continue;
+    }
+
+    if (isNonMaterializedRetainedModuleId(moduleId)) {
+      continue;
+    }
+
+    missingModuleIds.add(moduleId);
+  }
+
+  while (pendingModuleIds.length > 0) {
+    const moduleId = pendingModuleIds.pop();
+    if (!moduleId) {
+      continue;
+    }
+
+    const record = input.capturedModules.get(moduleId);
+    if (!record) {
+      continue;
+    }
+
+    const bridgeModuleIds = await collectBridgeModuleIds.call(this, {
+      capturedModules: input.capturedModules,
+      code: record.code,
+      importerId: moduleId,
+      retainedModuleIds,
+    });
+    for (const bridgeModuleId of bridgeModuleIds) {
+      if (materializedModuleIds.has(bridgeModuleId)) {
+        continue;
+      }
+      materializedModuleIds.add(bridgeModuleId);
+      pendingModuleIds.push(bridgeModuleId);
+    }
+  }
+
+  return {
+    materializedModuleIds: [...materializedModuleIds].sort((left, right) =>
+      left.localeCompare(right),
+    ),
+    missingModuleIds: [...missingModuleIds].sort((left, right) =>
+      left.localeCompare(right),
+    ),
+  };
+}
+
+export function summarizeModuleIdsByPackage(moduleIds: Iterable<string>) {
+  const counts = new Map<string, number>();
+  for (const moduleId of moduleIds) {
+    const bucket = classifyModuleId(moduleId);
+    counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .sort((left, right) =>
+      right[1] === left[1]
+        ? left[0].localeCompare(right[0])
+        : right[1] - left[1],
+    )
+    .map(([bucket, count]) => `${bucket}:${count}`)
+    .join(", ");
+}
+
 export async function materializeCapturedGraph(
   this: PluginContext,
   input: {
@@ -285,7 +377,7 @@ async function rewriteModuleImports(
 
     const targetFile = input.filePathByModuleId.get(resolved.id);
     if (!targetFile) {
-      if (shouldOmitSideEffectAssetImport(node, resolved.id)) {
+      if (shouldOmitPrunedImport(node, resolved.id)) {
         edits.push({
           end: node.getEnd(),
           start: node.getStart(sourceFile),
@@ -345,15 +437,105 @@ async function rewriteModuleImports(
   return rewritten;
 }
 
-function shouldOmitSideEffectAssetImport(
+function shouldOmitPrunedImport(
   node: ts.ImportDeclaration | ts.ExportDeclaration | ts.CallExpression,
   resolvedId: string,
 ) {
+  if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+    const cleanId = stripQuery(resolvedId);
+    if (/\.(?:[cm]?[jt]sx?|mjs|cjs|svelte|vue)$/u.test(cleanId)) {
+      return true;
+    }
+  }
   if (!ts.isImportDeclaration(node) || node.importClause) {
     return false;
   }
   const cleanId = stripQuery(resolvedId);
   return /\.(?:css|less|sass|scss|styl|stylus|pcss|postcss)$/u.test(cleanId);
+}
+
+function isNonMaterializedRetainedModuleId(moduleId: string) {
+  const cleanId = stripQuery(moduleId);
+  return /\.(?:css|less|sass|scss|styl|stylus|pcss|postcss)$/u.test(cleanId);
+}
+
+async function collectBridgeModuleIds(
+  this: PluginContext,
+  input: {
+    capturedModules: Map<string, CapturedModule>;
+    code: string;
+    importerId: string;
+    retainedModuleIds: Set<string>;
+  },
+) {
+  const sourceFile = ts.createSourceFile(
+    input.importerId,
+    input.code,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS,
+  );
+  const bridgeModuleIds = new Set<string>();
+  const pendingResolutions: Promise<void>[] = [];
+
+  const queueBridgeResolution = (
+    literal: ts.StringLiteralLike,
+    node: ts.ImportDeclaration | ts.CallExpression,
+  ) => {
+    pendingResolutions.push(
+      (async () => {
+        const resolved = await this.resolve(literal.text, input.importerId, {
+          skipSelf: true,
+        });
+        if (
+          !resolved ||
+          resolved.external ||
+          input.retainedModuleIds.has(resolved.id) ||
+          !input.capturedModules.has(resolved.id) ||
+          isNonMaterializedRetainedModuleId(resolved.id)
+        ) {
+          return;
+        }
+        if (!shouldRetainBridgeModule(node)) {
+          return;
+        }
+        bridgeModuleIds.add(resolved.id);
+      })(),
+    );
+  };
+
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isImportDeclaration(node) &&
+      node.importClause &&
+      node.moduleSpecifier &&
+      ts.isStringLiteralLike(node.moduleSpecifier)
+    ) {
+      queueBridgeResolution(node.moduleSpecifier, node);
+    } else if (
+      ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+      node.arguments.length === 1 &&
+      ts.isStringLiteralLike(node.arguments[0])
+    ) {
+      queueBridgeResolution(node.arguments[0], node);
+    }
+
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  await Promise.all(pendingResolutions);
+  return bridgeModuleIds;
+}
+
+function shouldRetainBridgeModule(
+  node: ts.ImportDeclaration | ts.CallExpression,
+) {
+  if (ts.isImportDeclaration(node)) {
+    return !!node.importClause;
+  }
+  return true;
 }
 
 function isSupportedExternalSpecifier(specifier: string) {
@@ -422,6 +604,21 @@ function stripQuery(id: string) {
 
 function hashText(value: string) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function classifyModuleId(moduleId: string) {
+  const cleanId = stripQuery(moduleId).replace(/\\/g, "/");
+  const nodeModulesIndex = cleanId.lastIndexOf("/node_modules/");
+  if (nodeModulesIndex < 0) {
+    return "app";
+  }
+
+  const packagePath = cleanId.slice(nodeModulesIndex + "/node_modules/".length);
+  const segments = packagePath.split("/");
+  if (segments[0]?.startsWith("@")) {
+    return segments.slice(0, 2).join("/");
+  }
+  return segments[0] || "app";
 }
 
 function readAssetText(asset: { source: string | Uint8Array }) {

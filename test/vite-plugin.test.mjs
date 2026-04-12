@@ -47,6 +47,13 @@ async function buildViteFixture(fixture, overrides = {}) {
       "      runtime: {",
       '        loader: "script",',
       "      },",
+      ...(overrides.debugDir
+        ? [
+            "      debug: {",
+            `        dumpCapturedGraphDir: ${JSON.stringify(overrides.debugDir)},`,
+            "      },",
+          ]
+        : []),
       "    }),",
       "  ],",
       "};",
@@ -119,45 +126,128 @@ async function writeViteCssFixture(fixture) {
   );
 }
 
-test.serial("gccTsBundler wires lazy Vite CSS through the runtime when cssCodeSplit is enabled", async () => {
-  const fixture = await createFixture();
-  await writeViteCssFixture(fixture);
+async function readRuntimeModuleSourceMap(fixture, debugDir) {
+  const source = await fixture.read(
+    path.join(debugDir, ".gcc-ts-bundler-vite-runtime-module-sources.json"),
+  );
+  return JSON.parse(source);
+}
 
-  await buildViteFixture(fixture);
+test.serial(
+  "gccTsBundler wires lazy Vite CSS through the runtime when cssCodeSplit is enabled",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    await writeViteCssFixture(fixture);
 
-  const files = await listFiles(fixture.outDir);
-  const cssFiles = files.filter((filePath) => filePath.endsWith(".css"));
-  expect(cssFiles.length).toBeGreaterThan(1);
+    await buildViteFixture(fixture);
 
-  const html = await fixture.read("dist/index.html");
-  expect(html).toContain('<script defer src="/main.js"></script>');
-  expect(html).not.toContain('type="module"');
-  expect(html).not.toContain('rel="modulepreload"');
+    const files = await listFiles(fixture.outDir);
+    const cssFiles = files.filter((filePath) => filePath.endsWith(".css"));
+    expect(cssFiles.length).toBeGreaterThan(1);
 
-  const linkedCss = cssFiles.filter((fileName) => html.includes(fileName));
-  expect(linkedCss.length).toBeGreaterThan(0);
-  const lazyCss = cssFiles.find((fileName) => !html.includes(fileName));
-  expect(lazyCss).toBeTruthy();
+    const html = await fixture.read("dist/index.html");
+    expect(html).toContain('<script defer src="/main.js"></script>');
+    expect(html).not.toContain('type="module"');
+    expect(html).not.toContain('rel="modulepreload"');
 
-  const mainJs = await fixture.read("dist/main.js");
-  expect(mainJs).toContain(lazyCss);
-  expect(mainJs).toContain("globalThis.__g");
-});
+    const linkedCss = cssFiles.filter((fileName) => html.includes(fileName));
+    expect(linkedCss.length).toBeGreaterThan(0);
+    const lazyCss = cssFiles.find((fileName) => !html.includes(fileName));
+    expect(lazyCss).toBeTruthy();
 
-test.serial("gccTsBundler keeps eager Vite CSS when cssCodeSplit is disabled", async () => {
-  const fixture = await createFixture();
-  await writeViteCssFixture(fixture);
+    const mainJs = await fixture.read("dist/main.js");
+    expect(mainJs).toContain(lazyCss);
+    expect(mainJs).toContain("globalThis.__g");
+  },
+);
 
-  await buildViteFixture(fixture, {
-    build: {
-      cssCodeSplit: false,
-    },
-  });
+test.serial(
+  "gccTsBundler keeps eager Vite CSS when cssCodeSplit is disabled",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    await writeViteCssFixture(fixture);
 
-  const files = await listFiles(fixture.outDir);
-  const cssFiles = files.filter((filePath) => filePath.endsWith(".css"));
-  expect(cssFiles).toHaveLength(1);
+    await buildViteFixture(fixture, {
+      build: {
+        cssCodeSplit: false,
+      },
+    });
 
-  const mainJs = await fixture.read("dist/main.js");
-  expect(mainJs).not.toContain(cssFiles[0]);
-});
+    const files = await listFiles(fixture.outDir);
+    const cssFiles = files.filter((filePath) => filePath.endsWith(".css"));
+    expect(cssFiles).toHaveLength(1);
+
+    const mainJs = await fixture.read("dist/main.js");
+    expect(mainJs).not.toContain(cssFiles[0]);
+  },
+);
+
+test.serial(
+  "gccTsBundler materializes only retained Rollup modules from the final chunk graph",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      [
+        '<!doctype html>',
+        '<html lang="en">',
+        "  <body>",
+        '    <script type="module" src="/src/main.js"></script>',
+        "  </body>",
+        "</html>",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/main.js",
+      [
+        'import { alive } from "./entry.js";',
+        'document.body.textContent = alive;',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/entry.js",
+      [
+        'export { alive } from "./alive.js";',
+        'export { dead } from "./dead.js";',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/alive.js",
+      [
+        'export const alive = "alive";',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/dead.js",
+      [
+        'export const dead = "dead";',
+        'export function deadBranch() { return "tree-shaken"; }',
+        "",
+      ].join("\n"),
+    );
+
+    await buildViteFixture(fixture, {
+      debugDir: ".gcc-debug",
+    });
+
+    const runtimeModuleSourceMap = await readRuntimeModuleSourceMap(
+      fixture,
+      ".gcc-debug",
+    );
+    const runtimeModuleFiles = Object.values(runtimeModuleSourceMap).join("\n");
+    expect(runtimeModuleFiles).toContain("/src/main.js");
+    expect(runtimeModuleFiles).toContain("/src/entry.js");
+    expect(runtimeModuleFiles).toContain("/src/alive.js");
+    expect(runtimeModuleFiles).not.toContain("/src/dead.js");
+
+    const mainJs = await fixture.read("dist/main.js");
+    expect(mainJs).not.toContain("tree-shaken");
+  },
+);

@@ -38,6 +38,45 @@ export async function emitCompiledOutputs(
   }
 }
 
+export async function collectOutputByteBreakdown(input: {
+  bundle: OutputBundle;
+  emittedOutputFiles: string[];
+}) {
+  let js = 0;
+  let css = 0;
+  let fonts = 0;
+  let assets = 0;
+
+  for (const outputFile of input.emittedOutputFiles) {
+    if (outputFile.endsWith(".js")) {
+      js += (await fs.stat(outputFile)).size;
+    } else {
+      assets += (await fs.stat(outputFile)).size;
+    }
+  }
+
+  for (const item of Object.values(input.bundle)) {
+    if (item.type !== "asset") {
+      continue;
+    }
+    const size =
+      typeof item.source === "string"
+        ? Buffer.byteLength(item.source)
+        : item.source.byteLength;
+    if (item.fileName.endsWith(".css")) {
+      css += size;
+      continue;
+    }
+    if (/\.(?:woff2?|ttf|otf|eot)$/u.test(item.fileName)) {
+      fonts += size;
+      continue;
+    }
+    assets += size;
+  }
+
+  return { assets, css, fonts, js };
+}
+
 export function rewriteHtmlAssets(input: {
   baseScriptFileName: string;
   bundle: OutputBundle;
