@@ -88,6 +88,7 @@ export async function materializeCapturedGraph(
       filePath,
       id: moduleId,
       relativePath,
+      sourceModuleIds: [moduleId],
     });
     if (isAuthoredModuleId(moduleId, input.config.root)) {
       authoredFiles.push(filePath);

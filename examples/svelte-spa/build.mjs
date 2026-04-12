@@ -105,6 +105,7 @@ await fs.mkdir(m3CompiledDir, { recursive: true });
 await compileSvelteDirectory(srcDir, srcDir, transformSource);
 await prepareM3SveltePackage(m3PackageDir, m3CompiledPackageDir, transformSource);
 await writeM3ThemeModule(m3PackageDir, path.join(m3CompiledDir, "theme.js"), transformSource);
+await logPureGraphSnapshot("compiled", [srcDir, m3CompiledDir]);
 
 await fs.rm(prebundleDir, { force: true, recursive: true });
 await fs.mkdir(prebundleDir, { recursive: true });
@@ -118,6 +119,7 @@ await bundleWithEsbuild({
   splitting: true,
   target: "es2018",
 });
+await logPureGraphSnapshot("prebundle", [prebundleDir]);
 
 await generateExterns({
   appEntryFiles: ["./main.js"],
@@ -270,6 +272,56 @@ if (typeof document !== "undefined" && !document.getElementById(themeId)) {
   style.id = themeId;
   style.textContent = ${JSON.stringify(themeCss)};
   document.head.appendChild(style);
+}
+
+async function logPureGraphSnapshot(label, roots) {
+  if (!process.env.GCC_BUILD_TIMINGS) {
+    return;
+  }
+
+  const files = [];
+  for (const root of roots) {
+    files.push(...await collectJsFiles(root));
+  }
+  const uniqueFiles = [...new Set(files)].sort((left, right) =>
+    left.localeCompare(right),
+  );
+  const totalBytes = (
+    await Promise.all(
+      uniqueFiles.map(async (filePath) => (await fs.stat(filePath)).size),
+    )
+  ).reduce((sum, size) => sum + size, 0);
+  const forwardingCount = (
+    await Promise.all(
+      uniqueFiles.map(async (filePath) => {
+        const source = await fs.readFile(filePath, "utf8");
+        return /^\s*(?:export\s+\{[^}]*\}\s+from\s+["'][^"']+["'];?\s*)+$/su.test(
+          source,
+        )
+          ? 1
+          : 0;
+      }),
+    )
+  ).reduce((sum, count) => sum + count, 0);
+  console.log(
+    `[gcc-ts-bundler] pure:${label} modules=${uniqueFiles.length} js=${totalBytes} forwarding=${forwardingCount}`,
+  );
+}
+
+async function collectJsFiles(directory) {
+  const entries = await fs.readdir(directory, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...await collectJsFiles(entryPath));
+      continue;
+    }
+    if (entry.isFile() && entry.name.endsWith(".js")) {
+      files.push(entryPath);
+    }
+  }
+  return files;
 }
 `;
   await fs.writeFile(outputFile, themeModule, "utf8");

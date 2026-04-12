@@ -20,6 +20,7 @@ export interface CapturedRuntimeModule {
   filePath: string;
   id: string;
   relativePath: string;
+  sourceModuleIds: string[];
 }
 
 export interface MaterializedGraph {

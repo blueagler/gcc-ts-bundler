@@ -10,6 +10,7 @@ import {
 } from "../src/vite/capture.ts";
 import { resolveNormalizedBridgeModuleIds } from "../src/vite/graph.ts";
 import { materializeCapturedGraph } from "../src/vite/materialize.ts";
+import { prebundleMaterializedDependencies } from "../src/vite/prebundle.ts";
 import {
   VITE_FETCH_LOADER_ERROR,
   resolveViteLanguageOut,
@@ -230,6 +231,137 @@ test.serial(
       'from "./dep.js"',
     );
     expect(additionalBridgeModuleIds).toContain(depId);
+  },
+);
+
+test.serial(
+  "prebundleMaterializedDependencies collapses retained dependency modules into region bundles",
+  async () => {
+    const fixture = await createFixture();
+    const srcDir = path.join(fixture.projectRoot, "captured-src");
+    const authoredEntry = path.join(srcDir, "src", "entry.js");
+    const authoredLazy = path.join(srcDir, "src", "lazy.js");
+    const depIndex = path.join(srcDir, "node_modules", "pkg", "index.js");
+    const depFoo = path.join(srcDir, "node_modules", "pkg", "foo.js");
+    const depBar = path.join(srcDir, "node_modules", "pkg", "bar.js");
+    const depShared = path.join(srcDir, "node_modules", "pkg", "shared.js");
+    const depHelper = path.join(srcDir, "node_modules", "pkg", "helper.js");
+
+    await fs.mkdir(path.dirname(authoredEntry), { recursive: true });
+    await fs.mkdir(path.dirname(depIndex), { recursive: true });
+
+    await fixture.write(
+      path.relative(fixture.projectRoot, authoredEntry),
+      'import { foo } from "../node_modules/pkg/index.js";\nexport const entry = foo;\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, authoredLazy),
+      'import { bar } from "../node_modules/pkg/index.js";\nexport const lazy = bar;\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, depIndex),
+      'export { foo } from "./foo.js";\nexport { bar } from "./bar.js";\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, depFoo),
+      'import { shared } from "./shared.js";\nimport { helper } from "./helper.js";\nexport const foo = shared + helper;\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, depBar),
+      'import { shared } from "./shared.js";\nimport { helper } from "./helper.js";\nexport const bar = shared - helper;\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, depShared),
+      "export const shared = 7;\n",
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, depHelper),
+      "export const helper = 3;\n",
+    );
+
+    const materialized = {
+      authoredFiles: [authoredEntry, authoredLazy],
+      entries: ["./src/entry.js"],
+      modules: [
+        {
+          filePath: authoredEntry,
+          id: authoredEntry,
+          relativePath: "src/entry.js",
+          sourceModuleIds: [authoredEntry],
+        },
+        {
+          filePath: authoredLazy,
+          id: authoredLazy,
+          relativePath: "src/lazy.js",
+          sourceModuleIds: [authoredLazy],
+        },
+        {
+          filePath: depIndex,
+          id: depIndex,
+          relativePath: "node_modules/pkg/index.js",
+          sourceModuleIds: [depIndex],
+        },
+        {
+          filePath: depFoo,
+          id: depFoo,
+          relativePath: "node_modules/pkg/foo.js",
+          sourceModuleIds: [depFoo],
+        },
+        {
+          filePath: depBar,
+          id: depBar,
+          relativePath: "node_modules/pkg/bar.js",
+          sourceModuleIds: [depBar],
+        },
+        {
+          filePath: depShared,
+          id: depShared,
+          relativePath: "node_modules/pkg/shared.js",
+          sourceModuleIds: [depShared],
+        },
+        {
+          filePath: depHelper,
+          id: depHelper,
+          relativePath: "node_modules/pkg/helper.js",
+          sourceModuleIds: [depHelper],
+        },
+      ],
+      prunedEmptyModuleIds: [],
+      retainedEmptyModuleIds: [],
+      runtimeEntries: [
+        "./src/entry.js",
+        "./src/lazy.js",
+        "./node_modules/pkg/index.js",
+        "./node_modules/pkg/foo.js",
+        "./node_modules/pkg/bar.js",
+        "./node_modules/pkg/shared.js",
+        "./node_modules/pkg/helper.js",
+      ],
+      srcDir,
+    };
+
+    const prebundled = await prebundleMaterializedDependencies({
+      dynamicRootModuleIds: [authoredLazy],
+      materialized,
+    });
+
+    expect(prebundled.modules.length).toBeLessThan(materialized.modules.length);
+    expect(
+      prebundled.modules.some((module) => module.filePath === depIndex),
+    ).toBe(false);
+    expect(
+      prebundled.modules.some((module) => module.relativePath.startsWith("__dep-bundles/")),
+    ).toBe(true);
+
+    const rewrittenEntry = await fs.readFile(authoredEntry, "utf8");
+    const rewrittenLazy = await fs.readFile(authoredLazy, "utf8");
+    expect(rewrittenEntry).toContain("__dep-bundles/");
+    expect(rewrittenLazy).toContain("__dep-bundles/");
+    expect(
+      prebundled.runtimeEntries.filter((entry) =>
+        entry.startsWith("./__dep-bundles/"),
+      ).length,
+    ).toBeGreaterThan(1);
   },
 );
 

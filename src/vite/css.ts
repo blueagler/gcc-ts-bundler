@@ -164,19 +164,29 @@ function collectRuntimeChunkCss(input: {
   const moduleCssByRelativePath = new Map<string, string[]>();
   const normalizedPathCache = new Map<string, string>();
   for (const module of input.materialized.modules) {
-    const cssFiles = input.moduleCssById.get(
-      normalizePathForLookup(module.id, normalizedPathCache),
-    );
-    if (!cssFiles || cssFiles.length === 0) {
+    const cssFiles = new Set<string>();
+    for (const sourceModuleId of module.sourceModuleIds) {
+      const ownedCssFiles = input.moduleCssById.get(
+        normalizePathForLookup(sourceModuleId, normalizedPathCache),
+      );
+      if (!ownedCssFiles) {
+        continue;
+      }
+      for (const cssFile of ownedCssFiles) {
+        cssFiles.add(cssFile);
+      }
+    }
+    if (cssFiles.size === 0) {
       continue;
     }
+    const sortedCssFiles = [...cssFiles].sort();
     moduleCssByMaterializedFilePath.set(
       normalizePathForLookup(module.filePath, normalizedPathCache),
-      cssFiles,
+      sortedCssFiles,
     );
     moduleCssByRelativePath.set(
       normalizePathForLookup(module.relativePath, normalizedPathCache),
-      cssFiles,
+      sortedCssFiles,
     );
   }
 

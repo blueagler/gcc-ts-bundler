@@ -449,32 +449,33 @@ function buildChunkModuleIdLookup(input: {
   materialized: MaterializedGraph;
   runtimeModuleSourceMap: Record<string, string>;
 }) {
-  const normalizedMaterializedByFilePath = new Map<string, string>();
-  const normalizedMaterializedByRelativePath = new Map<string, string>();
+  const normalizedMaterializedByFilePath = new Map<string, string[]>();
+  const normalizedMaterializedByRelativePath = new Map<string, string[]>();
   for (const module of input.materialized.modules) {
-    normalizedMaterializedByFilePath.set(
-      normalizePath(module.filePath),
-      module.id,
-    );
+    normalizedMaterializedByFilePath.set(normalizePath(module.filePath), [
+      ...module.sourceModuleIds,
+    ]);
     normalizedMaterializedByRelativePath.set(
       normalizePath(module.relativePath),
-      module.id,
+      [...module.sourceModuleIds],
     );
   }
 
-  const runtimeModuleIdToOriginalId = new Map<string, string>();
+  const runtimeModuleIdToOriginalIds = new Map<string, string[]>();
   for (const [runtimeModuleId, sourceFilePath] of Object.entries(
     input.runtimeModuleSourceMap,
   )) {
     const normalizedSourceFilePath = normalizePath(sourceFilePath);
-    const matchedOriginalId =
+    const matchedOriginalIds =
       normalizedMaterializedByFilePath.get(normalizedSourceFilePath) ??
       findModuleIdByRelativeSuffix(
         normalizedSourceFilePath,
         normalizedMaterializedByRelativePath,
       );
-    if (matchedOriginalId) {
-      runtimeModuleIdToOriginalId.set(runtimeModuleId, matchedOriginalId);
+    if (matchedOriginalIds) {
+      runtimeModuleIdToOriginalIds.set(runtimeModuleId, [
+        ...matchedOriginalIds,
+      ]);
     }
   }
 
@@ -482,8 +483,11 @@ function buildChunkModuleIdLookup(input: {
   for (const [chunkId, chunk] of Object.entries(input.manifest.chunks)) {
     const moduleIds = new Set<string>();
     for (const runtimeModuleId of chunk.modules) {
-      const originalId = runtimeModuleIdToOriginalId.get(runtimeModuleId);
-      if (originalId) {
+      const originalIds = runtimeModuleIdToOriginalIds.get(runtimeModuleId);
+      if (!originalIds) {
+        continue;
+      }
+      for (const originalId of originalIds) {
         moduleIds.add(originalId);
       }
     }
@@ -503,14 +507,14 @@ function buildChunkModuleIdLookup(input: {
 
 function findModuleIdByRelativeSuffix(
   sourceFilePath: string,
-  moduleIdByRelativePath: Map<string, string>,
+  moduleIdByRelativePath: Map<string, string[]>,
 ) {
-  for (const [relativePath, moduleId] of moduleIdByRelativePath.entries()) {
+  for (const [relativePath, moduleIds] of moduleIdByRelativePath.entries()) {
     if (
       sourceFilePath === relativePath ||
       sourceFilePath.endsWith(`/${relativePath}`)
     ) {
-      return moduleId;
+      return moduleIds;
     }
   }
   return undefined;

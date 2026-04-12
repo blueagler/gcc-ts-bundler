@@ -29,6 +29,8 @@ interface CachedRuntimeHazards {
   protocolMembers: string[];
 }
 
+const VITE_EXTERN_PACKAGE_CACHE_VERSION = 2;
+
 export async function resolveCompilerExterns(input: {
   captureRoot: string;
   materialized: MaterializedGraph;
@@ -102,13 +104,19 @@ async function generateViteRuntimeAwareExterns(input: {
   const appRuntimeFiles: string[] = [];
   const dependencyFilesByPackage = new Map<string, string[]>();
   for (const module of input.materialized.modules) {
-    if (isDependencyModuleId(module.id)) {
-      const packageName = classifyModuleId(module.id);
-      const current = dependencyFilesByPackage.get(packageName);
-      if (current) {
-        current.push(module.filePath);
-      } else {
-        dependencyFilesByPackage.set(packageName, [module.filePath]);
+    if (isDependencyRuntimeModule(module.sourceModuleIds)) {
+      const packageNames = new Set(
+        module.sourceModuleIds
+          .map((moduleId) => classifyModuleId(moduleId))
+          .filter((packageName) => packageName !== "app"),
+      );
+      for (const packageName of packageNames) {
+        const current = dependencyFilesByPackage.get(packageName);
+        if (current) {
+          current.push(module.filePath);
+        } else {
+          dependencyFilesByPackage.set(packageName, [module.filePath]);
+        }
       }
       continue;
     }
@@ -190,6 +198,7 @@ async function loadCachedPackageRuntimeHazards(input: {
       .map((filePath) => hashFileInput(filePath)),
   );
   const cacheKey = hashJson({
+    cacheVersion: VITE_EXTERN_PACKAGE_CACHE_VERSION,
     fileHashes,
     includeDependencies: input.includeDependencies,
     mode: "runtime-aware",
@@ -329,6 +338,13 @@ function classifyModuleId(moduleId: string) {
 
 function isDependencyModuleId(moduleId: string) {
   return stripQuery(moduleId).includes(`${path.sep}node_modules${path.sep}`);
+}
+
+function isDependencyRuntimeModule(sourceModuleIds: string[]) {
+  return (
+    sourceModuleIds.length > 0 &&
+    sourceModuleIds.every((moduleId) => isDependencyModuleId(moduleId))
+  );
 }
 
 function stripQuery(id: string) {

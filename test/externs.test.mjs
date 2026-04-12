@@ -122,6 +122,10 @@ test.serial("generateExterns runtime-aware mode captures public runtime protocol
 
   expect(runtimeResult.mode).toBe("runtime-aware");
   expect(runtimeResult.text).toContain("Object.prototype.counts;");
+  expect(runtimeResult.text).toContain("Object.prototype.current;");
+  expect(runtimeResult.text).toContain("Object.prototype.previous;");
+  expect(runtimeResult.text).toContain("Object.prototype.is_fork;");
+  expect(runtimeResult.text).toContain("Object.prototype.id;");
   expect(runtimeResult.text).toContain("Object.prototype.label;");
   expect(runtimeResult.text).toContain("Object.prototype.reset;");
   expect(runtimeResult.text).toContain("Object.prototype.from;");

@@ -40,6 +40,8 @@ import type {
   ViteCssOwnership,
 } from "./internal-types";
 import { materializeCapturedGraph } from "./materialize";
+import { prebundleMaterializedDependencies } from "./prebundle";
+import { collectMaterializedGraphStats } from "./size";
 import {
   collectOutputByteBreakdown,
   emitCompiledOutputs,
@@ -81,6 +83,7 @@ export function gccTsBundler(
     externsMs: 0,
     htmlRewriteMs: 0,
     materializeMs: 0,
+    dependencyPrebundleMs: 0,
     normalizeRetainedMs: 0,
     retainedResolutionMs: 0,
     transformCaptureMs: 0,
@@ -215,37 +218,42 @@ export function gccTsBundler(
         performance.now() - normalizeStartedAt;
 
       const materializeStartedAt = performance.now();
-      const materialized = await materializeCapturedGraph.call(this, {
-        capturedModules: normalizedCapturedModules,
-        cssModuleIdsWithOwnership: cssOwnership.moduleCssById.keys(),
-        config: resolvedConfig,
-        dynamicRootModuleIds,
-        entryModuleIds,
-        metrics: buildMetrics,
-        moduleIds: materializedModuleIds,
-        resolutionCache,
-        srcDir,
-      });
+      const materializedBeforePrebundle = await materializeCapturedGraph.call(
+        this,
+        {
+          capturedModules: normalizedCapturedModules,
+          cssModuleIdsWithOwnership: cssOwnership.moduleCssById.keys(),
+          config: resolvedConfig,
+          dynamicRootModuleIds,
+          entryModuleIds,
+          metrics: buildMetrics,
+          moduleIds: materializedModuleIds,
+          resolutionCache,
+          srcDir,
+        },
+      );
       timingTotals.materializeMs += performance.now() - materializeStartedAt;
       logInternalDetail("vite:captured-modules", `${capturedModules.size}`);
       logInternalDetail("vite:retained-modules", `${retainedModuleIds.length}`);
       logInternalDetail(
         "vite:retained-captured-modules",
-        `${materialized.modules.length}`,
+        `${materializedBeforePrebundle.modules.length}`,
       );
       logInternalDetail(
         "vite:retained-packages",
         summarizeModuleIdsByPackage(
-          materialized.modules.map((module) => module.id),
+          materializedBeforePrebundle.modules.flatMap(
+            (module) => module.sourceModuleIds,
+          ),
         ) || "none",
       );
       logInternalDetail(
         "vite:retained-empty-modules",
-        `${materialized.retainedEmptyModuleIds.length}`,
+        `${materializedBeforePrebundle.retainedEmptyModuleIds.length}`,
       );
       logInternalDetail(
         "vite:pruned-empty-modules",
-        `${materialized.prunedEmptyModuleIds.length}`,
+        `${materializedBeforePrebundle.prunedEmptyModuleIds.length}`,
       );
       logInternalDetail(
         "vite:retained-dynamic-roots",
@@ -262,6 +270,37 @@ export function gccTsBundler(
       logInternalDetail(
         "vite:retained-edge-resolutions",
         `${buildMetrics.retainedEdgeResolutionCount}`,
+      );
+      const prebundleInputStats = await collectMaterializedGraphStats({
+        capturedModules,
+        dynamicRootCount: dynamicRootModuleIds.length,
+        entryCount: entryModuleIds.length,
+        materialized: materializedBeforePrebundle,
+      });
+      logInternalDetail(
+        "vite:graph-before-prebundle",
+        `modules=${prebundleInputStats.moduleCount} js=${prebundleInputStats.totalBytes} forwarding=${prebundleInputStats.forwardingModuleCount} entries=${prebundleInputStats.entryCount} lazy=${prebundleInputStats.lazyRootCount} packages=${prebundleInputStats.packageSummary || "none"}`,
+      );
+      const dependencyPrebundleStartedAt = performance.now();
+      const materialized = await prebundleMaterializedDependencies({
+        dynamicRootModuleIds,
+        materialized: materializedBeforePrebundle,
+      });
+      timingTotals.dependencyPrebundleMs +=
+        performance.now() - dependencyPrebundleStartedAt;
+      logInternalDetail(
+        "vite:prebundled-runtime-modules",
+        `${materialized.modules.length}`,
+      );
+      const prebundleOutputStats = await collectMaterializedGraphStats({
+        capturedModules,
+        dynamicRootCount: dynamicRootModuleIds.length,
+        entryCount: entryModuleIds.length,
+        materialized,
+      });
+      logInternalDetail(
+        "vite:graph-after-prebundle",
+        `modules=${prebundleOutputStats.moduleCount} js=${prebundleOutputStats.totalBytes} forwarding=${prebundleOutputStats.forwardingModuleCount} entries=${prebundleOutputStats.entryCount} lazy=${prebundleOutputStats.lazyRootCount} packages=${prebundleOutputStats.packageSummary || "none"}`,
       );
       const externsStartedAt = performance.now();
       const externs = await resolveCompilerExterns({
@@ -410,6 +449,7 @@ export function gccTsBundler(
         "vite:retained-resolution": timingTotals.retainedResolutionMs,
         "vite:normalize-retained": timingTotals.normalizeRetainedMs,
         "vite:materialize": timingTotals.materializeMs,
+        "vite:dependency-prebundle": timingTotals.dependencyPrebundleMs,
         "vite:externs": timingTotals.externsMs,
         "vite:css-analysis": timingTotals.cssAnalysisMs,
         "vite:css-augment": timingTotals.cssAugmentMs,

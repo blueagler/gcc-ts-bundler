@@ -175,7 +175,7 @@ function collectRuntimeAssignmentMembers(
   if (ts.isPropertyAccessExpression(target)) {
     if (isRelevantRuntimeTarget(target.expression, knownConstructors)) {
       if (isRuntimeExternPropertyName(target.name.text)) {
-        hazards.accessedMembers.add(target.name.text);
+        hazards.definedMembers.add(target.name.text);
       }
     }
     return;
@@ -199,11 +199,7 @@ function collectRuntimeCallMembers(
   hazards: RuntimeRenameHazards,
 ) {
   const callee = node.expression;
-  if (
-    ts.isIdentifier(callee) &&
-    callee.text === "__publicField" &&
-    node.arguments.length >= 2
-  ) {
+  if (isPublicFieldHelperCall(callee) && node.arguments.length >= 2) {
     const memberName = getStringLiteralMemberName(node.arguments[1]);
     if (
       memberName &&
@@ -227,6 +223,19 @@ function collectRuntimeCallMembers(
   if (isRelevantRuntimeTarget(target, knownConstructors)) {
     hazards.definedMembers.add(memberName);
   }
+}
+
+function isPublicFieldHelperCall(expression: ts.Expression): boolean {
+  if (ts.isIdentifier(expression)) {
+    return expression.text.startsWith("__publicField");
+  }
+  if (ts.isPropertyAccessExpression(expression)) {
+    return expression.name.text.startsWith("__publicField");
+  }
+  if (ts.isParenthesizedExpression(expression)) {
+    return isPublicFieldHelperCall(expression.expression);
+  }
+  return false;
 }
 
 function isRelevantRuntimeTarget(
