@@ -94,6 +94,7 @@ fn prepares_bundler_runtime_jobs_with_runtime_assets() {
     assert!(output.generatedAssets.iter().any(|asset| {
         asset.path.ends_with("chunk-map.json")
             && asset.text.contains("\"baseChunk\": \"c")
+            && asset.text.contains("\"css\": []")
             && asset.text.contains("\"modules\": [")
     }));
     assert!(output.generatedAssets.iter().any(|asset| {

@@ -4,6 +4,7 @@
     "types": ["bun", "node"],
     "target": "ESNext",
     "strict": true,
+    "skipLibCheck": true,
     "outDir": "out",
     "moduleResolution": "Bundler",
     "module": "ESNext"

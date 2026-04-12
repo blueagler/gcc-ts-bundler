@@ -67,6 +67,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         manifest_chunks.insert(
             runtime_chunk_id.clone(),
             BundlerRuntimeManifestChunk {
+                css: vec![],
                 deps: chunk
                     .dependencies
                     .iter()
@@ -131,6 +132,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
                         &base_chunk.name,
                     )
                 },
+                vec![],
             ))
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;

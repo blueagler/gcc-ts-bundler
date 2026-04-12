@@ -463,6 +463,9 @@ test.serial("emits an optional chunk manifest when requested", async () => {
   expect(moduleEntries.every(([moduleId, chunkId]) =>
     /^m[0-9a-f]{8}$/.test(moduleId) && /^c[0-9a-f]{8}$/.test(chunkId),
   )).toBe(true);
+  expect(
+    Object.values(manifest.chunks).every((chunkValue) => Array.isArray(chunkValue.css)),
+  ).toBe(true);
 });
 
 test.serial("emits a bundler-runtime chunk manifest when requested", async () => {
@@ -500,6 +503,7 @@ test.serial("emits a bundler-runtime chunk manifest when requested", async () =>
   expect(chunkEntries).toHaveLength(2);
   expect(chunkEntries.every(([chunkId, chunkValue]) =>
     /^c[0-9a-f]{8}$/.test(chunkId) &&
+    Array.isArray(chunkValue.css) &&
     Array.isArray(chunkValue.deps) &&
     Array.isArray(chunkValue.modules) &&
     chunkValue.modules.every((moduleId) => /^m[0-9a-f]{8}$/.test(moduleId)),

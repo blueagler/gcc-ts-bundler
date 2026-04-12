@@ -9,6 +9,7 @@ await runCommandsInParallel([
     args: [
       "build",
       "./src/index.ts",
+      "./src/vite/index.ts",
       "./src/native/index.ts",
       "--outdir",
       "./dist",
@@ -31,6 +32,7 @@ await runCommandsInParallel([
     args: [
       "build",
       "./src/index.ts",
+      "./src/vite/index.ts",
       "./src/native/index.ts",
       "--outdir",
       "./dist",

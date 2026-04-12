@@ -15,6 +15,7 @@ mod namespace;
 mod print;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::env;
 use std::fs;
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -130,6 +131,8 @@ pub fn transpile_sources(
         static_property_names,
         workspace_dir: workspace_dir.clone(),
     };
+    let runtime_module_source_map_file =
+        env::var("GCC_VITE_RUNTIME_SOURCE_MAP_FILE").ok().filter(|value| !value.is_empty());
 
     let emitted_outputs = file_names
         .par_iter()
@@ -144,7 +147,7 @@ pub fn transpile_sources(
                 Ok::<_, String>(code)
             })?;
 
-            Ok::<_, String>((output_path, code))
+            Ok::<_, String>((file_path, output_path, code))
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
@@ -154,13 +157,36 @@ pub fn transpile_sources(
     )
     .map_err(|error| error.to_string())?;
 
+    let mut runtime_module_source_map = BTreeMap::new();
     let mut emitted_files = Vec::with_capacity(emitted_outputs.len());
-    for (output_path, code) in emitted_outputs {
+    for (file_path, output_path, code) in emitted_outputs {
         if let Some(parent) = output_path.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         fs::write(&output_path, code).map_err(|error| error.to_string())?;
+        if runtime_module_source_map_file.is_some() {
+            let runtime_module_id =
+                to_bundler_runtime_module_id(&to_goog_module_id(&output_path, &out_dir));
+            runtime_module_source_map.insert(
+                runtime_module_id,
+                normalize_path(&file_path).to_string_lossy().to_string(),
+            );
+        }
         emitted_files.push(output_path.to_string_lossy().to_string());
+    }
+
+    if let Some(mapping_file) = runtime_module_source_map_file {
+        let mapping_path = if Path::new(&mapping_file).is_absolute() {
+            PathBuf::from(mapping_file)
+        } else {
+            out_dir.join(mapping_file)
+        };
+        if let Some(parent) = mapping_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let mapping_text = serde_json::to_string_pretty(&runtime_module_source_map)
+            .map_err(|error| error.to_string())?;
+        fs::write(&mapping_path, format!("{mapping_text}\n")).map_err(|error| error.to_string())?;
     }
 
     emitted_files.sort();

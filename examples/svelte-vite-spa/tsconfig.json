@@ -8,6 +8,6 @@
     "strict": true,
     "target": "ESNext"
   },
-  "include": ["src/**/*.js", "src/**/*.svelte"],
-  "exclude": [".m3-compiled/**", ".prebundle/**", "dist/**"]
+  "include": ["src/**/*.js", "src/**/*.svelte", "vite.config.ts"],
+  "exclude": [".gcc-ts-bundler-vite/**", "dist/**"]
 }

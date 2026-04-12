@@ -1,0 +1,21 @@
+{
+  "name": "svelte-vite-spa-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build"
+  },
+  "dependencies": {
+    "gcc-ts-bundler": "file:../..",
+    "m3-svelte": "^7.1.2",
+    "svelte": "5.55.2",
+    "vite": "^7.3.2"
+  },
+  "devDependencies": {
+    "@fontsource-variable/google-sans-flex": "^5.2.2",
+    "@sveltejs/vite-plugin-svelte": "^6.2.4",
+    "@ktibow/iconset-material-symbols": "^0.0.1764827375",
+    "vite-plugin-functions-mixins": "^0.4.1",
+    "vite-plugin-token-shaker": "^0.0.7"
+  }
+}

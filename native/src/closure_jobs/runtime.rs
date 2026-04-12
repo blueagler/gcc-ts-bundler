@@ -12,6 +12,7 @@ pub(super) struct BundlerRuntimeManifest {
 
 #[derive(Clone, Debug, Serialize)]
 pub(super) struct BundlerRuntimeManifestChunk {
+    pub(super) css: Vec<String>,
     pub(super) deps: Vec<String>,
     pub(super) modules: Vec<String>,
     pub(super) url: String,
@@ -26,7 +27,11 @@ pub(super) struct BundlerRuntimeInitManifest(
 );
 
 #[derive(Clone, Debug, Serialize)]
-pub(super) struct BundlerRuntimeInitChunk(pub(super) Vec<usize>, pub(super) String);
+pub(super) struct BundlerRuntimeInitChunk(
+    pub(super) Vec<usize>,
+    pub(super) String,
+    pub(super) Vec<String>,
+);
 
 pub(super) fn bundler_runtime_output_file_name(
     chunk_name: &str,
@@ -117,6 +122,11 @@ pub(super) fn render_bundler_runtime_preamble(
     } else {
         "\"f\"+a"
     };
+    let style_error = if debug_runtime {
+        "\"style \"+a+\" failed\""
+    } else {
+        "\"s\"+a"
+    };
     let fetch_eval = if debug_runtime {
         "(0,global.eval)(c+\"\\n//# sourceURL=\"+b);"
     } else {
@@ -151,11 +161,13 @@ pub(super) fn render_bundler_runtime_preamble(
         "script" => render_script_loader_runtime(
             missing_chunk_error,
             script_error,
+            style_error,
             numeric_module_ids,
         ),
         "fetch" => render_fetch_loader_runtime(
             missing_chunk_error,
             fetch_error,
+            style_error,
             fetch_eval,
             numeric_module_ids,
         ),
@@ -163,6 +175,7 @@ pub(super) fn render_bundler_runtime_preamble(
             missing_chunk_error,
             script_error,
             fetch_error,
+            style_error,
             fetch_eval,
             numeric_module_ids,
         ),
@@ -212,7 +225,7 @@ fn render_manifest_apply(loader: &str, manifest_json: &str) -> String {
 }
 
 fn render_loader_env_setup(loader: &str) -> String {
-    if matches!(loader, "script" | "fetch") {
+    if matches!(loader, "script" | "fetch" | "auto") {
         "var d=global.document,l=global.location;".to_string()
     } else {
         String::new()
@@ -293,6 +306,7 @@ fn indent_block(source: &str) -> String {
 fn render_script_loader_runtime(
     missing_chunk_error: &str,
     script_error: &str,
+    style_error: &str,
     numeric_module_ids: bool,
 ) -> String {
     let chunk_lookup = if numeric_module_ids {
@@ -305,7 +319,8 @@ fn render_script_loader_runtime(
             "function u(a){{{chunk_lookup}if(!b)throw Error({missing_chunk_error});return new URL(b[1],r.b).toString();}}"
         ),
         format!("function p(a){{return new Promise(function(c,e){{var f=d.createElement(\"script\");f.async=true;f.src=a;f.onload=function(){{c();}};f.onerror=function(){{e(Error({script_error}));}};(d.head||d.documentElement).appendChild(f);}});}}"),
-        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!b)throw Error({missing_chunk_error});r.s[a]=0;var c=g(a);return Promise.all((b[0]||[]).map(e)).then(function(){{return p(u(a));}}).then(function(){{return c.p;}}).catch(function(d){{h(a,d);throw d;}});}}"),
+        render_css_loader_runtime(style_error),
+        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!b)throw Error({missing_chunk_error});r.s[a]=0;var c=g(a);return Promise.all((b[0]||[]).map(e)).then(function(){{return Promise.all([z(a),p(u(a))]);}}).then(function(){{return c.p;}}).catch(function(d){{h(a,d);throw d;}});}}"),
     ]
     .join("\n")
 }
@@ -313,6 +328,7 @@ fn render_script_loader_runtime(
 fn render_fetch_loader_runtime(
     missing_chunk_error: &str,
     fetch_error: &str,
+    style_error: &str,
     fetch_eval: &str,
     numeric_module_ids: bool,
 ) -> String {
@@ -326,7 +342,8 @@ fn render_fetch_loader_runtime(
             "function u(a){{{chunk_lookup}if(!b)throw Error({missing_chunk_error});return new URL(b[1],r.b).toString();}}"
         ),
         format!("function w(a){{return Promise.resolve(global.fetch(a)).then(function(c){{if(!c.ok)throw Error({fetch_error});return c.text();}}).then(function(c){{{fetch_eval}}});}}"),
-        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!b)throw Error({missing_chunk_error});r.s[a]=0;var c=g(a);return Promise.all((b[0]||[]).map(e)).then(function(){{return w(u(a));}}).then(function(){{return c.p;}}).catch(function(d){{h(a,d);throw d;}});}}"),
+        render_css_loader_runtime(style_error),
+        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!b)throw Error({missing_chunk_error});r.s[a]=0;var c=g(a);return Promise.all((b[0]||[]).map(e)).then(function(){{return Promise.all([z(a),w(u(a))]);}}).then(function(){{return c.p;}}).catch(function(d){{h(a,d);throw d;}});}}"),
     ]
     .join("\n")
 }
@@ -335,6 +352,7 @@ fn render_auto_loader_runtime(
     missing_chunk_error: &str,
     script_error: &str,
     fetch_error: &str,
+    style_error: &str,
     fetch_eval: &str,
     numeric_module_ids: bool,
 ) -> String {
@@ -346,12 +364,23 @@ fn render_auto_loader_runtime(
     [
         "r.o=0;".to_string(),
         format!(
-            "function u(a){{var b=r.k&&r.k[a];if(!b)throw Error({missing_chunk_error});return new URL(b[1],r.b||(global.location&&global.location.href?global.location.href:\"./\")).toString();}}"
+            "function u(a){{var b=r.k&&r.k[a];if(!b)throw Error({missing_chunk_error});return new URL(b[1],r.b).toString();}}"
         ),
-        format!("function p(a,b){{return new Promise(function(c,d){{var e=global.document.createElement(\"script\");e.async=true;e.src=b;e.onload=function(){{c();}};e.onerror=function(){{d(Error({script_error}));}};(global.document.head||global.document.documentElement).appendChild(e);}});}}"),
+        format!("function p(a,b){{return new Promise(function(c,e){{var f=d.createElement(\"script\");f.async=true;f.src=b;f.onload=function(){{c();}};f.onerror=function(){{e(Error({script_error}));}};(d.head||d.documentElement).appendChild(f);}});}}"),
         format!("function w(a,b){{return Promise.resolve(global.fetch(b)).then(function(c){{if(!c.ok)throw Error({fetch_error});return c.text();}}).then(function(c){{{fetch_eval}}});}}"),
-        "function t(){return r.o===1?1:r.o===2?2:global.document?1:2;}".to_string(),
-        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!c)throw Error({missing_chunk_error});r.s[a]=0;var d=g(a),f=t();return Promise.all((c[0]||[]).map(function(j){{return e(j);}})).then(function(){{var j=u(a);return f===2?w(a,j):p(a,j);}}).then(function(){{return d.p;}}).catch(function(j){{h(a,j);throw j;}});}}"),
+        render_css_loader_runtime(style_error),
+        "function t(){return r.o===1?1:r.o===2?2:d?1:2;}".to_string(),
+        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!c)throw Error({missing_chunk_error});r.s[a]=0;var f=g(a),j=t();return Promise.all((c[0]||[]).map(function(k){{return e(k);}})).then(function(){{var k=u(a);return Promise.all([z(a),j===2?w(a,k):p(a,k)]);}}).then(function(){{return f.p;}}).catch(function(k){{h(a,k);throw k;}});}}"),
+    ]
+    .join("\n")
+}
+
+fn render_css_loader_runtime(style_error: &str) -> String {
+    [
+        "var m=null,n=Object.create(null);".to_string(),
+        "function v(){if(m)return m;m=Object.create(null);if(d)for(var a=d.querySelectorAll(\"link[rel=\\\"stylesheet\\\"]\"),b=0;b<a.length;b+=1){var c=a[b].href;c&&(m[c]=1);}return m;}".to_string(),
+        format!("function y(a){{var b=v();if(b[a])return Promise.resolve();var c=n[a];if(c)return c;c=new Promise(function(e,f){{var k=d.createElement(\"link\");k.rel=\"stylesheet\";k.href=a;k.onload=function(){{b[a]=1;delete n[a];e();}};k.onerror=function(){{delete n[a];f(Error({style_error}));}};(d.head||d.documentElement).appendChild(k);}});n[a]=c;return c;}}"),
+        "function z(a){for(var b=r.k[a],c=b&&b[2]||[],e=[],f=0;f<c.length;f+=1)e.push(y((new URL(c[f],r.b)).toString()));return Promise.all(e);}".to_string(),
     ]
     .join("\n")
 }
@@ -396,6 +425,8 @@ __runtime.h(function(__register){\n  __register(1,function(){});\n},3);\n"
                 .expect("render preamble");
         assert!(rendered.contains("var d=global.document,l=global.location;"));
         assert!(rendered.contains("return new URL(b[1],r.b).toString();"));
+        assert!(rendered.contains("createElement(\"link\")"));
+        assert!(rendered.contains("b&&b[2]||[]"));
         assert!(!rendered.contains("r.b||(global.location"));
         assert!(!rendered.contains("if(arguments.length>1)r.o=b;"));
     }
