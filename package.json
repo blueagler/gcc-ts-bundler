@@ -37,6 +37,8 @@
   },
   "scripts": {
     "build:native": "node ./scripts/build-native.mjs",
+    "build:native:cross": "node ./scripts/build-native.mjs --targets linux-x64-gnu,win32-x64-msvc",
+    "build:native:all": "node ./scripts/build-native.mjs --all",
     "build:js": "node ./scripts/build-js.mjs",
     "build": "node ./scripts/build.mjs",
     "lint": "bun --bun tsc --noEmit && bun --bun ./scripts/format.ts && bun --bun eslint -c eslint.config.ts \"src/**/*.ts\" --fix",
