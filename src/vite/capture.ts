@@ -6,8 +6,6 @@ import ts from "typescript";
 import type { ResolvedConfig } from "vite";
 import type { OutputBundle, OutputChunk, PluginContext } from "rollup";
 
-import { generateExterns } from "../api/build";
-import type { GccTsBundlerVitePluginOptions } from "./types";
 import type {
   CapturedModule,
   CapturedRuntimeModule,
@@ -88,6 +86,31 @@ export async function normalizeCapturedCode(id: string, code: string) {
   }
 
   return nextCode;
+}
+
+export async function normalizeRetainedCapturedModules(input: {
+  capturedModules: Map<string, CapturedModule>;
+  moduleIds: string[];
+}) {
+  const normalizedEntries = await Promise.all(
+    input.moduleIds.map(async (moduleId) => {
+      const record = input.capturedModules.get(moduleId);
+      if (!record) {
+        throw new Error(
+          `gccTsBundler() could not normalize retained module ${moduleId}.`,
+        );
+      }
+      return [
+        moduleId,
+        {
+          code: await normalizeCapturedCode(moduleId, record.code),
+          id: record.id,
+        } satisfies CapturedModule,
+      ] as const;
+    }),
+  );
+
+  return new Map(normalizedEntries);
 }
 
 export function resolveEntryModuleIds(
@@ -214,6 +237,52 @@ export async function resolveRetainedCapturedModuleIds(
   };
 }
 
+export async function resolveNormalizedBridgeModuleIds(
+  this: PluginContext,
+  input: {
+    capturedModules: Map<string, CapturedModule>;
+    normalizedCapturedModules: Map<string, CapturedModule>;
+    retainedModuleIds: string[];
+  },
+) {
+  const retainedModuleIds = new Set(input.retainedModuleIds);
+  const additionalModuleIds = new Set<string>();
+  const pendingModuleIds = [...input.retainedModuleIds];
+
+  while (pendingModuleIds.length > 0) {
+    const moduleId = pendingModuleIds.pop();
+    if (!moduleId) {
+      continue;
+    }
+
+    const record = input.normalizedCapturedModules.get(moduleId);
+    if (!record) {
+      continue;
+    }
+
+    const bridgeModuleIds = await collectBridgeModuleIds.call(this, {
+      capturedModules: input.capturedModules,
+      code: record.code,
+      importerId: moduleId,
+      retainedModuleIds,
+    });
+    for (const bridgeModuleId of bridgeModuleIds) {
+      if (
+        retainedModuleIds.has(bridgeModuleId) ||
+        additionalModuleIds.has(bridgeModuleId)
+      ) {
+        continue;
+      }
+      additionalModuleIds.add(bridgeModuleId);
+      pendingModuleIds.push(bridgeModuleId);
+    }
+  }
+
+  return [...additionalModuleIds].sort((left, right) =>
+    left.localeCompare(right),
+  );
+}
+
 export function summarizeModuleIdsByPackage(moduleIds: Iterable<string>) {
   const counts = new Map<string, number>();
   for (const moduleId of moduleIds) {
@@ -277,6 +346,7 @@ export async function materializeCapturedGraph(
   );
   const filePathByModuleId = new Map<string, string>();
   const modules: CapturedRuntimeModule[] = [];
+  const authoredFiles: string[] = [];
   for (const moduleId of materializedModuleIds) {
     const relativePath = toMaterializedRelativePath(
       input.config.root,
@@ -289,6 +359,9 @@ export async function materializeCapturedGraph(
       id: moduleId,
       relativePath,
     });
+    if (isAuthoredModuleId(moduleId, input.config.root)) {
+      authoredFiles.push(filePath);
+    }
   }
 
   for (const moduleId of materializedModuleIds) {
@@ -322,6 +395,9 @@ export async function materializeCapturedGraph(
   });
 
   return {
+    authoredFiles: authoredFiles.sort((left, right) =>
+      left.localeCompare(right),
+    ),
     entries: entryFiles,
     modules,
     prunedEmptyModuleIds: [...prunedEmptyModuleIds].sort((left, right) =>
@@ -341,47 +417,6 @@ export async function materializeCapturedGraph(
       .sort((left, right) => left.localeCompare(right)),
     srcDir: input.srcDir,
   };
-}
-
-export async function resolveCompilerExterns(input: {
-  captureRoot: string;
-  materialized: MaterializedGraph;
-  options: GccTsBundlerVitePluginOptions;
-  projectRoot: string;
-}) {
-  const explicitExterns = [...(input.options.compiler?.externs ?? [])].map(
-    (filePath) => path.resolve(input.projectRoot, filePath),
-  );
-  const generateOptions = input.options.externs?.generate;
-  if (!generateOptions) {
-    return explicitExterns;
-  }
-
-  const generatedExternFile = path.resolve(
-    input.projectRoot,
-    generateOptions.outputFile ??
-      path.join(input.captureRoot, "generated.externs.js"),
-  );
-  await generateExterns({
-    appEntryFiles: input.materialized.entries,
-    includeDependencies: generateOptions.includeDependencies,
-    mode: generateOptions.mode ?? "runtime-aware",
-    modules: [...generateOptions.modules],
-    outputFile: generatedExternFile,
-    projectRoot: input.projectRoot,
-    runtimeEntryFiles: input.materialized.runtimeEntries,
-    srcDir: input.materialized.srcDir,
-  });
-
-  if ((generateOptions.appendLines?.length ?? 0) > 0) {
-    await fs.appendFile(
-      generatedExternFile,
-      `\n${generateOptions.appendLines!.join("\n")}\n`,
-      "utf8",
-    );
-  }
-
-  return [...new Set([...explicitExterns, generatedExternFile])];
 }
 
 async function rewriteModuleImports(
@@ -693,6 +728,17 @@ function classifyModuleId(moduleId: string) {
     return segments.slice(0, 2).join("/");
   }
   return segments[0] || "app";
+}
+
+function isAuthoredModuleId(moduleId: string, projectRoot: string) {
+  const cleanId = stripQuery(moduleId);
+  if (cleanId.includes(`${path.sep}node_modules${path.sep}`)) {
+    return false;
+  }
+  if (!path.isAbsolute(cleanId)) {
+    return true;
+  }
+  return cleanId.startsWith(path.resolve(projectRoot) + path.sep);
 }
 
 function readAssetText(asset: { source: string | Uint8Array }) {

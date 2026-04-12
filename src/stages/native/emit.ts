@@ -326,6 +326,8 @@ function runNativeTranspile({
     outDir,
     packageAliases,
     packageJsonFiles,
+    runtimeModuleSourceMapFile:
+      process.env.GCC_VITE_RUNTIME_SOURCE_MAP_FILE || undefined,
     workspaceDir,
   });
 }

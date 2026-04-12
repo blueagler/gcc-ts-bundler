@@ -12,7 +12,7 @@ export interface GccTsBundlerGeneratedExternsOptions {
 export interface GccTsBundlerVitePluginOptions {
   compiler?: Omit<
     BuildOptions,
-    "entries" | "outDir" | "projectRoot" | "srcDir" | "packages"
+    "entries" | "languageOut" | "outDir" | "packages" | "projectRoot" | "srcDir"
   >;
   runtime?: {
     loader?: ChunkLoader;

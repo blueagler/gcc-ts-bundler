@@ -1,25 +1,28 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 
 import type { Plugin, ResolvedConfig, UserConfig } from "vite";
 import type { PluginContext } from "rollup";
 
 import { build } from "../api/build";
-import { logInternalDetail } from "../internal/timing";
+import { logInternalDetail, logInternalTiming } from "../internal/timing";
 import {
   materializeCapturedGraph,
-  normalizeCapturedCode,
+  normalizeRetainedCapturedModules,
   prepareCaptureRoot,
   resolveDynamicRootModuleIds,
+  resolveNormalizedBridgeModuleIds,
   resolveRetainedCapturedModuleIds,
   resolveRetainedModuleIds,
-  resolveCompilerExterns,
   resolveEntryModuleIds,
   summarizeModuleIdsByPackage,
   shouldCaptureModule,
 } from "./capture";
 import {
   applyViteBuildGuards,
+  assertNoViteLanguageOut,
+  INTERNAL_VITE_AUTHORED_FILES_FILE,
   INTERNAL_VITE_RUNTIME_MODULE_SOURCES_FILE,
   createCompilerOptions,
   resolveBaseChunkName,
@@ -27,6 +30,7 @@ import {
   resolvePublicPath,
 } from "./config";
 import { analyzeViteCssOwnership, augmentCompiledViteCss } from "./css";
+import { resolveCompilerExterns } from "./externs";
 import type { CapturedModule, ViteCssOwnership } from "./internal-types";
 import {
   collectOutputByteBreakdown,
@@ -35,6 +39,10 @@ import {
   removeRollupJavaScript,
   rewriteHtmlAssets,
 } from "./output";
+import {
+  finalizeBaseJsOutputName,
+  renameCompiledNonBaseJsOutputs,
+} from "./naming";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 
 export interface GccTsBundlerVitePlugin {
@@ -51,18 +59,31 @@ export function gccTsBundler(
   const capturedModules = new Map<string, CapturedModule>();
   let resolvedConfig: ResolvedConfig | null = null;
   let workerImportDetected = false;
+  const timingTotals = {
+    cssAnalysisMs: 0,
+    cssAugmentMs: 0,
+    emitOutputsMs: 0,
+    externsMs: 0,
+    htmlRewriteMs: 0,
+    materializeMs: 0,
+    normalizeRetainedMs: 0,
+    retainedResolutionMs: 0,
+    transformCaptureMs: 0,
+  };
 
   const plugin: Plugin = {
     name: "gcc-ts-bundler:vite",
     apply: "build",
     enforce: "post",
     config(userConfig: UserConfig) {
+      assertNoViteLanguageOut(options);
       return applyViteBuildGuards(userConfig);
     },
     configResolved(config) {
       resolvedConfig = config;
     },
     async transform(code, id) {
+      const startedAt = performance.now();
       if (!shouldCaptureModule(id, code)) {
         return null;
       }
@@ -72,12 +93,13 @@ export function gccTsBundler(
       }
 
       capturedModules.set(id, {
-        code: await normalizeCapturedCode(id, code),
+        code,
         id,
       });
+      timingTotals.transformCaptureMs += performance.now() - startedAt;
       return null;
     },
-    async generateBundle(this: PluginContext, _outputOptions, bundle) {
+    async generateBundle(this: PluginContext, outputOptions, bundle) {
       if (!resolvedConfig) {
         throw new Error("gccTsBundler() did not receive resolved Vite config.");
       }
@@ -94,6 +116,7 @@ export function gccTsBundler(
 
       const entryModuleIds = resolveEntryModuleIds(bundle, jsChunks);
       const dynamicRootModuleIds = resolveDynamicRootModuleIds(jsChunks);
+      const retainedResolutionStartedAt = performance.now();
       const retainedModuleIds = resolveRetainedModuleIds(
         jsChunks,
         entryModuleIds,
@@ -105,6 +128,8 @@ export function gccTsBundler(
           retainedModuleIds,
         },
       );
+      timingTotals.retainedResolutionMs +=
+        performance.now() - retainedResolutionStartedAt;
       if (retainedCaptured.missingModuleIds.length > 0) {
         this.error(
           "gccTsBundler() could not capture transformed code for retained Rollup modules:\n" +
@@ -119,6 +144,7 @@ export function gccTsBundler(
       const outDir = path.join(captureRoot, "gcc-out");
       const publicPath = resolvePublicPath(resolvedConfig, options);
       const manifestSettings = resolveManifestFileSettings(options);
+      const cssAnalysisStartedAt = performance.now();
       const cssOwnership: ViteCssOwnership =
         resolvedConfig.build.cssCodeSplit === false
           ? {
@@ -127,16 +153,49 @@ export function gccTsBundler(
               moduleCssById: new Map<string, string[]>(),
             }
           : analyzeViteCssOwnership(bundle);
+      timingTotals.cssAnalysisMs += performance.now() - cssAnalysisStartedAt;
 
-      const materialized = await materializeCapturedGraph.call(this, {
+      const normalizeStartedAt = performance.now();
+      let materializedModuleIds = [...retainedCaptured.materializedModuleIds];
+      const normalizedCapturedModules = await normalizeRetainedCapturedModules({
         capturedModules,
+        moduleIds: materializedModuleIds,
+      });
+      while (true) {
+        const additionalBridgeModuleIds =
+          await resolveNormalizedBridgeModuleIds.call(this, {
+            capturedModules,
+            normalizedCapturedModules,
+            retainedModuleIds: materializedModuleIds,
+          });
+        if (additionalBridgeModuleIds.length === 0) {
+          break;
+        }
+        const normalizedBridgeModules = await normalizeRetainedCapturedModules({
+          capturedModules,
+          moduleIds: additionalBridgeModuleIds,
+        });
+        for (const [moduleId, record] of normalizedBridgeModules) {
+          normalizedCapturedModules.set(moduleId, record);
+        }
+        materializedModuleIds = [
+          ...new Set([...materializedModuleIds, ...additionalBridgeModuleIds]),
+        ].sort((left, right) => left.localeCompare(right));
+      }
+      timingTotals.normalizeRetainedMs +=
+        performance.now() - normalizeStartedAt;
+
+      const materializeStartedAt = performance.now();
+      const materialized = await materializeCapturedGraph.call(this, {
+        capturedModules: normalizedCapturedModules,
         cssModuleIdsWithOwnership: cssOwnership.moduleCssById.keys(),
         config: resolvedConfig,
         dynamicRootModuleIds,
         entryModuleIds,
-        moduleIds: retainedCaptured.materializedModuleIds,
+        moduleIds: materializedModuleIds,
         srcDir,
       });
+      timingTotals.materializeMs += performance.now() - materializeStartedAt;
       logInternalDetail("vite:captured-modules", `${capturedModules.size}`);
       logInternalDetail("vite:retained-modules", `${retainedModuleIds.length}`);
       logInternalDetail(
@@ -161,14 +220,17 @@ export function gccTsBundler(
         "vite:retained-dynamic-roots",
         `${dynamicRootModuleIds.length}`,
       );
+      const externsStartedAt = performance.now();
       const externs = await resolveCompilerExterns({
         captureRoot,
         materialized,
         options,
         projectRoot: resolvedConfig.root,
       });
+      timingTotals.externsMs += performance.now() - externsStartedAt;
 
       const compilerOptions = createCompilerOptions({
+        config: resolvedConfig,
         options,
         outDir,
         projectRoot: resolvedConfig.root,
@@ -182,14 +244,22 @@ export function gccTsBundler(
         captureRoot,
         INTERNAL_VITE_RUNTIME_MODULE_SOURCES_FILE,
       );
+      const authoredFilesFilePath = path.join(
+        captureRoot,
+        INTERNAL_VITE_AUTHORED_FILES_FILE,
+      );
+      await fs.writeFile(
+        authoredFilesFilePath,
+        JSON.stringify(materialized.authoredFiles, null, 2),
+        "utf8",
+      );
       const previousRuntimeModuleSourceMapFile =
         process.env.GCC_VITE_RUNTIME_SOURCE_MAP_FILE;
-      if (cssOwnership.enabled) {
-        process.env.GCC_VITE_RUNTIME_SOURCE_MAP_FILE =
-          runtimeModuleSourceMapFilePath;
-      } else {
-        delete process.env.GCC_VITE_RUNTIME_SOURCE_MAP_FILE;
-      }
+      const previousAuthoredFilesFile =
+        process.env.GCC_VITE_AUTHORED_FILES_FILE;
+      process.env.GCC_VITE_RUNTIME_SOURCE_MAP_FILE =
+        runtimeModuleSourceMapFilePath;
+      process.env.GCC_VITE_AUTHORED_FILES_FILE = authoredFilesFilePath;
       let result;
       try {
         result = await build(compilerOptions);
@@ -199,6 +269,11 @@ export function gccTsBundler(
         } else {
           process.env.GCC_VITE_RUNTIME_SOURCE_MAP_FILE =
             previousRuntimeModuleSourceMapFile;
+        }
+        if (previousAuthoredFilesFile === undefined) {
+          delete process.env.GCC_VITE_AUTHORED_FILES_FILE;
+        } else {
+          process.env.GCC_VITE_AUTHORED_FILES_FILE = previousAuthoredFilesFile;
         }
       }
       if (result.exitCode !== 0 || result.emitSkipped) {
@@ -219,27 +294,47 @@ export function gccTsBundler(
         "vite:gcc-runtime-modules",
         `${Object.keys(manifest.modules ?? {}).length}`,
       );
+      const renamedNonBaseOutputs = await renameCompiledNonBaseJsOutputs({
+        baseChunkName: resolveBaseChunkName(options),
+        dynamicRootModuleIds,
+        jsChunks,
+        manifestFilePath,
+        materialized,
+        outDir,
+        outputFiles: result.outputFiles,
+        outputOptions,
+        publicPath,
+        runtimeModuleSourceMapFilePath,
+      });
       if (cssOwnership.enabled) {
+        const cssAugmentStartedAt = performance.now();
         await augmentCompiledViteCss({
-          baseChunkFilePath: path.join(
-            outDir,
-            `${resolveBaseChunkName(options)}.js`,
-          ),
+          baseChunkFilePath: renamedNonBaseOutputs.baseChunkFilePath,
           manifestFilePath,
           materialized,
           ownership: cssOwnership,
           runtimeModuleSourceMapFilePath,
         });
+        timingTotals.cssAugmentMs += performance.now() - cssAugmentStartedAt;
       }
+      const finalizedBaseOutput = await finalizeBaseJsOutputName({
+        baseChunkFilePath: renamedNonBaseOutputs.baseChunkFilePath,
+        baseSeed: renamedNonBaseOutputs.baseSeed,
+        emittedOutputFiles: renamedNonBaseOutputs.emittedOutputFiles,
+        manifestFilePath,
+        outputOptions,
+        outDir,
+        publicPath,
+      });
 
       removeRollupJavaScript(bundle);
       const emittedOutputFiles = manifestSettings.isInternal
-        ? result.outputFiles.filter(
+        ? finalizedBaseOutput.emittedOutputFiles.filter(
             (filePath) =>
               filePath !== manifestFilePath &&
               filePath !== runtimeModuleSourceMapFilePath,
           )
-        : result.outputFiles.filter(
+        : finalizedBaseOutput.emittedOutputFiles.filter(
             (filePath) => filePath !== runtimeModuleSourceMapFilePath,
           );
       const outputBytes = await collectOutputByteBreakdown({
@@ -250,17 +345,37 @@ export function gccTsBundler(
         "vite:output-bytes",
         `js=${outputBytes.js} css=${outputBytes.css} fonts=${outputBytes.fonts} assets=${outputBytes.assets}`,
       );
+      const emitOutputsStartedAt = performance.now();
       await emitCompiledOutputs(this, emittedOutputFiles, outDir);
+      timingTotals.emitOutputsMs += performance.now() - emitOutputsStartedAt;
 
       if (options.html?.rewriteEntryScripts ?? REWRITE_ENTRY_SCRIPTS_DEFAULT) {
+        const htmlRewriteStartedAt = performance.now();
         rewriteHtmlAssets({
-          baseScriptFileName: `${resolveBaseChunkName(options)}.js`,
+          baseScriptFileName: finalizedBaseOutput.baseScriptFileName,
           bundle,
           publicPath,
           removedChunkFileNames: new Set(
             jsChunks.map((chunk) => chunk.fileName),
           ),
         });
+        timingTotals.htmlRewriteMs += performance.now() - htmlRewriteStartedAt;
+      }
+
+      for (const [label, durationMs] of Object.entries({
+        "vite:transform-capture": timingTotals.transformCaptureMs,
+        "vite:retained-resolution": timingTotals.retainedResolutionMs,
+        "vite:normalize-retained": timingTotals.normalizeRetainedMs,
+        "vite:materialize": timingTotals.materializeMs,
+        "vite:externs": timingTotals.externsMs,
+        "vite:css-analysis": timingTotals.cssAnalysisMs,
+        "vite:css-augment": timingTotals.cssAugmentMs,
+        "vite:emit-outputs": timingTotals.emitOutputsMs,
+        "vite:html-rewrite": timingTotals.htmlRewriteMs,
+      })) {
+        if (durationMs > 0) {
+          logInternalTiming(label, durationMs);
+        }
       }
     },
   };

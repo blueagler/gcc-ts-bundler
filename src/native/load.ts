@@ -203,6 +203,7 @@ interface NativeBinding {
     externsPath: string,
     metadataPath: string,
     chunkMode: string,
+    runtimeModuleSourceMapFile: string | null,
     workspaceDir: string,
     packageAliases: NativeTranspilePackageAlias[],
     packageJsonFiles: string[],
@@ -291,6 +292,7 @@ export function transpileSources(input: {
   packageAliases?: NativeTranspilePackageAlias[];
   packageJsonFiles?: string[];
   lazyImports?: NativeLazyImportInput[];
+  runtimeModuleSourceMapFile?: string;
   workspaceDir: string;
 }) {
   return loadBinding().transpileSources(
@@ -300,6 +302,7 @@ export function transpileSources(input: {
     input.externsPath,
     input.metadataPath,
     input.chunkMode,
+    input.runtimeModuleSourceMapFile ?? null,
     input.workspaceDir,
     input.packageAliases ?? [],
     input.packageJsonFiles ?? [],

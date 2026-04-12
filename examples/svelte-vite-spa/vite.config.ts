@@ -7,18 +7,13 @@ import { gccTsBundler } from "gcc-ts-bundler/vite";
 
 export default defineConfig({
   build: {
-    target: "es2018",
+    target: "esnext",
   },
   plugins: [
     svelte(),
     functionsMixins({ deps: ["m3-svelte"] }),
     tokenShaker(),
     gccTsBundler({
-      compiler: {
-        cache: { mode: "off" },
-        diagnostics: { preflight: "full" },
-        languageOut: "ECMASCRIPT5",
-      },
       externs: {
         generate: {
           mode: "runtime-aware",
@@ -26,7 +21,7 @@ export default defineConfig({
         },
       },
       runtime: {
-        loader: "script",
+        loader: "fetch",
       },
     }),
   ],

@@ -151,6 +151,7 @@ export declare function transpileSources(input: {
     packageAliases?: NativeTranspilePackageAlias[];
     packageJsonFiles?: string[];
     lazyImports?: NativeLazyImportInput[];
+    runtimeModuleSourceMapFile?: string;
     workspaceDir: string;
 }): NativeTranspileOutput;
 export declare function prepareClosureJobs(input: NativePrepareClosureJobsInput): NativePrepareClosureJobsOutput;

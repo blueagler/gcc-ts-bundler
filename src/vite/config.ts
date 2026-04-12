@@ -1,13 +1,17 @@
 import type { ResolvedConfig, UserConfig } from "vite";
 
 import { DEFAULT_BUILD_OPTIONS } from "../api/types";
-import type { BuildOptions } from "../api/types";
+import type { BuildOptions, LanguageOut } from "../api/types";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type { ManifestFileSettings } from "./internal-types";
 
 export const INTERNAL_VITE_MANIFEST_FILE = ".gcc-ts-bundler-vite-manifest.json";
 export const INTERNAL_VITE_RUNTIME_MODULE_SOURCES_FILE =
   ".gcc-ts-bundler-vite-runtime-module-sources.json";
+export const INTERNAL_VITE_AUTHORED_FILES_FILE =
+  ".gcc-ts-bundler-vite-authored-files.json";
+export const VITE_LANGUAGE_OUT_ERROR =
+  "gccTsBundler() does not accept compiler.languageOut. Set Vite build.target instead.";
 
 export function applyViteBuildGuards(userConfig: UserConfig): UserConfig {
   if (userConfig.build?.ssr) {
@@ -28,7 +32,6 @@ export function applyViteBuildGuards(userConfig: UserConfig): UserConfig {
   return {
     build: {
       modulePreload: false,
-      target: userConfig.build?.target ?? "es2018",
     },
   };
 }
@@ -70,6 +73,7 @@ export function resolvePublicPath(
 }
 
 export function createCompilerOptions(input: {
+  config: ResolvedConfig;
   entries: string[];
   externs: string[];
   manifestFile: string;
@@ -79,6 +83,7 @@ export function createCompilerOptions(input: {
   publicPath: string;
   srcDir: string;
 }): BuildOptions {
+  assertNoViteLanguageOut(input.options);
   const compiler = input.options.compiler ?? {};
   const compilerChunks = compiler.chunks ?? {};
 
@@ -90,6 +95,7 @@ export function createCompilerOptions(input: {
     packages: { mode: "off" },
     projectRoot: input.projectRoot,
     srcDir: input.srcDir,
+    languageOut: resolveViteLanguageOut(input.config),
     chunks: {
       ...compilerChunks,
       baseChunkName:
@@ -104,4 +110,86 @@ export function createCompilerOptions(input: {
       publicPath: input.publicPath,
     },
   };
+}
+
+export function assertNoViteLanguageOut(
+  options: GccTsBundlerVitePluginOptions,
+) {
+  if (
+    !Object.prototype.hasOwnProperty.call(options.compiler ?? {}, "languageOut")
+  ) {
+    return;
+  }
+  throw new Error(VITE_LANGUAGE_OUT_ERROR);
+}
+
+export function resolveViteLanguageOut(config: ResolvedConfig): LanguageOut {
+  const targets = normalizeViteTargets(config.build.target);
+  if (targets.length === 0) {
+    return "ECMASCRIPT6";
+  }
+
+  let resolvedLanguageOut: LanguageOut | null = null;
+  for (const target of targets) {
+    const mapped = mapSingleViteTarget(target);
+    if (!mapped) {
+      throw new Error(
+        `gccTsBundler() could not derive a compiler output level from Vite build.target ${JSON.stringify(target)}. ` +
+          'Use false, "esnext", "es3", "es5", "baseline-widely-available", or an "es2015+" target.',
+      );
+    }
+    if (
+      !resolvedLanguageOut ||
+      languageOutRank(mapped) < languageOutRank(resolvedLanguageOut)
+    ) {
+      resolvedLanguageOut = mapped;
+    }
+  }
+
+  return resolvedLanguageOut ?? "ECMASCRIPT6";
+}
+
+function normalizeViteTargets(
+  target: ResolvedConfig["build"]["target"],
+): Array<string | false> {
+  if (target === undefined) {
+    return ["baseline-widely-available"];
+  }
+  return Array.isArray(target) ? [...target] : [target];
+}
+
+function mapSingleViteTarget(target: string | false): LanguageOut | null {
+  if (target === false) {
+    return "ECMASCRIPT_NEXT";
+  }
+  const normalized = target.trim().toLowerCase();
+  if (normalized === "esnext") {
+    return "ECMASCRIPT_NEXT";
+  }
+  if (normalized === "es3") {
+    return "ECMASCRIPT3";
+  }
+  if (normalized === "es5") {
+    return "ECMASCRIPT5";
+  }
+  if (normalized === "baseline-widely-available") {
+    return "ECMASCRIPT6";
+  }
+  if (/^es20(?:1[5-9]|[2-9]\d)$/u.test(normalized)) {
+    return "ECMASCRIPT6";
+  }
+  return null;
+}
+
+function languageOutRank(languageOut: LanguageOut) {
+  switch (languageOut) {
+    case "ECMASCRIPT3":
+      return 0;
+    case "ECMASCRIPT5":
+      return 1;
+    case "ECMASCRIPT6":
+      return 2;
+    case "ECMASCRIPT_NEXT":
+      return 3;
+  }
 }

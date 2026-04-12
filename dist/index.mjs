@@ -353,7 +353,7 @@ function rewriteDecoratorMetadata(code, propertyRenamingReport) {
   return loadBinding().rewriteDecoratorMetadata(code, propertyRenamingReport);
 }
 function transpileSources(input) {
-  return loadBinding().transpileSources(input.fileNames, input.explicitExternPaths ?? [], input.outDir, input.externsPath, input.metadataPath, input.chunkMode, input.workspaceDir, input.packageAliases ?? [], input.packageJsonFiles ?? [], input.lazyImports ?? []);
+  return loadBinding().transpileSources(input.fileNames, input.explicitExternPaths ?? [], input.outDir, input.externsPath, input.metadataPath, input.chunkMode, input.runtimeModuleSourceMapFile ?? null, input.workspaceDir, input.packageAliases ?? [], input.packageJsonFiles ?? [], input.lazyImports ?? []);
 }
 function prepareClosureJobs(input) {
   return loadBinding().prepareClosureJobs(input);
@@ -1766,6 +1766,7 @@ var init_diagnostics = __esm(() => {
 });
 
 // src/stages/native/closure-ir/preflight.ts
+import fs11 from "fs";
 import ts17 from "typescript";
 function collectNativePreflightDiagnostics({
   preflight,
@@ -1798,16 +1799,49 @@ function collectSemanticDiagnostics({
   scan
 }) {
   const diagnostics = [];
-  const semanticFiles = scan.files.filter(({ features }) => features.needsSemanticPreflight);
+  const authoredFiles = loadViteAuthoredFiles();
+  const semanticFiles = scan.files.filter(({ features, sourceFile }) => {
+    if (!features.needsSemanticPreflight) {
+      return false;
+    }
+    if (!authoredFiles) {
+      return true;
+    }
+    return authoredFiles.has(sourceFile.fileName);
+  });
   logInternalDetail("native-emit:preflight:files", `${semanticFiles.length}/${scan.scannedFileCount}`);
   for (const { sourceFile } of semanticFiles) {
     diagnostics.push(...program.getSemanticDiagnostics(sourceFile));
   }
   return diagnostics;
 }
+function loadViteAuthoredFiles() {
+  const filePath = process.env.GCC_VITE_AUTHORED_FILES_FILE;
+  if (!filePath) {
+    return null;
+  }
+  const cached = authoredFileSetCache.get(filePath);
+  if (cached) {
+    return cached;
+  }
+  try {
+    const raw = fs11.readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return null;
+    }
+    const authoredFiles = new Set(parsed.filter((value) => typeof value === "string"));
+    authoredFileSetCache.set(filePath, authoredFiles);
+    return authoredFiles;
+  } catch {
+    return null;
+  }
+}
+var authoredFileSetCache;
 var init_preflight = __esm(() => {
   init_timing();
   init_diagnostics();
+  authoredFileSetCache = new Map;
 });
 
 // src/stages/native/closure-ir.ts
@@ -1872,7 +1906,7 @@ var init_closure_ir = __esm(() => {
 });
 
 // src/stages/native/emit.ts
-import fs11 from "fs";
+import fs12 from "fs";
 import path17 from "path";
 import ts19 from "typescript";
 async function emitNativeStage({
@@ -1963,7 +1997,7 @@ async function emitNativeStage({
       supportFiles: []
     };
   }
-  await fs11.promises.writeFile(paths.metadataPathForNative, JSON.stringify(analysis.files, null, 2), "utf-8");
+  await fs12.promises.writeFile(paths.metadataPathForNative, JSON.stringify(analysis.files, null, 2), "utf-8");
   const result = await withInternalTiming("native-emit:transpile", () => Promise.resolve(runNativeTranspile({
     chunkMode: options.chunks.mode,
     combinedFileNames,
@@ -2047,8 +2081,8 @@ async function restoreCachedNativeEmitResult({
   };
 }
 async function resetNativeEmitOutDir(outDir) {
-  await fs11.promises.rm(outDir, { force: true, recursive: true });
-  await fs11.promises.mkdir(outDir, { recursive: true });
+  await fs12.promises.rm(outDir, { force: true, recursive: true });
+  await fs12.promises.mkdir(outDir, { recursive: true });
 }
 function runNativeTranspile({
   chunkMode,
@@ -2072,6 +2106,7 @@ function runNativeTranspile({
     outDir,
     packageAliases,
     packageJsonFiles,
+    runtimeModuleSourceMapFile: process.env.GCC_VITE_RUNTIME_SOURCE_MAP_FILE || undefined,
     workspaceDir
   });
 }
@@ -2084,7 +2119,7 @@ async function persistNativeEmitMetadata({
   metadataPathForNative,
   supportFiles
 }) {
-  await fs11.promises.writeFile(metadataPath, JSON.stringify({
+  await fs12.promises.writeFile(metadataPath, JSON.stringify({
     dependencyModules,
     dependencyRuntimeFiles,
     emittedFiles,
@@ -2128,7 +2163,7 @@ function createSimpleDiagnostic(messageText) {
 }
 async function readMetadata(metadataPath) {
   try {
-    const raw = await fs11.promises.readFile(metadataPath, "utf-8");
+    const raw = await fs12.promises.readFile(metadataPath, "utf-8");
     const parsed = JSON.parse(raw);
     if (parsed.version !== NATIVE_EMIT_METADATA_VERSION) {
       return null;
@@ -2236,7 +2271,7 @@ function configureClosureCompilerInstance(instance) {
 var init_compiler = () => {};
 
 // src/stages/closure/cache.ts
-import fs12 from "fs/promises";
+import fs13 from "fs/promises";
 import path18 from "path";
 function getCompileJobOutputFiles(job) {
   if (job.jsOutputFile) {
@@ -2266,13 +2301,13 @@ async function tryRestoreCachedClosureJob({
     return false;
   }
   const cachedFiles = metadata.artifactFiles.map((fileName) => path18.join(jobCacheDir, fileName));
-  const filesReady = await Promise.all(cachedFiles.map((filePath) => fs12.stat(filePath).then(() => true).catch(() => false)));
+  const filesReady = await Promise.all(cachedFiles.map((filePath) => fs13.stat(filePath).then(() => true).catch(() => false)));
   if (filesReady.some((ready) => !ready)) {
     return false;
   }
   await Promise.all(artifactFiles.map(async (artifactFile, index) => {
     await ensureDirectory(path18.dirname(artifactFile));
-    await fs12.copyFile(cachedFiles[index], artifactFile);
+    await fs13.copyFile(cachedFiles[index], artifactFile);
   }));
   return true;
 }
@@ -2283,10 +2318,10 @@ async function persistCachedClosureJob({
   artifactFiles
 }) {
   const jobCacheDir = await getClosureJobCacheDir(cacheDir, job, compilerVersion);
-  await fs12.rm(jobCacheDir, { force: true, recursive: true });
+  await fs13.rm(jobCacheDir, { force: true, recursive: true });
   await ensureDirectory(jobCacheDir);
   const artifactNames = artifactFiles.map((artifactFile) => path18.basename(artifactFile));
-  await Promise.all(artifactFiles.map((artifactFile, index) => fs12.copyFile(artifactFile, path18.join(jobCacheDir, artifactNames[index]))));
+  await Promise.all(artifactFiles.map((artifactFile, index) => fs13.copyFile(artifactFile, path18.join(jobCacheDir, artifactNames[index]))));
   await writeJson(path18.join(jobCacheDir, "meta.json"), {
     artifactFiles: artifactNames,
     version: CLOSURE_JOB_CACHE_VERSION
@@ -2425,11 +2460,11 @@ var init_es5 = __esm(() => {
 });
 
 // src/stages/closure/postprocess/io.ts
-import fs13 from "fs/promises";
+import fs14 from "fs/promises";
 async function readCachedText(filePath, cache) {
   let pending = cache.get(filePath);
   if (!pending) {
-    pending = fs13.readFile(filePath, "utf-8");
+    pending = fs14.readFile(filePath, "utf-8");
     cache.set(filePath, pending);
   }
   return pending;
@@ -2508,7 +2543,7 @@ function escapeRegex(value) {
 }
 
 // src/stages/closure/postprocess.ts
-import fs14 from "fs/promises";
+import fs15 from "fs/promises";
 async function runClosurePostprocess({
   chunkMode,
   languageOut,
@@ -2537,7 +2572,7 @@ async function runClosurePostprocess({
     const reportText = action.propertyRenamingReportPath ? await readPropertyRenamingReport(action.propertyRenamingReportPath, propertyRenamingReports) : "";
     const hasNoRewriteActions = action.kind === "copy" && !reportText && !es5Rewrite.requiresInputRead() && !wrapBundlerRuntimeOutput;
     if (hasNoRewriteActions) {
-      await fs14.copyFile(action.inputPath, action.outputPath);
+      await fs15.copyFile(action.inputPath, action.outputPath);
       return;
     }
     const originalContents = await readCachedText(action.inputPath, inputContents);
@@ -2556,7 +2591,7 @@ async function runClosurePostprocess({
     if (wrapBundlerRuntimeOutput) {
       contents = wrapBundlerRuntimeOutputFile(contents);
     }
-    await fs14.writeFile(action.outputPath, contents);
+    await fs15.writeFile(action.outputPath, contents);
   }));
 }
 var init_postprocess = __esm(() => {
@@ -2567,7 +2602,7 @@ var init_postprocess = __esm(() => {
 });
 
 // src/stages/closure/run-closure.ts
-import fs15 from "fs/promises";
+import fs16 from "fs/promises";
 import path19 from "path";
 async function runClosureStage({
   chunkPlan,
@@ -2633,20 +2668,20 @@ async function prepareClosureStageDirectories({
   finalCacheDir,
   outDir
 }) {
-  await fs15.rm(finalCacheDir, { force: true, recursive: true });
+  await fs16.rm(finalCacheDir, { force: true, recursive: true });
   await ensureDirectory(finalCacheDir);
   const rawDir = path19.join(finalCacheDir, "raw");
   const cacheOutputDir = path19.join(finalCacheDir, "outputs");
   await ensureDirectory(rawDir);
   await ensureDirectory(cacheOutputDir);
-  await fs15.rm(outDir, { force: true, recursive: true });
+  await fs16.rm(outDir, { force: true, recursive: true });
   await ensureDirectory(outDir);
   return { cacheOutputDir, rawDir };
 }
 async function writeGeneratedAssets(assets) {
   await Promise.all(assets.map(async (asset) => {
     await ensureParentDirectory(asset.path);
-    await fs15.writeFile(asset.path, asset.text, "utf-8");
+    await fs16.writeFile(asset.path, asset.text, "utf-8");
   }));
 }
 async function compilePreparedClosureJobs({
@@ -2734,7 +2769,7 @@ var init_run_closure = __esm(() => {
 });
 
 // src/pipeline/build-helpers.ts
-import fs16 from "fs";
+import fs17 from "fs";
 import path20 from "path";
 async function publishOutputs(outputFiles, outDir) {
   if (await publishedOutputsMatch2(outputFiles, outDir)) {
@@ -2757,7 +2792,7 @@ function createBuildDiagnostic(error) {
   };
 }
 async function removeProjectCacheDir(projectCacheDir) {
-  await fs16.promises.rm(projectCacheDir, { force: true, recursive: true });
+  await fs17.promises.rm(projectCacheDir, { force: true, recursive: true });
 }
 var init_build_helpers = __esm(() => {
   init_files();

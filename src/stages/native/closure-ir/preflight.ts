@@ -1,9 +1,12 @@
+import fs from "fs";
 import ts from "typescript";
 
 import { DiagnosticsPreflight } from "../../../api/types";
 import { logInternalDetail } from "../../../internal/timing";
 import { shouldIgnorePreflightDiagnostic } from "./diagnostics";
 import type { ClosureIrScanResult } from "./metadata/scan";
+
+const authoredFileSetCache = new Map<string, Set<string>>();
 
 export function collectNativePreflightDiagnostics({
   preflight,
@@ -52,9 +55,16 @@ function collectSemanticDiagnostics({
   scan: ClosureIrScanResult;
 }) {
   const diagnostics: ts.Diagnostic[] = [];
-  const semanticFiles = scan.files.filter(
-    ({ features }) => features.needsSemanticPreflight,
-  );
+  const authoredFiles = loadViteAuthoredFiles();
+  const semanticFiles = scan.files.filter(({ features, sourceFile }) => {
+    if (!features.needsSemanticPreflight) {
+      return false;
+    }
+    if (!authoredFiles) {
+      return true;
+    }
+    return authoredFiles.has(sourceFile.fileName);
+  });
 
   logInternalDetail(
     "native-emit:preflight:files",
@@ -66,4 +76,31 @@ function collectSemanticDiagnostics({
   }
 
   return diagnostics;
+}
+
+function loadViteAuthoredFiles() {
+  const filePath = process.env.GCC_VITE_AUTHORED_FILES_FILE;
+  if (!filePath) {
+    return null;
+  }
+
+  const cached = authoredFileSetCache.get(filePath);
+  if (cached) {
+    return cached;
+  }
+
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return null;
+    }
+    const authoredFiles = new Set(
+      parsed.filter((value): value is string => typeof value === "string"),
+    );
+    authoredFileSetCache.set(filePath, authoredFiles);
+    return authoredFiles;
+  } catch {
+    return null;
+  }
 }

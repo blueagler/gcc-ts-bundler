@@ -15,7 +15,6 @@ mod namespace;
 mod print;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::env;
 use std::fs;
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -94,6 +93,7 @@ pub fn transpile_sources(
     externs_path: String,
     metadata_path: String,
     chunk_mode: String,
+    runtime_module_source_map_file: Option<String>,
     workspace_dir: String,
     package_aliases: Vec<PackageAliasInput>,
     package_json_files: Vec<String>,
@@ -135,9 +135,6 @@ pub fn transpile_sources(
         static_property_names,
         workspace_dir: workspace_dir.clone(),
     };
-    let runtime_module_source_map_file =
-        env::var("GCC_VITE_RUNTIME_SOURCE_MAP_FILE").ok().filter(|value| !value.is_empty());
-
     let emitted_outputs = file_names
         .par_iter()
         .filter(|file_name| !file_name.ends_with(".d.ts"))

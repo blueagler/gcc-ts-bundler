@@ -387,7 +387,7 @@ function rewriteDecoratorMetadata(code, propertyRenamingReport) {
   return loadBinding().rewriteDecoratorMetadata(code, propertyRenamingReport);
 }
 function transpileSources(input) {
-  return loadBinding().transpileSources(input.fileNames, input.explicitExternPaths ?? [], input.outDir, input.externsPath, input.metadataPath, input.chunkMode, input.workspaceDir, input.packageAliases ?? [], input.packageJsonFiles ?? [], input.lazyImports ?? []);
+  return loadBinding().transpileSources(input.fileNames, input.explicitExternPaths ?? [], input.outDir, input.externsPath, input.metadataPath, input.chunkMode, input.runtimeModuleSourceMapFile ?? null, input.workspaceDir, input.packageAliases ?? [], input.packageJsonFiles ?? [], input.lazyImports ?? []);
 }
 function prepareClosureJobs(input) {
   return loadBinding().prepareClosureJobs(input);
@@ -1848,18 +1848,51 @@ function collectSemanticDiagnostics({
   scan
 }) {
   const diagnostics = [];
-  const semanticFiles = scan.files.filter(({ features }) => features.needsSemanticPreflight);
+  const authoredFiles = loadViteAuthoredFiles();
+  const semanticFiles = scan.files.filter(({ features, sourceFile }) => {
+    if (!features.needsSemanticPreflight) {
+      return false;
+    }
+    if (!authoredFiles) {
+      return true;
+    }
+    return authoredFiles.has(sourceFile.fileName);
+  });
   logInternalDetail("native-emit:preflight:files", `${semanticFiles.length}/${scan.scannedFileCount}`);
   for (const { sourceFile } of semanticFiles) {
     diagnostics.push(...program.getSemanticDiagnostics(sourceFile));
   }
   return diagnostics;
 }
-var import_typescript17;
+function loadViteAuthoredFiles() {
+  const filePath = process.env.GCC_VITE_AUTHORED_FILES_FILE;
+  if (!filePath) {
+    return null;
+  }
+  const cached = authoredFileSetCache.get(filePath);
+  if (cached) {
+    return cached;
+  }
+  try {
+    const raw = import_fs10.default.readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return null;
+    }
+    const authoredFiles = new Set(parsed.filter((value) => typeof value === "string"));
+    authoredFileSetCache.set(filePath, authoredFiles);
+    return authoredFiles;
+  } catch {
+    return null;
+  }
+}
+var import_fs10, import_typescript17, authoredFileSetCache;
 var init_preflight = __esm(() => {
   init_timing();
   init_diagnostics();
+  import_fs10 = __toESM(require("fs"));
   import_typescript17 = __toESM(require("typescript"));
+  authoredFileSetCache = new Map;
 });
 
 // src/stages/native/closure-ir.ts
@@ -2013,7 +2046,7 @@ async function emitNativeStage({
       supportFiles: []
     };
   }
-  await import_fs10.default.promises.writeFile(paths.metadataPathForNative, JSON.stringify(analysis.files, null, 2), "utf-8");
+  await import_fs11.default.promises.writeFile(paths.metadataPathForNative, JSON.stringify(analysis.files, null, 2), "utf-8");
   const result = await withInternalTiming("native-emit:transpile", () => Promise.resolve(runNativeTranspile({
     chunkMode: options.chunks.mode,
     combinedFileNames,
@@ -2097,8 +2130,8 @@ async function restoreCachedNativeEmitResult({
   };
 }
 async function resetNativeEmitOutDir(outDir) {
-  await import_fs10.default.promises.rm(outDir, { force: true, recursive: true });
-  await import_fs10.default.promises.mkdir(outDir, { recursive: true });
+  await import_fs11.default.promises.rm(outDir, { force: true, recursive: true });
+  await import_fs11.default.promises.mkdir(outDir, { recursive: true });
 }
 function runNativeTranspile({
   chunkMode,
@@ -2122,6 +2155,7 @@ function runNativeTranspile({
     outDir,
     packageAliases,
     packageJsonFiles,
+    runtimeModuleSourceMapFile: process.env.GCC_VITE_RUNTIME_SOURCE_MAP_FILE || undefined,
     workspaceDir
   });
 }
@@ -2134,7 +2168,7 @@ async function persistNativeEmitMetadata({
   metadataPathForNative,
   supportFiles
 }) {
-  await import_fs10.default.promises.writeFile(metadataPath, JSON.stringify({
+  await import_fs11.default.promises.writeFile(metadataPath, JSON.stringify({
     dependencyModules,
     dependencyRuntimeFiles,
     emittedFiles,
@@ -2178,7 +2212,7 @@ function createSimpleDiagnostic(messageText) {
 }
 async function readMetadata(metadataPath) {
   try {
-    const raw = await import_fs10.default.promises.readFile(metadataPath, "utf-8");
+    const raw = await import_fs11.default.promises.readFile(metadataPath, "utf-8");
     const parsed = JSON.parse(raw);
     if (parsed.version !== NATIVE_EMIT_METADATA_VERSION) {
       return null;
@@ -2215,14 +2249,14 @@ function collectDependencyRuntimeFiles({
 function isDependencyFile(filePath) {
   return import_path17.default.resolve(filePath).includes(`${import_path17.default.sep}node_modules${import_path17.default.sep}`);
 }
-var import_fs10, import_path17, import_typescript19, NATIVE_EMIT_METADATA_VERSION = 8;
+var import_fs11, import_path17, import_typescript19, NATIVE_EMIT_METADATA_VERSION = 8;
 var init_emit = __esm(() => {
   init_files();
   init_file_state();
   init_timing();
   init_load();
   init_closure_ir();
-  import_fs10 = __toESM(require("fs"));
+  import_fs11 = __toESM(require("fs"));
   import_path17 = __toESM(require("path"));
   import_typescript19 = __toESM(require("typescript"));
 });
@@ -2816,13 +2850,13 @@ function createBuildDiagnostic(error) {
   };
 }
 async function removeProjectCacheDir(projectCacheDir) {
-  await import_fs11.default.promises.rm(projectCacheDir, { force: true, recursive: true });
+  await import_fs12.default.promises.rm(projectCacheDir, { force: true, recursive: true });
 }
-var import_fs11, import_path20;
+var import_fs12, import_path20;
 var init_build_helpers = __esm(() => {
   init_files();
   init_file_state();
-  import_fs11 = __toESM(require("fs"));
+  import_fs12 = __toESM(require("fs"));
   import_path20 = __toESM(require("path"));
 });
 

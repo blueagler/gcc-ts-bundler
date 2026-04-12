@@ -5,6 +5,10 @@ import { pathToFileURL } from "node:url";
 import { expect, test } from "bun:test";
 
 import { materializeCapturedGraph } from "../src/vite/capture.ts";
+import {
+  resolveViteLanguageOut,
+  VITE_LANGUAGE_OUT_ERROR,
+} from "../src/vite/config.ts";
 import { createFixture, execFileAsync } from "./helpers.mjs";
 
 async function listFiles(rootDir, currentDir = rootDir) {
@@ -26,6 +30,7 @@ async function buildViteFixture(fixture, overrides = {}) {
   const pluginUrl = pathToFileURL(
     path.join(process.cwd(), "dist/vite/index.mjs"),
   ).href;
+  const viteBin = path.join(process.cwd(), "node_modules", "vite", "bin", "vite.js");
   await fixture.write(
     "vite.config.mjs",
     [
@@ -38,12 +43,12 @@ async function buildViteFixture(fixture, overrides = {}) {
       ...(overrides.build?.cssCodeSplit === false
         ? ['    cssCodeSplit: false,']
         : []),
+      ...(overrides.buildLines ?? []),
       "  },",
       "  plugins: [",
       "    gccTsBundler({",
       "      compiler: {",
       '        cache: { mode: "off" },',
-      '        languageOut: "ECMASCRIPT5",',
       "      },",
       "      runtime: {",
       '        loader: "script",',
@@ -62,9 +67,19 @@ async function buildViteFixture(fixture, overrides = {}) {
     ].join("\n"),
   );
 
-  await execFileAsync("bun", ["x", "vite", "build"], {
+  await execFileAsync(process.execPath, [viteBin, "build"], {
     cwd: fixture.projectRoot,
   });
+}
+
+function readRewrittenEntryScript(html) {
+  const match = html.match(/<script defer src="([^"]+)"><\/script>/u);
+  expect(match).toBeTruthy();
+  return match[1];
+}
+
+function toDistRelativeFile(publicPath) {
+  return publicPath.replace(/^\/+/u, "");
 }
 
 async function writeViteCssFixture(fixture) {
@@ -165,16 +180,18 @@ test.serial(
     expect(cssFiles.length).toBeGreaterThan(1);
 
     const html = await fixture.read("dist/index.html");
-    expect(html).toContain('<script defer src="/main.js"></script>');
     expect(html).not.toContain('type="module"');
     expect(html).not.toContain('rel="modulepreload"');
+    const entryScript = readRewrittenEntryScript(html);
+    expect(entryScript).toMatch(/^\/assets\/.+\.js$/u);
+    expect(files).toContain(toDistRelativeFile(entryScript));
 
     const linkedCss = cssFiles.filter((fileName) => html.includes(fileName));
     expect(linkedCss.length).toBeGreaterThan(0);
     const lazyCss = cssFiles.find((fileName) => !html.includes(fileName));
     expect(lazyCss).toBeTruthy();
 
-    const mainJs = await fixture.read("dist/main.js");
+    const mainJs = await fixture.read(path.join("dist", toDistRelativeFile(entryScript)));
     expect(mainJs).toContain(lazyCss);
     expect(mainJs).toContain("globalThis.__g");
   },
@@ -197,7 +214,9 @@ test.serial(
     const cssFiles = files.filter((filePath) => filePath.endsWith(".css"));
     expect(cssFiles).toHaveLength(1);
 
-    const mainJs = await fixture.read("dist/main.js");
+    const html = await fixture.read("dist/index.html");
+    const entryScript = readRewrittenEntryScript(html);
+    const mainJs = await fixture.read(path.join("dist", toDistRelativeFile(entryScript)));
     expect(mainJs).not.toContain(cssFiles[0]);
   },
 );
@@ -265,8 +284,40 @@ test.serial(
     expect(runtimeModuleFiles).toContain("/src/alive.js");
     expect(runtimeModuleFiles).not.toContain("/src/dead.js");
 
-    const mainJs = await fixture.read("dist/main.js");
+    const html = await fixture.read("dist/index.html");
+    const entryScript = readRewrittenEntryScript(html);
+    const mainJs = await fixture.read(path.join("dist", toDistRelativeFile(entryScript)));
     expect(mainJs).not.toContain("tree-shaken");
+  },
+);
+
+test.serial(
+  "gccTsBundler follows Vite entry and chunk naming config",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    await writeViteCssFixture(fixture);
+
+    await buildViteFixture(fixture, {
+      buildLines: [
+        "    rollupOptions: {",
+        "      output: {",
+        '        entryFileNames: "entry/[name]-[hash].js",',
+        '        chunkFileNames: "chunks/[name]-[hash].js",',
+        "      },",
+        "    },",
+      ],
+    });
+
+    const files = await listFiles(fixture.outDir);
+    const jsFiles = files.filter((filePath) => filePath.endsWith(".js"));
+    const html = await fixture.read("dist/index.html");
+    const entryScript = readRewrittenEntryScript(html);
+
+    expect(entryScript).toMatch(/^\/entry\/.+\.js$/u);
+    expect(files).toContain(toDistRelativeFile(entryScript));
+    expect(jsFiles.some((filePath) => filePath.startsWith("chunks/"))).toBe(true);
+    expect(jsFiles).not.toContain("main.js");
   },
 );
 
@@ -343,5 +394,90 @@ test.serial(
   expect(rewrittenMain).not.toContain("empty.ts");
   expect(rewrittenMain).toContain('import("./lazy.js")');
   expect(rewrittenMain).toContain('import "./style.js"');
+  },
+);
+
+test("resolveViteLanguageOut derives compiler output from Vite build.target", () => {
+  expect(
+    resolveViteLanguageOut({
+      build: { target: false },
+    }),
+  ).toBe("ECMASCRIPT_NEXT");
+  expect(
+    resolveViteLanguageOut({
+      build: { target: "esnext" },
+    }),
+  ).toBe("ECMASCRIPT_NEXT");
+  expect(
+    resolveViteLanguageOut({
+      build: { target: "es5" },
+    }),
+  ).toBe("ECMASCRIPT5");
+  expect(
+    resolveViteLanguageOut({
+      build: { target: "baseline-widely-available" },
+    }),
+  ).toBe("ECMASCRIPT6");
+  expect(
+    resolveViteLanguageOut({
+      build: { target: ["es2020", "es5"] },
+    }),
+  ).toBe("ECMASCRIPT5");
+});
+
+test("resolveViteLanguageOut rejects unsupported target strings", () => {
+  expect(() =>
+    resolveViteLanguageOut({
+      build: { target: "chrome120" },
+    }),
+  ).toThrow(/could not derive a compiler output level/);
+});
+
+test.serial(
+  "gccTsBundler rejects compiler.languageOut in Vite mode with an actionable error",
+  async () => {
+    const fixture = await createFixture();
+    const pluginUrl = pathToFileURL(
+      path.join(process.cwd(), "dist/vite/index.mjs"),
+    ).href;
+    const viteBin = path.join(process.cwd(), "node_modules", "vite", "bin", "vite.js");
+    await fixture.write(
+      "index.html",
+      [
+        "<!doctype html>",
+        "<html>",
+        "  <body>",
+        '    <script type="module" src="/src/main.js"></script>',
+        "  </body>",
+        "</html>",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write("src/main.js", 'console.log("vite");\n');
+    await fixture.write(
+      "vite.config.mjs",
+      [
+        `import { gccTsBundler } from ${JSON.stringify(pluginUrl)};`,
+        "",
+        "export default {",
+        "  plugins: [",
+        "    gccTsBundler({",
+        "      compiler: {",
+        '        languageOut: "ECMASCRIPT5",',
+        "      },",
+        "    }),",
+        "  ],",
+        "};",
+        "",
+      ].join("\n"),
+    );
+
+    await expect(
+      execFileAsync(process.execPath, [viteBin, "build"], {
+        cwd: fixture.projectRoot,
+      }),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining(VITE_LANGUAGE_OUT_ERROR),
+    });
   },
 );
