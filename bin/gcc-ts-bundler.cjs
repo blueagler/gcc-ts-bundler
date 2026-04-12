@@ -1649,7 +1649,7 @@ function scanClosureIrSourceFiles({
     scannedFileCount: files.length
   };
 }
-function classifyClosureIrFile(sourceFile) {
+function classifyClosureIrSourceFile(sourceFile) {
   let hasEnumDeclarations = false;
   let hasTypeDeclarations = false;
   for (const statement of sourceFile.statements) {
@@ -1675,6 +1675,9 @@ function classifyClosureIrFile(sourceFile) {
     hasTypeDeclarations,
     shouldAnalyze: hasDecorators || hasEnumDeclarations || docEligibility.hasTopLevelDocs || hasTypeDeclarations
   };
+}
+function classifyClosureIrFile(sourceFile) {
+  return classifyClosureIrSourceFile(sourceFile);
 }
 function containsExplicitTypeSignal(node) {
   if (import_typescript15.default.isAsExpression(node) || import_typescript15.default.isEnumDeclaration(node) || import_typescript15.default.isInterfaceDeclaration(node) || import_typescript15.default.isSatisfiesExpression(node) || import_typescript15.default.isTypeAliasDeclaration(node) || import_typescript15.default.isTypeAssertionExpression(node) || import_typescript15.default.isTypeParameterDeclaration(node)) {
@@ -1824,6 +1827,8 @@ var init_diagnostics = __esm(() => {
 
 // src/stages/native/closure-ir/preflight.ts
 function collectNativePreflightDiagnostics({
+  authoredFiles,
+  additionalSyntacticDiagnostics,
   preflight,
   program,
   scan
@@ -1834,8 +1839,12 @@ function collectNativePreflightDiagnostics({
   const diagnostics = [
     ...program.getOptionsDiagnostics(),
     ...program.getGlobalDiagnostics(),
-    ...collectSyntacticDiagnostics(program),
-    ...collectSemanticDiagnostics({ program, scan })
+    ...additionalSyntacticDiagnostics ?? collectSyntacticDiagnostics(program),
+    ...collectSemanticDiagnostics({
+      authoredFiles: authoredFiles ?? loadViteAuthoredFiles(),
+      program,
+      scan
+    })
   ].filter((diagnostic) => !shouldIgnorePreflightDiagnostic(diagnostic));
   if (preflight === "errors-only") {
     return diagnostics.filter((diagnostic) => diagnostic.category === import_typescript17.default.DiagnosticCategory.Error);
@@ -1850,11 +1859,11 @@ function collectSyntacticDiagnostics(program) {
   return diagnostics;
 }
 function collectSemanticDiagnostics({
+  authoredFiles,
   program,
   scan
 }) {
   const diagnostics = [];
-  const authoredFiles = loadViteAuthoredFiles();
   const semanticFiles = scan.files.filter(({ features, sourceFile }) => {
     if (!features.needsSemanticPreflight) {
       return false;
@@ -1870,8 +1879,7 @@ function collectSemanticDiagnostics({
   }
   return diagnostics;
 }
-function loadViteAuthoredFiles() {
-  const filePath = process.env.GCC_VITE_AUTHORED_FILES_FILE;
+function loadViteAuthoredFiles(filePath = process.env.GCC_VITE_AUTHORED_FILES_FILE) {
   if (!filePath) {
     return null;
   }
@@ -1927,18 +1935,6 @@ function scanNativeTypeAnalysisContext({
 }) {
   const { fileNames, program } = context;
   return scanClosureIrFiles({ fileNames, program });
-}
-function collectNativePreflightDiagnosticsFromContext({
-  context,
-  preflight,
-  scan
-}) {
-  const closureIrScan = scan ?? scanNativeTypeAnalysisContext({ context });
-  return collectNativePreflightDiagnostics({
-    preflight,
-    program: context.program,
-    scan: closureIrScan
-  });
 }
 function collectNativeClosureIrFromContext({
   context,
@@ -2021,23 +2017,14 @@ async function emitNativeStage({
     };
   }
   await resetNativeEmitOutDir(paths.outDir);
-  const analysisContext = await withInternalTiming("native-emit:analysis-context", () => createNativeTypeAnalysisContext({
+  const analysis = await collectNativeAnalysis({
     fileNames: combinedFileNames,
+    options,
     tsConfigPath,
     workspaceDir
-  }));
-  const analysisScan = await withInternalTiming("native-emit:analysis-scan", () => Promise.resolve(scanNativeTypeAnalysisContext({ context: analysisContext })));
-  const preflightDiagnostics = await withInternalTiming("native-emit:preflight", () => Promise.resolve(collectNativePreflightDiagnosticsFromContext({
-    context: analysisContext,
-    preflight: options.diagnostics.preflight,
-    scan: analysisScan
-  })));
-  const analysis = await withInternalTiming("native-emit:closure-ir", () => Promise.resolve(collectNativeClosureIrFromContext({
-    context: analysisContext,
-    scan: analysisScan
-  })));
+  });
   const analysisDiagnostics = [
-    ...preflightDiagnostics,
+    ...analysis.preflightDiagnostics,
     ...analysis.diagnostics
   ];
   if (analysisDiagnostics.length > 0) {
@@ -2090,6 +2077,68 @@ async function emitNativeStage({
     externsPath: result.externsPath,
     outDir: paths.outDir,
     supportFiles: finalSupportFiles
+  };
+}
+async function collectNativeAnalysis({
+  fileNames,
+  options,
+  tsConfigPath,
+  workspaceDir
+}) {
+  if (!canUseJsAnalysisFastPath(fileNames)) {
+    const analysisContext2 = await withInternalTiming("native-emit:analysis-context", () => createNativeTypeAnalysisContext({
+      fileNames,
+      tsConfigPath,
+      workspaceDir
+    }));
+    const analysisScan2 = await withInternalTiming("native-emit:analysis-scan", () => Promise.resolve(scanNativeTypeAnalysisContext({ context: analysisContext2 })));
+    const preflightDiagnostics2 = await withInternalTiming("native-emit:preflight", () => Promise.resolve(collectNativePreflightDiagnostics({
+      preflight: options.diagnostics.preflight,
+      program: analysisContext2.program,
+      scan: analysisScan2
+    })));
+    const analysis = await withInternalTiming("native-emit:closure-ir", () => Promise.resolve(collectNativeClosureIrFromContext({
+      context: analysisContext2,
+      scan: analysisScan2
+    })));
+    return {
+      diagnostics: analysis.diagnostics,
+      files: analysis.files,
+      preflightDiagnostics: preflightDiagnostics2
+    };
+  }
+  const authoredFiles = loadViteAuthoredFiles();
+  const quickScanFiles = await withInternalTiming("native-emit:quick-scan", () => scanNativeFilesQuickly(fileNames));
+  const checkerRequiredFileNames = quickScanFiles.filter(({ features, fileName }) => features.shouldAnalyze || features.needsSemanticPreflight && (authoredFiles ? authoredFiles.has(fileName) : true)).map(({ fileName }) => fileName);
+  const checkerRequiredFileSet = new Set(checkerRequiredFileNames);
+  const trivialJsFiles = quickScanFiles.filter(({ fileName }) => !checkerRequiredFileSet.has(fileName));
+  logInternalDetail("native-emit:checker-required-files", `${checkerRequiredFileNames.length}`);
+  logInternalDetail("native-emit:trivial-js-files", `${trivialJsFiles.length}`);
+  const analysisContext = checkerRequiredFileNames.length > 0 || options.diagnostics.preflight !== "off" ? await withInternalTiming("native-emit:analysis-context", () => createNativeTypeAnalysisContext({
+    fileNames: checkerRequiredFileNames,
+    tsConfigPath,
+    workspaceDir
+  })) : null;
+  const analysisScan = analysisContext ? await withInternalTiming("native-emit:analysis-scan", () => Promise.resolve(scanNativeTypeAnalysisContext({ context: analysisContext }))) : null;
+  if (!analysisScan) {
+    logInternalDetail("native-emit:analysis-scan:files", `0/${quickScanFiles.length}`);
+  }
+  const preflightDiagnostics = analysisContext && analysisScan ? await withInternalTiming("native-emit:preflight", () => Promise.resolve(collectNativePreflightDiagnostics({
+    additionalSyntacticDiagnostics: quickScanFiles.flatMap(({ parseDiagnostics }) => parseDiagnostics),
+    authoredFiles,
+    preflight: options.diagnostics.preflight,
+    program: analysisContext.program,
+    scan: analysisScan
+  }))) : [];
+  const checkerAnalysis = analysisContext && analysisScan && checkerRequiredFileNames.length > 0 ? await withInternalTiming("native-emit:closure-ir", () => Promise.resolve(collectNativeClosureIrFromContext({
+    context: analysisContext,
+    scan: analysisScan
+  }))) : { diagnostics: [], files: [] };
+  const checkerFileMap = new Map(checkerAnalysis.files.map((file) => [file.filePath, file]));
+  return {
+    diagnostics: checkerAnalysis.diagnostics,
+    files: fileNames.map((fileName) => checkerFileMap.get(fileName) ?? createTrivialClosureIrFile(fileName)),
+    preflightDiagnostics
   };
 }
 function createNativeEmitPaths({
@@ -2255,6 +2304,44 @@ function collectDependencyRuntimeFiles({
 function isDependencyFile(filePath) {
   return import_path17.default.resolve(filePath).includes(`${import_path17.default.sep}node_modules${import_path17.default.sep}`);
 }
+async function scanNativeFilesQuickly(fileNames) {
+  const files = await Promise.all(fileNames.map(async (fileName) => {
+    const text = await import_fs11.default.promises.readFile(fileName, "utf8");
+    const sourceFile = import_typescript19.default.createSourceFile(fileName, text, import_typescript19.default.ScriptTarget.Latest, true, resolveScriptKind(fileName));
+    return {
+      features: classifyClosureIrSourceFile(sourceFile),
+      fileName,
+      parseDiagnostics: getSourceFileParseDiagnostics(sourceFile)
+    };
+  }));
+  return files;
+}
+function canUseJsAnalysisFastPath(fileNames) {
+  if (!process.env.GCC_VITE_AUTHORED_FILES_FILE) {
+    return false;
+  }
+  return fileNames.every((fileName) => /\.(?:[cm]?jsx?)$/u.test(fileName));
+}
+function createTrivialClosureIrFile(filePath) {
+  return {
+    decoratedOutputText: undefined,
+    enumDeclarations: [],
+    filePath,
+    topLevelDocs: [],
+    typeDeclarations: []
+  };
+}
+function resolveScriptKind(fileName) {
+  if (fileName.endsWith(".jsx")) {
+    return import_typescript19.default.ScriptKind.JSX;
+  }
+  return import_typescript19.default.ScriptKind.JS;
+}
+function getSourceFileParseDiagnostics(sourceFile) {
+  return [
+    ...sourceFile.parseDiagnostics ?? []
+  ];
+}
 var import_fs11, import_path17, import_typescript19, NATIVE_EMIT_METADATA_VERSION = 8;
 var init_emit = __esm(() => {
   init_files();
@@ -2262,6 +2349,8 @@ var init_emit = __esm(() => {
   init_timing();
   init_load();
   init_closure_ir();
+  init_scan();
+  init_preflight();
   import_fs11 = __toESM(require("fs"));
   import_path17 = __toESM(require("path"));
   import_typescript19 = __toESM(require("typescript"));

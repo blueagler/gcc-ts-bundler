@@ -1,6 +1,19 @@
+export interface CapturedModuleAnalysis {
+  bridgeSpecifiers: string[];
+  dynamicImportSpecifiers: string[];
+  importSpecifiers: string[];
+  isEffectivelyEmpty: boolean;
+  isForwardingOnly: boolean;
+  needsClosureCompatibilityDownlevel: boolean;
+  needsTypeScriptCompatibilityDownlevel: boolean;
+}
+
 export interface CapturedModule {
   code: string;
   id: string;
+  normalizedCode?: string;
+  normalizedAnalysis?: CapturedModuleAnalysis;
+  rawAnalysis?: CapturedModuleAnalysis;
 }
 
 export interface CapturedRuntimeModule {
@@ -43,4 +56,11 @@ export interface ViteCssOwnership {
 export interface ManifestFileSettings {
   fileName: string;
   isInternal: boolean;
+}
+
+export interface ViteBuildMetrics {
+  normalizedRetainedModuleCount: number;
+  parseCacheHits: number;
+  parseCacheMisses: number;
+  retainedEdgeResolutionCount: number;
 }

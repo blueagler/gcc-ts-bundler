@@ -9,10 +9,14 @@ import type { ClosureIrScanResult } from "./metadata/scan";
 const authoredFileSetCache = new Map<string, Set<string>>();
 
 export function collectNativePreflightDiagnostics({
+  authoredFiles,
+  additionalSyntacticDiagnostics,
   preflight,
   program,
   scan,
 }: {
+  authoredFiles?: Set<string> | null;
+  additionalSyntacticDiagnostics?: ts.Diagnostic[];
   preflight: DiagnosticsPreflight;
   program: ts.Program;
   scan: ClosureIrScanResult;
@@ -24,8 +28,12 @@ export function collectNativePreflightDiagnostics({
   const diagnostics = [
     ...program.getOptionsDiagnostics(),
     ...program.getGlobalDiagnostics(),
-    ...collectSyntacticDiagnostics(program),
-    ...collectSemanticDiagnostics({ program, scan }),
+    ...(additionalSyntacticDiagnostics ?? collectSyntacticDiagnostics(program)),
+    ...collectSemanticDiagnostics({
+      authoredFiles: authoredFiles ?? loadViteAuthoredFiles(),
+      program,
+      scan,
+    }),
   ].filter((diagnostic) => !shouldIgnorePreflightDiagnostic(diagnostic));
 
   if (preflight === "errors-only") {
@@ -48,14 +56,15 @@ function collectSyntacticDiagnostics(program: ts.Program) {
 }
 
 function collectSemanticDiagnostics({
+  authoredFiles,
   program,
   scan,
 }: {
+  authoredFiles: Set<string> | null;
   program: ts.Program;
   scan: ClosureIrScanResult;
 }) {
   const diagnostics: ts.Diagnostic[] = [];
-  const authoredFiles = loadViteAuthoredFiles();
   const semanticFiles = scan.files.filter(({ features, sourceFile }) => {
     if (!features.needsSemanticPreflight) {
       return false;
@@ -78,8 +87,9 @@ function collectSemanticDiagnostics({
   return diagnostics;
 }
 
-function loadViteAuthoredFiles() {
-  const filePath = process.env.GCC_VITE_AUTHORED_FILES_FILE;
+export function loadViteAuthoredFiles(
+  filePath = process.env.GCC_VITE_AUTHORED_FILES_FILE,
+) {
   if (!filePath) {
     return null;
   }

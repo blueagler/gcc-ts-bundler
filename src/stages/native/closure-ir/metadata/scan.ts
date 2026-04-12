@@ -60,7 +60,7 @@ export function scanClosureIrSourceFiles({
   };
 }
 
-function classifyClosureIrFile(
+export function classifyClosureIrSourceFile(
   sourceFile: ts.SourceFile,
 ): ClosureIrFileFeatures {
   let hasEnumDeclarations = false;
@@ -105,6 +105,12 @@ function classifyClosureIrFile(
       docEligibility.hasTopLevelDocs ||
       hasTypeDeclarations,
   };
+}
+
+function classifyClosureIrFile(
+  sourceFile: ts.SourceFile,
+): ClosureIrFileFeatures {
+  return classifyClosureIrSourceFile(sourceFile);
 }
 
 function containsExplicitTypeSignal(node: ts.Node): boolean {

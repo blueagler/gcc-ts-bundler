@@ -138,7 +138,7 @@ const result = await build({
   outDir: "./dist",
   projectRoot,
   srcDir: "./.prebundle",
-  languageOut: "ECMASCRIPT5",
+  languageOut: "ECMASCRIPT_NEXT",
 });
 
 if (result.exitCode !== 0) {

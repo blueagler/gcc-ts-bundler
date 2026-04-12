@@ -4,7 +4,12 @@ import { pathToFileURL } from "node:url";
 
 import { expect, test } from "bun:test";
 
-import { materializeCapturedGraph } from "../src/vite/capture.ts";
+import {
+  getCapturedModuleAnalysis,
+  normalizeRetainedCapturedModules,
+} from "../src/vite/capture.ts";
+import { resolveNormalizedBridgeModuleIds } from "../src/vite/graph.ts";
+import { materializeCapturedGraph } from "../src/vite/materialize.ts";
 import {
   VITE_FETCH_LOADER_ERROR,
   resolveViteLanguageOut,
@@ -163,6 +168,70 @@ function createCapturePluginContext() {
     },
   };
 }
+
+test("captured module analysis ignores comment-only hash text for compat downlevel", () => {
+  const record = {
+    code: '/** @import { ComponentContext } from "#client" */\nexport { value } from "./dep.js";\n',
+    id: "/virtual/comment.js",
+  };
+
+  const analysis = getCapturedModuleAnalysis(record);
+  expect(analysis.needsClosureCompatibilityDownlevel).toBe(false);
+  expect(analysis.needsTypeScriptCompatibilityDownlevel).toBe(false);
+  expect(analysis.importSpecifiers).toEqual(["./dep.js"]);
+});
+
+test.serial(
+  "resolveNormalizedBridgeModuleIds follows bridge imports introduced by compat normalization",
+  async () => {
+    const fixture = await createFixture();
+    const entryId = path.join(fixture.projectRoot, "src", "entry.js");
+    const depId = path.join(fixture.projectRoot, "src", "dep.js");
+    const capturedModules = new Map([
+      [
+        entryId,
+        {
+          code: [
+            'export { dep } from "./dep.js";',
+            "class Widget {",
+            "  static {",
+            "    this.ready = true;",
+            "  }",
+            "}",
+            "",
+          ].join("\n"),
+          id: entryId,
+        },
+      ],
+      [
+        depId,
+        {
+          code: 'export const dep = "dep";\n',
+          id: depId,
+        },
+      ],
+    ]);
+
+    const normalizedCapturedModules = await normalizeRetainedCapturedModules({
+      capturedModules,
+      moduleIds: [entryId],
+    });
+    const additionalBridgeModuleIds = await resolveNormalizedBridgeModuleIds.call(
+      createCapturePluginContext(),
+      {
+        capturedModules,
+        normalizedCapturedModules,
+        resolutionCache: new Map(),
+        retainedModuleIds: [entryId],
+      },
+    );
+
+    expect(normalizedCapturedModules.get(entryId)?.code).toContain(
+      'from "./dep.js"',
+    );
+    expect(additionalBridgeModuleIds).toContain(depId);
+  },
+);
 
 test.serial(
   "gccTsBundler wires lazy Vite CSS through the runtime when cssCodeSplit is enabled",
@@ -371,6 +440,7 @@ test.serial(
       config: { root: fixture.projectRoot },
       dynamicRootModuleIds: [lazyId],
       entryModuleIds: [mainId],
+      resolutionCache: new Map(),
       moduleIds: [mainId, emptyId, lazyId, styleId],
       srcDir,
     },

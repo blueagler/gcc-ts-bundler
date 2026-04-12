@@ -8,17 +8,19 @@ import type { PluginContext } from "rollup";
 import { build } from "../api/build";
 import { logInternalDetail, logInternalTiming } from "../internal/timing";
 import {
-  materializeCapturedGraph,
   normalizeRetainedCapturedModules,
   prepareCaptureRoot,
+  shouldCaptureModule,
+  type CapturedModuleResolutionCache,
+} from "./capture";
+import {
   resolveDynamicRootModuleIds,
   resolveNormalizedBridgeModuleIds,
   resolveRetainedCapturedModuleIds,
   resolveRetainedModuleIds,
   resolveEntryModuleIds,
   summarizeModuleIdsByPackage,
-  shouldCaptureModule,
-} from "./capture";
+} from "./graph";
 import {
   applyViteBuildGuards,
   assertNoViteFetchLoader,
@@ -32,7 +34,12 @@ import {
 } from "./config";
 import { analyzeViteCssOwnership, augmentCompiledViteCss } from "./css";
 import { resolveCompilerExterns } from "./externs";
-import type { CapturedModule, ViteCssOwnership } from "./internal-types";
+import type {
+  CapturedModule,
+  ViteBuildMetrics,
+  ViteCssOwnership,
+} from "./internal-types";
+import { materializeCapturedGraph } from "./materialize";
 import {
   collectOutputByteBreakdown,
   emitCompiledOutputs,
@@ -58,6 +65,13 @@ export function gccTsBundler(
   options: GccTsBundlerVitePluginOptions = {},
 ): GccTsBundlerVitePlugin {
   const capturedModules = new Map<string, CapturedModule>();
+  const resolutionCache: CapturedModuleResolutionCache = new Map();
+  const buildMetrics: ViteBuildMetrics = {
+    normalizedRetainedModuleCount: 0,
+    parseCacheHits: 0,
+    parseCacheMisses: 0,
+    retainedEdgeResolutionCount: 0,
+  };
   let resolvedConfig: ResolvedConfig | null = null;
   let workerImportDetected = false;
   const timingTotals = {
@@ -105,6 +119,11 @@ export function gccTsBundler(
       if (!resolvedConfig) {
         throw new Error("gccTsBundler() did not receive resolved Vite config.");
       }
+      resolutionCache.clear();
+      buildMetrics.normalizedRetainedModuleCount = 0;
+      buildMetrics.parseCacheHits = 0;
+      buildMetrics.parseCacheMisses = 0;
+      buildMetrics.retainedEdgeResolutionCount = 0;
       if (workerImportDetected) {
         this.error(
           "gccTsBundler() does not support worker entry graphs in Vite build mode.",
@@ -127,6 +146,8 @@ export function gccTsBundler(
         this,
         {
           capturedModules,
+          metrics: buildMetrics,
+          resolutionCache,
           retainedModuleIds,
         },
       );
@@ -161,13 +182,16 @@ export function gccTsBundler(
       let materializedModuleIds = [...retainedCaptured.materializedModuleIds];
       const normalizedCapturedModules = await normalizeRetainedCapturedModules({
         capturedModules,
+        metrics: buildMetrics,
         moduleIds: materializedModuleIds,
       });
       while (true) {
         const additionalBridgeModuleIds =
           await resolveNormalizedBridgeModuleIds.call(this, {
             capturedModules,
+            metrics: buildMetrics,
             normalizedCapturedModules,
+            resolutionCache,
             retainedModuleIds: materializedModuleIds,
           });
         if (additionalBridgeModuleIds.length === 0) {
@@ -175,6 +199,7 @@ export function gccTsBundler(
         }
         const normalizedBridgeModules = await normalizeRetainedCapturedModules({
           capturedModules,
+          metrics: buildMetrics,
           moduleIds: additionalBridgeModuleIds,
         });
         for (const [moduleId, record] of normalizedBridgeModules) {
@@ -184,6 +209,8 @@ export function gccTsBundler(
           ...new Set([...materializedModuleIds, ...additionalBridgeModuleIds]),
         ].sort((left, right) => left.localeCompare(right));
       }
+      buildMetrics.normalizedRetainedModuleCount =
+        normalizedCapturedModules.size;
       timingTotals.normalizeRetainedMs +=
         performance.now() - normalizeStartedAt;
 
@@ -194,7 +221,9 @@ export function gccTsBundler(
         config: resolvedConfig,
         dynamicRootModuleIds,
         entryModuleIds,
+        metrics: buildMetrics,
         moduleIds: materializedModuleIds,
+        resolutionCache,
         srcDir,
       });
       timingTotals.materializeMs += performance.now() - materializeStartedAt;
@@ -221,6 +250,18 @@ export function gccTsBundler(
       logInternalDetail(
         "vite:retained-dynamic-roots",
         `${dynamicRootModuleIds.length}`,
+      );
+      logInternalDetail(
+        "vite:normalized-retained-modules",
+        `${buildMetrics.normalizedRetainedModuleCount}`,
+      );
+      logInternalDetail(
+        "vite:parse-cache",
+        `hits=${buildMetrics.parseCacheHits} misses=${buildMetrics.parseCacheMisses}`,
+      );
+      logInternalDetail(
+        "vite:retained-edge-resolutions",
+        `${buildMetrics.retainedEdgeResolutionCount}`,
       );
       const externsStartedAt = performance.now();
       const externs = await resolveCompilerExterns({

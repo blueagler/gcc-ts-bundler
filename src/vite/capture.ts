@@ -3,13 +3,12 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 
 import ts from "typescript";
-import type { ResolvedConfig } from "vite";
-import type { OutputBundle, OutputChunk, PluginContext } from "rollup";
+import type { PluginContext } from "rollup";
 
 import type {
   CapturedModule,
-  CapturedRuntimeModule,
-  MaterializedGraph,
+  CapturedModuleAnalysis,
+  ViteBuildMetrics,
 } from "./internal-types";
 
 const GCC_CAPTURE_DIR = ".gcc-ts-bundler-vite";
@@ -21,6 +20,14 @@ let cachedViteEsbuildTransform: Promise<
     options: Record<string, unknown>,
   ) => Promise<{ code: string }>
 > | null = null;
+
+export type CapturedModuleResolution = Awaited<
+  ReturnType<PluginContext["resolve"]>
+>;
+export type CapturedModuleResolutionCache = Map<
+  string,
+  Promise<CapturedModuleResolution>
+>;
 
 export async function prepareCaptureRoot(input: {
   debugDir?: string;
@@ -55,10 +62,62 @@ export function shouldCaptureModule(id: string, code: string) {
   return /\b(?:import|export)\b/u.test(code);
 }
 
-export async function normalizeCapturedCode(id: string, code: string) {
-  let nextCode = code;
+export function getCapturedModuleAnalysis(
+  record: CapturedModule,
+  metrics?: ViteBuildMetrics,
+  mode: "raw" | "normalized" = "raw",
+): CapturedModuleAnalysis {
+  const existingAnalysis =
+    mode === "normalized" ? record.normalizedAnalysis : record.rawAnalysis;
+  if (existingAnalysis) {
+    if (metrics) {
+      metrics.parseCacheHits += 1;
+    }
+    return existingAnalysis;
+  }
+  if (mode === "normalized" && record.normalizedCode === undefined) {
+    return getCapturedModuleAnalysis(record, metrics, "raw");
+  }
+  if (
+    mode === "normalized" &&
+    record.normalizedCode !== undefined &&
+    record.normalizedCode === record.code &&
+    record.rawAnalysis
+  ) {
+    if (metrics) {
+      metrics.parseCacheHits += 1;
+    }
+    record.normalizedAnalysis = record.rawAnalysis;
+    return record.normalizedAnalysis;
+  }
 
-  if (needsClosureCompatibilityDownlevel(nextCode)) {
+  if (metrics) {
+    metrics.parseCacheMisses += 1;
+  }
+
+  const analysis = analyzeModuleCode(
+    record.id,
+    mode === "normalized"
+      ? (record.normalizedCode ?? record.code)
+      : record.code,
+  );
+  if (mode === "normalized") {
+    record.normalizedAnalysis = analysis;
+  } else {
+    record.rawAnalysis = analysis;
+  }
+  return analysis;
+}
+
+export async function normalizeCapturedCode(
+  id: string,
+  code: string,
+  analysis?: CapturedModuleAnalysis,
+) {
+  let nextCode = code;
+  const moduleAnalysis = analysis ?? analyzeModuleCode(id, code);
+
+  if (moduleAnalysis.needsClosureCompatibilityDownlevel) {
     const transformWithEsbuild = await loadViteEsbuildTransform();
     const result = await transformWithEsbuild(nextCode, stripQuery(id), {
       format: "esm",
@@ -69,7 +128,7 @@ export async function normalizeCapturedCode(id: string, code: string) {
     nextCode = result.code;
   }
 
-  if (needsTypeScriptCompatibilityDownlevel(nextCode)) {
+  if (moduleAnalysis.needsTypeScriptCompatibilityDownlevel) {
     nextCode = ts.transpileModule(nextCode, {
       compilerOptions: {
         allowJs: true,
@@ -90,6 +149,7 @@ export async function normalizeCapturedCode(id: string, code: string) {
 
 export async function normalizeRetainedCapturedModules(input: {
   capturedModules: Map<string, CapturedModule>;
+  metrics?: ViteBuildMetrics;
   moduleIds: string[];
 }) {
   const normalizedEntries = await Promise.all(
@@ -100,564 +160,117 @@ export async function normalizeRetainedCapturedModules(input: {
           `gccTsBundler() could not normalize retained module ${moduleId}.`,
         );
       }
-      return [
-        moduleId,
-        {
-          code: await normalizeCapturedCode(moduleId, record.code),
-          id: record.id,
-        } satisfies CapturedModule,
-      ] as const;
+      const normalizedRecord = await getNormalizedCapturedModule(
+        record,
+        input.metrics,
+      );
+      return [moduleId, normalizedRecord] as const;
     }),
   );
 
   return new Map(normalizedEntries);
 }
 
-export function resolveEntryModuleIds(
-  bundle: OutputBundle,
-  chunks: OutputChunk[],
-) {
-  const chunkByFileName = new Map(
-    chunks.map((chunk) => [chunk.fileName, chunk]),
+export async function getNormalizedCapturedModule(
+  record: CapturedModule,
+  metrics?: ViteBuildMetrics,
+): Promise<CapturedModule> {
+  if (record.normalizedCode !== undefined) {
+    return {
+      code: record.normalizedCode,
+      id: record.id,
+      normalizedAnalysis:
+        record.normalizedAnalysis ??
+        getCapturedModuleAnalysis(record, metrics, "normalized"),
+      normalizedCode: record.normalizedCode,
+      rawAnalysis:
+        record.rawAnalysis ?? getCapturedModuleAnalysis(record, metrics),
+    };
+  }
+
+  const analysis = getCapturedModuleAnalysis(record, metrics);
+  const normalizedCode = await normalizeCapturedCode(
+    record.id,
+    record.code,
+    analysis,
   );
-  const moduleIds = new Set<string>();
-
-  for (const asset of Object.values(bundle)) {
-    if (asset.type !== "asset" || !asset.fileName.endsWith(".html")) {
-      continue;
-    }
-    const html = readAssetText(asset);
-    const entryScripts = [
-      ...html.matchAll(
-        /<script\b[^>]*type=(["'])module\1[^>]*src=(["'])([^"']+)\2[^>]*><\/script>/giu,
-      ),
-    ];
-    for (const match of entryScripts) {
-      const sourcePath = match[3];
-      const chunk = [...chunkByFileName.entries()].find(([fileName]) =>
-        sourcePath.endsWith(fileName),
-      )?.[1];
-      if (chunk?.facadeModuleId) {
-        moduleIds.add(chunk.facadeModuleId);
-      }
-    }
+  record.normalizedCode = normalizedCode;
+  if (normalizedCode === record.code) {
+    record.normalizedAnalysis = record.rawAnalysis ?? analysis;
   }
-
-  if (moduleIds.size > 0) {
-    return [...moduleIds];
-  }
-
-  return chunks
-    .filter((chunk) => chunk.isEntry && chunk.facadeModuleId)
-    .map((chunk) => chunk.facadeModuleId as string);
-}
-
-export function resolveRetainedModuleIds(
-  chunks: OutputChunk[],
-  entryModuleIds: string[],
-) {
-  const moduleIds = new Set<string>(entryModuleIds);
-  for (const chunk of chunks) {
-    for (const moduleId of Object.keys(chunk.modules)) {
-      moduleIds.add(moduleId);
-    }
-  }
-  return [...moduleIds].sort((left, right) => left.localeCompare(right));
-}
-
-export function resolveDynamicRootModuleIds(chunks: OutputChunk[]) {
-  return [
-    ...new Set(
-      chunks
-        .filter((chunk) => chunk.isDynamicEntry && chunk.facadeModuleId)
-        .map((chunk) => chunk.facadeModuleId as string),
-    ),
-  ].sort((left, right) => left.localeCompare(right));
-}
-
-export async function resolveRetainedCapturedModuleIds(
-  this: PluginContext,
-  input: {
-    capturedModules: Map<string, CapturedModule>;
-    retainedModuleIds: string[];
-  },
-) {
-  const retainedModuleIds = new Set(input.retainedModuleIds);
-  const materializedModuleIds = new Set<string>();
-  const missingModuleIds = new Set<string>();
-  const pendingModuleIds: string[] = [];
-
-  for (const moduleId of input.retainedModuleIds) {
-    if (input.capturedModules.has(moduleId)) {
-      materializedModuleIds.add(moduleId);
-      pendingModuleIds.push(moduleId);
-      continue;
-    }
-
-    if (isNonMaterializedRetainedModuleId(moduleId)) {
-      continue;
-    }
-
-    missingModuleIds.add(moduleId);
-  }
-
-  while (pendingModuleIds.length > 0) {
-    const moduleId = pendingModuleIds.pop();
-    if (!moduleId) {
-      continue;
-    }
-
-    const record = input.capturedModules.get(moduleId);
-    if (!record) {
-      continue;
-    }
-
-    const bridgeModuleIds = await collectBridgeModuleIds.call(this, {
-      capturedModules: input.capturedModules,
-      code: record.code,
-      importerId: moduleId,
-      retainedModuleIds,
-    });
-    for (const bridgeModuleId of bridgeModuleIds) {
-      if (materializedModuleIds.has(bridgeModuleId)) {
-        continue;
-      }
-      materializedModuleIds.add(bridgeModuleId);
-      pendingModuleIds.push(bridgeModuleId);
-    }
-  }
-
   return {
-    materializedModuleIds: [...materializedModuleIds].sort((left, right) =>
-      left.localeCompare(right),
-    ),
-    missingModuleIds: [...missingModuleIds].sort((left, right) =>
-      left.localeCompare(right),
-    ),
+    code: normalizedCode,
+    id: record.id,
+    normalizedAnalysis:
+      record.normalizedAnalysis ??
+      getCapturedModuleAnalysis(record, metrics, "normalized"),
+    normalizedCode,
+    rawAnalysis: record.rawAnalysis ?? analysis,
   };
 }
 
-export async function resolveNormalizedBridgeModuleIds(
+export async function resolveCapturedSpecifier(
   this: PluginContext,
   input: {
-    capturedModules: Map<string, CapturedModule>;
-    normalizedCapturedModules: Map<string, CapturedModule>;
-    retainedModuleIds: string[];
-  },
-) {
-  const retainedModuleIds = new Set(input.retainedModuleIds);
-  const additionalModuleIds = new Set<string>();
-  const pendingModuleIds = [...input.retainedModuleIds];
-
-  while (pendingModuleIds.length > 0) {
-    const moduleId = pendingModuleIds.pop();
-    if (!moduleId) {
-      continue;
-    }
-
-    const record = input.normalizedCapturedModules.get(moduleId);
-    if (!record) {
-      continue;
-    }
-
-    const bridgeModuleIds = await collectBridgeModuleIds.call(this, {
-      capturedModules: input.capturedModules,
-      code: record.code,
-      importerId: moduleId,
-      retainedModuleIds,
-    });
-    for (const bridgeModuleId of bridgeModuleIds) {
-      if (
-        retainedModuleIds.has(bridgeModuleId) ||
-        additionalModuleIds.has(bridgeModuleId)
-      ) {
-        continue;
-      }
-      additionalModuleIds.add(bridgeModuleId);
-      pendingModuleIds.push(bridgeModuleId);
-    }
-  }
-
-  return [...additionalModuleIds].sort((left, right) =>
-    left.localeCompare(right),
-  );
-}
-
-export function summarizeModuleIdsByPackage(moduleIds: Iterable<string>) {
-  const counts = new Map<string, number>();
-  for (const moduleId of moduleIds) {
-    const bucket = classifyModuleId(moduleId);
-    counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
-  }
-
-  return [...counts.entries()]
-    .sort((left, right) =>
-      right[1] === left[1]
-        ? left[0].localeCompare(right[0])
-        : right[1] - left[1],
-    )
-    .map(([bucket, count]) => `${bucket}:${count}`)
-    .join(", ");
-}
-
-export async function materializeCapturedGraph(
-  this: PluginContext,
-  input: {
-    capturedModules: Map<string, CapturedModule>;
-    cssModuleIdsWithOwnership?: Iterable<string>;
-    config: ResolvedConfig;
-    dynamicRootModuleIds: string[];
-    entryModuleIds: string[];
-    moduleIds: string[];
-    srcDir: string;
-  },
-): Promise<MaterializedGraph> {
-  if (input.entryModuleIds.length === 0) {
-    this.error("gccTsBundler() could not determine a Vite entry facade.");
-  }
-
-  await fs.mkdir(input.srcDir, { recursive: true });
-  const entryModuleIds = new Set(input.entryModuleIds);
-  const dynamicRootModuleIds = new Set(input.dynamicRootModuleIds);
-  const retainedEmptyModuleIds: string[] = [];
-  const prunedEmptyModuleIds = new Set<string>();
-
-  for (const moduleId of input.moduleIds) {
-    const record = input.capturedModules.get(moduleId);
-    if (!record) {
-      this.error(
-        `gccTsBundler() could not capture transformed code for ${moduleId}.`,
-      );
-    }
-
-    if (!isEffectivelyEmptyModule(record.code, moduleId)) {
-      continue;
-    }
-    retainedEmptyModuleIds.push(moduleId);
-
-    if (entryModuleIds.has(moduleId) || dynamicRootModuleIds.has(moduleId)) {
-      continue;
-    }
-    prunedEmptyModuleIds.add(moduleId);
-  }
-
-  const materializedModuleIds = input.moduleIds.filter(
-    (moduleId) => !prunedEmptyModuleIds.has(moduleId),
-  );
-  const filePathByModuleId = new Map<string, string>();
-  const modules: CapturedRuntimeModule[] = [];
-  const authoredFiles: string[] = [];
-  for (const moduleId of materializedModuleIds) {
-    const relativePath = toMaterializedRelativePath(
-      input.config.root,
-      moduleId,
-    );
-    const filePath = path.join(input.srcDir, relativePath);
-    filePathByModuleId.set(moduleId, filePath);
-    modules.push({
-      filePath,
-      id: moduleId,
-      relativePath,
-    });
-    if (isAuthoredModuleId(moduleId, input.config.root)) {
-      authoredFiles.push(filePath);
-    }
-  }
-
-  for (const moduleId of materializedModuleIds) {
-    const record = input.capturedModules.get(moduleId);
-    if (!record) {
-      this.error(
-        `gccTsBundler() could not capture transformed code for ${moduleId}.`,
-      );
-    }
-
-    const outputPath = filePathByModuleId.get(moduleId);
-    if (!outputPath) {
-      this.error(`Missing materialized output path for ${moduleId}.`);
-    }
-
-    const rewritten = await rewriteModuleImports.call(this, {
-      code: record.code,
-      filePathByModuleId,
-      importerId: moduleId,
-    });
-    await fs.mkdir(path.dirname(outputPath), { recursive: true });
-    await fs.writeFile(outputPath, rewritten, "utf8");
-  }
-
-  const entryFiles = input.entryModuleIds.map((moduleId) => {
-    const filePath = filePathByModuleId.get(moduleId);
-    if (!filePath) {
-      this.error(`Missing captured entry module ${moduleId}.`);
-    }
-    return `./${path.relative(input.srcDir, filePath).replace(/\\/g, "/")}`;
-  });
-
-  return {
-    authoredFiles: authoredFiles.sort((left, right) =>
-      left.localeCompare(right),
-    ),
-    entries: entryFiles,
-    modules,
-    prunedEmptyModuleIds: [...prunedEmptyModuleIds].sort((left, right) =>
-      left.localeCompare(right),
-    ),
-    retainedEmptyModuleIds: retainedEmptyModuleIds.sort((left, right) =>
-      left.localeCompare(right),
-    ),
-    runtimeEntries: materializedModuleIds
-      .map((moduleId) => {
-        const filePath = filePathByModuleId.get(moduleId);
-        if (!filePath) {
-          this.error(`Missing captured runtime module ${moduleId}.`);
-        }
-        return `./${path.relative(input.srcDir, filePath).replace(/\\/g, "/")}`;
-      })
-      .sort((left, right) => left.localeCompare(right)),
-    srcDir: input.srcDir,
-  };
-}
-
-async function rewriteModuleImports(
-  this: PluginContext,
-  input: {
-    code: string;
-    filePathByModuleId: Map<string, string>;
     importerId: string;
+    metrics?: ViteBuildMetrics;
+    resolutionCache: CapturedModuleResolutionCache;
+    specifier: string;
   },
 ) {
-  const sourceFile = ts.createSourceFile(
-    input.importerId,
-    input.code,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.JS,
-  );
-  const edits: Array<{ end: number; start: number; text: string }> = [];
-  const pendingEdits: Promise<void>[] = [];
-
-  const addSpecifierEdit = async (
-    literal: ts.StringLiteralLike,
-    node: ts.ImportDeclaration | ts.ExportDeclaration | ts.CallExpression,
-  ) => {
-    const specifier = literal.text;
-    const resolved = await this.resolve(specifier, input.importerId, {
+  const cacheKey = `${input.importerId}\u0000${input.specifier}`;
+  let pendingResolution = input.resolutionCache.get(cacheKey);
+  if (!pendingResolution) {
+    if (input.metrics) {
+      input.metrics.retainedEdgeResolutionCount += 1;
+    }
+    pendingResolution = this.resolve(input.specifier, input.importerId, {
       skipSelf: true,
     });
-    if (!resolved || resolved.external) {
-      if (isSupportedExternalSpecifier(specifier)) {
-        return;
-      }
-      this.error(
-        `gccTsBundler() could not materialize ${specifier} imported from ${input.importerId}. ` +
-          "Ensure Vite/plugins lower the resource to a JS module before gccTsBundler() runs.",
-      );
-    }
-
-    const targetFile = input.filePathByModuleId.get(resolved.id);
-    if (!targetFile) {
-      if (shouldOmitPrunedImport(node, resolved.id)) {
-        edits.push({
-          end: node.getEnd(),
-          start: node.getStart(sourceFile),
-          text: "",
-        });
-        return;
-      }
-      this.error(
-        `gccTsBundler() resolved ${specifier} from ${input.importerId} to ${resolved.id}, ` +
-          "but that transformed module was not captured in the final Vite JS graph.",
-      );
-    }
-
-    const importerFile = input.filePathByModuleId.get(input.importerId);
-    if (!importerFile) {
-      this.error(`Missing importer file path for ${input.importerId}.`);
-    }
-
-    edits.push({
-      end: literal.getEnd() - 1,
-      start: literal.getStart() + 1,
-      text: toRelativeImportSpecifier(importerFile, targetFile),
-    });
-  };
-
-  const visit = (node: ts.Node) => {
-    if (
-      (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
-      node.moduleSpecifier &&
-      ts.isStringLiteralLike(node.moduleSpecifier)
-    ) {
-      pendingEdits.push(addSpecifierEdit(node.moduleSpecifier, node));
-    } else if (
-      ts.isCallExpression(node) &&
-      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-      node.arguments.length === 1 &&
-      ts.isStringLiteralLike(node.arguments[0])
-    ) {
-      pendingEdits.push(addSpecifierEdit(node.arguments[0], node));
-    }
-
-    ts.forEachChild(node, visit);
-  };
-
-  visit(sourceFile);
-  await Promise.all(pendingEdits);
-
-  if (edits.length === 0) {
-    return input.code;
+    input.resolutionCache.set(cacheKey, pendingResolution);
   }
-
-  let rewritten = input.code;
-  for (const edit of edits.sort((left, right) => right.start - left.start)) {
-    rewritten =
-      rewritten.slice(0, edit.start) + edit.text + rewritten.slice(edit.end);
-  }
-  return rewritten;
+  return await pendingResolution;
 }
 
-function shouldOmitPrunedImport(
-  node: ts.ImportDeclaration | ts.ExportDeclaration | ts.CallExpression,
-  resolvedId: string,
-) {
-  if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
-    const cleanId = stripQuery(resolvedId);
-    if (/\.(?:[cm]?[jt]sx?|mjs|cjs|svelte|vue)$/u.test(cleanId)) {
-      return true;
-    }
-  }
-  if (!ts.isImportDeclaration(node) || node.importClause) {
+export function isAuthoredModuleId(moduleId: string, projectRoot: string) {
+  const cleanId = stripQuery(moduleId);
+  if (cleanId.includes(`${path.sep}node_modules${path.sep}`)) {
     return false;
   }
-  const cleanId = stripQuery(resolvedId);
-  return /\.(?:css|less|sass|scss|styl|stylus|pcss|postcss)$/u.test(cleanId);
+  if (!path.isAbsolute(cleanId)) {
+    return true;
+  }
+  return cleanId.startsWith(path.resolve(projectRoot) + path.sep);
 }
 
-function isNonMaterializedRetainedModuleId(moduleId: string) {
+export function isNonMaterializedRetainedModuleId(moduleId: string) {
   const cleanId = stripQuery(moduleId);
   return /\.(?:css|less|sass|scss|styl|stylus|pcss|postcss)$/u.test(cleanId);
 }
 
-function isEffectivelyEmptyModule(code: string, moduleId: string) {
-  const sourceFile = ts.createSourceFile(
-    moduleId,
-    code,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.JS,
-  );
-
-  return sourceFile.statements.every((statement) => {
-    if (ts.isEmptyStatement(statement)) {
-      return true;
-    }
-    if (!ts.isExportDeclaration(statement)) {
-      return false;
-    }
-    if (statement.moduleSpecifier) {
-      return false;
-    }
-    if (!statement.exportClause) {
-      return true;
-    }
-    return (
-      ts.isNamedExports(statement.exportClause) &&
-      statement.exportClause.elements.length === 0
-    );
-  });
-}
-
-async function collectBridgeModuleIds(
-  this: PluginContext,
-  input: {
-    capturedModules: Map<string, CapturedModule>;
-    code: string;
-    importerId: string;
-    retainedModuleIds: Set<string>;
-  },
-) {
-  const sourceFile = ts.createSourceFile(
-    input.importerId,
-    input.code,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.JS,
-  );
-  const bridgeModuleIds = new Set<string>();
-  const pendingResolutions: Promise<void>[] = [];
-
-  const queueBridgeResolution = (
-    literal: ts.StringLiteralLike,
-    node: ts.ImportDeclaration | ts.CallExpression,
-  ) => {
-    pendingResolutions.push(
-      (async () => {
-        const resolved = await this.resolve(literal.text, input.importerId, {
-          skipSelf: true,
-        });
-        if (
-          !resolved ||
-          resolved.external ||
-          input.retainedModuleIds.has(resolved.id) ||
-          !input.capturedModules.has(resolved.id) ||
-          isNonMaterializedRetainedModuleId(resolved.id)
-        ) {
-          return;
-        }
-        if (!shouldRetainBridgeModule(node)) {
-          return;
-        }
-        bridgeModuleIds.add(resolved.id);
-      })(),
-    );
-  };
-
-  const visit = (node: ts.Node) => {
-    if (
-      ts.isImportDeclaration(node) &&
-      node.importClause &&
-      node.moduleSpecifier &&
-      ts.isStringLiteralLike(node.moduleSpecifier)
-    ) {
-      queueBridgeResolution(node.moduleSpecifier, node);
-    } else if (
-      ts.isCallExpression(node) &&
-      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-      node.arguments.length === 1 &&
-      ts.isStringLiteralLike(node.arguments[0])
-    ) {
-      queueBridgeResolution(node.arguments[0], node);
-    }
-
-    ts.forEachChild(node, visit);
-  };
-
-  visit(sourceFile);
-  await Promise.all(pendingResolutions);
-  return bridgeModuleIds;
-}
-
-function shouldRetainBridgeModule(
-  node: ts.ImportDeclaration | ts.CallExpression,
-) {
-  if (ts.isImportDeclaration(node)) {
-    return !!node.importClause;
+export function classifyModuleId(moduleId: string) {
+  const cleanId = stripQuery(moduleId).replace(/\\/g, "/");
+  const nodeModulesIndex = cleanId.lastIndexOf("/node_modules/");
+  if (nodeModulesIndex < 0) {
+    return "app";
   }
-  return true;
+
+  const packagePath = cleanId.slice(nodeModulesIndex + "/node_modules/".length);
+  const segments = packagePath.split("/");
+  if (segments[0]?.startsWith("@")) {
+    return segments.slice(0, 2).join("/");
+  }
+  return segments[0] || "app";
 }
 
-function isSupportedExternalSpecifier(specifier: string) {
-  return specifier.startsWith("node:");
+export function stripQuery(id: string) {
+  return id.replace(/[?#].*$/u, "");
 }
 
-function toRelativeImportSpecifier(fromFile: string, toFile: string) {
-  const relativePath = path.relative(path.dirname(fromFile), toFile);
-  const normalized = relativePath.replace(/\\/g, "/");
-  return normalized.startsWith(".") ? normalized : `./${normalized}`;
-}
-
-function toMaterializedRelativePath(projectRoot: string, moduleId: string) {
+export function toMaterializedRelativePath(
+  projectRoot: string,
+  moduleId: string,
+) {
   const cleanId = stripQuery(moduleId);
   const extension = path.extname(cleanId).replace(/^\./u, "");
   const queryHash =
@@ -703,48 +316,45 @@ function toMaterializedRelativePath(projectRoot: string, moduleId: string) {
   );
 }
 
+export function toRelativeImportSpecifier(fromFile: string, toFile: string) {
+  const relativePath = path.relative(path.dirname(fromFile), toFile);
+  const normalized = relativePath.replace(/\\/g, "/");
+  return normalized.startsWith(".") ? normalized : `./${normalized}`;
+}
+
+export function isSupportedExternalSpecifier(specifier: string) {
+  return specifier.startsWith("node:");
+}
+
+function isEffectivelyEmptyStatement(statement: ts.Statement) {
+  if (ts.isEmptyStatement(statement)) {
+    return true;
+  }
+  return isEmptyExportStatement(statement);
+}
+
+function isEmptyExportStatement(statement: ts.Statement) {
+  if (!ts.isExportDeclaration(statement)) {
+    return false;
+  }
+  if (statement.moduleSpecifier) {
+    return false;
+  }
+  if (!statement.exportClause) {
+    return true;
+  }
+  return (
+    ts.isNamedExports(statement.exportClause) &&
+    statement.exportClause.elements.length === 0
+  );
+}
+
 function sanitizeSegment(value: string) {
   return value.replace(/[^\w./-]+/gu, "-").replace(/^-+/u, "");
 }
 
-function stripQuery(id: string) {
-  return id.replace(/[?#].*$/u, "");
-}
-
 function hashText(value: string) {
   return createHash("sha256").update(value).digest("hex");
-}
-
-function classifyModuleId(moduleId: string) {
-  const cleanId = stripQuery(moduleId).replace(/\\/g, "/");
-  const nodeModulesIndex = cleanId.lastIndexOf("/node_modules/");
-  if (nodeModulesIndex < 0) {
-    return "app";
-  }
-
-  const packagePath = cleanId.slice(nodeModulesIndex + "/node_modules/".length);
-  const segments = packagePath.split("/");
-  if (segments[0]?.startsWith("@")) {
-    return segments.slice(0, 2).join("/");
-  }
-  return segments[0] || "app";
-}
-
-function isAuthoredModuleId(moduleId: string, projectRoot: string) {
-  const cleanId = stripQuery(moduleId);
-  if (cleanId.includes(`${path.sep}node_modules${path.sep}`)) {
-    return false;
-  }
-  if (!path.isAbsolute(cleanId)) {
-    return true;
-  }
-  return cleanId.startsWith(path.resolve(projectRoot) + path.sep);
-}
-
-function readAssetText(asset: { source: string | Uint8Array }) {
-  return typeof asset.source === "string"
-    ? asset.source
-    : Buffer.from(asset.source).toString("utf8");
 }
 
 function resolveEsbuildLoader(id: string) {
@@ -761,16 +371,132 @@ function resolveEsbuildLoader(id: string) {
   return "js";
 }
 
-function needsClosureCompatibilityDownlevel(code: string) {
-  return /(^|[^\w$])#[$A-Z_a-z]/u.test(code) || /\bstatic\s*\{/u.test(code);
+function resolveScriptKind(id: string) {
+  const cleanId = stripQuery(id);
+  if (cleanId.endsWith(".tsx")) {
+    return ts.ScriptKind.TSX;
+  }
+  if (cleanId.endsWith(".ts")) {
+    return ts.ScriptKind.TS;
+  }
+  if (cleanId.endsWith(".jsx")) {
+    return ts.ScriptKind.JSX;
+  }
+  return ts.ScriptKind.JS;
 }
 
-function needsTypeScriptCompatibilityDownlevel(code: string) {
-  return (
-    code.includes("new.target") ||
-    /\bsuper(?:\.|\[)/u.test(code) ||
-    /\b(?:get|set)\s*\[[^\]]+\]\s*\(/u.test(code)
+function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
+  const sourceFile = ts.createSourceFile(
+    id,
+    code,
+    ts.ScriptTarget.Latest,
+    true,
+    resolveScriptKind(id),
   );
+  const importSpecifiers = new Set<string>();
+  const dynamicImportSpecifiers = new Set<string>();
+  const bridgeSpecifiers = new Set<string>();
+  let isForwardingOnly = true;
+  let needsClosureCompatibility = false;
+  let needsTypeScriptCompatibility = false;
+
+  for (const statement of sourceFile.statements) {
+    if (ts.isEmptyStatement(statement)) {
+      continue;
+    }
+
+    if (
+      ts.isImportDeclaration(statement) &&
+      statement.moduleSpecifier &&
+      ts.isStringLiteralLike(statement.moduleSpecifier)
+    ) {
+      const specifier = statement.moduleSpecifier.text;
+      importSpecifiers.add(specifier);
+      if (statement.importClause) {
+        bridgeSpecifiers.add(specifier);
+      }
+      continue;
+    }
+
+    if (
+      ts.isExportDeclaration(statement) &&
+      statement.moduleSpecifier &&
+      ts.isStringLiteralLike(statement.moduleSpecifier)
+    ) {
+      importSpecifiers.add(statement.moduleSpecifier.text);
+      continue;
+    }
+
+    if (isEmptyExportStatement(statement)) {
+      continue;
+    }
+
+    isForwardingOnly = false;
+  }
+
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+      node.arguments.length === 1 &&
+      ts.isStringLiteralLike(node.arguments[0])
+    ) {
+      const specifier = node.arguments[0].text;
+      importSpecifiers.add(specifier);
+      dynamicImportSpecifiers.add(specifier);
+      bridgeSpecifiers.add(specifier);
+    }
+
+    if (ts.isPrivateIdentifier(node) || isClassStaticBlockNode(node)) {
+      needsClosureCompatibility = true;
+    }
+
+    if (
+      (ts.isPropertyAccessExpression(node) ||
+        ts.isElementAccessExpression(node)) &&
+      node.expression.kind === ts.SyntaxKind.SuperKeyword
+    ) {
+      needsTypeScriptCompatibility = true;
+    } else if (ts.isMetaProperty(node)) {
+      if (
+        node.keywordToken === ts.SyntaxKind.NewKeyword &&
+        node.name.escapedText === "target"
+      ) {
+        needsTypeScriptCompatibility = true;
+      }
+    } else if (
+      (ts.isGetAccessorDeclaration(node) ||
+        ts.isSetAccessorDeclaration(node)) &&
+      ts.isComputedPropertyName(node.name)
+    ) {
+      needsTypeScriptCompatibility = true;
+    }
+
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+
+  return {
+    bridgeSpecifiers: [...bridgeSpecifiers].sort((left, right) =>
+      left.localeCompare(right),
+    ),
+    dynamicImportSpecifiers: [...dynamicImportSpecifiers].sort((left, right) =>
+      left.localeCompare(right),
+    ),
+    importSpecifiers: [...importSpecifiers].sort((left, right) =>
+      left.localeCompare(right),
+    ),
+    isEffectivelyEmpty: sourceFile.statements.every(
+      isEffectivelyEmptyStatement,
+    ),
+    isForwardingOnly,
+    needsClosureCompatibilityDownlevel: needsClosureCompatibility,
+    needsTypeScriptCompatibilityDownlevel: needsTypeScriptCompatibility,
+  };
+}
+
+function isClassStaticBlockNode(node: ts.Node) {
+  return node.kind === ts.SyntaxKind.ClassStaticBlockDeclaration;
 }
 
 async function loadViteEsbuildTransform() {
