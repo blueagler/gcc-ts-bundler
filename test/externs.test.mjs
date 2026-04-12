@@ -147,6 +147,43 @@ test.serial("generateExterns runtime-aware mode keeps string-defined members use
   expect(result.text).toContain("Object.prototype.from;");
 });
 
+test.serial("generateExterns runtime-aware mode captures precompiled helper protocol keys", async () => {
+  const fixture = await createFixture();
+  await fixture.write(
+    "src/runtime.js",
+    [
+      "const helpers = {",
+      "  prop(props, key) {",
+      "    return props[key];",
+      "  },",
+      "  rest_props(props, keys) {",
+      "    return keys.length ? props : {};",
+      "  },",
+      "};",
+      "export function view(props) {",
+      '  return helpers.prop(props, "variant") ?? helpers.rest_props(props, ["$$slots", "$$events", "$$legacy", "size"]);',
+      "}",
+      "",
+    ].join("\n"),
+  );
+
+  const result = await generateExterns({
+    mode: "runtime-aware",
+    modules: ["demo-runtime"],
+    projectRoot: fixture.projectRoot,
+    runtimeEntryFiles: ["./runtime.js"],
+    srcDir: fixture.srcDir,
+  });
+
+  expect(result.text).toContain("Object.prototype.$$slots;");
+  expect(result.text).toContain("Object.prototype.$$events;");
+  expect(result.text).toContain("Object.prototype.$$legacy;");
+  expect(result.text).toContain("Object.prototype.variant;");
+  expect(result.text).toContain("Object.prototype.size;");
+  expect(result.text).not.toContain("Object.prototype.prop;");
+  expect(result.text).not.toContain("Object.prototype.rest_props;");
+});
+
 test.serial("externs CLI writes generated output with bun-compatible tests", async () => {
   const fixture = await createExternFixture();
   const outputFile = path.join(
@@ -247,6 +284,78 @@ test.serial("build uses explicit runtime-aware dependency externs for helper-low
   );
   expect(builtModule.first).toBe("demo:1");
   expect(builtModule.second).toBe("demo:2");
+});
+
+test.serial("build uses explicit runtime-aware externs to keep precompiled helper keys aligned", async () => {
+  const fixture = await createFixture();
+  const externsFile = path.join(
+    fixture.projectRoot,
+    "closure-externs",
+    "protocol.generated.js",
+  );
+  await fixture.write(
+    "src/helpers.js",
+    [
+      "export function prop(props, key) {",
+      "  return props[key];",
+      "}",
+      "export function rest_props(props, keys) {",
+      "  const next = {};",
+      "  for (const key in props) {",
+      "    if (keys.includes(key)) {",
+      "      continue;",
+      "    }",
+      "    next[key] = props[key];",
+      "  }",
+      "  return next;",
+      "}",
+      "export function render(props) {",
+      '  const variant = prop(props, "variant");',
+      '  const extra = rest_props(props, ["$$slots", "$$events", "$$legacy", "variant"]);',
+      "  return { extra, variant };",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "src/main.js",
+    [
+      'import { render } from "./helpers.js";',
+      "const result = render({",
+      '  $$slots: { default: true },',
+      '  class: "m3-container",',
+      '  variant: "filled",',
+      "});",
+      'globalThis["__protocolHasObjectValue"] = Object.values(result.extra).some((value) => value && typeof value === "object");',
+      'globalThis["__protocolVariant"] = result.variant;',
+      "",
+    ].join("\n"),
+  );
+
+  await generateExterns({
+    mode: "runtime-aware",
+    modules: ["demo-runtime"],
+    outputFile: externsFile,
+    projectRoot: fixture.projectRoot,
+    runtimeEntryFiles: ["./helpers.js"],
+    srcDir: fixture.srcDir,
+  });
+
+  const result = await build({
+    cache: { mode: "off" },
+    entries: ["./main.js"],
+    externs: ["./closure-externs/protocol.generated.js"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  expect(result.exitCode).toBe(0);
+  await import(
+    `${pathToFileURL(path.join(fixture.outDir, "main.js")).href}?protocol=${Date.now()}`
+  );
+  expect(globalThis.__protocolHasObjectValue).toBe(false);
+  expect(globalThis.__protocolVariant).toBe("filled");
 });
 
 test.serial("build does not auto-generate runtime-aware dependency externs by default", async () => {

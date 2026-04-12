@@ -353,7 +353,7 @@ function rewriteDecoratorMetadata(code, propertyRenamingReport) {
   return loadBinding().rewriteDecoratorMetadata(code, propertyRenamingReport);
 }
 function transpileSources(input) {
-  return loadBinding().transpileSources(input.fileNames, input.outDir, input.externsPath, input.metadataPath, input.chunkMode, input.workspaceDir, input.packageAliases ?? [], input.packageJsonFiles ?? [], input.lazyImports ?? []);
+  return loadBinding().transpileSources(input.fileNames, input.explicitExternPaths ?? [], input.outDir, input.externsPath, input.metadataPath, input.chunkMode, input.workspaceDir, input.packageAliases ?? [], input.packageJsonFiles ?? [], input.lazyImports ?? []);
 }
 function prepareClosureJobs(input) {
   return loadBinding().prepareClosureJobs(input);
@@ -905,6 +905,7 @@ async function resolveBuild(context) {
   const nativeEmitKey = usesPersistentCache ? hashJson({
     compilerOptionsHash,
     diagnostics: options.diagnostics,
+    externInputHash: await hashExternalInputs(options.externs),
     packageSignature: context.packageSignature,
     resolveKey,
     tsxRuntimeSourceFiles: resolveMetadata.tsxRuntimeSourceFiles ?? []
@@ -1913,6 +1914,7 @@ async function emitNativeStage({
     return cachedResult;
   }
   const missingInputDiagnostics = await getMissingInputDiagnostics({
+    externFileNames: options.externs,
     fileNames: combinedFileNames,
     preflight: options.diagnostics.preflight,
     tsConfigPath
@@ -1965,6 +1967,7 @@ async function emitNativeStage({
   const result = await withInternalTiming("native-emit:transpile", () => Promise.resolve(runNativeTranspile({
     chunkMode: options.chunks.mode,
     combinedFileNames,
+    explicitExternPaths: options.externs,
     externsPath: paths.externsPath,
     lazyImports,
     metadataPath: paths.metadataPathForNative,
@@ -1977,6 +1980,7 @@ async function emitNativeStage({
     ...paths.runtimeSupportFiles,
     ...result.supportFiles
   ]);
+  logInternalDetail("native-emit:extern-preserved-properties", `${result.explicitExternPropertyCount}`);
   if (usesPersistentCache) {
     await persistNativeEmitMetadata({
       dependencyModules,
@@ -2049,6 +2053,7 @@ async function resetNativeEmitOutDir(outDir) {
 function runNativeTranspile({
   chunkMode,
   combinedFileNames,
+  explicitExternPaths,
   externsPath,
   lazyImports,
   metadataPath,
@@ -2059,6 +2064,7 @@ function runNativeTranspile({
 }) {
   return transpileSources({
     chunkMode,
+    explicitExternPaths,
     metadataPath,
     externsPath,
     fileNames: combinedFileNames,
@@ -2089,6 +2095,7 @@ async function persistNativeEmitMetadata({
   }, null, 2), "utf-8");
 }
 async function getMissingInputDiagnostics({
+  externFileNames,
   fileNames,
   preflight,
   tsConfigPath
@@ -2096,7 +2103,11 @@ async function getMissingInputDiagnostics({
   if (preflight === "off") {
     return [];
   }
-  const requiredStates = collectFileStates([tsConfigPath, ...fileNames]);
+  const requiredStates = collectFileStates([
+    tsConfigPath,
+    ...fileNames,
+    ...externFileNames
+  ]);
   const missingFiles = requiredStates.filter((state) => !state.exists).map((state) => state.filePath);
   if (missingFiles.length > 0) {
     return [
@@ -2154,7 +2165,7 @@ function collectDependencyRuntimeFiles({
 function isDependencyFile(filePath) {
   return path17.resolve(filePath).includes(`${path17.sep}node_modules${path17.sep}`);
 }
-var NATIVE_EMIT_METADATA_VERSION = 7;
+var NATIVE_EMIT_METADATA_VERSION = 8;
 var init_emit = __esm(() => {
   init_files();
   init_file_state();
@@ -3538,7 +3549,8 @@ import ts6 from "typescript";
 async function analyzeRuntimeUsage(runtimeEntryFiles) {
   const hazards = {
     accessedMembers: new Set,
-    definedMembers: new Set
+    definedMembers: new Set,
+    protocolMembers: new Set
   };
   for (const runtimeEntryFile of runtimeEntryFiles) {
     const sourceText = await fs5.promises.readFile(runtimeEntryFile, "utf8");
@@ -3552,6 +3564,7 @@ async function analyzeRuntimeUsage(runtimeEntryFiles) {
       } else if (ts6.isBinaryExpression(node) && isAssignmentOperator(node.operatorToken.kind)) {
         collectRuntimeAssignmentMembers(node.left, knownConstructors, hazards);
       } else if (ts6.isCallExpression(node)) {
+        collectProtocolHelperMembers(node, hazards);
         collectRuntimeCallMembers(node, knownConstructors, hazards);
       }
       ts6.forEachChild(node, visit);
@@ -3559,6 +3572,64 @@ async function analyzeRuntimeUsage(runtimeEntryFiles) {
     visit(sourceFile);
   }
   return hazards;
+}
+function collectProtocolHelperMembers(node, hazards) {
+  const signature = getProtocolHelperCallSignature(node);
+  if (!signature) {
+    return;
+  }
+  if (signature.kind === "direct-key-read") {
+    const memberName = getStringLiteralMemberName(node.arguments[1]);
+    if (memberName && isRuntimeExternPropertyName(memberName)) {
+      hazards.protocolMembers.add(memberName);
+    }
+    return;
+  }
+  const memberList = node.arguments[1];
+  if (!memberList || !ts6.isArrayLiteralExpression(memberList)) {
+    return;
+  }
+  for (const element of memberList.elements) {
+    if (!ts6.isStringLiteral(element) && !ts6.isNoSubstitutionTemplateLiteral(element)) {
+      continue;
+    }
+    if (isRuntimeExternPropertyName(element.text)) {
+      hazards.protocolMembers.add(element.text);
+    }
+  }
+}
+function getProtocolHelperCallSignature(node) {
+  if (node.arguments.length < 2) {
+    return null;
+  }
+  const calleeName = getProtocolHelperCalleeName(node.expression);
+  if (!calleeName) {
+    return null;
+  }
+  switch (calleeName) {
+    case "prop":
+      return { kind: "direct-key-read" };
+    case "rest_props":
+    case "legacy_rest_props":
+      return { kind: "key-exclusion-list" };
+    default:
+      return null;
+  }
+}
+function getProtocolHelperCalleeName(expression) {
+  if (ts6.isIdentifier(expression)) {
+    return expression.text;
+  }
+  if (ts6.isPropertyAccessExpression(expression)) {
+    return expression.name.text;
+  }
+  if (ts6.isElementAccessExpression(expression)) {
+    return getStringLiteralMemberName(expression.argumentExpression);
+  }
+  if (ts6.isParenthesizedExpression(expression)) {
+    return getProtocolHelperCalleeName(expression.expression);
+  }
+  return null;
 }
 function collectKnownConstructorBindings(sourceFile) {
   const knownConstructors = new Set;
@@ -3910,6 +3981,9 @@ async function renderRuntimeAwareExterns({
   const appUsageMembers = analysis.appEntryFiles.length > 0 ? collectBoundaryAwareUsageMemberNames2(analysis) : new Set;
   const runtimeUsage = await analyzeRuntimeUsage(runtimeEntryFiles);
   const emittedLines = new Set;
+  for (const member of runtimeUsage.protocolMembers) {
+    emittedLines.add(renderStructuralExternLine(member));
+  }
   for (const member of runtimeUsage.definedMembers) {
     if (runtimeUsage.accessedMembers.has(member) || appUsageMembers.has(member)) {
       emittedLines.add(renderStructuralExternLine(member));

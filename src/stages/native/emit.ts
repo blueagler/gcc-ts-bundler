@@ -5,7 +5,7 @@ import ts from "typescript";
 import { DiagnosticsPreflight } from "../../api/types";
 import { uniqueSortedStrings } from "../../internal/files";
 import { filesExist } from "../../internal/file-state";
-import { withInternalTiming } from "../../internal/timing";
+import { logInternalDetail, withInternalTiming } from "../../internal/timing";
 import {
   LazyImport,
   NormalizedBuildOptions,
@@ -40,7 +40,7 @@ interface NativeEmitMetadata {
   version: number;
 }
 
-const NATIVE_EMIT_METADATA_VERSION = 7;
+const NATIVE_EMIT_METADATA_VERSION = 8;
 
 export async function emitNativeStage({
   cacheDir,
@@ -94,6 +94,7 @@ export async function emitNativeStage({
   }
 
   const missingInputDiagnostics = await getMissingInputDiagnostics({
+    externFileNames: options.externs,
     fileNames: combinedFileNames,
     preflight: options.diagnostics.preflight,
     tsConfigPath,
@@ -175,6 +176,7 @@ export async function emitNativeStage({
       runNativeTranspile({
         chunkMode: options.chunks.mode,
         combinedFileNames,
+        explicitExternPaths: options.externs,
         externsPath: paths.externsPath,
         lazyImports,
         metadataPath: paths.metadataPathForNative,
@@ -189,6 +191,10 @@ export async function emitNativeStage({
     ...paths.runtimeSupportFiles,
     ...result.supportFiles,
   ]);
+  logInternalDetail(
+    "native-emit:extern-preserved-properties",
+    `${result.explicitExternPropertyCount}`,
+  );
 
   if (usesPersistentCache) {
     await persistNativeEmitMetadata({
@@ -290,6 +296,7 @@ async function resetNativeEmitOutDir(outDir: string) {
 function runNativeTranspile({
   chunkMode,
   combinedFileNames,
+  explicitExternPaths,
   externsPath,
   lazyImports,
   metadataPath,
@@ -300,6 +307,7 @@ function runNativeTranspile({
 }: {
   chunkMode: string;
   combinedFileNames: string[];
+  explicitExternPaths: string[];
   externsPath: string;
   lazyImports: LazyImport[];
   metadataPath: string;
@@ -310,6 +318,7 @@ function runNativeTranspile({
 }) {
   return transpileSources({
     chunkMode,
+    explicitExternPaths,
     metadataPath,
     externsPath,
     fileNames: combinedFileNames,
@@ -358,10 +367,12 @@ async function persistNativeEmitMetadata({
 }
 
 async function getMissingInputDiagnostics({
+  externFileNames,
   fileNames,
   preflight,
   tsConfigPath,
 }: {
+  externFileNames: string[];
   fileNames: string[];
   preflight: DiagnosticsPreflight;
   tsConfigPath: string;
@@ -370,7 +381,11 @@ async function getMissingInputDiagnostics({
     return [];
   }
 
-  const requiredStates = collectFileStates([tsConfigPath, ...fileNames]);
+  const requiredStates = collectFileStates([
+    tsConfigPath,
+    ...fileNames,
+    ...externFileNames,
+  ]);
   const missingFiles = requiredStates
     .filter((state) => !state.exists)
     .map((state) => state.filePath);

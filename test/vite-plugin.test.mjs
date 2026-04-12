@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 
 import { expect, test } from "bun:test";
 
+import { materializeCapturedGraph } from "../src/vite/capture.ts";
 import { createFixture, execFileAsync } from "./helpers.mjs";
 
 async function listFiles(rootDir, currentDir = rootDir) {
@@ -133,6 +134,23 @@ async function readRuntimeModuleSourceMap(fixture, debugDir) {
   return JSON.parse(source);
 }
 
+function createCapturePluginContext() {
+  return {
+    error(message) {
+      throw new Error(String(message));
+    },
+    async resolve(specifier, importer) {
+      if (specifier.startsWith(".")) {
+        return {
+          external: false,
+          id: path.resolve(path.dirname(importer), specifier),
+        };
+      }
+      return null;
+    },
+  };
+}
+
 test.serial(
   "gccTsBundler wires lazy Vite CSS through the runtime when cssCodeSplit is enabled",
   { timeout: 20000 },
@@ -251,3 +269,110 @@ test.serial(
     expect(mainJs).not.toContain("tree-shaken");
   },
 );
+
+test.serial("materializeCapturedGraph prunes empty retained JS stubs", async () => {
+  const fixture = await createFixture();
+  const srcDir = path.join(fixture.projectRoot, ".gcc-debug", "src");
+  const mainId = path.join(fixture.projectRoot, "src", "main.js");
+  const emptyId = path.join(fixture.projectRoot, "src", "empty.ts");
+  const capturedModules = new Map([
+    [
+      mainId,
+      {
+        code: 'import "./empty.ts";\nexport const ready = true;\n',
+        id: mainId,
+      },
+    ],
+    [
+      emptyId,
+      {
+        code: "export {};\n",
+        id: emptyId,
+      },
+    ],
+  ]);
+
+  const materialized = await materializeCapturedGraph.call(
+    createCapturePluginContext(),
+    {
+      capturedModules,
+      config: { root: fixture.projectRoot },
+      dynamicRootModuleIds: [],
+      entryModuleIds: [mainId],
+      moduleIds: [mainId, emptyId],
+      srcDir,
+    },
+  );
+
+  expect(materialized.retainedEmptyModuleIds).toContain(emptyId);
+  expect(materialized.prunedEmptyModuleIds).toContain(emptyId);
+  expect(materialized.modules.map((module) => module.id)).not.toContain(emptyId);
+  expect(materialized.runtimeEntries.join("\n")).not.toContain("empty");
+
+  const materializedMain = materialized.modules.find((module) => module.id === mainId);
+  const rewrittenMain = await fixture.read(
+    path.relative(fixture.projectRoot, materializedMain.filePath),
+  );
+  expect(rewrittenMain).not.toContain("empty.ts");
+});
+
+test.serial("materializeCapturedGraph keeps dynamic roots and CSS side-effect stubs", async () => {
+  const fixture = await createFixture();
+  const srcDir = path.join(fixture.projectRoot, ".gcc-debug", "src");
+  const mainId = path.join(fixture.projectRoot, "src", "main.js");
+  const lazyId = path.join(fixture.projectRoot, "src", "lazy.js");
+  const styleId = path.join(fixture.projectRoot, "src", "style.js");
+  const capturedModules = new Map([
+    [
+      mainId,
+      {
+        code: [
+          'export const loadLazy = () => import("./lazy.js");',
+          'import "./style.js";',
+          "",
+        ].join("\n"),
+        id: mainId,
+      },
+    ],
+    [
+      lazyId,
+      {
+        code: "export {};\n",
+        id: lazyId,
+      },
+    ],
+    [
+      styleId,
+      {
+        code: 'import "./style.css";\nexport {};\n',
+        id: styleId,
+      },
+    ],
+  ]);
+
+  const materialized = await materializeCapturedGraph.call(
+    createCapturePluginContext(),
+    {
+      capturedModules,
+      config: { root: fixture.projectRoot },
+      dynamicRootModuleIds: [lazyId],
+      entryModuleIds: [mainId],
+      moduleIds: [mainId, lazyId, styleId],
+      srcDir,
+    },
+  );
+
+  expect(materialized.retainedEmptyModuleIds).toContain(lazyId);
+  expect(materialized.retainedEmptyModuleIds).not.toContain(styleId);
+  expect(materialized.prunedEmptyModuleIds).not.toContain(lazyId);
+  expect(materialized.prunedEmptyModuleIds).not.toContain(styleId);
+  expect(materialized.modules.map((module) => module.id)).toEqual(
+    expect.arrayContaining([lazyId, styleId]),
+  );
+
+  const rewrittenMain = await fixture.read(
+    path.relative(fixture.projectRoot, materialized.modules.find((module) => module.id === mainId).filePath),
+  );
+  expect(rewrittenMain).toContain('import("./lazy.js")');
+  expect(rewrittenMain).toContain('import "./style.js"');
+});

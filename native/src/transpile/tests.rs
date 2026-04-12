@@ -1,9 +1,9 @@
 use super::{
     apply_js_compat_text_fixes, collect_commonjs_extern_names, collect_enum_extern_names,
-    collect_extern_property_names, collect_preserved_property_names, collect_protocol_extern_names,
-    collect_static_property_names_from_text, print_program, render_externs,
-    render_generated_externs, transform_js_pass_through_module, transform_program,
-    transform_source_file,
+    collect_extern_property_names, collect_extern_property_names_with_externs,
+    collect_preserved_property_names, collect_protocol_extern_names,
+    collect_static_property_names_from_text, print_program, render_externs, render_generated_externs,
+    transform_js_pass_through_module, transform_program, transform_source_file,
 };
 use crate::module_cache::parse_module;
 use crate::pathing::to_goog_module_id;
@@ -719,6 +719,114 @@ fn rewrites_hard_static_interop_property_reads_to_bracket_access() {
         transformed.contains("Demo[\"formAssociated\"] = true"),
         "{transformed}"
     );
+}
+
+#[test]
+fn collects_preserved_property_names_from_explicit_extern_files() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("gcc-ts-bundler-explicit-externs-{unique}"));
+    let source_file = root.join("view.js");
+    let extern_file = root.join("generated.externs.js");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        &source_file,
+        "function view(props){return prop(props,\"variant\",3)+rest_props(props,[\"ignored\"]);}\n",
+    )
+    .unwrap();
+    fs::write(
+        &extern_file,
+        [
+            "/** @externs */",
+            "Object.prototype.$$slots;",
+            "Object.prototype.$$events;",
+            "Object.prototype.$$legacy;",
+            "Object.prototype.variant;",
+            "",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    let analysis = collect_extern_property_names_with_externs(
+        &[source_file.to_string_lossy().to_string()],
+        &[extern_file.to_string_lossy().to_string()],
+    )
+    .expect("collect extern property names");
+
+    assert!(analysis.preserved_property_names.contains("$$slots"));
+    assert!(analysis.preserved_property_names.contains("$$events"));
+    assert!(analysis.preserved_property_names.contains("$$legacy"));
+    assert!(analysis.preserved_property_names.contains("variant"));
+    assert!(analysis.explicit_extern_property_names.contains("$$slots"));
+    assert!(analysis.explicit_extern_property_names.contains("variant"));
+}
+
+#[test]
+fn preserves_property_names_from_explicit_extern_files_in_precompiled_js_output() {
+    let source = [
+        "const attrs = { $$slots: { default: true }, $$events: null, $$legacy: true, variant: 'filled' };",
+        "function read(){ return attrs.$$slots, attrs.$$events, attrs.$$legacy, attrs.variant; }",
+        "",
+    ]
+    .join("\n");
+    let transformed = transform_js_pass_through_module(
+        parse_module(std::path::Path::new("fixture.js"), &source).expect("module"),
+        source,
+        std::path::Path::new("fixture.js"),
+        &super::TranspileContext {
+            preserved_property_names: HashSet::from([
+                "$$slots".to_string(),
+                "$$events".to_string(),
+                "$$legacy".to_string(),
+                "variant".to_string(),
+            ]),
+            ..empty_context()
+        },
+    )
+    .expect("transform");
+
+    assert!(transformed.contains("\"$$slots\""), "{transformed}");
+    assert!(transformed.contains("\"$$events\""), "{transformed}");
+    assert!(transformed.contains("\"$$legacy\""), "{transformed}");
+    assert!(transformed.contains("\"variant\""), "{transformed}");
+    assert!(transformed.contains("attrs[\"$$slots\"]"), "{transformed}");
+    assert!(transformed.contains("attrs[\"$$events\"]"), "{transformed}");
+    assert!(transformed.contains("attrs[\"$$legacy\"]"), "{transformed}");
+    assert!(transformed.contains("attrs[\"variant\"]"), "{transformed}");
+    assert!(!transformed.contains("attrs.$$slots"), "{transformed}");
+    assert!(!transformed.contains("attrs.variant"), "{transformed}");
+}
+
+#[test]
+fn preserves_shorthand_object_property_names_from_explicit_extern_files() {
+    let source = [
+        "function makeEffect(fn) {",
+        "  return { fn, parent: null };",
+        "}",
+        "function run(effect) {",
+        "  return effect.fn();",
+        "}",
+        "",
+    ]
+    .join("\n");
+    let transformed = transform_js_pass_through_module(
+        parse_module(std::path::Path::new("fixture.js"), &source).expect("module"),
+        source,
+        std::path::Path::new("fixture.js"),
+        &super::TranspileContext {
+            preserved_property_names: HashSet::from(["fn".to_string()]),
+            ..empty_context()
+        },
+    )
+    .expect("transform");
+
+    assert!(transformed.contains("\"fn\": fn"), "{transformed}");
+    assert!(transformed.contains("effect[\"fn\"]()"), "{transformed}");
+    assert!(!transformed.contains("{fn,"), "{transformed}");
+    assert!(!transformed.contains("effect.fn()"), "{transformed}");
 }
 
 #[test]

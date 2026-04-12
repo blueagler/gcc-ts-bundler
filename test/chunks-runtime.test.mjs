@@ -282,8 +282,7 @@ test.serial(
     expect(result.exitCode).toBe(0);
     const output = await fixture.read("dist/main.js");
     expect(output).not.toContain('==="class"');
-    expect(output).not.toContain('["$$slots"');
-    expect(output).not.toContain('"$$slots $$events $$legacy variant children".split(" ")');
+    expect(output).not.toContain('"$$slots"');
   },
 );
 

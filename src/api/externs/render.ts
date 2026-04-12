@@ -54,6 +54,9 @@ export async function renderRuntimeAwareExterns({
       : new Set<string>();
   const runtimeUsage = await analyzeRuntimeUsage(runtimeEntryFiles);
   const emittedLines = new Set<string>();
+  for (const member of runtimeUsage.protocolMembers) {
+    emittedLines.add(renderStructuralExternLine(member));
+  }
   for (const member of runtimeUsage.definedMembers) {
     if (
       runtimeUsage.accessedMembers.has(member) ||

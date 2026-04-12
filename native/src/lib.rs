@@ -76,6 +76,7 @@ pub fn write_entry_shims(entries: Vec<shims::ShimEntry>) -> Result<Vec<String>> 
 #[napi(js_name = "transpileSources")]
 pub fn transpile_sources(
     file_names: Vec<String>,
+    explicit_extern_paths: Vec<String>,
     out_dir: String,
     externs_path: String,
     metadata_path: String,
@@ -87,6 +88,7 @@ pub fn transpile_sources(
 ) -> Result<transpile::TranspileOutput> {
     into_napi(transpile::transpile_sources(
         file_names,
+        explicit_extern_paths,
         out_dir,
         externs_path,
         metadata_path,

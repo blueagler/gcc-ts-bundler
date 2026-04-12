@@ -10,6 +10,7 @@ import {
   materializeCapturedGraph,
   normalizeCapturedCode,
   prepareCaptureRoot,
+  resolveDynamicRootModuleIds,
   resolveRetainedCapturedModuleIds,
   resolveRetainedModuleIds,
   resolveCompilerExterns,
@@ -92,6 +93,7 @@ export function gccTsBundler(
       }
 
       const entryModuleIds = resolveEntryModuleIds(bundle, jsChunks);
+      const dynamicRootModuleIds = resolveDynamicRootModuleIds(jsChunks);
       const retainedModuleIds = resolveRetainedModuleIds(
         jsChunks,
         entryModuleIds,
@@ -109,17 +111,6 @@ export function gccTsBundler(
             retainedCaptured.missingModuleIds.join("\n"),
         );
       }
-      logInternalDetail("vite:captured-modules", `${capturedModules.size}`);
-      logInternalDetail("vite:retained-modules", `${retainedModuleIds.length}`);
-      logInternalDetail(
-        "vite:retained-captured-modules",
-        `${retainedCaptured.materializedModuleIds.length}`,
-      );
-      logInternalDetail(
-        "vite:retained-packages",
-        summarizeModuleIdsByPackage(retainedCaptured.materializedModuleIds) ||
-          "none",
-      );
       const captureRoot = await prepareCaptureRoot({
         debugDir: options.debug?.dumpCapturedGraphDir,
         projectRoot: resolvedConfig.root,
@@ -139,11 +130,37 @@ export function gccTsBundler(
 
       const materialized = await materializeCapturedGraph.call(this, {
         capturedModules,
+        cssModuleIdsWithOwnership: cssOwnership.moduleCssById.keys(),
         config: resolvedConfig,
+        dynamicRootModuleIds,
         entryModuleIds,
         moduleIds: retainedCaptured.materializedModuleIds,
         srcDir,
       });
+      logInternalDetail("vite:captured-modules", `${capturedModules.size}`);
+      logInternalDetail("vite:retained-modules", `${retainedModuleIds.length}`);
+      logInternalDetail(
+        "vite:retained-captured-modules",
+        `${materialized.modules.length}`,
+      );
+      logInternalDetail(
+        "vite:retained-packages",
+        summarizeModuleIdsByPackage(
+          materialized.modules.map((module) => module.id),
+        ) || "none",
+      );
+      logInternalDetail(
+        "vite:retained-empty-modules",
+        `${materialized.retainedEmptyModuleIds.length}`,
+      );
+      logInternalDetail(
+        "vite:pruned-empty-modules",
+        `${materialized.prunedEmptyModuleIds.length}`,
+      );
+      logInternalDetail(
+        "vite:retained-dynamic-roots",
+        `${dynamicRootModuleIds.length}`,
+      );
       const externs = await resolveCompilerExterns({
         captureRoot,
         materialized,

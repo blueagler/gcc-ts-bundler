@@ -99,7 +99,9 @@ export interface NativePublishedOutputEntry {
 }
 interface NativeTranspileOutput {
     emittedFiles: string[];
+    explicitExternPropertyCount: number;
     externsPath: string;
+    preservedPropertyCount: number;
     supportFiles: string[];
 }
 interface NativeLazyImportInput {
@@ -141,6 +143,7 @@ export declare function rewriteGccExports(code: string): string;
 export declare function rewriteDecoratorMetadata(code: string, propertyRenamingReport: string): string;
 export declare function transpileSources(input: {
     chunkMode: string;
+    explicitExternPaths?: string[];
     externsPath: string;
     fileNames: string[];
     metadataPath: string;

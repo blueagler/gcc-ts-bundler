@@ -277,6 +277,7 @@ export async function resolveBuild(
     ? hashJson({
         compilerOptionsHash,
         diagnostics: options.diagnostics,
+        externInputHash: await hashExternalInputs(options.externs),
         packageSignature: context.packageSignature,
         resolveKey,
         tsxRuntimeSourceFiles: resolveMetadata.tsxRuntimeSourceFiles ?? [],

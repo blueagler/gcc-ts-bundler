@@ -5,11 +5,12 @@ mod render;
 use super::*;
 
 pub(super) use self::analysis::{
-    collect_extern_property_names, is_valid_js_identifier, prop_name_to_string,
-    ExternPropertyAnalysis,
+    is_valid_js_identifier, prop_name_to_string, ExternPropertyAnalysis,
 };
+pub(super) use self::analysis::collect_extern_property_names_with_externs;
 #[cfg(test)]
 pub(super) use self::analysis::{
+    collect_extern_property_names,
     collect_preserved_property_names, collect_static_property_names_from_text,
 };
 #[cfg(test)]

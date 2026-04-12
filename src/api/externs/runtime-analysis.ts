@@ -15,12 +15,14 @@ import {
 export interface RuntimeRenameHazards {
   accessedMembers: Set<string>;
   definedMembers: Set<string>;
+  protocolMembers: Set<string>;
 }
 
 export async function analyzeRuntimeUsage(runtimeEntryFiles: string[]) {
   const hazards: RuntimeRenameHazards = {
     accessedMembers: new Set(),
     definedMembers: new Set(),
+    protocolMembers: new Set(),
   };
 
   for (const runtimeEntryFile of runtimeEntryFiles) {
@@ -47,6 +49,7 @@ export async function analyzeRuntimeUsage(runtimeEntryFiles: string[]) {
       ) {
         collectRuntimeAssignmentMembers(node.left, knownConstructors, hazards);
       } else if (ts.isCallExpression(node)) {
+        collectProtocolHelperMembers(node, hazards);
         collectRuntimeCallMembers(node, knownConstructors, hazards);
       }
 
@@ -57,6 +60,87 @@ export async function analyzeRuntimeUsage(runtimeEntryFiles: string[]) {
   }
 
   return hazards;
+}
+
+function collectProtocolHelperMembers(
+  node: ts.CallExpression,
+  hazards: RuntimeRenameHazards,
+) {
+  const signature = getProtocolHelperCallSignature(node);
+  if (!signature) {
+    return;
+  }
+
+  if (signature.kind === "direct-key-read") {
+    const memberName = getStringLiteralMemberName(node.arguments[1]);
+    if (memberName && isRuntimeExternPropertyName(memberName)) {
+      hazards.protocolMembers.add(memberName);
+    }
+    return;
+  }
+
+  const memberList = node.arguments[1];
+  if (!memberList || !ts.isArrayLiteralExpression(memberList)) {
+    return;
+  }
+  for (const element of memberList.elements) {
+    if (
+      !ts.isStringLiteral(element) &&
+      !ts.isNoSubstitutionTemplateLiteral(element)
+    ) {
+      continue;
+    }
+    if (isRuntimeExternPropertyName(element.text)) {
+      hazards.protocolMembers.add(element.text);
+    }
+  }
+}
+
+type ProtocolHelperCallSignature =
+  | {
+      kind: "direct-key-read";
+    }
+  | {
+      kind: "key-exclusion-list";
+    };
+
+function getProtocolHelperCallSignature(
+  node: ts.CallExpression,
+): ProtocolHelperCallSignature | null {
+  if (node.arguments.length < 2) {
+    return null;
+  }
+
+  const calleeName = getProtocolHelperCalleeName(node.expression);
+  if (!calleeName) {
+    return null;
+  }
+
+  switch (calleeName) {
+    case "prop":
+      return { kind: "direct-key-read" };
+    case "rest_props":
+    case "legacy_rest_props":
+      return { kind: "key-exclusion-list" };
+    default:
+      return null;
+  }
+}
+
+function getProtocolHelperCalleeName(expression: ts.Expression): string | null {
+  if (ts.isIdentifier(expression)) {
+    return expression.text;
+  }
+  if (ts.isPropertyAccessExpression(expression)) {
+    return expression.name.text;
+  }
+  if (ts.isElementAccessExpression(expression)) {
+    return getStringLiteralMemberName(expression.argumentExpression);
+  }
+  if (ts.isParenthesizedExpression(expression)) {
+    return getProtocolHelperCalleeName(expression.expression);
+  }
+  return null;
 }
 
 function collectKnownConstructorBindings(sourceFile: ts.SourceFile) {

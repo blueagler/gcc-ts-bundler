@@ -142,7 +142,9 @@ interface NativeShimEntry {
 
 interface NativeTranspileOutput {
   emittedFiles: string[];
+  explicitExternPropertyCount: number;
   externsPath: string;
+  preservedPropertyCount: number;
   supportFiles: string[];
 }
 
@@ -196,6 +198,7 @@ interface NativeBinding {
   rewriteGccExports(code: string): string;
   transpileSources(
     fileNames: string[],
+    explicitExternPaths: string[],
     outDir: string,
     externsPath: string,
     metadataPath: string,
@@ -280,6 +283,7 @@ export function rewriteDecoratorMetadata(
 
 export function transpileSources(input: {
   chunkMode: string;
+  explicitExternPaths?: string[];
   externsPath: string;
   fileNames: string[];
   metadataPath: string;
@@ -291,6 +295,7 @@ export function transpileSources(input: {
 }) {
   return loadBinding().transpileSources(
     input.fileNames,
+    input.explicitExternPaths ?? [],
     input.outDir,
     input.externsPath,
     input.metadataPath,

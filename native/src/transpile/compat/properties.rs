@@ -1,4 +1,5 @@
 use super::*;
+use swc_core::ecma::ast::{KeyValueProp, Prop};
 
 pub(crate) fn collect_class_static_assignments(source_text: &str) -> Vec<(String, String)> {
     let class_binding_regex = match regex::Regex::new(
@@ -78,6 +79,19 @@ impl VisitMut for PreservedPropertyCompatVisitor {
             }
             _ => {}
         }
+    }
+
+    fn visit_mut_prop(&mut self, prop: &mut Prop) {
+        if let Prop::Shorthand(ident) = prop {
+            if self.property_names.contains(ident.sym.as_ref()) {
+                *prop = Prop::KeyValue(KeyValueProp {
+                    key: quote_prop_name(PropName::Ident(ident.clone().into())),
+                    value: Box::new(Expr::Ident(ident.clone())),
+                });
+                return;
+            }
+        }
+        prop.visit_mut_children_with(self);
     }
 
     fn visit_mut_prop_name(&mut self, prop_name: &mut PropName) {

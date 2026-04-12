@@ -62,7 +62,9 @@ use self::print::*;
 #[napi(object)]
 pub struct TranspileOutput {
     pub emittedFiles: Vec<String>,
+    pub explicitExternPropertyCount: u32,
     pub externsPath: String,
+    pub preservedPropertyCount: u32,
     pub supportFiles: Vec<String>,
 }
 
@@ -87,6 +89,7 @@ pub struct LazyImportInput {
 
 pub fn transpile_sources(
     file_names: Vec<String>,
+    explicit_extern_paths: Vec<String>,
     out_dir: String,
     externs_path: String,
     metadata_path: String,
@@ -114,9 +117,10 @@ pub fn transpile_sources(
         .collect::<HashMap<_, _>>();
     let file_metadata = load_closure_metadata(&metadata_path)?;
     let ExternPropertyAnalysis {
+        explicit_extern_property_names,
         preserved_property_names,
         static_property_names,
-    } = collect_extern_property_names(&file_names)?;
+    } = collect_extern_property_names_with_externs(&file_names, &explicit_extern_paths)?;
     let context = TranspileContext {
         bundler_module_slots,
         bundler_runtime_logical_ids,
@@ -199,7 +203,9 @@ pub fn transpile_sources(
     )?;
     Ok(TranspileOutput {
         emittedFiles: emitted_files,
+        explicitExternPropertyCount: explicit_extern_property_names.len() as u32,
         externsPath: externs_path,
+        preservedPropertyCount: context.preserved_property_names.len() as u32,
         supportFiles: support_files,
     })
 }

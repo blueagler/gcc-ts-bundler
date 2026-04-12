@@ -12,6 +12,8 @@ export interface CapturedRuntimeModule {
 export interface MaterializedGraph {
   entries: string[];
   modules: CapturedRuntimeModule[];
+  prunedEmptyModuleIds: string[];
+  retainedEmptyModuleIds: string[];
   runtimeEntries: string[];
   srcDir: string;
 }

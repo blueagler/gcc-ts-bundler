@@ -23,12 +23,6 @@ export default defineConfig({
         generate: {
           mode: "runtime-aware",
           modules: ["m3-svelte", "svelte"],
-          appendLines: [
-            "var addEventListener;",
-            "var removeEventListener;",
-            "var scrollTo;",
-            "Object.prototype.fn;",
-          ],
         },
       },
       runtime: {

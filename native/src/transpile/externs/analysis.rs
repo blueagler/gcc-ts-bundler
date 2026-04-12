@@ -32,6 +32,7 @@ fn is_hard_static_interop_name(name: &str) -> bool {
 
 #[derive(Default)]
 pub(crate) struct ExternPropertyAnalysis {
+    pub(crate) explicit_extern_property_names: HashSet<String>,
     pub(crate) preserved_property_names: HashSet<String>,
     pub(crate) static_property_names: HashSet<String>,
 }
@@ -45,8 +46,16 @@ struct ParsedExternFileAnalysis {
     static_property_names: HashSet<String>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn collect_extern_property_names(
     file_names: &[String],
+) -> std::result::Result<ExternPropertyAnalysis, String> {
+    collect_extern_property_names_with_externs(file_names, &[])
+}
+
+pub(crate) fn collect_extern_property_names_with_externs(
+    file_names: &[String],
+    extern_file_names: &[String],
 ) -> std::result::Result<ExternPropertyAnalysis, String> {
     let mut preserved_property_names = HashSet::new();
     let mut static_property_names = HashSet::new();
@@ -79,8 +88,11 @@ pub(crate) fn collect_extern_property_names(
         }
     }
 
+    let explicit_extern_property_names = collect_explicit_extern_property_names(extern_file_names)?;
+    preserved_property_names.extend(explicit_extern_property_names.iter().cloned());
     preserved_property_names.extend(static_property_names.iter().cloned());
     Ok(ExternPropertyAnalysis {
+        explicit_extern_property_names,
         preserved_property_names,
         static_property_names,
     })
@@ -92,6 +104,22 @@ pub(crate) fn collect_preserved_property_names(
     _static_property_names: &HashSet<String>,
 ) -> std::result::Result<HashSet<String>, String> {
     Ok(collect_extern_property_names(file_names)?.preserved_property_names)
+}
+
+fn collect_explicit_extern_property_names(
+    extern_file_names: &[String],
+) -> std::result::Result<HashSet<String>, String> {
+    let mut property_names = HashSet::new();
+
+    for file_name in extern_file_names {
+        let file_path = PathBuf::from(file_name);
+        let module = get_or_parse_cached_module(&file_path)?;
+        let mut collector = ExplicitExternPropertyCollector::default();
+        module.visit_with(&mut collector);
+        property_names.extend(collector.property_names);
+    }
+
+    Ok(property_names)
 }
 
 pub(crate) fn collect_static_property_names_from_text(source_text: &str) -> HashSet<String> {
@@ -457,6 +485,36 @@ fn member_prop_name(prop: &MemberProp) -> Option<String> {
             _ => None,
         },
         MemberProp::PrivateName(_) => None,
+    }
+}
+
+#[derive(Default)]
+struct ExplicitExternPropertyCollector {
+    property_names: HashSet<String>,
+}
+
+impl Visit for ExplicitExternPropertyCollector {
+    fn visit_member_expr(&mut self, member_expr: &MemberExpr) {
+        if is_explicit_extern_target(&member_expr.obj) {
+            if let Some(property_name) = member_prop_name(&member_expr.prop) {
+                if property_name != "prototype" && is_valid_js_identifier(&property_name) {
+                    self.property_names.insert(property_name);
+                }
+            }
+        }
+        member_expr.visit_children_with(self);
+    }
+}
+
+fn is_explicit_extern_target(expr: &Expr) -> bool {
+    match expr {
+        Expr::Ident(_) => true,
+        Expr::Member(member) => matches!(
+            (&*member.obj, &member.prop),
+            (Expr::Ident(_), MemberProp::Ident(ident)) if ident.sym == *"prototype"
+        ),
+        Expr::Paren(paren) => is_explicit_extern_target(&paren.expr),
+        _ => false,
     }
 }
 

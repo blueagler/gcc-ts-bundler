@@ -142,6 +142,16 @@ export function resolveRetainedModuleIds(
   return [...moduleIds].sort((left, right) => left.localeCompare(right));
 }
 
+export function resolveDynamicRootModuleIds(chunks: OutputChunk[]) {
+  return [
+    ...new Set(
+      chunks
+        .filter((chunk) => chunk.isDynamicEntry && chunk.facadeModuleId)
+        .map((chunk) => chunk.facadeModuleId as string),
+    ),
+  ].sort((left, right) => left.localeCompare(right));
+}
+
 export async function resolveRetainedCapturedModuleIds(
   this: PluginContext,
   input: {
@@ -225,7 +235,9 @@ export async function materializeCapturedGraph(
   this: PluginContext,
   input: {
     capturedModules: Map<string, CapturedModule>;
+    cssModuleIdsWithOwnership?: Iterable<string>;
     config: ResolvedConfig;
+    dynamicRootModuleIds: string[];
     entryModuleIds: string[];
     moduleIds: string[];
     srcDir: string;
@@ -236,9 +248,36 @@ export async function materializeCapturedGraph(
   }
 
   await fs.mkdir(input.srcDir, { recursive: true });
+  const entryModuleIds = new Set(input.entryModuleIds);
+  const dynamicRootModuleIds = new Set(input.dynamicRootModuleIds);
+  const retainedEmptyModuleIds: string[] = [];
+  const prunedEmptyModuleIds = new Set<string>();
+
+  for (const moduleId of input.moduleIds) {
+    const record = input.capturedModules.get(moduleId);
+    if (!record) {
+      this.error(
+        `gccTsBundler() could not capture transformed code for ${moduleId}.`,
+      );
+    }
+
+    if (!isEffectivelyEmptyModule(record.code, moduleId)) {
+      continue;
+    }
+    retainedEmptyModuleIds.push(moduleId);
+
+    if (entryModuleIds.has(moduleId) || dynamicRootModuleIds.has(moduleId)) {
+      continue;
+    }
+    prunedEmptyModuleIds.add(moduleId);
+  }
+
+  const materializedModuleIds = input.moduleIds.filter(
+    (moduleId) => !prunedEmptyModuleIds.has(moduleId),
+  );
   const filePathByModuleId = new Map<string, string>();
   const modules: CapturedRuntimeModule[] = [];
-  for (const moduleId of input.moduleIds) {
+  for (const moduleId of materializedModuleIds) {
     const relativePath = toMaterializedRelativePath(
       input.config.root,
       moduleId,
@@ -252,7 +291,7 @@ export async function materializeCapturedGraph(
     });
   }
 
-  for (const moduleId of input.moduleIds) {
+  for (const moduleId of materializedModuleIds) {
     const record = input.capturedModules.get(moduleId);
     if (!record) {
       this.error(
@@ -285,7 +324,13 @@ export async function materializeCapturedGraph(
   return {
     entries: entryFiles,
     modules,
-    runtimeEntries: input.moduleIds
+    prunedEmptyModuleIds: [...prunedEmptyModuleIds].sort((left, right) =>
+      left.localeCompare(right),
+    ),
+    retainedEmptyModuleIds: retainedEmptyModuleIds.sort((left, right) =>
+      left.localeCompare(right),
+    ),
+    runtimeEntries: materializedModuleIds
       .map((moduleId) => {
         const filePath = filePathByModuleId.get(moduleId);
         if (!filePath) {
@@ -457,6 +502,35 @@ function shouldOmitPrunedImport(
 function isNonMaterializedRetainedModuleId(moduleId: string) {
   const cleanId = stripQuery(moduleId);
   return /\.(?:css|less|sass|scss|styl|stylus|pcss|postcss)$/u.test(cleanId);
+}
+
+function isEffectivelyEmptyModule(code: string, moduleId: string) {
+  const sourceFile = ts.createSourceFile(
+    moduleId,
+    code,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS,
+  );
+
+  return sourceFile.statements.every((statement) => {
+    if (ts.isEmptyStatement(statement)) {
+      return true;
+    }
+    if (!ts.isExportDeclaration(statement)) {
+      return false;
+    }
+    if (statement.moduleSpecifier) {
+      return false;
+    }
+    if (!statement.exportClause) {
+      return true;
+    }
+    return (
+      ts.isNamedExports(statement.exportClause) &&
+      statement.exportClause.elements.length === 0
+    );
+  });
 }
 
 async function collectBridgeModuleIds(
