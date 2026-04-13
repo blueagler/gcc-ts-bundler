@@ -43,6 +43,17 @@ pub(super) fn emit_bundler_runtime_module_program(
                 .map(|rewrite| (rewrite.local_name.clone(), rewrite.replacement_code.clone()))
         })
         .collect::<HashMap<_, _>>();
+    let import_binding_slot_aliases = import_plans
+        .iter()
+        .flat_map(|plan| {
+            plan.binding_rewrites.iter().filter_map(|rewrite| {
+                rewrite
+                    .slot_alias
+                    .clone()
+                    .map(|slot_alias| (rewrite.local_name.clone(), slot_alias))
+            })
+        })
+        .collect::<HashMap<_, _>>();
     let all_rewrites = import_plans
         .iter()
         .flat_map(|plan| plan.binding_rewrites.iter().cloned())
@@ -98,6 +109,7 @@ pub(super) fn emit_bundler_runtime_module_program(
                     context,
                     current_slots,
                     &import_binding_rewrites,
+                    &import_binding_slot_aliases,
                     &local_export_modes,
                     &mut export_counter,
                 )?;
@@ -212,6 +224,7 @@ pub(super) fn emit_bundler_runtime_module_program(
                             export_module_id
                         )
                     })?;
+                let mut packed_slot_pairs = Vec::new();
                 for export_name in target_slots.export_names() {
                     if export_name == "default" {
                         continue;
@@ -228,11 +241,12 @@ pub(super) fn emit_bundler_runtime_module_program(
                             export_name, module_id
                         )
                     })?;
-                    output.push(render_live_export_slot(
-                        target_slot,
-                        &stable_slot_access(&require_name, source_slot),
-                    ));
+                    packed_slot_pairs.push((target_slot, source_slot));
                 }
+                output.extend(render_grouped_live_slot_exports(
+                    &require_name,
+                    packed_slot_pairs,
+                ));
             }
             ModuleItem::Stmt(statement) => output.push(print_statement(statement)?),
             _ => {}

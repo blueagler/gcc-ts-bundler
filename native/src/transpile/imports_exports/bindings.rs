@@ -12,12 +12,19 @@ pub(crate) struct ImportBindingRewrite {
     pub(crate) local_name: String,
     pub(crate) replacement: Box<Expr>,
     pub(crate) replacement_code: String,
+    pub(crate) slot_alias: Option<ImportBindingSlotAlias>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BundlerExportSlotMode {
     Live,
     Static,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ImportBindingSlotAlias {
+    pub(crate) source_object_name: String,
+    pub(crate) source_slot: usize,
 }
 
 pub(super) fn bind_import_specifiers(
@@ -68,6 +75,10 @@ pub(super) fn plan_bundler_import_specifiers(
                     local_name: default_specifier.local.sym.to_string(),
                     replacement: Box::new(slot_access_expr(local_name, slot)),
                     replacement_code: stable_slot_access(local_name, slot),
+                    slot_alias: Some(ImportBindingSlotAlias {
+                        source_object_name: local_name.to_string(),
+                        source_slot: slot,
+                    }),
                 });
             }
             ImportSpecifier::Namespace(namespace_specifier) => {
@@ -87,6 +98,10 @@ pub(super) fn plan_bundler_import_specifiers(
                     local_name: named_specifier.local.sym.to_string(),
                     replacement: Box::new(slot_access_expr(local_name, slot)),
                     replacement_code: stable_slot_access(local_name, slot),
+                    slot_alias: Some(ImportBindingSlotAlias {
+                        source_object_name: local_name.to_string(),
+                        source_slot: slot,
+                    }),
                 });
             }
         }
@@ -249,6 +264,19 @@ pub(crate) fn render_live_export_slot(slot: usize, value_expression: &str) -> St
     format!(
         "__live(__exports,{slot},function(){{return {value_expression};}});"
     )
+}
+
+pub(crate) fn render_packed_live_export_slots(
+    source_object_name: &str,
+    slot_pairs: &[(usize, usize)],
+) -> String {
+    let flat_pairs = slot_pairs
+        .iter()
+        .flat_map(|(target_slot, source_slot)| [target_slot, source_slot])
+        .map(|slot| slot.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("__live(__exports,{source_object_name},[{flat_pairs}]);")
 }
 
 pub(crate) fn render_static_export_slot(slot: usize, value_expression: &str) -> String {

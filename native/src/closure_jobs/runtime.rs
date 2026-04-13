@@ -165,7 +165,7 @@ pub(super) fn render_bundler_runtime_preamble(
         "r.l=function(a){r.s[a]=1;var b=r.d[a];if(b){b.r();delete r.d[a];}};".to_string(),
         "function h(a,b){r.s[a]=2;var c=r.d[a];if(c){c.j(b);delete r.d[a];}}".to_string(),
         "r.r=function(a,b){r.f[a]=b;};".to_string(),
-        "r.g=function(a,b,c){Object.defineProperty(a,b,{configurable:!0,enumerable:!0,get:c});};".to_string(),
+        "r.g=function(a,b,c){if(typeof c===\"function\"){Object.defineProperty(a,b,{configurable:!0,enumerable:!0,get:c});return;}for(var d=0;d<c.length;d+=2)!function(e,f){Object.defineProperty(a,e,{configurable:!0,enumerable:!0,get:function(){return b[f];}})}(c[d],c[d+1]);};".to_string(),
         "r.h=function(a,b){a(r.r);r.l(b);};".to_string(),
         format!("r.q=function(a){{if(Object.prototype.hasOwnProperty.call(r.c,a))return r.c[a];var b=r.f[a];if(b===void 0)throw Error({missing_module_error});var c=[];r.c[a]=c;b(r.q,c,r.j,r.x,r.g);return c;}};"),
         loader_specific,
@@ -332,5 +332,14 @@ __runtime.h(function(__register){\n  __register(1,function(){});\n},3);\n"
         assert!(rendered.contains("b&&b[2]||[]"));
         assert!(!rendered.contains("r.b||(global.location"));
         assert!(!rendered.contains("global.fetch("));
+    }
+
+    #[test]
+    fn live_export_helper_supports_packed_alias_mode() {
+        let rendered = render_bundler_runtime_preamble("[0,[],[],\"./\"]", true, false)
+            .expect("render preamble");
+        assert!(rendered.contains("typeof c===\"function\""), "{rendered}");
+        assert!(rendered.contains("for(var d=0;d<c.length;d+=2)"), "{rendered}");
+        assert!(rendered.contains("return b[f];"), "{rendered}");
     }
 }

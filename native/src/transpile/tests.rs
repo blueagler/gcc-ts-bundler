@@ -1327,6 +1327,240 @@ fn bundler_runtime_keeps_exported_let_bindings_live() {
 }
 
 #[test]
+fn bundler_runtime_packs_named_reexports_from_single_dependency() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("gcc-ts-bundler-packed-reexports-{unique}"));
+    let src_dir = root.join("src");
+    let dep_file = src_dir.join("dep.ts");
+    let main_file = src_dir.join("main.ts");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(
+        &dep_file,
+        "export const alpha = 1;\nexport const beta = 2;\nexport const gamma = 3;\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_file,
+        "export { alpha, beta, gamma } from './dep';\n",
+    )
+    .unwrap();
+
+    let dep_module_id = to_goog_module_id(&dep_file, &root);
+    let main_module_id = to_goog_module_id(&main_file, &root);
+    let transformed = GLOBALS
+        .set(&Globals::new(), || {
+            transform_source_file(
+                &main_file,
+                &super::TranspileContext {
+                    bundler_module_slots: HashMap::from([
+                        (
+                            dep_module_id,
+                            super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
+                                "alpha".to_string(),
+                                "beta".to_string(),
+                                "gamma".to_string(),
+                            ])),
+                        ),
+                        (
+                            main_module_id,
+                            super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
+                                "alpha".to_string(),
+                                "beta".to_string(),
+                                "gamma".to_string(),
+                            ])),
+                        ),
+                    ]),
+                    bundler_runtime_logical_ids: HashMap::new(),
+                    chunk_mode: super::ChunkMode::BundlerRuntime,
+                    commonjs_specifiers: HashSet::new(),
+                    file_metadata: HashMap::new(),
+                    preserved_property_names: HashSet::new(),
+                    lazy_imports_by_file: HashMap::new(),
+                    package_aliases: Vec::new(),
+                    static_property_names: HashSet::new(),
+                    workspace_dir: root.clone(),
+                },
+            )
+        })
+        .unwrap();
+
+    assert!(
+        transformed.contains("__live(__exports,__gcc_export_0,[0,0,1,1,2,2]);"),
+        "{transformed}"
+    );
+    assert!(
+        !transformed.contains("__live(__exports,0,function(){return __gcc_export_0[0];});"),
+        "{transformed}"
+    );
+}
+
+#[test]
+fn bundler_runtime_packs_export_all_from_single_dependency() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("gcc-ts-bundler-packed-export-all-{unique}"));
+    let src_dir = root.join("src");
+    let dep_file = src_dir.join("dep.ts");
+    let main_file = src_dir.join("main.ts");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(
+        &dep_file,
+        "export const alpha = 1;\nexport const beta = 2;\nexport const gamma = 3;\n",
+    )
+    .unwrap();
+    fs::write(&main_file, "export * from './dep';\n").unwrap();
+
+    let dep_module_id = to_goog_module_id(&dep_file, &root);
+    let main_module_id = to_goog_module_id(&main_file, &root);
+    let transformed = GLOBALS
+        .set(&Globals::new(), || {
+            transform_source_file(
+                &main_file,
+                &super::TranspileContext {
+                    bundler_module_slots: HashMap::from([
+                        (
+                            dep_module_id,
+                            super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
+                                "alpha".to_string(),
+                                "beta".to_string(),
+                                "gamma".to_string(),
+                            ])),
+                        ),
+                        (
+                            main_module_id,
+                            super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
+                                "alpha".to_string(),
+                                "beta".to_string(),
+                                "gamma".to_string(),
+                            ])),
+                        ),
+                    ]),
+                    bundler_runtime_logical_ids: HashMap::new(),
+                    chunk_mode: super::ChunkMode::BundlerRuntime,
+                    commonjs_specifiers: HashSet::new(),
+                    file_metadata: HashMap::new(),
+                    preserved_property_names: HashSet::new(),
+                    lazy_imports_by_file: HashMap::new(),
+                    package_aliases: Vec::new(),
+                    static_property_names: HashSet::new(),
+                    workspace_dir: root.clone(),
+                },
+            )
+        })
+        .unwrap();
+
+    assert!(
+        transformed.contains("__live(__exports,__gcc_export_all_0,[0,0,1,1,2,2]);"),
+        "{transformed}"
+    );
+    assert!(
+        !transformed.contains("__live(__exports,0,function(){return __gcc_export_all_0[0];});"),
+        "{transformed}"
+    );
+}
+
+#[test]
+fn bundler_runtime_packs_imported_slot_alias_reexports_per_source() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("gcc-ts-bundler-packed-import-aliases-{unique}"));
+    let src_dir = root.join("src");
+    let alpha_file = src_dir.join("alpha.ts");
+    let beta_file = src_dir.join("beta.ts");
+    let main_file = src_dir.join("main.ts");
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(
+        &alpha_file,
+        "export const alpha = 1;\nexport const beta = 2;\n",
+    )
+    .unwrap();
+    fs::write(
+        &beta_file,
+        "export const gamma = 3;\nexport const delta = 4;\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_file,
+        [
+            "import { alpha, beta } from './alpha';",
+            "import { gamma, delta } from './beta';",
+            "export { alpha, beta, gamma, delta };",
+            "",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    let alpha_module_id = to_goog_module_id(&alpha_file, &root);
+    let beta_module_id = to_goog_module_id(&beta_file, &root);
+    let main_module_id = to_goog_module_id(&main_file, &root);
+    let transformed = GLOBALS
+        .set(&Globals::new(), || {
+            transform_source_file(
+                &main_file,
+                &super::TranspileContext {
+                    bundler_module_slots: HashMap::from([
+                        (
+                            alpha_module_id,
+                            super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
+                                "alpha".to_string(),
+                                "beta".to_string(),
+                            ])),
+                        ),
+                        (
+                            beta_module_id,
+                            super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
+                                "delta".to_string(),
+                                "gamma".to_string(),
+                            ])),
+                        ),
+                        (
+                            main_module_id,
+                            super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
+                                "alpha".to_string(),
+                                "beta".to_string(),
+                                "delta".to_string(),
+                                "gamma".to_string(),
+                            ])),
+                        ),
+                    ]),
+                    bundler_runtime_logical_ids: HashMap::new(),
+                    chunk_mode: super::ChunkMode::BundlerRuntime,
+                    commonjs_specifiers: HashSet::new(),
+                    file_metadata: HashMap::new(),
+                    preserved_property_names: HashSet::new(),
+                    lazy_imports_by_file: HashMap::new(),
+                    package_aliases: Vec::new(),
+                    static_property_names: HashSet::new(),
+                    workspace_dir: root.clone(),
+                },
+            )
+        })
+        .unwrap();
+
+    assert!(
+        transformed.contains("__live(__exports,__gcc_import_0,[0,0,1,1]);"),
+        "{transformed}"
+    );
+    assert!(
+        transformed.contains("__live(__exports,__gcc_import_1,[2,0,3,1]);"),
+        "{transformed}"
+    );
+    assert!(
+        !transformed.contains("__live(__exports,0,function(){return __gcc_import_0[0];});"),
+        "{transformed}"
+    );
+}
+
+#[test]
 fn bundler_runtime_rewrites_promise_consumer_callback_params_to_slots() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
