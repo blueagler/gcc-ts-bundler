@@ -56,3 +56,15 @@ export async function copyOrLinkFiles(sourceFiles: string[], outDir: string) {
     }),
   );
 }
+
+export async function copyFiles(sourceFiles: string[], outDir: string) {
+  await fs.rm(outDir, { force: true, recursive: true });
+  await ensureDirectory(outDir);
+
+  await Promise.all(
+    sourceFiles.map(async (sourceFile) => {
+      const destinationFile = path.join(outDir, path.basename(sourceFile));
+      await fs.copyFile(sourceFile, destinationFile);
+    }),
+  );
+}

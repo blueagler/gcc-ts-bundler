@@ -100,6 +100,9 @@ export async function emitNativeStage({
     outDir: paths.outDir,
     usesPersistentCache,
   });
+  if (usesPersistentCache) {
+    logInternalDetail("cache:native-emit", cachedResult ? "hit" : "miss");
+  }
   if (cachedResult) {
     return cachedResult;
   }

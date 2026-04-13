@@ -164,11 +164,15 @@ export function gccTsBundler(
         );
       }
       const captureRoot = await prepareCaptureRoot({
+        config: resolvedConfig,
         debugDir: options.debug?.dumpCapturedGraphDir,
+        options,
         projectRoot: resolvedConfig.root,
       });
       const srcDir = path.join(captureRoot, "src");
       const outDir = path.join(captureRoot, "gcc-out");
+      await fs.rm(srcDir, { force: true, recursive: true });
+      await fs.mkdir(srcDir, { recursive: true });
       const publicPath = resolvePublicPath(resolvedConfig, options);
       const manifestSettings = resolveManifestFileSettings(options);
       const cssAnalysisStartedAt = performance.now();

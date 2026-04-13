@@ -3,8 +3,11 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 
 import ts from "typescript";
+import type { ResolvedConfig } from "vite";
 import type { PluginContext } from "rollup";
 
+import { hashJson } from "../cache/hash";
+import type { GccTsBundlerVitePluginOptions } from "./types";
 import type {
   CapturedModule,
   CapturedModuleAnalysis,
@@ -30,23 +33,62 @@ export type CapturedModuleResolutionCache = Map<
 >;
 
 export async function prepareCaptureRoot(input: {
+  config: ResolvedConfig;
   debugDir?: string;
+  options: GccTsBundlerVitePluginOptions;
   projectRoot: string;
 }) {
-  const targetDir = path.resolve(
-    input.projectRoot,
-    input.debugDir ??
-      path.join(
-        GCC_CAPTURE_DIR,
-        createHash("sha256")
-          .update(`${input.projectRoot}:${Date.now()}`)
-          .digest("hex")
-          .slice(0, 12),
-      ),
-  );
-  await fs.rm(targetDir, { force: true, recursive: true });
+  const targetDir = input.debugDir
+    ? path.resolve(input.projectRoot, input.debugDir)
+    : resolveViteCaptureRootPath({
+        config: input.config,
+        options: input.options,
+        projectRoot: input.projectRoot,
+      });
+  if (input.debugDir) {
+    await fs.rm(targetDir, { force: true, recursive: true });
+  }
   await fs.mkdir(targetDir, { recursive: true });
   return targetDir;
+}
+
+export function resolveViteCaptureRootPath(input: {
+  config: Pick<ResolvedConfig, "base" | "mode" | "root" | "build">;
+  options: GccTsBundlerVitePluginOptions;
+  projectRoot: string;
+}) {
+  return path.resolve(
+    input.projectRoot,
+    GCC_CAPTURE_DIR,
+    resolveViteCaptureRootId(input),
+  );
+}
+
+export function resolveViteCaptureRootId(input: {
+  config: Pick<ResolvedConfig, "base" | "mode" | "root" | "build">;
+  options: GccTsBundlerVitePluginOptions;
+  projectRoot: string;
+}) {
+  return hashJson({
+    plugin: {
+      compiler: input.options.compiler ?? {},
+      externs: input.options.externs ?? {},
+      html: input.options.html ?? {},
+      runtime: input.options.runtime ?? {},
+    },
+    projectRoot: path.resolve(input.projectRoot),
+    vite: {
+      base: input.config.base,
+      build: {
+        assetsDir: input.config.build.assetsDir,
+        cssCodeSplit: input.config.build.cssCodeSplit,
+        minify: input.config.build.minify,
+        target: input.config.build.target,
+      },
+      mode: input.config.mode,
+      root: path.resolve(input.config.root),
+    },
+  }).slice(0, 12);
 }
 
 export function shouldCaptureModule(id: string, code: string) {

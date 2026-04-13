@@ -2,11 +2,11 @@ import fs from "fs/promises";
 import path from "path";
 
 import {
-  copyOrLinkFiles,
+  copyFiles,
   ensureDirectory,
   ensureParentDirectory,
 } from "../../internal/files";
-import { withInternalTiming } from "../../internal/timing";
+import { logInternalDetail, withInternalTiming } from "../../internal/timing";
 import { ChunkPlanChunk, NormalizedBuildOptions } from "../../internal/types";
 import { prepareClosureJobs } from "../../native/load";
 import {
@@ -165,19 +165,30 @@ async function compilePreparedClosureJobs({
     chunkMode === "bundler-runtime"
       ? determineClosureConcurrency(prepared.compileJobs.length)
       : 1;
-  return runWithConcurrency(prepared.compileJobs, concurrency, async (job) =>
-    runPreparedClosureJob({
-      cacheDir,
-      job,
-    }),
+  const results = await runWithConcurrency(
+    prepared.compileJobs,
+    concurrency,
+    async (job) =>
+      runPreparedClosureJob({
+        cacheDir,
+        job,
+      }),
   );
+  if (cacheDir) {
+    const hits = results.filter((result) => result.cacheHit).length;
+    logInternalDetail(
+      "cache:closure-jobs",
+      `hits=${hits} misses=${results.length - hits} jobs=${results.length}`,
+    );
+  }
+  return results.map((result) => result.exitCode);
 }
 
 async function publishPreparedClosureOutputs(
   outputFiles: string[],
   cacheOutputDir: string,
 ) {
-  await copyOrLinkFiles(outputFiles, cacheOutputDir);
+  await copyFiles(outputFiles, cacheOutputDir);
 }
 
 async function runPreparedClosureJob({
@@ -198,7 +209,10 @@ async function runPreparedClosureJob({
       })
     : false;
   if (cached) {
-    return 0;
+    return {
+      cacheHit: true,
+      exitCode: 0,
+    };
   }
 
   const closureOptions: ClosureCompilerOptions = {
@@ -236,7 +250,10 @@ async function runPreparedClosureJob({
   configureClosureCompilerOptions(closureOptions);
   const exitCode = await runClosureCompiler(closureOptions);
   if (exitCode !== 0) {
-    return exitCode;
+    return {
+      cacheHit: false,
+      exitCode,
+    };
   }
 
   if (cacheDir) {
@@ -248,5 +265,8 @@ async function runPreparedClosureJob({
     });
   }
 
-  return 0;
+  return {
+    cacheHit: false,
+    exitCode: 0,
+  };
 }

@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 
-import { copyOrLinkFiles } from "../internal/files";
+import { copyFiles } from "../internal/files";
 import { publishedOutputsMatch } from "../internal/file-state";
 
 export async function publishOutputs(outputFiles: string[], outDir: string) {
@@ -9,7 +9,7 @@ export async function publishOutputs(outputFiles: string[], outDir: string) {
     return;
   }
 
-  await copyOrLinkFiles(outputFiles, outDir);
+  await copyFiles(outputFiles, outDir);
 }
 
 export function toImportPath(relativePath: string): string {

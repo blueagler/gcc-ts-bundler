@@ -45,6 +45,7 @@ import {
   ensureWorkspaceNodeModules,
   resolveTsConfigPath,
 } from "./resolve-build/workspace";
+import { logInternalDetail } from "../internal/timing";
 
 export { normalizeBuildOptions } from "./resolve-build/options";
 export {
@@ -108,16 +109,22 @@ export async function resolveBuild(
   const cachedSnapshot = usesPersistentCache
     ? await readJsonIfExists<ResolveSnapshot>(resolveSnapshotPath)
     : null;
-  if (
-    cachedSnapshot &&
+  const resolveSnapshotHit =
+    !!cachedSnapshot &&
     Array.isArray(cachedSnapshot.packageAliases) &&
     Array.isArray(cachedSnapshot.sourceFiles) &&
     Array.isArray(cachedSnapshot.packageJsonFiles) &&
     cachedSnapshot.packageSignature === context.packageSignature &&
     cachedSnapshot.compilerOptionsHash === compilerOptionsHash &&
     cachedSnapshot.optionsSignature === context.optionsSignature &&
-    (await trackedFilesMatch(cachedSnapshot.trackedFiles))
-  ) {
+    (await trackedFilesMatch(cachedSnapshot.trackedFiles));
+  if (usesPersistentCache) {
+    logInternalDetail(
+      "cache:resolve-snapshot",
+      resolveSnapshotHit ? "hit" : "miss",
+    );
+  }
+  if (cachedSnapshot && resolveSnapshotHit) {
     const entryFiles = cachedSnapshot.entryFiles.map(
       (entry): BuildEntry => toBuildEntry(entry, sourceRoot),
     );

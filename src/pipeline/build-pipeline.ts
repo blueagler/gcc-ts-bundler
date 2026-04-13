@@ -29,7 +29,7 @@ import {
   toImportPath,
   toPublishedOutputPaths,
 } from "./build-helpers";
-import { withInternalTiming } from "../internal/timing";
+import { logInternalDetail, withInternalTiming } from "../internal/timing";
 
 interface FinalCacheMetadata {
   outputFiles: string[];
@@ -51,16 +51,17 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     const fastSnapshot = await readJsonIfExists<FinalFastSnapshot>(
       path.join(context.projectCacheDir, "final-fast.json"),
     );
-    if (
-      fastSnapshot &&
+    const finalFastCacheHit =
+      !!fastSnapshot &&
       fastSnapshot.optionsSignature === context.optionsSignature &&
       fastSnapshot.packageSignature === context.packageSignature &&
       (await trackedFilesMatch(fastSnapshot.trackedFiles)) &&
       (await publishedOutputsMatchSnapshot(
         fastSnapshot.publishedOutputs,
         context.options.outDir,
-      ))
-    ) {
+      ));
+    logInternalDetail("cache:final-fast", finalFastCacheHit ? "hit" : "miss");
+    if (fastSnapshot && finalFastCacheHit) {
       return {
         cacheHit: true,
         diagnostics: [],
@@ -88,11 +89,17 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     const finalMetadata = usesPersistentCache
       ? await readJsonIfExists<FinalCacheMetadata>(finalMetadataPath)
       : null;
-    if (
+    const finalMetadataHit =
       usesPersistentCache &&
-      finalMetadata &&
-      (await filesExist(finalMetadata.outputFiles))
-    ) {
+      !!finalMetadata &&
+      (await filesExist(finalMetadata.outputFiles));
+    if (usesPersistentCache) {
+      logInternalDetail(
+        "cache:final-metadata",
+        finalMetadataHit ? "hit" : "miss",
+      );
+    }
+    if (finalMetadata && finalMetadataHit) {
       await publishOutputs(finalMetadata.outputFiles, context.options.outDir);
       return {
         cacheHit: true,

@@ -168,20 +168,12 @@ async function hashFileInput(filePath) {
 async function hashFilesInOrder(filePaths) {
   return Promise.all(filePaths.map((filePath) => hashFileInput(filePath)));
 }
-async function copyOrLinkFiles(sourceFiles, outDir) {
+async function copyFiles(sourceFiles, outDir) {
   await import_promises.default.rm(outDir, { force: true, recursive: true });
   await ensureDirectory(outDir);
   await Promise.all(sourceFiles.map(async (sourceFile) => {
     const destinationFile = import_path6.default.join(outDir, import_path6.default.basename(sourceFile));
-    try {
-      await import_promises.default.link(sourceFile, destinationFile);
-    } catch (error) {
-      const code = error.code;
-      if (code !== "EXDEV" && code !== "EEXIST" && code !== "EPERM") {
-        throw error;
-      }
-      await import_promises.default.copyFile(sourceFile, destinationFile);
-    }
+    await import_promises.default.copyFile(sourceFile, destinationFile);
   }));
 }
 var import_promises, import_path6, fileInputHashCache;
@@ -746,6 +738,36 @@ var init_workspace = __esm(() => {
   import_typescript9 = __toESM(require("typescript"));
 });
 
+// src/internal/timing.ts
+function logInternalTiming(label, durationMs) {
+  if (!SHOW_INTERNAL_TIMINGS) {
+    return;
+  }
+  console.error(`[gcc-ts-bundler timing] ${label}: ${durationMs.toFixed(1)}ms`);
+}
+function logInternalDetail(label, detail) {
+  if (!SHOW_INTERNAL_TIMINGS) {
+    return;
+  }
+  console.error(`[gcc-ts-bundler timing] ${label}: ${detail}`);
+}
+async function withInternalTiming(label, work) {
+  if (!SHOW_INTERNAL_TIMINGS) {
+    return await work();
+  }
+  const startedAt = import_node_perf_hooks.performance.now();
+  try {
+    return await work();
+  } finally {
+    logInternalTiming(label, import_node_perf_hooks.performance.now() - startedAt);
+  }
+}
+var import_node_perf_hooks, SHOW_INTERNAL_TIMINGS;
+var init_timing = __esm(() => {
+  import_node_perf_hooks = require("node:perf_hooks");
+  SHOW_INTERNAL_TIMINGS = process.env.GCC_BUILD_TIMINGS === "1";
+});
+
 // src/pipeline/resolve-build/options.ts
 function normalizeBuildOptions(options) {
   const projectRoot = import_path15.default.resolve(options.projectRoot ?? process.cwd());
@@ -834,7 +856,11 @@ async function resolveBuild(context) {
   const overlayEntries = options.entries.map((entry) => import_path16.default.join(sourceRoot, import_path16.default.relative(options.srcDir, entry)));
   const resolveSnapshotPath = import_path16.default.join(cacheStore.projectCacheDir, "resolve", "latest.json");
   const cachedSnapshot = usesPersistentCache ? await readJsonIfExists(resolveSnapshotPath) : null;
-  if (cachedSnapshot && Array.isArray(cachedSnapshot.packageAliases) && Array.isArray(cachedSnapshot.sourceFiles) && Array.isArray(cachedSnapshot.packageJsonFiles) && cachedSnapshot.packageSignature === context.packageSignature && cachedSnapshot.compilerOptionsHash === compilerOptionsHash && cachedSnapshot.optionsSignature === context.optionsSignature && await trackedFilesMatch(cachedSnapshot.trackedFiles)) {
+  const resolveSnapshotHit = !!cachedSnapshot && Array.isArray(cachedSnapshot.packageAliases) && Array.isArray(cachedSnapshot.sourceFiles) && Array.isArray(cachedSnapshot.packageJsonFiles) && cachedSnapshot.packageSignature === context.packageSignature && cachedSnapshot.compilerOptionsHash === compilerOptionsHash && cachedSnapshot.optionsSignature === context.optionsSignature && await trackedFilesMatch(cachedSnapshot.trackedFiles);
+  if (usesPersistentCache) {
+    logInternalDetail("cache:resolve-snapshot", resolveSnapshotHit ? "hit" : "miss");
+  }
+  if (cachedSnapshot && resolveSnapshotHit) {
     const entryFiles2 = cachedSnapshot.entryFiles.map((entry) => toBuildEntry(entry, sourceRoot));
     const shimDir2 = import_path16.default.join(cacheStore.workspaceDir, "entries");
     const shimFiles2 = toShimFiles(entryFiles2, shimDir2);
@@ -1019,39 +1045,10 @@ var init_resolve_build = __esm(() => {
   init_cache();
   init_jsx_runtime();
   init_workspace();
+  init_timing();
   init_options();
   init_signatures();
   import_path16 = __toESM(require("path"));
-});
-
-// src/internal/timing.ts
-function logInternalTiming(label, durationMs) {
-  if (!SHOW_INTERNAL_TIMINGS) {
-    return;
-  }
-  console.error(`[gcc-ts-bundler timing] ${label}: ${durationMs.toFixed(1)}ms`);
-}
-function logInternalDetail(label, detail) {
-  if (!SHOW_INTERNAL_TIMINGS) {
-    return;
-  }
-  console.error(`[gcc-ts-bundler timing] ${label}: ${detail}`);
-}
-async function withInternalTiming(label, work) {
-  if (!SHOW_INTERNAL_TIMINGS) {
-    return await work();
-  }
-  const startedAt = import_node_perf_hooks.performance.now();
-  try {
-    return await work();
-  } finally {
-    logInternalTiming(label, import_node_perf_hooks.performance.now() - startedAt);
-  }
-}
-var import_node_perf_hooks, SHOW_INTERNAL_TIMINGS;
-var init_timing = __esm(() => {
-  import_node_perf_hooks = require("node:perf_hooks");
-  SHOW_INTERNAL_TIMINGS = process.env.GCC_BUILD_TIMINGS === "1";
 });
 
 // src/stages/native/closure-ir/decorators.ts
@@ -1995,6 +1992,9 @@ async function emitNativeStage({
     outDir: paths.outDir,
     usesPersistentCache
   });
+  if (usesPersistentCache) {
+    logInternalDetail("cache:native-emit", cachedResult ? "hit" : "miss");
+  }
   if (cachedResult) {
     return cachedResult;
   }
@@ -2844,13 +2844,18 @@ async function compilePreparedClosureJobs({
 }) {
   const cacheDir = usesPersistentCache ? import_path19.default.join(projectCacheDir, "closure-jobs") : null;
   const concurrency = chunkMode === "bundler-runtime" ? determineClosureConcurrency(prepared.compileJobs.length) : 1;
-  return runWithConcurrency(prepared.compileJobs, concurrency, async (job) => runPreparedClosureJob({
+  const results = await runWithConcurrency(prepared.compileJobs, concurrency, async (job) => runPreparedClosureJob({
     cacheDir,
     job
   }));
+  if (cacheDir) {
+    const hits = results.filter((result) => result.cacheHit).length;
+    logInternalDetail("cache:closure-jobs", `hits=${hits} misses=${results.length - hits} jobs=${results.length}`);
+  }
+  return results.map((result) => result.exitCode);
 }
 async function publishPreparedClosureOutputs(outputFiles, cacheOutputDir) {
-  await copyOrLinkFiles(outputFiles, cacheOutputDir);
+  await copyFiles(outputFiles, cacheOutputDir);
 }
 async function runPreparedClosureJob({
   cacheDir,
@@ -2865,7 +2870,10 @@ async function runPreparedClosureJob({
     job
   }) : false;
   if (cached) {
-    return 0;
+    return {
+      cacheHit: true,
+      exitCode: 0
+    };
   }
   const closureOptions = {
     assumeFunctionWrapper: job.assumeFunctionWrapper,
@@ -2898,7 +2906,10 @@ async function runPreparedClosureJob({
   configureClosureCompilerOptions(closureOptions);
   const exitCode = await runClosureCompiler(closureOptions);
   if (exitCode !== 0) {
-    return exitCode;
+    return {
+      cacheHit: false,
+      exitCode
+    };
   }
   if (cacheDir) {
     await persistCachedClosureJob({
@@ -2908,7 +2919,10 @@ async function runPreparedClosureJob({
       job
     });
   }
-  return 0;
+  return {
+    cacheHit: false,
+    exitCode: 0
+  };
 }
 var import_promises5, import_path19;
 var init_run_closure = __esm(() => {
@@ -2928,7 +2942,7 @@ async function publishOutputs(outputFiles, outDir) {
   if (await publishedOutputsMatch2(outputFiles, outDir)) {
     return;
   }
-  await copyOrLinkFiles(outputFiles, outDir);
+  await copyFiles(outputFiles, outDir);
 }
 function toImportPath(relativePath) {
   const normalized = relativePath.replace(/\\/g, "/").replace(/\.[^/.]+$/, "");
@@ -2966,7 +2980,9 @@ async function build(options) {
   const usesPersistentCache = context.options.cache.mode === "persistent";
   if (usesPersistentCache) {
     const fastSnapshot = await readJsonIfExists(import_path21.default.join(context.projectCacheDir, "final-fast.json"));
-    if (fastSnapshot && fastSnapshot.optionsSignature === context.optionsSignature && fastSnapshot.packageSignature === context.packageSignature && await trackedFilesMatch(fastSnapshot.trackedFiles) && await publishedOutputsMatchSnapshot(fastSnapshot.publishedOutputs, context.options.outDir)) {
+    const finalFastCacheHit = !!fastSnapshot && fastSnapshot.optionsSignature === context.optionsSignature && fastSnapshot.packageSignature === context.packageSignature && await trackedFilesMatch(fastSnapshot.trackedFiles) && await publishedOutputsMatchSnapshot(fastSnapshot.publishedOutputs, context.options.outDir);
+    logInternalDetail("cache:final-fast", finalFastCacheHit ? "hit" : "miss");
+    if (fastSnapshot && finalFastCacheHit) {
       return {
         cacheHit: true,
         diagnostics: [],
@@ -2982,7 +2998,11 @@ async function build(options) {
     const resolvedBuild = resolved;
     const finalMetadataPath = import_path21.default.join(resolvedBuild.finalCacheDir, "meta.json");
     const finalMetadata = usesPersistentCache ? await readJsonIfExists(finalMetadataPath) : null;
-    if (usesPersistentCache && finalMetadata && await filesExist(finalMetadata.outputFiles)) {
+    const finalMetadataHit = usesPersistentCache && !!finalMetadata && await filesExist(finalMetadata.outputFiles);
+    if (usesPersistentCache) {
+      logInternalDetail("cache:final-metadata", finalMetadataHit ? "hit" : "miss");
+    }
+    if (finalMetadata && finalMetadataHit) {
       await publishOutputs(finalMetadata.outputFiles, context.options.outDir);
       return {
         cacheHit: true,

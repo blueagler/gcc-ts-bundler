@@ -7,6 +7,7 @@ import { expect, test } from "bun:test";
 import {
   getCapturedModuleAnalysis,
   normalizeRetainedCapturedModules,
+  resolveViteCaptureRootPath,
 } from "../src/vite/capture.ts";
 import { resolveNormalizedBridgeModuleIds } from "../src/vite/graph.ts";
 import { materializeCapturedGraph } from "../src/vite/materialize.ts";
@@ -16,7 +17,7 @@ import {
   resolveViteLanguageOut,
   VITE_LANGUAGE_OUT_ERROR,
 } from "../src/vite/config.ts";
-import { createFixture, execFileAsync } from "./helpers.mjs";
+import { createFixture, execFileAsync, listDirectoryNames } from "./helpers.mjs";
 
 async function listFiles(rootDir, currentDir = rootDir) {
   const entries = await fs.readdir(currentDir, { withFileTypes: true });
@@ -55,7 +56,7 @@ async function buildViteFixture(fixture, overrides = {}) {
       "  plugins: [",
       "    gccTsBundler({",
       "      compiler: {",
-      '        cache: { mode: "off" },',
+      `        cache: ${JSON.stringify(overrides.cache ?? { mode: "off" })},`,
       "      },",
       ...(overrides.debugDir
         ? [
@@ -71,8 +72,12 @@ async function buildViteFixture(fixture, overrides = {}) {
     ].join("\n"),
   );
 
-  await execFileAsync(process.execPath, [viteBin, "build"], {
+  return await execFileAsync(process.execPath, [viteBin, "build"], {
     cwd: fixture.projectRoot,
+    env: {
+      ...process.env,
+      ...(overrides.env ?? {}),
+    },
   });
 }
 
@@ -967,6 +972,108 @@ test("resolveViteLanguageOut rejects unsupported target strings", () => {
     }),
   ).toThrow(/could not derive a compiler output level/);
 });
+
+test("resolveViteCaptureRootPath is deterministic for identical inputs", () => {
+  const input = {
+    config: {
+      base: "/",
+      build: {
+        assetsDir: "assets",
+        cssCodeSplit: true,
+        minify: "esbuild",
+        target: "esnext",
+      },
+      mode: "production",
+      root: "/tmp/demo",
+    },
+    options: {
+      compiler: {
+        compilationLevel: "ADVANCED",
+      },
+      externs: {
+        generate: {
+          mode: "runtime-aware",
+          modules: ["pkg"],
+        },
+      },
+    },
+    projectRoot: "/tmp/demo",
+  };
+
+  expect(resolveViteCaptureRootPath(input)).toBe(
+    resolveViteCaptureRootPath(input),
+  );
+});
+
+test("resolveViteCaptureRootPath changes when material build identity changes", () => {
+  const baseInput = {
+    config: {
+      base: "/",
+      build: {
+        assetsDir: "assets",
+        cssCodeSplit: true,
+        minify: "esbuild",
+        target: "esnext",
+      },
+      mode: "production",
+      root: "/tmp/demo",
+    },
+    options: {
+      compiler: {
+        compilationLevel: "ADVANCED",
+      },
+    },
+    projectRoot: "/tmp/demo",
+  };
+
+  expect(
+    resolveViteCaptureRootPath({
+      ...baseInput,
+      config: {
+        ...baseInput.config,
+        build: {
+          ...baseInput.config.build,
+          target: "es2018",
+        },
+      },
+    }),
+  ).not.toBe(resolveViteCaptureRootPath(baseInput));
+});
+
+test.serial(
+  "gccTsBundler reuses the same Vite capture root and restores immutable final cache outputs on identical builds",
+  async () => {
+    const fixture = await createFixture();
+    await writeViteCssFixture(fixture);
+
+    const first = await buildViteFixture(fixture, {
+      cache: { dir: ".cache", mode: "persistent" },
+      env: { GCC_BUILD_TIMINGS: "1" },
+    });
+    const second = await buildViteFixture(fixture, {
+      cache: { dir: ".cache", mode: "persistent" },
+      env: { GCC_BUILD_TIMINGS: "1" },
+    });
+
+    expect(
+      await listDirectoryNames(
+        path.join(fixture.projectRoot, ".gcc-ts-bundler-vite"),
+      ),
+    ).toHaveLength(1);
+    expect(first.stderr).toContain("[gcc-ts-bundler timing] cache:final-fast: miss");
+    expect(first.stderr).toContain(
+      "[gcc-ts-bundler timing] cache:final-metadata: miss",
+    );
+    expect(second.stderr).toContain(
+      "[gcc-ts-bundler timing] cache:final-fast: miss",
+    );
+    expect(second.stderr).toContain(
+      "[gcc-ts-bundler timing] cache:final-metadata: hit",
+    );
+    expect(second.stderr).not.toContain("[gcc-ts-bundler timing] closure:compile:");
+    expect(second.stderr).not.toContain("[gcc-ts-bundler timing] native-emit:transpile:");
+  },
+);
 
 test.serial(
   "gccTsBundler rejects compiler.languageOut in Vite mode with an actionable error",
