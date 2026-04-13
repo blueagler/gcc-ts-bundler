@@ -9,10 +9,8 @@ import {
 } from "../cache/store";
 import {
   collectPublishedOutputStats,
-  FileStateSnapshot,
   filesExist,
   publishedOutputsMatchSnapshot,
-  trackedFilesMatch,
 } from "../internal/file-state";
 import {
   createBuildContext,
@@ -40,40 +38,11 @@ interface FinalFastSnapshot {
   optionsSignature: string;
   packageSignature: string;
   publishedOutputs: Array<{ name: string; size: number }>;
-  trackedFiles: Record<string, FileStateSnapshot>;
 }
 
 export async function build(options: BuildOptions): Promise<BuildResult> {
   const context = await createBuildContext(normalizeBuildOptions(options));
   const usesPersistentCache = context.options.cache.mode === "persistent";
-
-  if (usesPersistentCache) {
-    const fastSnapshot = await readJsonIfExists<FinalFastSnapshot>(
-      path.join(context.projectCacheDir, "final-fast.json"),
-    );
-    const finalFastCacheHit =
-      !!fastSnapshot &&
-      fastSnapshot.optionsSignature === context.optionsSignature &&
-      fastSnapshot.packageSignature === context.packageSignature &&
-      (await trackedFilesMatch(fastSnapshot.trackedFiles)) &&
-      (await publishedOutputsMatchSnapshot(
-        fastSnapshot.publishedOutputs,
-        context.options.outDir,
-      ));
-    logInternalDetail("cache:final-fast", finalFastCacheHit ? "hit" : "miss");
-    if (fastSnapshot && finalFastCacheHit) {
-      return {
-        cacheHit: true,
-        diagnostics: [],
-        emitSkipped: false,
-        exitCode: 0,
-        outputFiles: toPublishedOutputPaths(
-          fastSnapshot.publishedOutputs,
-          context.options.outDir,
-        ),
-      };
-    }
-  }
 
   let resolved: Awaited<ReturnType<typeof resolveBuild>> | null = null;
 
@@ -82,6 +51,38 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       resolveBuild(context),
     );
     const resolvedBuild = resolved;
+    const finalFastSnapshotPath = path.join(
+      context.projectCacheDir,
+      "final-fast.json",
+    );
+    const finalFastSnapshot = usesPersistentCache
+      ? await readJsonIfExists<FinalFastSnapshot>(finalFastSnapshotPath)
+      : null;
+    const finalFastCacheHit =
+      usesPersistentCache &&
+      !!finalFastSnapshot &&
+      finalFastSnapshot.finalKey === resolvedBuild.finalKey &&
+      finalFastSnapshot.optionsSignature === context.optionsSignature &&
+      finalFastSnapshot.packageSignature === context.packageSignature &&
+      (await publishedOutputsMatchSnapshot(
+        finalFastSnapshot.publishedOutputs,
+        context.options.outDir,
+      ));
+    if (usesPersistentCache) {
+      logInternalDetail("cache:final-fast", finalFastCacheHit ? "hit" : "miss");
+    }
+    if (finalFastSnapshot && finalFastCacheHit) {
+      return {
+        cacheHit: true,
+        diagnostics: [],
+        emitSkipped: false,
+        exitCode: 0,
+        outputFiles: toPublishedOutputPaths(
+          finalFastSnapshot.publishedOutputs,
+          context.options.outDir,
+        ),
+      };
+    }
     const finalMetadataPath = path.join(
       resolvedBuild.finalCacheDir,
       "meta.json",
@@ -228,14 +229,13 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       await writeJson(finalMetadataPath, {
         outputFiles: closureResult.cacheOutputFiles,
       } satisfies FinalCacheMetadata);
-      await writeJson(path.join(context.projectCacheDir, "final-fast.json"), {
+      await writeJson(finalFastSnapshotPath, {
         finalKey: resolvedBuild.finalKey,
         optionsSignature: context.optionsSignature,
         packageSignature: context.packageSignature,
         publishedOutputs: await collectPublishedOutputStats(
           closureResult.outputFiles,
         ),
-        trackedFiles: resolvedBuild.trackedFiles,
       } satisfies FinalFastSnapshot);
     }
 

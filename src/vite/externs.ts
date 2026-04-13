@@ -17,7 +17,7 @@ import {
   writeJson,
 } from "../cache/store";
 import { hashJson } from "../cache/hash";
-import { hashFileInput } from "../internal/files";
+import { hashFileInput, writeFileIfChanged } from "../internal/files";
 import { logInternalDetail } from "../internal/timing";
 import { getPackageSignature } from "../pipeline/resolve-build/signatures";
 import type { GccTsBundlerVitePluginOptions } from "./types";
@@ -75,11 +75,9 @@ export async function resolveCompilerExterns(input: {
   }
 
   if ((generateOptions.appendLines?.length ?? 0) > 0) {
-    await fs.appendFile(
-      generatedExternFile,
-      `\n${generateOptions.appendLines!.join("\n")}\n`,
-      "utf8",
-    );
+    const currentText = await fs.readFile(generatedExternFile, "utf8");
+    const appendedText = `${currentText.replace(/\s*$/u, "\n")}${generateOptions.appendLines!.join("\n")}\n`;
+    await writeFileIfChanged(generatedExternFile, appendedText);
   }
 
   return [...new Set([...explicitExterns, generatedExternFile])];
@@ -182,7 +180,7 @@ async function generateViteRuntimeAwareExterns(input: {
   ].join("\n");
 
   await fs.mkdir(path.dirname(input.generatedExternFile), { recursive: true });
-  await fs.writeFile(input.generatedExternFile, text, "utf8");
+  await writeFileIfChanged(input.generatedExternFile, text);
 }
 
 async function loadCachedPackageRuntimeHazards(input: {

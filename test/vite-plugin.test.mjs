@@ -1041,7 +1041,7 @@ test("resolveViteCaptureRootPath changes when material build identity changes", 
 });
 
 test.serial(
-  "gccTsBundler reuses the same Vite capture root and restores immutable final cache outputs on identical builds",
+  "gccTsBundler reuses the same Vite capture root and hits resolve snapshot plus final fast cache on identical builds",
   async () => {
     const fixture = await createFixture();
     await writeViteCssFixture(fixture);
@@ -1065,13 +1065,61 @@ test.serial(
       "[gcc-ts-bundler timing] cache:final-metadata: miss",
     );
     expect(second.stderr).toContain(
-      "[gcc-ts-bundler timing] cache:final-fast: miss",
+      "[gcc-ts-bundler timing] cache:resolve-snapshot: hit",
     );
     expect(second.stderr).toContain(
-      "[gcc-ts-bundler timing] cache:final-metadata: hit",
+      "[gcc-ts-bundler timing] cache:final-fast: hit",
+    );
+    expect(second.stderr).not.toContain(
+      "[gcc-ts-bundler timing] cache:final-metadata:",
     );
     expect(second.stderr).not.toContain("[gcc-ts-bundler timing] closure:compile:");
     expect(second.stderr).not.toContain("[gcc-ts-bundler timing] native-emit:transpile:");
+  },
+);
+
+test.serial(
+  "gccTsBundler falls back to final metadata restore when core outputs are missing",
+  async () => {
+    const fixture = await createFixture();
+    await writeViteCssFixture(fixture);
+
+    await buildViteFixture(fixture, {
+      cache: { dir: ".cache", mode: "persistent" },
+      env: { GCC_BUILD_TIMINGS: "1" },
+    });
+
+    const [captureRootId] = await listDirectoryNames(
+      path.join(fixture.projectRoot, ".gcc-ts-bundler-vite"),
+    );
+    expect(captureRootId).toBeTruthy();
+    await fs.rm(
+      path.join(
+        fixture.projectRoot,
+        ".gcc-ts-bundler-vite",
+        captureRootId,
+        "gcc-core-out",
+      ),
+      { force: true, recursive: true },
+    );
+
+    const restored = await buildViteFixture(fixture, {
+      cache: { dir: ".cache", mode: "persistent" },
+      env: { GCC_BUILD_TIMINGS: "1" },
+    });
+
+    expect(restored.stderr).toContain(
+      "[gcc-ts-bundler timing] cache:resolve-snapshot: hit",
+    );
+    expect(restored.stderr).toContain(
+      "[gcc-ts-bundler timing] cache:final-fast: miss",
+    );
+    expect(restored.stderr).toContain(
+      "[gcc-ts-bundler timing] cache:final-metadata: hit",
+    );
+    expect(restored.stderr).not.toContain(
+      "[gcc-ts-bundler timing] closure:compile:",
+    );
   },
 );
 

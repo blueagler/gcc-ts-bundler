@@ -2,7 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 
 import {
-  copyFiles,
+  publishFilesToDirectory,
   ensureDirectory,
   ensureParentDirectory,
 } from "../../internal/files";
@@ -188,7 +188,7 @@ async function publishPreparedClosureOutputs(
   outputFiles: string[],
   cacheOutputDir: string,
 ) {
-  await copyFiles(outputFiles, cacheOutputDir);
+  await publishFilesToDirectory(outputFiles, cacheOutputDir, "copy");
 }
 
 async function runPreparedClosureJob({

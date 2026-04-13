@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 
+import { writeFileIfChanged } from "../internal/files";
 import { createExternAnalysisContext } from "./externs/context";
 import {
   collectReachableTypeFiles,
@@ -122,7 +123,7 @@ export async function generateExterns(
     options.outputFile && path.resolve(projectRoot, options.outputFile);
   if (outputFile) {
     await fs.promises.mkdir(path.dirname(outputFile), { recursive: true });
-    await fs.promises.writeFile(outputFile, text, "utf8");
+    await writeFileIfChanged(outputFile, text);
   }
 
   return {

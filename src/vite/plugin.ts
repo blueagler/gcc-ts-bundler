@@ -10,7 +10,6 @@ import { collectOutputChunkStats } from "../internal/lifecycle-size";
 import { logInternalDetail, logInternalTiming } from "../internal/timing";
 import {
   normalizeRetainedCapturedModules,
-  prepareCaptureRoot,
   shouldCaptureModule,
   type CapturedModuleResolutionCache,
 } from "./capture";
@@ -55,6 +54,7 @@ import {
   renameCompiledNonBaseJsOutputs,
 } from "./naming";
 import type { GccTsBundlerVitePluginOptions } from "./types";
+import { prepareViteWorkspace, stageCompiledCoreOutputs } from "./workspace";
 
 export interface GccTsBundlerVitePlugin {
   apply?: "build" | "serve";
@@ -163,16 +163,19 @@ export function gccTsBundler(
             retainedCaptured.missingModuleIds.join("\n"),
         );
       }
-      const captureRoot = await prepareCaptureRoot({
+      const workspace = await prepareViteWorkspace({
         config: resolvedConfig,
         debugDir: options.debug?.dumpCapturedGraphDir,
         options,
         projectRoot: resolvedConfig.root,
       });
-      const srcDir = path.join(captureRoot, "src");
-      const outDir = path.join(captureRoot, "gcc-out");
-      await fs.rm(srcDir, { force: true, recursive: true });
-      await fs.mkdir(srcDir, { recursive: true });
+      const {
+        captureRoot,
+        coreOutDir,
+        finalOutDir,
+        materializedSrcDir,
+        srcDir,
+      } = workspace;
       const publicPath = resolvePublicPath(resolvedConfig, options);
       const manifestSettings = resolveManifestFileSettings(options);
       const cssAnalysisStartedAt = performance.now();
@@ -234,7 +237,7 @@ export function gccTsBundler(
           metrics: buildMetrics,
           moduleIds: materializedModuleIds,
           resolutionCache,
-          srcDir,
+          srcDir: materializedSrcDir,
         },
       );
       timingTotals.materializeMs += performance.now() - materializeStartedAt;
@@ -290,6 +293,7 @@ export function gccTsBundler(
       const materialized = await prebundleMaterializedDependencies({
         dynamicRootModuleIds,
         materialized: materializedBeforePrebundle,
+        outputSrcDir: srcDir,
       });
       timingTotals.dependencyPrebundleMs +=
         performance.now() - dependencyPrebundleStartedAt;
@@ -319,7 +323,7 @@ export function gccTsBundler(
       const compilerOptions = createCompilerOptions({
         config: resolvedConfig,
         options,
-        outDir,
+        outDir: coreOutDir,
         projectRoot: resolvedConfig.root,
         publicPath,
         srcDir: materialized.srcDir,
@@ -373,7 +377,15 @@ export function gccTsBundler(
         );
       }
 
-      const manifestFilePath = path.join(outDir, manifestSettings.fileName);
+      const compiledCoreOutputs = await stageCompiledCoreOutputs({
+        coreOutDir,
+        finalOutDir,
+        outputFiles: result.outputFiles,
+      });
+      const manifestFilePath = path.join(
+        compiledCoreOutputs.finalOutDir,
+        manifestSettings.fileName,
+      );
       const manifest = JSON.parse(
         await fs.readFile(manifestFilePath, "utf8"),
       ) as { modules?: Record<string, string> };
@@ -387,8 +399,8 @@ export function gccTsBundler(
         jsChunks,
         manifestFilePath,
         materialized,
-        outDir,
-        outputFiles: result.outputFiles,
+        outDir: compiledCoreOutputs.finalOutDir,
+        outputFiles: compiledCoreOutputs.outputFiles,
         outputOptions,
         publicPath,
         runtimeModuleSourceMapFilePath,
@@ -410,7 +422,7 @@ export function gccTsBundler(
         emittedOutputFiles: renamedNonBaseOutputs.emittedOutputFiles,
         manifestFilePath,
         outputOptions,
-        outDir,
+        outDir: compiledCoreOutputs.finalOutDir,
         publicPath,
       });
 
@@ -433,7 +445,7 @@ export function gccTsBundler(
         `js=${outputBytes.js} css=${outputBytes.css} fonts=${outputBytes.fonts} assets=${outputBytes.assets}`,
       );
       const finalBaseChunkFilePath = path.join(
-        outDir,
+        compiledCoreOutputs.finalOutDir,
         finalizedBaseOutput.baseScriptFileName,
       );
       const outputChunkStats = await collectOutputChunkStats({
@@ -448,7 +460,11 @@ export function gccTsBundler(
         `entry=${outputChunkStats.entryRawBytes}/${outputChunkStats.entryGzipBytes} lazy=${outputChunkStats.lazyRawBytes}/${outputChunkStats.lazyGzipBytes} factories=${outputChunkStats.entryFactoryCount}+${outputChunkStats.lazyFactoryCount}`,
       );
       const emitOutputsStartedAt = performance.now();
-      await emitCompiledOutputs(this, emittedOutputFiles, outDir);
+      await emitCompiledOutputs(
+        this,
+        emittedOutputFiles,
+        compiledCoreOutputs.finalOutDir,
+      );
       timingTotals.emitOutputsMs += performance.now() - emitOutputsStartedAt;
 
       if (options.html?.rewriteEntryScripts ?? REWRITE_ENTRY_SCRIPTS_DEFAULT) {

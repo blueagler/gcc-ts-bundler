@@ -129,12 +129,151 @@ function hashJson(value) {
 }
 var init_hash = () => {};
 
+// src/internal/files.ts
+import fs3 from "fs/promises";
+import path3 from "path";
+function uniqueSortedStrings(values) {
+  return [...new Set(values)].sort((left, right) => left.localeCompare(right));
+}
+async function ensureDirectory(dirPath) {
+  await fs3.mkdir(dirPath, { recursive: true });
+}
+async function ensureParentDirectory(filePath) {
+  await ensureDirectory(path3.dirname(filePath));
+}
+async function hashFileInput(filePath) {
+  const stat = await fs3.stat(filePath);
+  const cacheKey = `${filePath}:${stat.size}:${stat.mtimeMs}`;
+  const cached = fileInputHashCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  const pending = fs3.readFile(filePath, "utf-8").then((contents) => hashContent(contents));
+  fileInputHashCache.set(cacheKey, pending);
+  return pending;
+}
+async function hashFilesInOrder(filePaths) {
+  return Promise.all(filePaths.map((filePath) => hashFileInput(filePath)));
+}
+async function publishFilesToDirectory(sourceFiles, outDir, mode) {
+  await fs3.rm(outDir, { force: true, recursive: true });
+  await ensureDirectory(outDir);
+  await Promise.all(sourceFiles.map(async (sourceFile) => {
+    const destinationFile = path3.join(outDir, path3.basename(sourceFile));
+    if (mode === "copy") {
+      await fs3.copyFile(sourceFile, destinationFile);
+      return;
+    }
+    try {
+      await fs3.link(sourceFile, destinationFile);
+    } catch (error) {
+      const code = error.code;
+      if (code !== "EXDEV" && code !== "EEXIST" && code !== "EPERM") {
+        throw error;
+      }
+      await fs3.copyFile(sourceFile, destinationFile);
+    }
+  }));
+}
+async function syncDirectoryEntries(rootDir, entries, options = {}) {
+  await ensureDirectory(rootDir);
+  const expectedEntries = new Map(entries.map((entry) => [normalizeRelativePath(entry.relativePath), entry]));
+  const existingFiles = await listRelativeFiles(rootDir);
+  await Promise.all(existingFiles.filter((relativePath) => !expectedEntries.has(relativePath) && !(options.preserve?.(relativePath) ?? false)).map((relativePath) => fs3.rm(path3.join(rootDir, relativePath), { force: true })));
+  await removeEmptyDirectories(rootDir);
+  await Promise.all([...expectedEntries.values()].map(async (entry) => {
+    const filePath = path3.join(rootDir, normalizeRelativePath(entry.relativePath));
+    await ensureParentDirectory(filePath);
+    await writeFileIfChanged(filePath, entry.content);
+  }));
+}
+async function writeFileIfChanged(filePath, content) {
+  const nextContent = typeof content === "string" ? content : Buffer.from(content);
+  let currentContent = null;
+  try {
+    currentContent = await fs3.readFile(filePath, typeof content === "string" ? "utf8" : undefined);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+  if (currentContent !== null && fileContentsEqual(currentContent, nextContent)) {
+    return;
+  }
+  await fs3.writeFile(filePath, nextContent);
+}
+async function listRelativeFiles(rootDir, currentDir = rootDir) {
+  let entries;
+  try {
+    entries = await fs3.readdir(currentDir, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+  const files = [];
+  for (const entry of entries) {
+    const entryPath = path3.join(currentDir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...await listRelativeFiles(rootDir, entryPath));
+      continue;
+    }
+    files.push(normalizeRelativePath(path3.relative(rootDir, entryPath)));
+  }
+  return files.sort((left, right) => left.localeCompare(right));
+}
+async function removeEmptyDirectories(rootDir, currentDir = rootDir) {
+  let entries;
+  try {
+    entries = await fs3.readdir(currentDir, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => {
+    const entryPath = path3.join(currentDir, entry.name);
+    await removeEmptyDirectories(rootDir, entryPath);
+    const nestedEntries = await fs3.readdir(entryPath).catch((error) => {
+      if (error.code === "ENOENT") {
+        return [];
+      }
+      throw error;
+    });
+    if (nestedEntries.length === 0 && entryPath !== rootDir) {
+      await fs3.rmdir(entryPath).catch((error) => {
+        if (error.code !== "ENOENT") {
+          throw error;
+        }
+      });
+    }
+  }));
+}
+function fileContentsEqual(currentContent, nextContent) {
+  if (typeof currentContent === "string" && typeof nextContent === "string") {
+    return currentContent === nextContent;
+  }
+  const currentBuffer = typeof currentContent === "string" ? Buffer.from(currentContent) : currentContent;
+  const nextBuffer = typeof nextContent === "string" ? Buffer.from(nextContent) : nextContent;
+  return currentBuffer.equals(nextBuffer);
+}
+function normalizeRelativePath(relativePath) {
+  return relativePath.replace(/\\/g, "/").replace(/^\/+/u, "");
+}
+var fileInputHashCache;
+var init_files = __esm(() => {
+  init_hash();
+  fileInputHashCache = new Map;
+});
+
 // src/stages/native/compiler-options.ts
-import fs3 from "fs";
-import path5 from "path";
+import fs4 from "fs";
+import path6 from "path";
 import ts4 from "typescript";
 async function loadCompilerOptions(configPath, extraOptions = {}) {
-  const configStat = await fs3.promises.stat(configPath);
+  const configStat = await fs4.promises.stat(configPath);
   const cacheKey = hashJson({
     configPath,
     extraOptions,
@@ -145,7 +284,7 @@ async function loadCompilerOptions(configPath, extraOptions = {}) {
   if (cached) {
     return cached;
   }
-  const configDir = path5.dirname(configPath);
+  const configDir = path6.dirname(configPath);
   const configFile = ts4.readConfigFile(configPath, ts4.sys.readFile);
   if (configFile.error) {
     throw new Error(ts4.flattenDiagnosticMessageText(configFile.error.messageText, `
@@ -205,46 +344,6 @@ var init_types = __esm(() => {
     projectRoot: "",
     srcDir: ""
   });
-});
-
-// src/internal/files.ts
-import fs7 from "fs/promises";
-import path8 from "path";
-function uniqueSortedStrings(values) {
-  return [...new Set(values)].sort((left, right) => left.localeCompare(right));
-}
-async function ensureDirectory(dirPath) {
-  await fs7.mkdir(dirPath, { recursive: true });
-}
-async function ensureParentDirectory(filePath) {
-  await ensureDirectory(path8.dirname(filePath));
-}
-async function hashFileInput(filePath) {
-  const stat = await fs7.stat(filePath);
-  const cacheKey = `${filePath}:${stat.size}:${stat.mtimeMs}`;
-  const cached = fileInputHashCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-  const pending = fs7.readFile(filePath, "utf-8").then((contents) => hashContent(contents));
-  fileInputHashCache.set(cacheKey, pending);
-  return pending;
-}
-async function hashFilesInOrder(filePaths) {
-  return Promise.all(filePaths.map((filePath) => hashFileInput(filePath)));
-}
-async function copyFiles(sourceFiles, outDir) {
-  await fs7.rm(outDir, { force: true, recursive: true });
-  await ensureDirectory(outDir);
-  await Promise.all(sourceFiles.map(async (sourceFile) => {
-    const destinationFile = path8.join(outDir, path8.basename(sourceFile));
-    await fs7.copyFile(sourceFile, destinationFile);
-  }));
-}
-var fileInputHashCache;
-var init_files = __esm(() => {
-  init_hash();
-  fileInputHashCache = new Map;
 });
 
 // src/cache/store.ts
@@ -2799,7 +2898,7 @@ async function compilePreparedClosureJobs({
   return results.map((result) => result.exitCode);
 }
 async function publishPreparedClosureOutputs(outputFiles, cacheOutputDir) {
-  await copyFiles(outputFiles, cacheOutputDir);
+  await publishFilesToDirectory(outputFiles, cacheOutputDir, "copy");
 }
 async function runPreparedClosureJob({
   cacheDir,
@@ -2885,7 +2984,7 @@ async function publishOutputs(outputFiles, outDir) {
   if (await publishedOutputsMatch2(outputFiles, outDir)) {
     return;
   }
-  await copyFiles(outputFiles, outDir);
+  await publishFilesToDirectory(outputFiles, outDir, "copy");
 }
 function toImportPath(relativePath) {
   const normalized = relativePath.replace(/\\/g, "/").replace(/\.[^/.]+$/, "");
@@ -2919,24 +3018,25 @@ import path21 from "path";
 async function build(options) {
   const context = await createBuildContext(normalizeBuildOptions(options));
   const usesPersistentCache = context.options.cache.mode === "persistent";
-  if (usesPersistentCache) {
-    const fastSnapshot = await readJsonIfExists(path21.join(context.projectCacheDir, "final-fast.json"));
-    const finalFastCacheHit = !!fastSnapshot && fastSnapshot.optionsSignature === context.optionsSignature && fastSnapshot.packageSignature === context.packageSignature && await trackedFilesMatch(fastSnapshot.trackedFiles) && await publishedOutputsMatchSnapshot(fastSnapshot.publishedOutputs, context.options.outDir);
-    logInternalDetail("cache:final-fast", finalFastCacheHit ? "hit" : "miss");
-    if (fastSnapshot && finalFastCacheHit) {
+  let resolved = null;
+  try {
+    resolved = await withInternalTiming("resolve-build", () => resolveBuild(context));
+    const resolvedBuild = resolved;
+    const finalFastSnapshotPath = path21.join(context.projectCacheDir, "final-fast.json");
+    const finalFastSnapshot = usesPersistentCache ? await readJsonIfExists(finalFastSnapshotPath) : null;
+    const finalFastCacheHit = usesPersistentCache && !!finalFastSnapshot && finalFastSnapshot.finalKey === resolvedBuild.finalKey && finalFastSnapshot.optionsSignature === context.optionsSignature && finalFastSnapshot.packageSignature === context.packageSignature && await publishedOutputsMatchSnapshot(finalFastSnapshot.publishedOutputs, context.options.outDir);
+    if (usesPersistentCache) {
+      logInternalDetail("cache:final-fast", finalFastCacheHit ? "hit" : "miss");
+    }
+    if (finalFastSnapshot && finalFastCacheHit) {
       return {
         cacheHit: true,
         diagnostics: [],
         emitSkipped: false,
         exitCode: 0,
-        outputFiles: toPublishedOutputPaths(fastSnapshot.publishedOutputs, context.options.outDir)
+        outputFiles: toPublishedOutputPaths(finalFastSnapshot.publishedOutputs, context.options.outDir)
       };
     }
-  }
-  let resolved = null;
-  try {
-    resolved = await withInternalTiming("resolve-build", () => resolveBuild(context));
-    const resolvedBuild = resolved;
     const finalMetadataPath = path21.join(resolvedBuild.finalCacheDir, "meta.json");
     const finalMetadata = usesPersistentCache ? await readJsonIfExists(finalMetadataPath) : null;
     const finalMetadataHit = usesPersistentCache && !!finalMetadata && await filesExist(finalMetadata.outputFiles);
@@ -3035,12 +3135,11 @@ async function build(options) {
       await writeJson(finalMetadataPath, {
         outputFiles: closureResult.cacheOutputFiles
       });
-      await writeJson(path21.join(context.projectCacheDir, "final-fast.json"), {
+      await writeJson(finalFastSnapshotPath, {
         finalKey: resolvedBuild.finalKey,
         optionsSignature: context.optionsSignature,
         packageSignature: context.packageSignature,
-        publishedOutputs: await collectPublishedOutputStats2(closureResult.outputFiles),
-        trackedFiles: resolvedBuild.trackedFiles
+        publishedOutputs: await collectPublishedOutputStats2(closureResult.outputFiles)
       });
     }
     return {
@@ -3080,18 +3179,19 @@ var init_build_pipeline = __esm(() => {
 });
 
 // src/api/externs.ts
-import fs6 from "fs";
-import path7 from "path";
+init_files();
+import fs7 from "fs";
+import path8 from "path";
 
 // src/api/externs/context.ts
 import ts3 from "typescript";
 
 // src/api/externs/contracts/registry.ts
-import path4 from "path";
+import path5 from "path";
 import ts2 from "typescript";
 
 // src/api/externs/shared.ts
-import path3 from "path";
+import path4 from "path";
 import ts from "typescript";
 var DECLARATION_EXTENSIONS = [
   ".d.ts",
@@ -3193,8 +3293,8 @@ function addMapSetValue(map, key, value) {
   map.set(key, new Set([value]));
 }
 function isProjectAppSourceFile(filePath, projectRoot) {
-  const resolvedFilePath = path3.resolve(filePath);
-  return !resolvedFilePath.includes(`${path3.sep}node_modules${path3.sep}`) && !resolvedFilePath.endsWith(".d.ts") && resolvedFilePath.startsWith(path3.resolve(projectRoot) + path3.sep);
+  const resolvedFilePath = path4.resolve(filePath);
+  return !resolvedFilePath.includes(`${path4.sep}node_modules${path4.sep}`) && !resolvedFilePath.endsWith(".d.ts") && resolvedFilePath.startsWith(path4.resolve(projectRoot) + path4.sep);
 }
 function isExportedDeclaration(node) {
   return (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Export) !== 0;
@@ -3255,16 +3355,16 @@ function getScriptKindForFile(filePath) {
   return ts.ScriptKind.JS;
 }
 function isScannedDeclarationSymbol(symbol, scannedFiles) {
-  return (symbol.declarations ?? []).some((declaration) => scannedFiles.has(path3.resolve(declaration.getSourceFile().fileName)));
+  return (symbol.declarations ?? []).some((declaration) => scannedFiles.has(path4.resolve(declaration.getSourceFile().fileName)));
 }
 function findPackageDir(filePath) {
-  let currentDir = path3.dirname(filePath);
+  let currentDir = path4.dirname(filePath);
   while (true) {
-    const packageJsonPath = path3.join(currentDir, "package.json");
+    const packageJsonPath = path4.join(currentDir, "package.json");
     if (ts.sys.fileExists(packageJsonPath)) {
       return currentDir;
     }
-    const parentDir = path3.dirname(currentDir);
+    const parentDir = path4.dirname(currentDir);
     if (parentDir === currentDir) {
       return null;
     }
@@ -3275,11 +3375,11 @@ function isTypeSourceFile(filePath) {
   return DECLARATION_EXTENSIONS.some((extension) => filePath.endsWith(extension));
 }
 function isTypescriptLibFile(filePath) {
-  return filePath.includes(`${path3.sep}node_modules${path3.sep}typescript${path3.sep}lib${path3.sep}`);
+  return filePath.includes(`${path4.sep}node_modules${path4.sep}typescript${path4.sep}lib${path4.sep}`);
 }
 function symbolCacheKey(symbol) {
   const declaration = symbol.declarations?.[0];
-  return declaration ? `${path3.resolve(declaration.getSourceFile().fileName)}:${symbol.getName()}` : symbol.getName();
+  return declaration ? `${path4.resolve(declaration.getSourceFile().fileName)}:${symbol.getName()}` : symbol.getName();
 }
 function uniqueStrings(values) {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
@@ -3294,12 +3394,12 @@ function collectContracts({
   program,
   scannedFiles
 }) {
-  const scannedFileSet = new Set(scannedFiles.map((filePath) => path4.resolve(filePath)));
+  const scannedFileSet = new Set(scannedFiles.map((filePath) => path5.resolve(filePath)));
   const interfaceContracts = new Map;
   const typeAliasContracts = new Map;
   const classContracts = new Map;
   for (const sourceFile of program.getSourceFiles()) {
-    if (!scannedFileSet.has(path4.resolve(sourceFile.fileName))) {
+    if (!scannedFileSet.has(path5.resolve(sourceFile.fileName))) {
       continue;
     }
     for (const statement of sourceFile.statements) {
@@ -3516,8 +3616,8 @@ function createExternAnalysisContext({
 
 // src/api/externs/compiler.ts
 init_compiler_options();
-import fs4 from "fs";
-import path6 from "path";
+import fs5 from "fs";
+import path7 from "path";
 import ts5 from "typescript";
 async function loadExternCompilerOptions({
   projectRoot,
@@ -3530,9 +3630,9 @@ async function loadExternCompilerOptions({
     moduleResolution: ts5.ModuleResolutionKind.Bundler,
     target: ts5.ScriptTarget.ESNext
   };
-  const resolvedConfigPath = tsConfigPath ?? path6.join(projectRoot, "tsconfig.json");
+  const resolvedConfigPath = tsConfigPath ?? path7.join(projectRoot, "tsconfig.json");
   try {
-    await fs4.promises.access(resolvedConfigPath, fs4.constants.R_OK);
+    await fs5.promises.access(resolvedConfigPath, fs5.constants.R_OK);
     try {
       return await loadCompilerOptions(resolvedConfigPath, {
         allowJs: true,
@@ -3578,14 +3678,14 @@ function resolveAnalysisEntryFiles({
   srcDir
 }) {
   return entryFiles.map((entry) => {
-    if (path6.isAbsolute(entry)) {
+    if (path7.isAbsolute(entry)) {
       return entry;
     }
-    const fromSrcDir = path6.resolve(srcDir, entry);
+    const fromSrcDir = path7.resolve(srcDir, entry);
     if (ts5.sys.fileExists(fromSrcDir)) {
       return fromSrcDir;
     }
-    return path6.resolve(projectRoot, entry);
+    return path7.resolve(projectRoot, entry);
   });
 }
 async function collectReachableTypeFiles({
@@ -3601,7 +3701,7 @@ async function collectReachableTypeFiles({
     if (!nextFile) {
       continue;
     }
-    const resolvedFile = path6.resolve(nextFile);
+    const resolvedFile = path7.resolve(nextFile);
     if (seen.has(resolvedFile) || !isTypeSourceFile(resolvedFile)) {
       continue;
     }
@@ -3609,7 +3709,7 @@ async function collectReachableTypeFiles({
       continue;
     }
     seen.add(resolvedFile);
-    const sourceText = await fs4.promises.readFile(resolvedFile, "utf8");
+    const sourceText = await fs5.promises.readFile(resolvedFile, "utf8");
     const sourceFile = ts5.createSourceFile(resolvedFile, sourceText, ts5.ScriptTarget.Latest, true);
     for (const specifier of collectReferencedSpecifiers(sourceFile)) {
       const resolvedModule = ts5.resolveModuleName(specifier, resolvedFile, compilerOptions, ts5.sys).resolvedModule;
@@ -3636,7 +3736,7 @@ async function resolveModuleTypeEntry({
   projectRoot,
   specifier
 }) {
-  const containingFile = path6.join(projectRoot, "__gcc_externs_entry__.ts");
+  const containingFile = path7.join(projectRoot, "__gcc_externs_entry__.ts");
   const resolution = ts5.resolveModuleName(specifier, containingFile, compilerOptions, ts5.sys).resolvedModule;
   const resolvedFromTypescript = resolution && normalizeResolvedTypeFile(resolution.resolvedFileName);
   if (resolvedFromTypescript) {
@@ -3651,14 +3751,14 @@ async function resolveModuleTypeEntry({
   throw new Error(`Unable to resolve TypeScript declarations for module ${JSON.stringify(specifier)} from ${projectRoot}.`);
 }
 function normalizeResolvedTypeFile(resolvedFileName) {
-  const normalizedPath = path6.resolve(resolvedFileName);
+  const normalizedPath = path7.resolve(resolvedFileName);
   if (isTypeSourceFile(normalizedPath)) {
     return normalizedPath;
   }
   for (const extension of DECLARATION_EXTENSIONS) {
     const candidate = withTypeExtension(normalizedPath, extension);
     if (ts5.sys.fileExists(candidate)) {
-      return path6.resolve(candidate);
+      return path7.resolve(candidate);
     }
   }
   return null;
@@ -3667,7 +3767,7 @@ function withTypeExtension(filePath, nextExtension) {
   if (filePath.endsWith(".d.ts") || filePath.endsWith(".d.mts") || filePath.endsWith(".d.cts")) {
     return filePath;
   }
-  const extension = path6.extname(filePath);
+  const extension = path7.extname(filePath);
   return `${filePath.slice(0, filePath.length - extension.length)}${nextExtension}`;
 }
 function collectReferencedSpecifiers(sourceFile) {
@@ -3695,7 +3795,7 @@ function collectReferencedSpecifiers(sourceFile) {
 }
 
 // src/api/externs/runtime-analysis.ts
-import fs5 from "fs";
+import fs6 from "fs";
 import ts6 from "typescript";
 async function analyzeRuntimeUsage(runtimeEntryFiles) {
   const hazards = {
@@ -3704,7 +3804,7 @@ async function analyzeRuntimeUsage(runtimeEntryFiles) {
     protocolMembers: new Set
   };
   for (const runtimeEntryFile of runtimeEntryFiles) {
-    const sourceText = await fs5.promises.readFile(runtimeEntryFile, "utf8");
+    const sourceText = await fs6.promises.readFile(runtimeEntryFile, "utf8");
     const sourceFile = ts6.createSourceFile(runtimeEntryFile, sourceText, ts6.ScriptTarget.Latest, true, getScriptKindForFile(runtimeEntryFile));
     const knownConstructors = collectKnownConstructorBindings(sourceFile);
     const visit = (node) => {
@@ -4186,9 +4286,9 @@ async function generateExterns(options) {
     throw new Error("generateExterns requires at least one module specifier.");
   }
   const mode = options.mode ?? "boundary-aware";
-  const projectRoot = path7.resolve(options.projectRoot ?? process.cwd());
-  const srcDir = path7.resolve(projectRoot, options.srcDir ?? ".");
-  const tsConfigPath = options.tsConfigPath && path7.resolve(projectRoot, options.tsConfigPath);
+  const projectRoot = path8.resolve(options.projectRoot ?? process.cwd());
+  const srcDir = path8.resolve(projectRoot, options.srcDir ?? ".");
+  const tsConfigPath = options.tsConfigPath && path8.resolve(projectRoot, options.tsConfigPath);
   const compilerOptions = await loadExternCompilerOptions({
     projectRoot,
     tsConfigPath
@@ -4238,10 +4338,10 @@ async function generateExterns(options) {
     modules: options.modules,
     runtimeEntryFiles: resolvedRuntimeEntryFiles
   });
-  const outputFile = options.outputFile && path7.resolve(projectRoot, options.outputFile);
+  const outputFile = options.outputFile && path8.resolve(projectRoot, options.outputFile);
   if (outputFile) {
-    await fs6.promises.mkdir(path7.dirname(outputFile), { recursive: true });
-    await fs6.promises.writeFile(outputFile, text, "utf8");
+    await fs7.promises.mkdir(path8.dirname(outputFile), { recursive: true });
+    await writeFileIfChanged(outputFile, text);
   }
   return {
     mode,

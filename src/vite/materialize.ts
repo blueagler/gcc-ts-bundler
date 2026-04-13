@@ -1,10 +1,10 @@
-import fs from "node:fs/promises";
 import path from "node:path";
 
 import ts from "typescript";
 import type { ResolvedConfig } from "vite";
 import type { PluginContext } from "rollup";
 
+import { syncDirectoryEntries } from "../internal/files";
 import {
   getCapturedModuleAnalysis,
   isAuthoredModuleId,
@@ -40,8 +40,6 @@ export async function materializeCapturedGraph(
   if (input.entryModuleIds.length === 0) {
     this.error("gccTsBundler() could not determine a Vite entry facade.");
   }
-
-  await fs.mkdir(input.srcDir, { recursive: true });
   const entryModuleIds = new Set(input.entryModuleIds);
   const dynamicRootModuleIds = new Set(input.dynamicRootModuleIds);
   const cssOwnedModuleIds = new Set(input.cssModuleIdsWithOwnership ?? []);
@@ -95,30 +93,44 @@ export async function materializeCapturedGraph(
     }
   }
 
-  await Promise.all(
-    materializedModuleIds.map(async (moduleId) => {
-      const record = input.capturedModules.get(moduleId);
-      if (!record) {
-        this.error(
-          `gccTsBundler() could not capture transformed code for ${moduleId}.`,
+  await syncDirectoryEntries(
+    input.srcDir,
+    await Promise.all(
+      materializedModuleIds.map(async (moduleId) => {
+        const record = input.capturedModules.get(moduleId);
+        if (!record) {
+          this.error(
+            `gccTsBundler() could not capture transformed code for ${moduleId}.`,
+          );
+        }
+
+        const outputPath = filePathByModuleId.get(moduleId);
+        if (!outputPath) {
+          this.error(`Missing materialized output path for ${moduleId}.`);
+        }
+
+        return {
+          content: await rewriteModuleImports.call(this, {
+            code: record.code,
+            filePathByModuleId,
+            importerId: moduleId,
+            metrics: input.metrics,
+            resolutionCache: input.resolutionCache,
+          }),
+          relativePath: path
+            .relative(input.srcDir, outputPath)
+            .replace(/\\/g, "/"),
+        };
+      }),
+    ),
+    {
+      preserve(relativePath) {
+        return (
+          relativePath.startsWith("__dep-bundle-inputs/") ||
+          relativePath.startsWith("__dep-bundles/")
         );
-      }
-
-      const outputPath = filePathByModuleId.get(moduleId);
-      if (!outputPath) {
-        this.error(`Missing materialized output path for ${moduleId}.`);
-      }
-
-      const rewritten = await rewriteModuleImports.call(this, {
-        code: record.code,
-        filePathByModuleId,
-        importerId: moduleId,
-        metrics: input.metrics,
-        resolutionCache: input.resolutionCache,
-      });
-      await fs.mkdir(path.dirname(outputPath), { recursive: true });
-      await fs.writeFile(outputPath, rewritten, "utf8");
-    }),
+      },
+    },
   );
 
   const entryFiles = input.entryModuleIds.map((moduleId) => {

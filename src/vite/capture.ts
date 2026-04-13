@@ -1,4 +1,3 @@
-import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
 
@@ -31,26 +30,6 @@ export type CapturedModuleResolutionCache = Map<
   string,
   Promise<CapturedModuleResolution>
 >;
-
-export async function prepareCaptureRoot(input: {
-  config: ResolvedConfig;
-  debugDir?: string;
-  options: GccTsBundlerVitePluginOptions;
-  projectRoot: string;
-}) {
-  const targetDir = input.debugDir
-    ? path.resolve(input.projectRoot, input.debugDir)
-    : resolveViteCaptureRootPath({
-        config: input.config,
-        options: input.options,
-        projectRoot: input.projectRoot,
-      });
-  if (input.debugDir) {
-    await fs.rm(targetDir, { force: true, recursive: true });
-  }
-  await fs.mkdir(targetDir, { recursive: true });
-  return targetDir;
-}
 
 export function resolveViteCaptureRootPath(input: {
   config: Pick<ResolvedConfig, "base" | "mode" | "root" | "build">;

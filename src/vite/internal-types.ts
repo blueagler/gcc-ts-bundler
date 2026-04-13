@@ -33,6 +33,19 @@ export interface MaterializedGraph {
   srcDir: string;
 }
 
+export interface ViteWorkspaceLayout {
+  captureRoot: string;
+  coreOutDir: string;
+  finalOutDir: string;
+  materializedSrcDir: string;
+  srcDir: string;
+}
+
+export interface CompiledCoreOutputSet {
+  finalOutDir: string;
+  outputFiles: string[];
+}
+
 export interface GccRuntimeManifestChunk {
   css?: string[];
   deps: string[];
