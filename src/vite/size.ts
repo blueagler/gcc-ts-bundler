@@ -1,5 +1,4 @@
-import fs from "node:fs/promises";
-
+import { collectJsGraphStats } from "../internal/lifecycle-size";
 import { classifyModuleId, getCapturedModuleAnalysis } from "./capture";
 import type { CapturedModule, MaterializedGraph } from "./internal-types";
 
@@ -9,44 +8,28 @@ export async function collectMaterializedGraphStats(input: {
   entryCount: number;
   materialized: MaterializedGraph;
 }) {
-  const totalBytes = (
-    await Promise.all(
-      input.materialized.modules.map(async (module) => {
-        try {
-          return (await fs.stat(module.filePath)).size;
-        } catch {
-          return 0;
-        }
-      }),
-    )
-  ).reduce((sum, size) => sum + size, 0);
-
   const uniqueSourceModuleIds = [
     ...new Set(
       input.materialized.modules.flatMap((module) => module.sourceModuleIds),
     ),
   ].sort((left, right) => left.localeCompare(right));
 
-  let forwardingModuleCount = 0;
-  if (input.capturedModules) {
-    for (const sourceModuleId of uniqueSourceModuleIds) {
-      const capturedModule = input.capturedModules.get(sourceModuleId);
+  const graphStats = await collectJsGraphStats({
+    entryCount: input.entryCount,
+    filePaths: input.materialized.modules.map((module) => module.filePath),
+    forwardingModuleIds: uniqueSourceModuleIds.filter((sourceModuleId) => {
+      const capturedModule = input.capturedModules?.get(sourceModuleId);
       if (!capturedModule) {
-        continue;
+        return false;
       }
-      if (getCapturedModuleAnalysis(capturedModule).isForwardingOnly) {
-        forwardingModuleCount += 1;
-      }
-    }
-  }
+      return getCapturedModuleAnalysis(capturedModule).isForwardingOnly;
+    }),
+    lazyRootCount: input.dynamicRootCount,
+  });
 
   return {
-    entryCount: input.entryCount,
-    forwardingModuleCount,
-    lazyRootCount: input.dynamicRootCount,
-    moduleCount: input.materialized.modules.length,
+    ...graphStats,
     packageSummary: summarizeModuleIdsByPackage(uniqueSourceModuleIds),
-    totalBytes,
   };
 }
 

@@ -6,6 +6,7 @@ import type { Plugin, ResolvedConfig, UserConfig } from "vite";
 import type { PluginContext } from "rollup";
 
 import { build } from "../api/build";
+import { collectOutputChunkStats } from "../internal/lifecycle-size";
 import { logInternalDetail, logInternalTiming } from "../internal/timing";
 import {
   normalizeRetainedCapturedModules,
@@ -426,6 +427,21 @@ export function gccTsBundler(
       logInternalDetail(
         "vite:output-bytes",
         `js=${outputBytes.js} css=${outputBytes.css} fonts=${outputBytes.fonts} assets=${outputBytes.assets}`,
+      );
+      const finalBaseChunkFilePath = path.join(
+        outDir,
+        finalizedBaseOutput.baseScriptFileName,
+      );
+      const outputChunkStats = await collectOutputChunkStats({
+        entryFilePath: finalBaseChunkFilePath,
+        lazyFilePaths: emittedOutputFiles.filter(
+          (filePath) =>
+            filePath.endsWith(".js") && filePath !== finalBaseChunkFilePath,
+        ),
+      });
+      logInternalDetail(
+        "vite:output-js-chunks",
+        `entry=${outputChunkStats.entryRawBytes}/${outputChunkStats.entryGzipBytes} lazy=${outputChunkStats.lazyRawBytes}/${outputChunkStats.lazyGzipBytes} factories=${outputChunkStats.entryFactoryCount}+${outputChunkStats.lazyFactoryCount}`,
       );
       const emitOutputsStartedAt = performance.now();
       await emitCompiledOutputs(this, emittedOutputFiles, outDir);

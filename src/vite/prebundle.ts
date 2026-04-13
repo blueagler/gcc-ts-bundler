@@ -57,6 +57,11 @@ interface WrittenRegionBundleRequest extends GroupedRegionBundleRequest {
   entryPoint: string;
 }
 
+interface CollapsibleBundleEntryOutput {
+  directTargetFilePath: string;
+  sideEffectImportFilePaths: string[];
+}
+
 let cachedEsbuildBuild: Promise<EsbuildBuild> | null = null;
 
 export async function prebundleMaterializedDependencies(input: {
@@ -413,6 +418,10 @@ export async function prebundleMaterializedDependencies(input: {
     return input.materialized;
   }
 
+  const collapsedEntryOutputByPath = await collectCollapsibleBundleEntryOutputs(
+    [...new Set(entryOutputByRequestKey.values())],
+  );
+
   await Promise.all(
     input.materialized.authoredFiles.map(async (filePath) => {
       const normalizedFilePath = normalizePath(filePath);
@@ -455,10 +464,25 @@ export async function prebundleMaterializedDependencies(input: {
         if (!bundledOutput) {
           continue;
         }
+        const collapsedOutput = collapsedEntryOutputByPath.get(bundledOutput);
+        if (!collapsedOutput) {
+          edits.push({
+            end: statement.moduleSpecifier.getEnd() - 1,
+            start: statement.moduleSpecifier.getStart() + 1,
+            text: toRelativeImportSpecifier(normalizedFilePath, bundledOutput),
+          });
+          continue;
+        }
+
         edits.push({
-          end: statement.moduleSpecifier.getEnd() - 1,
-          start: statement.moduleSpecifier.getStart() + 1,
-          text: toRelativeImportSpecifier(normalizedFilePath, bundledOutput),
+          end: statement.getEnd(),
+          start: statement.getStart(sourceFile),
+          text: renderCollapsedBundleImportStatement({
+            importerFilePath: normalizedFilePath,
+            sourceFile,
+            statement,
+            wrapperOutput: collapsedOutput,
+          }),
         });
       }
 
@@ -475,7 +499,11 @@ export async function prebundleMaterializedDependencies(input: {
           edit.text +
           rewritten.slice(edit.end);
       }
-      await fs.writeFile(normalizedFilePath, rewritten, "utf8");
+      await fs.writeFile(
+        normalizedFilePath,
+        dedupeAuthoredImportStatements(normalizedFilePath, rewritten),
+        "utf8",
+      );
     }),
   );
 
@@ -493,6 +521,7 @@ export async function prebundleMaterializedDependencies(input: {
   );
   const bundledModules = collectBundledModules({
     metafile: bundleResult.metafile,
+    omittedFilePaths: new Set(collapsedEntryOutputByPath.keys()),
     outputDir,
     originalSourceIdsByFilePath,
     srcDir: input.materialized.srcDir,
@@ -746,8 +775,236 @@ function resolveEntryOutputsByRequest(input: {
   return outputByRequestKey;
 }
 
+async function collectCollapsibleBundleEntryOutputs(outputFilePaths: string[]) {
+  const collapsibleByPath = new Map<string, CollapsibleBundleEntryOutput>();
+  for (const outputFilePath of outputFilePaths) {
+    const collapsible = await analyzeCollapsibleBundleEntryOutput(
+      outputFilePath,
+    );
+    if (!collapsible) {
+      continue;
+    }
+    collapsibleByPath.set(outputFilePath, collapsible);
+  }
+  return collapsibleByPath;
+}
+
+async function analyzeCollapsibleBundleEntryOutput(outputFilePath: string) {
+  const sourceText = await fs.readFile(outputFilePath, "utf8");
+  const sourceFile = ts.createSourceFile(
+    outputFilePath,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS,
+  );
+  const sideEffectImportFilePaths = new Set<string>();
+  const importedBindingNames = new Set<string>();
+  let directTargetFilePath: string | null = null;
+
+  const resolveTarget = (specifier: string) =>
+    normalizePath(path.resolve(path.dirname(outputFilePath), specifier));
+
+  const setDirectTarget = (nextTargetFilePath: string) => {
+    if (
+      directTargetFilePath !== null &&
+      directTargetFilePath !== nextTargetFilePath
+    ) {
+      return false;
+    }
+    directTargetFilePath = nextTargetFilePath;
+    return true;
+  };
+
+  for (const statement of sourceFile.statements) {
+    if (
+      ts.isImportDeclaration(statement) &&
+      statement.moduleSpecifier &&
+      ts.isStringLiteralLike(statement.moduleSpecifier)
+    ) {
+      const targetFilePath = resolveTarget(statement.moduleSpecifier.text);
+      if (!statement.importClause) {
+        sideEffectImportFilePaths.add(targetFilePath);
+        continue;
+      }
+      if (!setDirectTarget(targetFilePath)) {
+        return null;
+      }
+      if (statement.importClause.name) {
+        importedBindingNames.add(statement.importClause.name.text);
+      }
+      if (statement.importClause.namedBindings) {
+        if (ts.isNamespaceImport(statement.importClause.namedBindings)) {
+          importedBindingNames.add(statement.importClause.namedBindings.name.text);
+        } else {
+          for (const element of statement.importClause.namedBindings.elements) {
+            importedBindingNames.add(element.name.text);
+          }
+        }
+      }
+      continue;
+    }
+
+    if (
+      ts.isExportDeclaration(statement) &&
+      statement.moduleSpecifier &&
+      ts.isStringLiteralLike(statement.moduleSpecifier)
+    ) {
+      if (statement.exportClause && ts.isNamespaceExport(statement.exportClause)) {
+        return null;
+      }
+      if (!setDirectTarget(resolveTarget(statement.moduleSpecifier.text))) {
+        return null;
+      }
+      continue;
+    }
+
+    if (ts.isExportDeclaration(statement)) {
+      if (
+        !statement.exportClause ||
+        !ts.isNamedExports(statement.exportClause) ||
+        directTargetFilePath === null
+      ) {
+        return null;
+      }
+      for (const element of statement.exportClause.elements) {
+        const localName = (element.propertyName ?? element.name).text;
+        if (!importedBindingNames.has(localName)) {
+          return null;
+        }
+      }
+      continue;
+    }
+
+    return null;
+  }
+
+  if (directTargetFilePath === null) {
+    return null;
+  }
+
+  sideEffectImportFilePaths.delete(directTargetFilePath);
+  return {
+    directTargetFilePath,
+    sideEffectImportFilePaths: [...sideEffectImportFilePaths].sort((left, right) =>
+      left.localeCompare(right),
+    ),
+  } satisfies CollapsibleBundleEntryOutput;
+}
+
+function renderCollapsedBundleImportStatement(input: {
+  importerFilePath: string;
+  sourceFile: ts.SourceFile;
+  statement: ts.ImportDeclaration | ts.ExportDeclaration;
+  wrapperOutput: CollapsibleBundleEntryOutput;
+}) {
+  const moduleSpecifier = input.statement.moduleSpecifier;
+  if (!moduleSpecifier) {
+    return input.sourceFile.text.slice(
+      input.statement.getStart(input.sourceFile),
+      input.statement.getEnd(),
+    );
+  }
+  const statementStart = input.statement.getStart(input.sourceFile);
+  const statementText = input.sourceFile.text.slice(
+    statementStart,
+    input.statement.getEnd(),
+  );
+  const directSpecifierText = toRelativeImportSpecifier(
+    input.importerFilePath,
+    input.wrapperOutput.directTargetFilePath,
+  );
+  const specifierStart =
+    moduleSpecifier.getStart(input.sourceFile) - statementStart + 1;
+  const specifierEnd =
+    moduleSpecifier.getEnd() - statementStart - 1;
+  const rewrittenStatementText =
+    statementText.slice(0, specifierStart) +
+    directSpecifierText +
+    statementText.slice(specifierEnd);
+  const sideEffectImports = input.wrapperOutput.sideEffectImportFilePaths.map(
+    (filePath) =>
+      `import ${JSON.stringify(
+        toRelativeImportSpecifier(input.importerFilePath, filePath),
+      )};`,
+  );
+  return [...sideEffectImports, rewrittenStatementText].join("\n");
+}
+
+function dedupeAuthoredImportStatements(filePath: string, sourceText: string) {
+  const sourceFile = ts.createSourceFile(
+    filePath,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS,
+  );
+  const seenBoundImports = new Set<string>();
+  const seenSideEffectImports = new Set<string>();
+  const moduleSpecifiersWithBoundImports = new Set<string>();
+
+  for (const statement of sourceFile.statements) {
+    if (
+      !ts.isImportDeclaration(statement) ||
+      !statement.moduleSpecifier ||
+      !ts.isStringLiteralLike(statement.moduleSpecifier) ||
+      !statement.importClause
+    ) {
+      continue;
+    }
+    moduleSpecifiersWithBoundImports.add(statement.moduleSpecifier.text);
+  }
+
+  const deletions: Array<{ start: number; end: number }> = [];
+  for (const statement of sourceFile.statements) {
+    if (
+      !ts.isImportDeclaration(statement) ||
+      !statement.moduleSpecifier ||
+      !ts.isStringLiteralLike(statement.moduleSpecifier)
+    ) {
+      continue;
+    }
+    const moduleSpecifier = statement.moduleSpecifier.text;
+    const statementText = sourceFile.text.slice(
+      statement.getStart(sourceFile),
+      statement.getEnd(),
+    );
+    if (!statement.importClause) {
+      if (
+        moduleSpecifiersWithBoundImports.has(moduleSpecifier) ||
+        seenSideEffectImports.has(moduleSpecifier)
+      ) {
+        deletions.push({
+          end: statement.getEnd(),
+          start: statement.getStart(sourceFile),
+        });
+        continue;
+      }
+      seenSideEffectImports.add(moduleSpecifier);
+      continue;
+    }
+    const boundImportKey = `${moduleSpecifier}\u0000${statementText}`;
+    if (seenBoundImports.has(boundImportKey)) {
+      deletions.push({
+        end: statement.getEnd(),
+        start: statement.getStart(sourceFile),
+      });
+      continue;
+    }
+    seenBoundImports.add(boundImportKey);
+  }
+
+  let rewritten = sourceText;
+  for (const deletion of deletions.sort((left, right) => right.start - left.start)) {
+    rewritten =
+      rewritten.slice(0, deletion.start) + rewritten.slice(deletion.end);
+  }
+  return rewritten;
+}
+
 function collectBundledModules(input: {
   metafile: NonNullable<Awaited<ReturnType<EsbuildBuild>>["metafile"]>;
+  omittedFilePaths: Set<string>;
   originalSourceIdsByFilePath: Map<string, string[]>;
   outputDir: string;
   srcDir: string;
@@ -777,6 +1034,9 @@ function collectBundledModules(input: {
     }
 
     const filePath = normalizePath(path.resolve(input.srcDir, outputPath));
+    if (input.omittedFilePaths.has(filePath)) {
+      continue;
+    }
     modules.push({
       filePath,
       id: filePath,

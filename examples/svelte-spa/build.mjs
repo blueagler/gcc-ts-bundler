@@ -8,6 +8,10 @@ import { build as bundleWithEsbuild } from "esbuild";
 import { functionsMixins } from "vite-plugin-functions-mixins";
 
 import { build, generateExterns } from "../../dist/index.mjs";
+import {
+  collectJsGraphStats,
+  collectOutputChunkStats,
+} from "../../dist/internal/lifecycle-size.mjs";
 
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.join(projectRoot, "src");
@@ -105,7 +109,9 @@ await fs.mkdir(m3CompiledDir, { recursive: true });
 await compileSvelteDirectory(srcDir, srcDir, transformSource);
 await prepareM3SveltePackage(m3PackageDir, m3CompiledPackageDir, transformSource);
 await writeM3ThemeModule(m3PackageDir, path.join(m3CompiledDir, "theme.js"), transformSource);
-await logPureGraphSnapshot("compiled", [srcDir, m3CompiledDir]);
+await logPureGraphSnapshot("compiled", [srcDir, m3CompiledDir], {
+  lazyRootCount: 0,
+});
 
 await fs.rm(prebundleDir, { force: true, recursive: true });
 await fs.mkdir(prebundleDir, { recursive: true });
@@ -119,7 +125,9 @@ await bundleWithEsbuild({
   splitting: true,
   target: "es2018",
 });
-await logPureGraphSnapshot("prebundle", [prebundleDir]);
+await logPureGraphSnapshot("prebundle", [prebundleDir], {
+  lazyRootCount: (await collectRuntimeEntries(prebundleDir)).length - 1,
+});
 
 await generateExterns({
   appEntryFiles: ["./main.js"],
@@ -162,6 +170,7 @@ console.log(
 );
 console.log(`Bundled Svelte runtime through ${path.relative(projectRoot, prebundleEntry)}`);
 console.log(`Generated externs at ${path.relative(projectRoot, generatedExternsFile)}`);
+await logPureDistSnapshot();
 
 async function compileSvelteDirectory(sourceDir, outDir, transformSourceCode) {
   await fs.mkdir(outDir, { recursive: true });
@@ -273,8 +282,11 @@ if (typeof document !== "undefined" && !document.getElementById(themeId)) {
   style.textContent = ${JSON.stringify(themeCss)};
   document.head.appendChild(style);
 }
+`;
+  await fs.writeFile(outputFile, themeModule, "utf8");
+}
 
-async function logPureGraphSnapshot(label, roots) {
+async function logPureGraphSnapshot(label, roots, { lazyRootCount }) {
   if (!process.env.GCC_BUILD_TIMINGS) {
     return;
   }
@@ -286,11 +298,6 @@ async function logPureGraphSnapshot(label, roots) {
   const uniqueFiles = [...new Set(files)].sort((left, right) =>
     left.localeCompare(right),
   );
-  const totalBytes = (
-    await Promise.all(
-      uniqueFiles.map(async (filePath) => (await fs.stat(filePath)).size),
-    )
-  ).reduce((sum, size) => sum + size, 0);
   const forwardingCount = (
     await Promise.all(
       uniqueFiles.map(async (filePath) => {
@@ -303,8 +310,13 @@ async function logPureGraphSnapshot(label, roots) {
       }),
     )
   ).reduce((sum, count) => sum + count, 0);
+  const graphStats = await collectJsGraphStats({
+    entryCount: 1,
+    filePaths: uniqueFiles,
+    lazyRootCount,
+  });
   console.log(
-    `[gcc-ts-bundler] pure:${label} modules=${uniqueFiles.length} js=${totalBytes} forwarding=${forwardingCount}`,
+    `[gcc-ts-bundler timing] pure:${label}: modules=${graphStats.moduleCount} js=${graphStats.totalBytes} forwarding=${forwardingCount} entries=1 lazy=${lazyRootCount}`,
   );
 }
 
@@ -323,8 +335,25 @@ async function collectJsFiles(directory) {
   }
   return files;
 }
-`;
-  await fs.writeFile(outputFile, themeModule, "utf8");
+
+async function logPureDistSnapshot() {
+  if (!process.env.GCC_BUILD_TIMINGS) {
+    return;
+  }
+
+  const distDir = path.join(projectRoot, "dist");
+  const jsFiles = await collectJsFiles(distDir);
+  const entryFilePath = path.join(distDir, "main.js");
+  const lazyFilePaths = jsFiles
+    .filter((filePath) => filePath !== entryFilePath)
+    .sort((left, right) => left.localeCompare(right));
+  const outputStats = await collectOutputChunkStats({
+    entryFilePath,
+    lazyFilePaths,
+  });
+  console.log(
+    `[gcc-ts-bundler timing] pure:dist: entry=${outputStats.entryRawBytes}/${outputStats.entryGzipBytes} lazy=${outputStats.lazyRawBytes}/${outputStats.lazyGzipBytes} factories=${outputStats.entryFactoryCount}+${outputStats.lazyFactoryCount}`,
+  );
 }
 
 async function createMixinsTransformer(rootDir) {

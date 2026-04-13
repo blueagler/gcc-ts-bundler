@@ -352,16 +352,27 @@ test.serial(
     expect(
       prebundled.modules.some((module) => module.relativePath.startsWith("__dep-bundles/")),
     ).toBe(true);
+    expect(
+      prebundled.modules.some(
+        (module) =>
+          module.relativePath.startsWith("__dep-bundles/") &&
+          !module.relativePath.startsWith("__dep-bundles/chunks/"),
+      ),
+    ).toBe(false);
 
     const rewrittenEntry = await fs.readFile(authoredEntry, "utf8");
     const rewrittenLazy = await fs.readFile(authoredLazy, "utf8");
-    expect(rewrittenEntry).toContain("__dep-bundles/");
-    expect(rewrittenLazy).toContain("__dep-bundles/");
+    expect(rewrittenEntry).toContain("__dep-bundles/chunks/");
+    expect(rewrittenLazy).toContain("__dep-bundles/chunks/");
+    expect(rewrittenEntry).not.toContain("__dep-bundles/eager/");
+    expect(rewrittenLazy).not.toContain("__dep-bundles/lazy/");
     expect(
-      prebundled.runtimeEntries.filter((entry) =>
-        entry.startsWith("./__dep-bundles/"),
-      ).length,
-    ).toBeGreaterThan(1);
+      prebundled.runtimeEntries.every(
+        (entry) =>
+          !entry.startsWith("./__dep-bundles/") ||
+          entry.startsWith("./__dep-bundles/chunks/"),
+      ),
+    ).toBe(true);
   },
 );
 
