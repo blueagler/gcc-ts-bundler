@@ -1,9 +1,17 @@
-<script>
+<script lang="ts">
   import { Button, Card, Divider, Menu, MenuItem } from "m3-svelte";
 
-  let message = "Pick an item from the menu.";
+  const menuChoices = [
+    { label: "Open design tokens", message: "Opened design tokens" },
+    { label: "Queue diagnostics review", message: "Queued diagnostics review" },
+    { label: "Publish component snapshot", message: "Published component snapshot" },
+  ] as const;
 
-  function select(choice) {
+  type MenuChoice = (typeof menuChoices)[number]["message"] | "Menu refreshed";
+
+  let message = $state<MenuChoice | "Pick an item from the menu.">("Pick an item from the menu.");
+
+  function select(choice: MenuChoice): void {
     message = choice;
   }
 </script>
@@ -20,15 +28,11 @@
   </Button>
 
   <Menu>
-    <MenuItem onclick={() => select("Opened design tokens")}>
-      Open design tokens
-    </MenuItem>
-    <MenuItem onclick={() => select("Queued diagnostics review")}>
-      Queue diagnostics review
-    </MenuItem>
-    <MenuItem onclick={() => select("Published component snapshot")}>
-      Publish component snapshot
-    </MenuItem>
+    {#each menuChoices as choice}
+      <MenuItem onclick={() => select(choice.message)}>
+        {choice.label}
+      </MenuItem>
+    {/each}
   </Menu>
 
   <p>{message}</p>

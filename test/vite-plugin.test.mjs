@@ -377,6 +377,83 @@ test.serial(
 );
 
 test.serial(
+  "prebundleMaterializedDependencies keeps aliasing wrapper exports intact",
+  async () => {
+    const fixture = await createFixture();
+    const srcDir = path.join(fixture.projectRoot, "captured-src");
+    const authoredEntry = path.join(srcDir, "src", "entry.js");
+    const depIndex = path.join(srcDir, "node_modules", "pkg", "index.js");
+    const depFoo = path.join(srcDir, "node_modules", "pkg", "foo.js");
+
+    await fs.mkdir(path.dirname(authoredEntry), { recursive: true });
+    await fs.mkdir(path.dirname(depIndex), { recursive: true });
+
+    await fixture.write(
+      path.relative(fixture.projectRoot, authoredEntry),
+      'import { aliased } from "../node_modules/pkg/index.js";\nexport const entry = aliased;\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, depIndex),
+      'export { foo as aliased } from "./foo.js";\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, depFoo),
+      "export const foo = 7;\n",
+    );
+
+    const materialized = {
+      authoredFiles: [authoredEntry],
+      entries: ["./src/entry.js"],
+      modules: [
+        {
+          filePath: authoredEntry,
+          id: authoredEntry,
+          relativePath: "src/entry.js",
+          sourceModuleIds: [authoredEntry],
+        },
+        {
+          filePath: depIndex,
+          id: depIndex,
+          relativePath: "node_modules/pkg/index.js",
+          sourceModuleIds: [depIndex],
+        },
+        {
+          filePath: depFoo,
+          id: depFoo,
+          relativePath: "node_modules/pkg/foo.js",
+          sourceModuleIds: [depFoo],
+        },
+      ],
+      prunedEmptyModuleIds: [],
+      retainedEmptyModuleIds: [],
+      runtimeEntries: [
+        "./src/entry.js",
+        "./node_modules/pkg/index.js",
+        "./node_modules/pkg/foo.js",
+      ],
+      srcDir,
+    };
+
+    const prebundled = await prebundleMaterializedDependencies({
+      dynamicRootModuleIds: [],
+      materialized,
+    });
+
+    expect(
+      prebundled.modules.some(
+        (module) =>
+          module.relativePath.startsWith("__dep-bundles/eager/") &&
+          !module.relativePath.startsWith("__dep-bundles/chunks/"),
+      ),
+    ).toBe(true);
+
+    const rewrittenEntry = await fs.readFile(authoredEntry, "utf8");
+    expect(rewrittenEntry).toContain("__dep-bundles/eager/");
+    expect(rewrittenEntry).not.toContain("__dep-bundles/chunks/");
+  },
+);
+
+test.serial(
   "gccTsBundler wires lazy Vite CSS through the runtime when cssCodeSplit is enabled",
   { timeout: 20000 },
   async () => {

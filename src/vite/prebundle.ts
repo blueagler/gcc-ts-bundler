@@ -778,9 +778,8 @@ function resolveEntryOutputsByRequest(input: {
 async function collectCollapsibleBundleEntryOutputs(outputFilePaths: string[]) {
   const collapsibleByPath = new Map<string, CollapsibleBundleEntryOutput>();
   for (const outputFilePath of outputFilePaths) {
-    const collapsible = await analyzeCollapsibleBundleEntryOutput(
-      outputFilePath,
-    );
+    const collapsible =
+      await analyzeCollapsibleBundleEntryOutput(outputFilePath);
     if (!collapsible) {
       continue;
     }
@@ -835,7 +834,9 @@ async function analyzeCollapsibleBundleEntryOutput(outputFilePath: string) {
       }
       if (statement.importClause.namedBindings) {
         if (ts.isNamespaceImport(statement.importClause.namedBindings)) {
-          importedBindingNames.add(statement.importClause.namedBindings.name.text);
+          importedBindingNames.add(
+            statement.importClause.namedBindings.name.text,
+          );
         } else {
           for (const element of statement.importClause.namedBindings.elements) {
             importedBindingNames.add(element.name.text);
@@ -850,7 +851,21 @@ async function analyzeCollapsibleBundleEntryOutput(outputFilePath: string) {
       statement.moduleSpecifier &&
       ts.isStringLiteralLike(statement.moduleSpecifier)
     ) {
-      if (statement.exportClause && ts.isNamespaceExport(statement.exportClause)) {
+      if (
+        statement.exportClause &&
+        ts.isNamespaceExport(statement.exportClause)
+      ) {
+        return null;
+      }
+      if (
+        statement.exportClause &&
+        ts.isNamedExports(statement.exportClause) &&
+        statement.exportClause.elements.some(
+          (element) =>
+            element.propertyName &&
+            element.propertyName.text !== element.name.text,
+        )
+      ) {
         return null;
       }
       if (!setDirectTarget(resolveTarget(statement.moduleSpecifier.text))) {
@@ -868,6 +883,12 @@ async function analyzeCollapsibleBundleEntryOutput(outputFilePath: string) {
         return null;
       }
       for (const element of statement.exportClause.elements) {
+        if (
+          element.propertyName &&
+          element.propertyName.text !== element.name.text
+        ) {
+          return null;
+        }
         const localName = (element.propertyName ?? element.name).text;
         if (!importedBindingNames.has(localName)) {
           return null;
@@ -886,8 +907,8 @@ async function analyzeCollapsibleBundleEntryOutput(outputFilePath: string) {
   sideEffectImportFilePaths.delete(directTargetFilePath);
   return {
     directTargetFilePath,
-    sideEffectImportFilePaths: [...sideEffectImportFilePaths].sort((left, right) =>
-      left.localeCompare(right),
+    sideEffectImportFilePaths: [...sideEffectImportFilePaths].sort(
+      (left, right) => left.localeCompare(right),
     ),
   } satisfies CollapsibleBundleEntryOutput;
 }
@@ -916,8 +937,7 @@ function renderCollapsedBundleImportStatement(input: {
   );
   const specifierStart =
     moduleSpecifier.getStart(input.sourceFile) - statementStart + 1;
-  const specifierEnd =
-    moduleSpecifier.getEnd() - statementStart - 1;
+  const specifierEnd = moduleSpecifier.getEnd() - statementStart - 1;
   const rewrittenStatementText =
     statementText.slice(0, specifierStart) +
     directSpecifierText +
@@ -995,7 +1015,9 @@ function dedupeAuthoredImportStatements(filePath: string, sourceText: string) {
   }
 
   let rewritten = sourceText;
-  for (const deletion of deletions.sort((left, right) => right.start - left.start)) {
+  for (const deletion of deletions.sort(
+    (left, right) => right.start - left.start,
+  )) {
     rewritten =
       rewritten.slice(0, deletion.start) + rewritten.slice(deletion.end);
   }

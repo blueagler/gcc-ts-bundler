@@ -1,9 +1,23 @@
-<script>
+<script lang="ts">
+  import type { ComponentProps } from "svelte";
   import { Button, Card, Divider } from "m3-svelte";
 
-  let clicks = 0;
+  let clicks = $state(0);
 
-  function handleClick() {
+  type ButtonVariant = Exclude<ComponentProps<typeof Button>["variant"], undefined>;
+  type ButtonAction = {
+    readonly label: string;
+    readonly variant?: ButtonVariant;
+  };
+
+  const actions: readonly ButtonAction[] = [
+    { label: "Filled action" },
+    { label: "Tonal action", variant: "tonal" },
+    { label: "Outlined action", variant: "outlined" },
+    { label: "Text action", variant: "text" },
+  ];
+
+  function handleClick(): void {
     clicks += 1;
   }
 </script>
@@ -19,10 +33,11 @@
   <Divider />
 
   <div>
-    <Button onclick={handleClick}>Filled action</Button>
-    <Button variant="tonal" onclick={handleClick}>Tonal action</Button>
-    <Button variant="outlined" onclick={handleClick}>Outlined action</Button>
-    <Button variant="text" onclick={handleClick}>Text action</Button>
+    {#each actions as action}
+      <Button variant={action.variant} onclick={handleClick}>
+        {action.label}
+      </Button>
+    {/each}
   </div>
 
   <p>Lazy button clicks recorded: {clicks}</p>

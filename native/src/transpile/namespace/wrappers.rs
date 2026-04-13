@@ -4,6 +4,7 @@ use super::*;
 pub(crate) struct DynamicImportWrappers {
     pub(crate) function_wrappers: HashMap<Id, BTreeSet<String>>,
     pub(crate) object_wrappers: HashMap<Id, DynamicImportObjectWrapper>,
+    pub(crate) object_function_wrappers: HashMap<Id, DynamicImportObjectWrapper>,
 }
 
 pub(crate) type DynamicImportObjectWrapper = BTreeMap<String, BTreeSet<String>>;
@@ -227,7 +228,25 @@ impl Visit for ObjectCarrierCollector {
 pub(crate) fn collect_dynamic_import_wrappers(module: &Module) -> DynamicImportWrappers {
     let mut collector = DynamicImportWrapperCollector::default();
     module.visit_with(&mut collector);
-    collector.wrappers
+
+    let mut wrappers = collector.wrappers;
+    let mut object_function_wrappers = HashMap::new();
+
+    loop {
+        let mut collector = DynamicImportObjectFunctionCollector {
+            object_function_wrappers: object_function_wrappers.clone(),
+            dynamic_import_wrappers: DynamicImportWrappers {
+                object_function_wrappers: object_function_wrappers.clone(),
+                ..wrappers.clone()
+            },
+        };
+        module.visit_with(&mut collector);
+        if collector.object_function_wrappers == object_function_wrappers {
+            wrappers.object_function_wrappers = collector.object_function_wrappers;
+            return wrappers;
+        }
+        object_function_wrappers = collector.object_function_wrappers;
+    }
 }
 
 #[derive(Default)]
@@ -261,6 +280,48 @@ impl Visit for DynamicImportWrapperCollector {
                 self.wrappers
                     .object_wrappers
                     .insert(binding.id.to_id(), object_wrappers);
+            }
+        }
+        declarator.visit_children_with(self);
+    }
+}
+
+struct DynamicImportObjectFunctionCollector {
+    object_function_wrappers: HashMap<Id, DynamicImportObjectWrapper>,
+    dynamic_import_wrappers: DynamicImportWrappers,
+}
+
+impl DynamicImportObjectFunctionCollector {
+    fn insert_wrapper(&mut self, id: Id, wrapper: DynamicImportObjectWrapper) {
+        self.dynamic_import_wrappers
+            .object_function_wrappers
+            .insert(id.clone(), wrapper.clone());
+        self.object_function_wrappers.insert(id, wrapper);
+    }
+}
+
+impl Visit for DynamicImportObjectFunctionCollector {
+    fn visit_fn_decl(&mut self, function_decl: &swc_core::ecma::ast::FnDecl) {
+        if let Some(wrapper) = extract_dynamic_import_object_wrapper_from_function(
+            &function_decl.function,
+            &self.dynamic_import_wrappers,
+        ) {
+            self.insert_wrapper(function_decl.ident.to_id(), wrapper);
+        }
+        function_decl.visit_children_with(self);
+    }
+
+    fn visit_var_declarator(&mut self, declarator: &VarDeclarator) {
+        let Pat::Ident(binding) = &declarator.name else {
+            declarator.visit_children_with(self);
+            return;
+        };
+        if let Some(init) = declarator.init.as_deref() {
+            if let Some(wrapper) = extract_dynamic_import_object_wrapper_from_callable_expr(
+                init,
+                &self.dynamic_import_wrappers,
+            ) {
+                self.insert_wrapper(binding.id.to_id(), wrapper);
             }
         }
         declarator.visit_children_with(self);
@@ -322,6 +383,70 @@ fn extract_dynamic_import_object_wrappers(expr: &Expr) -> Option<DynamicImportOb
         Expr::Paren(paren) => extract_dynamic_import_object_wrappers(&paren.expr),
         _ => None,
     }
+}
+
+fn extract_dynamic_import_object_wrapper_from_callable_expr(
+    expr: &Expr,
+    dynamic_import_wrappers: &DynamicImportWrappers,
+) -> Option<DynamicImportObjectWrapper> {
+    match expr {
+        Expr::Arrow(arrow) => {
+            extract_dynamic_import_object_wrapper_from_arrow(arrow, dynamic_import_wrappers)
+        }
+        Expr::Fn(function_expr) => extract_dynamic_import_object_wrapper_from_function(
+            &function_expr.function,
+            dynamic_import_wrappers,
+        ),
+        Expr::Paren(paren) => extract_dynamic_import_object_wrapper_from_callable_expr(
+            &paren.expr,
+            dynamic_import_wrappers,
+        ),
+        _ => None,
+    }
+}
+
+fn extract_dynamic_import_object_wrapper_from_function(
+    function: &swc_core::ecma::ast::Function,
+    dynamic_import_wrappers: &DynamicImportWrappers,
+) -> Option<DynamicImportObjectWrapper> {
+    let body = function.body.as_ref()?;
+    let argument = extract_wrapper_return_argument(&body.stmts)?;
+    let object_carriers = HashMap::new();
+    resolve_dynamic_import_object_wrapper(argument, &object_carriers, dynamic_import_wrappers)
+}
+
+fn extract_dynamic_import_object_wrapper_from_arrow(
+    arrow: &ArrowExpr,
+    dynamic_import_wrappers: &DynamicImportWrappers,
+) -> Option<DynamicImportObjectWrapper> {
+    let object_carriers = HashMap::new();
+    match &*arrow.body {
+        BlockStmtOrExpr::Expr(expr) => {
+            resolve_dynamic_import_object_wrapper(expr, &object_carriers, dynamic_import_wrappers)
+        }
+        BlockStmtOrExpr::BlockStmt(block) => {
+            let argument = extract_wrapper_return_argument(&block.stmts)?;
+            resolve_dynamic_import_object_wrapper(argument, &object_carriers, dynamic_import_wrappers)
+        }
+    }
+}
+
+fn extract_wrapper_return_argument<'a>(statements: &'a [Stmt]) -> Option<&'a Expr> {
+    let (return_stmt, prelude) = statements.split_last()?;
+    if !prelude.iter().all(is_wrapper_prelude_statement) {
+        return None;
+    }
+    let Stmt::Return(return_stmt) = return_stmt else {
+        return None;
+    };
+    return_stmt.arg.as_deref()
+}
+
+fn is_wrapper_prelude_statement(statement: &Stmt) -> bool {
+    let Stmt::Decl(swc_core::ecma::ast::Decl::Var(var_decl)) = statement else {
+        return false;
+    };
+    var_decl.decls.iter().all(|declarator| declarator.init.is_none())
 }
 
 pub(crate) fn dynamic_import_module_ids_from_call(
@@ -488,6 +613,21 @@ fn resolve_dynamic_import_object_wrapper_from_call(
         return None;
     };
     match &**callee_expr {
+        Expr::Ident(ident) => dynamic_import_wrappers
+            .object_function_wrappers
+            .get(&ident.to_id())
+            .cloned()
+            .or_else(|| {
+                if call_expr.args.len() == 1 {
+                    resolve_dynamic_import_object_wrapper(
+                        &call_expr.args[0].expr,
+                        object_carriers,
+                        dynamic_import_wrappers,
+                    )
+                } else {
+                    None
+                }
+            }),
         Expr::Member(member) => {
             let wrapper = resolve_dynamic_import_object_wrapper(
                 &member.obj,

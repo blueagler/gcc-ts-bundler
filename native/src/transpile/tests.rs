@@ -1552,14 +1552,14 @@ fn bundler_runtime_rewrites_realistic_helper_wrapped_consumer_callbacks_to_slots
     fs::write(
         &main_file,
         [
-            "const modules = [{ id: 'button', label: 'Button', note: 'lazy panel', load: function(){ return __dynamicImport('gcc.src.feature'); } }];",
-            "const component = __gcc_import_0[30]('button');",
-            "const hasMounted = __gcc_import_0[30](false);",
-            "const selectedModule = __gcc_import_0[30](null);",
-            "const activePanel = __gcc_import_0[30](modules[0]);",
-            "__gcc_import_0[27](function(){ return __gcc_import_0[22](component); }, function(){ var _a; __gcc_import_0[38](activePanel, (_a = modules.find(function(panel){ return panel.id === __gcc_import_0[22](component); })) != null ? _a : modules[0]); });",
-            "__gcc_import_0[27](function(){ return __gcc_import_0[22](hasMounted), __gcc_import_0[22](activePanel); }, function(){ if (__gcc_import_0[22](hasMounted)) __gcc_import_0[38](selectedModule, __gcc_import_0[22](activePanel).load()); });",
-            "__gcc_import_0[12](node, function(){ return __gcc_import_0[22](selectedModule); }, null, function(anchor, module){ __gcc_import_0[16](anchor, function(){ return __gcc_import_0[22](module).default; }, function(inner, component){ component(inner, {}); }); });",
+            "const entries = [{ key: 'button', label: 'Button', note: 'lazy panel', load: function(){ return __dynamicImport('gcc.src.feature'); } }];",
+            "const selection = __gcc_import_0[30]('button');",
+            "const mounted = __gcc_import_0[30](false);",
+            "const pendingModule = __gcc_import_0[30](null);",
+            "const currentEntry = __gcc_import_0[30](entries[0]);",
+            "const resolveEntry = function(entryKey){ var _a; return (_a = entries.find(function(entry){ return entry.key === entryKey; })) != null ? _a : entries[0]; };",
+            "__gcc_import_0[27](function(){ return __gcc_import_0[22](selection); }, function(){ var nextEntry = resolveEntry(__gcc_import_0[22](selection)); __gcc_import_0[38](currentEntry, nextEntry); if (__gcc_import_0[22](mounted)) __gcc_import_0[38](pendingModule, nextEntry.load()); });",
+            "__gcc_import_0[12](node, function(){ return __gcc_import_0[22](pendingModule); }, null, function(anchor, module){ __gcc_import_0[16](anchor, function(){ return __gcc_import_0[22](module).default; }, function(inner, component){ component(inner, {}); }); });",
             "",
         ]
         .join("\n"),
@@ -1609,13 +1609,13 @@ fn bundler_runtime_rewrites_realistic_helper_wrapped_consumer_callbacks_to_slots
 #[test]
 fn collects_realistic_helper_wrapped_object_and_promise_carriers() {
     let source = [
-        "const modules = [{ id: 'button', label: 'Button', note: 'lazy panel', load: function(){ return __dynamicImport('gcc.src.feature'); } }];",
-        "const component = __gcc_import_0[30]('button');",
-        "const hasMounted = __gcc_import_0[30](false);",
-        "const selectedModule = __gcc_import_0[30](null);",
-        "const activePanel = __gcc_import_0[30](modules[0]);",
-        "__gcc_import_0[27](function(){ return __gcc_import_0[22](component); }, function(){ var _a; __gcc_import_0[38](activePanel, (_a = modules.find(function(panel){ return panel.id === __gcc_import_0[22](component); })) != null ? _a : modules[0]); });",
-        "__gcc_import_0[27](function(){ return __gcc_import_0[22](hasMounted), __gcc_import_0[22](activePanel); }, function(){ if (__gcc_import_0[22](hasMounted)) __gcc_import_0[38](selectedModule, __gcc_import_0[22](activePanel).load()); });",
+        "const entries = [{ key: 'button', label: 'Button', note: 'lazy panel', load: function(){ return __dynamicImport('gcc.src.feature'); } }];",
+        "const selection = __gcc_import_0[30]('button');",
+        "const mounted = __gcc_import_0[30](false);",
+        "const pendingModule = __gcc_import_0[30](null);",
+        "const currentEntry = __gcc_import_0[30](entries[0]);",
+        "const resolveEntry = function(entryKey){ var _a; return (_a = entries.find(function(entry){ return entry.key === entryKey; })) != null ? _a : entries[0]; };",
+        "__gcc_import_0[27](function(){ return __gcc_import_0[22](selection); }, function(){ var nextEntry = resolveEntry(__gcc_import_0[22](selection)); __gcc_import_0[38](currentEntry, nextEntry); if (__gcc_import_0[22](mounted)) __gcc_import_0[38](pendingModule, nextEntry.load()); });",
         "",
     ]
     .join("\n");
@@ -1630,17 +1630,24 @@ fn collects_realistic_helper_wrapped_object_and_promise_carriers() {
         wrappers
             .object_wrappers
             .keys()
-            .any(|id| id.0.as_ref() == "modules"),
+            .any(|id| id.0.as_ref() == "entries"),
         "{wrappers:?}"
     );
     assert!(
-        object_carriers.keys().any(|id| id.0.as_ref() == "activePanel"),
+        wrappers
+            .object_function_wrappers
+            .keys()
+            .any(|id| id.0.as_ref() == "resolveEntry"),
+        "{wrappers:?}"
+    );
+    assert!(
+        object_carriers.keys().any(|id| id.0.as_ref() == "nextEntry"),
         "{object_carriers:?}"
     );
     assert!(
         promise_carriers
             .keys()
-            .any(|id| id.0.as_ref() == "selectedModule"),
+            .any(|id| id.0.as_ref() == "pendingModule"),
         "{promise_carriers:?}"
     );
 }

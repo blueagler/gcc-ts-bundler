@@ -1,8 +1,20 @@
-<script>
+<script lang="ts">
   import { onMount } from "svelte";
+  import type { Component } from "svelte";
   import { Button, Card, Chip, Divider } from "m3-svelte";
 
-  let count = 0;
+  type PanelId = "button" | "menu" | "checkbox" | "dialog" | "rail";
+  type PanelComponent = Component<Record<string, never>>;
+  type PanelModule = { default: PanelComponent };
+
+  interface PanelDefinition {
+    readonly id: PanelId;
+    readonly label: string;
+    readonly load: () => Promise<PanelModule>;
+    readonly note: string;
+  }
+
+  let count = $state(0);
   const modules = [
     {
       id: "button",
@@ -34,29 +46,38 @@
       load: () => import("./panels/NavigationRailPanel.svelte"),
       note: "Rail layout and icons isolated in their own chunk.",
     },
-  ];
+  ] as const satisfies readonly PanelDefinition[];
   const metrics = [
     "Lazy panels: 5",
     "UI library: m3-svelte",
     "Chunk loader: bundler-runtime",
-  ];
-  let component = "button";
-  let hasMounted = false;
-  let selectedModule = null;
-  let activePanel = modules[0];
+  ] as const;
+  const resolveActivePanel = (panelId: PanelId): PanelDefinition =>
+    modules.find((panel) => panel.id === panelId) ?? modules[0];
+  let component = $state<PanelId>(modules[0].id);
+  let hasMounted = $state(false);
+  let selectedModule = $state<Promise<PanelModule> | null>(null);
+  let activePanel = $state<PanelDefinition>(modules[0]);
 
   onMount(() => {
     hasMounted = true;
   });
 
-  $: activePanel = modules.find((panel) => panel.id === component) ?? modules[0];
+  $effect(() => {
+    const nextPanel = resolveActivePanel(component);
+    activePanel = nextPanel;
 
-  $: if (hasMounted) {
-    selectedModule = activePanel.load();
+    if (hasMounted) {
+      selectedModule = nextPanel.load();
+    }
+  });
+
+  function increment(): void {
+    count += 1;
   }
 
-  function increment() {
-    count += 1;
+  function selectPanel(panelId: PanelId): void {
+    component = panelId;
   }
 </script>
 
@@ -76,7 +97,7 @@
 
   <div>
     {#each metrics as metric}
-      <Chip variant="general" elevated={true}>{metric}</Chip>
+      <Chip variant="general" elevated={true} label={true}>{metric}</Chip>
     {/each}
   </div>
 </Card>
@@ -93,7 +114,7 @@
     {#each modules as panel}
       <Button
         variant={component === panel.id ? "filled" : "outlined"}
-        onclick={() => (component = panel.id)}
+        onclick={() => selectPanel(panel.id)}
       >
         {panel.label}
       </Button>
@@ -107,7 +128,8 @@
 <Card variant="elevated">
   {#if selectedModule}
     {#await selectedModule then module}
-      <svelte:component this={module.default} />
+      {@const Panel = module.default}
+      <Panel />
     {/await}
   {:else}
     <p>Preparing first lazy panel...</p>

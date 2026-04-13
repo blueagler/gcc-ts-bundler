@@ -1,12 +1,12 @@
-<script>
+<script lang="ts">
   import { Button, Card, Dialog, Divider } from "m3-svelte";
 
-  let open = false;
-  let acknowledged = false;
+  let open = $state(false);
+  let status = $state<"idle" | "confirmed">("idle");
 
-  function closeDialog() {
+  function closeDialog(): void {
     open = false;
-    acknowledged = true;
+    status = "confirmed";
   }
 </script>
 
@@ -33,7 +33,7 @@
   </Dialog>
 
   <p>
-    {acknowledged
+    {status === "confirmed"
       ? "Latest dialog action: deployment confirmed."
       : "No dialog action confirmed yet."}
   </p>

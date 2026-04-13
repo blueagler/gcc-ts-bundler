@@ -1,4 +1,4 @@
-<script>
+<script lang="ts">
   import {
     Button,
     Card,
@@ -10,8 +10,25 @@
   import iconPalette from "@ktibow/iconset-material-symbols/palette";
   import iconWidgets from "@ktibow/iconset-material-symbols/widgets";
 
-  let open = true;
-  let active = "apps";
+  type RailDestination = "apps" | "palette" | "widgets";
+  type RailIcon = typeof iconApps;
+
+  const destinations = [
+    { id: "apps", label: "Apps", icon: iconApps },
+    { id: "palette", label: "Palette", icon: iconPalette },
+    { id: "widgets", label: "Widgets", icon: iconWidgets },
+  ] as const satisfies readonly {
+    readonly id: RailDestination;
+    readonly label: string;
+    readonly icon: RailIcon;
+  }[];
+
+  let open = $state(true);
+  let active = $state<RailDestination>("apps");
+
+  function setActive(destination: RailDestination): void {
+    active = destination;
+  }
 </script>
 
 <Card variant="elevated">
@@ -31,24 +48,14 @@
       </Button>
     {/snippet}
 
-    <NavigationRailItem
-      label="Apps"
-      icon={iconApps}
-      active={active === "apps"}
-      onclick={() => (active = "apps")}
-    />
-    <NavigationRailItem
-      label="Palette"
-      icon={iconPalette}
-      active={active === "palette"}
-      onclick={() => (active = "palette")}
-    />
-    <NavigationRailItem
-      label="Widgets"
-      icon={iconWidgets}
-      active={active === "widgets"}
-      onclick={() => (active = "widgets")}
-    />
+    {#each destinations as destination}
+      <NavigationRailItem
+        label={destination.label}
+        icon={destination.icon}
+        active={active === destination.id}
+        onclick={() => setActive(destination.id)}
+      />
+    {/each}
   </NavigationRail>
 
   <p>Active destination: {active}</p>

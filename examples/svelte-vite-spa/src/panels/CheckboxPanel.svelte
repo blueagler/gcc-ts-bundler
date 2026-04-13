@@ -1,9 +1,20 @@
-<script>
+<script lang="ts">
   import { Card, Checkbox, Divider } from "m3-svelte";
 
-  let advancedDiagnostics = true;
-  let publishManifest = false;
-  let preserveNativeImports = true;
+  type FlagSummary = `diag:${"on" | "off"}` | `manifest:${"on" | "off"}` | `esm:${"on" | "off"}`;
+  const getSummaries = (
+    diagnostics: boolean,
+    manifest: boolean,
+    nativeImports: boolean,
+  ): readonly FlagSummary[] => [
+    diagnostics ? "diag:on" : "diag:off",
+    manifest ? "manifest:on" : "manifest:off",
+    nativeImports ? "esm:on" : "esm:off",
+  ];
+
+  let advancedDiagnostics = $state(true);
+  let publishManifest = $state(false);
+  let preserveNativeImports = $state(true);
 </script>
 
 <Card variant="elevated">
@@ -38,9 +49,6 @@
   </label>
 
   <p>
-    Flags:
-    {advancedDiagnostics ? "diag:on" : "diag:off"},
-    {publishManifest ? "manifest:on" : "manifest:off"},
-    {preserveNativeImports ? "esm:on" : "esm:off"}
+    Flags: {getSummaries(advancedDiagnostics, publishManifest, preserveNativeImports).join(", ")}
   </p>
 </Card>
