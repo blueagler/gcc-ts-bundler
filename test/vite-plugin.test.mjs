@@ -454,6 +454,253 @@ test.serial(
 );
 
 test.serial(
+  "prebundleMaterializedDependencies dedupes identical lazy dependency bundles into one shared module",
+  async () => {
+    const fixture = await createFixture();
+    const srcDir = path.join(fixture.projectRoot, "captured-src");
+    const authoredEntry = path.join(srcDir, "src", "entry.js");
+    const authoredLazyA = path.join(srcDir, "src", "lazy-a.js");
+    const authoredLazyB = path.join(srcDir, "src", "lazy-b.js");
+    const depIndex = path.join(srcDir, "node_modules", "pkg", "index.js");
+    const depFoo = path.join(srcDir, "node_modules", "pkg", "foo.js");
+
+    await fs.mkdir(path.dirname(authoredEntry), { recursive: true });
+    await fs.mkdir(path.dirname(depIndex), { recursive: true });
+
+    await fixture.write(
+      path.relative(fixture.projectRoot, authoredEntry),
+      "export const entry = true;\n",
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, authoredLazyA),
+      'import { aliased } from "../node_modules/pkg/index.js";\nexport const lazyA = aliased;\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, authoredLazyB),
+      'import { aliased } from "../node_modules/pkg/index.js";\nexport const lazyB = aliased;\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, depIndex),
+      'export { foo as aliased } from "./foo.js";\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, depFoo),
+      "export const foo = 7;\n",
+    );
+
+    const materialized = {
+      authoredFiles: [authoredEntry, authoredLazyA, authoredLazyB],
+      entries: ["./src/entry.js"],
+      modules: [
+        {
+          filePath: authoredEntry,
+          id: authoredEntry,
+          relativePath: "src/entry.js",
+          sourceModuleIds: [authoredEntry],
+        },
+        {
+          filePath: authoredLazyA,
+          id: authoredLazyA,
+          relativePath: "src/lazy-a.js",
+          sourceModuleIds: [authoredLazyA],
+        },
+        {
+          filePath: authoredLazyB,
+          id: authoredLazyB,
+          relativePath: "src/lazy-b.js",
+          sourceModuleIds: [authoredLazyB],
+        },
+        {
+          filePath: depIndex,
+          id: depIndex,
+          relativePath: "node_modules/pkg/index.js",
+          sourceModuleIds: [depIndex],
+        },
+        {
+          filePath: depFoo,
+          id: depFoo,
+          relativePath: "node_modules/pkg/foo.js",
+          sourceModuleIds: [depFoo],
+        },
+      ],
+      prunedEmptyModuleIds: [],
+      retainedEmptyModuleIds: [],
+      runtimeEntries: [
+        "./src/entry.js",
+        "./src/lazy-a.js",
+        "./src/lazy-b.js",
+        "./node_modules/pkg/index.js",
+        "./node_modules/pkg/foo.js",
+      ],
+      srcDir,
+    };
+
+    const prebundled = await prebundleMaterializedDependencies({
+      dynamicRootModuleIds: [authoredLazyA, authoredLazyB],
+      materialized,
+    });
+
+    const sharedModules = prebundled.modules.filter((module) =>
+      module.relativePath.startsWith("__dep-bundles/shared/"),
+    );
+    expect(sharedModules).toHaveLength(1);
+    expect(
+      prebundled.modules.some(
+        (module) =>
+          module.relativePath.startsWith("__dep-bundles/") &&
+          !module.relativePath.startsWith("__dep-bundles/chunks/") &&
+          !module.relativePath.startsWith("__dep-bundles/shared/"),
+      ),
+    ).toBe(false);
+
+    const rewrittenLazyA = await fs.readFile(authoredLazyA, "utf8");
+    const rewrittenLazyB = await fs.readFile(authoredLazyB, "utf8");
+    const sharedImportA = rewrittenLazyA.match(/__dep-bundles\/shared\/[^"']+\.js/u);
+    const sharedImportB = rewrittenLazyB.match(/__dep-bundles\/shared\/[^"']+\.js/u);
+    expect(sharedImportA).toBeTruthy();
+    expect(sharedImportB).toBeTruthy();
+    expect(sharedImportA?.[0]).toBe(sharedImportB?.[0]);
+    expect(
+      prebundled.runtimeEntries.filter((entry) =>
+        entry.startsWith("./__dep-bundles/shared/"),
+      ),
+    ).toHaveLength(1);
+  },
+);
+
+test.serial(
+  "prebundleMaterializedDependencies keeps non-identical lazy dependency bundles separate",
+  async () => {
+    const fixture = await createFixture();
+    const srcDir = path.join(fixture.projectRoot, "captured-src");
+    const authoredEntry = path.join(srcDir, "src", "entry.js");
+    const authoredLazyA = path.join(srcDir, "src", "lazy-a.js");
+    const authoredLazyB = path.join(srcDir, "src", "lazy-b.js");
+    const depIndexA = path.join(srcDir, "node_modules", "pkg-a", "index.js");
+    const depFoo = path.join(srcDir, "node_modules", "pkg-a", "foo.js");
+    const depIndexB = path.join(srcDir, "node_modules", "pkg-b", "index.js");
+    const depBar = path.join(srcDir, "node_modules", "pkg-b", "bar.js");
+
+    await fs.mkdir(path.dirname(authoredEntry), { recursive: true });
+    await fs.mkdir(path.dirname(depIndexA), { recursive: true });
+    await fs.mkdir(path.dirname(depIndexB), { recursive: true });
+
+    await fixture.write(
+      path.relative(fixture.projectRoot, authoredEntry),
+      "export const entry = true;\n",
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, authoredLazyA),
+      'import { aliased } from "../node_modules/pkg-a/index.js";\nexport const lazyA = aliased;\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, authoredLazyB),
+      'import { aliased } from "../node_modules/pkg-b/index.js";\nexport const lazyB = aliased;\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, depIndexA),
+      'export { foo as aliased } from "./foo.js";\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, depFoo),
+      "export const foo = 7;\n",
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, depIndexB),
+      'export { bar as aliased } from "./bar.js";\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, depBar),
+      "export const bar = 9;\n",
+    );
+
+    const materialized = {
+      authoredFiles: [authoredEntry, authoredLazyA, authoredLazyB],
+      entries: ["./src/entry.js"],
+      modules: [
+        {
+          filePath: authoredEntry,
+          id: authoredEntry,
+          relativePath: "src/entry.js",
+          sourceModuleIds: [authoredEntry],
+        },
+        {
+          filePath: authoredLazyA,
+          id: authoredLazyA,
+          relativePath: "src/lazy-a.js",
+          sourceModuleIds: [authoredLazyA],
+        },
+        {
+          filePath: authoredLazyB,
+          id: authoredLazyB,
+          relativePath: "src/lazy-b.js",
+          sourceModuleIds: [authoredLazyB],
+        },
+        {
+          filePath: depIndexA,
+          id: depIndexA,
+          relativePath: "node_modules/pkg-a/index.js",
+          sourceModuleIds: [depIndexA],
+        },
+        {
+          filePath: depFoo,
+          id: depFoo,
+          relativePath: "node_modules/pkg-a/foo.js",
+          sourceModuleIds: [depFoo],
+        },
+        {
+          filePath: depIndexB,
+          id: depIndexB,
+          relativePath: "node_modules/pkg-b/index.js",
+          sourceModuleIds: [depIndexB],
+        },
+        {
+          filePath: depBar,
+          id: depBar,
+          relativePath: "node_modules/pkg-b/bar.js",
+          sourceModuleIds: [depBar],
+        },
+      ],
+      prunedEmptyModuleIds: [],
+      retainedEmptyModuleIds: [],
+      runtimeEntries: [
+        "./src/entry.js",
+        "./src/lazy-a.js",
+        "./src/lazy-b.js",
+        "./node_modules/pkg-a/index.js",
+        "./node_modules/pkg-a/foo.js",
+        "./node_modules/pkg-b/index.js",
+        "./node_modules/pkg-b/bar.js",
+      ],
+      srcDir,
+    };
+
+    const prebundled = await prebundleMaterializedDependencies({
+      dynamicRootModuleIds: [authoredLazyA, authoredLazyB],
+      materialized,
+    });
+
+    expect(
+      prebundled.modules.some((module) =>
+        module.relativePath.startsWith("__dep-bundles/shared/"),
+      ),
+    ).toBe(false);
+    expect(
+      prebundled.modules.filter(
+        (module) =>
+          module.relativePath.startsWith("__dep-bundles/") &&
+          !module.relativePath.startsWith("__dep-bundles/chunks/"),
+      ).length,
+    ).toBe(2);
+
+    const rewrittenLazyA = await fs.readFile(authoredLazyA, "utf8");
+    const rewrittenLazyB = await fs.readFile(authoredLazyB, "utf8");
+    expect(rewrittenLazyA).toContain("__dep-bundles/lazy-a/");
+    expect(rewrittenLazyB).toContain("__dep-bundles/lazy-b/");
+  },
+);
+
+test.serial(
   "gccTsBundler wires lazy Vite CSS through the runtime when cssCodeSplit is enabled",
   { timeout: 20000 },
   async () => {

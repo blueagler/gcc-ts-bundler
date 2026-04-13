@@ -418,8 +418,17 @@ export async function prebundleMaterializedDependencies(input: {
     return input.materialized;
   }
 
+  const canonicalizedEntryOutputs = await canonicalizeDuplicateLazyEntryOutputs(
+    {
+      entryOutputByRequestKey,
+      outputDir,
+      srcDir: input.materialized.srcDir,
+      writtenRequests,
+    },
+  );
+
   const collapsedEntryOutputByPath = await collectCollapsibleBundleEntryOutputs(
-    [...new Set(entryOutputByRequestKey.values())],
+    [...new Set(canonicalizedEntryOutputs.outputByRequestKey.values())],
   );
 
   await Promise.all(
@@ -458,7 +467,7 @@ export async function prebundleMaterializedDependencies(input: {
           ),
         );
         const targetRequestKey = `${regionKey}\u0000${targetFilePath}`;
-        const bundledOutput = entryOutputByRequestKey.get(
+        const bundledOutput = canonicalizedEntryOutputs.outputByRequestKey.get(
           requestGroupKeyByTarget.get(targetRequestKey) ?? targetRequestKey,
         );
         if (!bundledOutput) {
@@ -520,8 +529,12 @@ export async function prebundleMaterializedDependencies(input: {
     ]),
   );
   const bundledModules = collectBundledModules({
+    extraModules: canonicalizedEntryOutputs.canonicalModules,
     metafile: bundleResult.metafile,
-    omittedFilePaths: new Set(collapsedEntryOutputByPath.keys()),
+    omittedFilePaths: new Set([
+      ...collapsedEntryOutputByPath.keys(),
+      ...canonicalizedEntryOutputs.omittedOutputFilePaths,
+    ]),
     outputDir,
     originalSourceIdsByFilePath,
     srcDir: input.materialized.srcDir,
@@ -775,6 +788,94 @@ function resolveEntryOutputsByRequest(input: {
   return outputByRequestKey;
 }
 
+async function canonicalizeDuplicateLazyEntryOutputs(input: {
+  entryOutputByRequestKey: Map<string, string>;
+  outputDir: string;
+  srcDir: string;
+  writtenRequests: WrittenRegionBundleRequest[];
+}) {
+  const requestByKey = new Map(
+    input.writtenRequests.map((request) => [request.requestKey, request]),
+  );
+  const requestKeysByContentHash = new Map<string, string[]>();
+
+  for (const [requestKey, outputFilePath] of input.entryOutputByRequestKey) {
+    const request = requestByKey.get(requestKey);
+    if (!request || !isPureLazyRegionKey(request.requests[0]?.regionKey)) {
+      continue;
+    }
+    const sourceText = await fs.readFile(outputFilePath, "utf8");
+    const contentHash = hashText(sourceText);
+    const bucket = requestKeysByContentHash.get(contentHash);
+    if (bucket) {
+      bucket.push(requestKey);
+    } else {
+      requestKeysByContentHash.set(contentHash, [requestKey]);
+    }
+  }
+
+  const outputByRequestKey = new Map(input.entryOutputByRequestKey);
+  const omittedOutputFilePaths = new Set<string>();
+  const canonicalModules: CapturedRuntimeModule[] = [];
+
+  for (const [contentHash, requestKeys] of requestKeysByContentHash) {
+    if (requestKeys.length < 2) {
+      continue;
+    }
+
+    const firstOutputFilePath = outputByRequestKey.get(requestKeys[0]!);
+    if (!firstOutputFilePath) {
+      continue;
+    }
+
+    const canonicalFilePath = normalizePath(
+      path.join(
+        input.outputDir,
+        "shared",
+        `${path.basename(firstOutputFilePath, ".js")}-${contentHash.slice(
+          0,
+          8,
+        )}.js`,
+      ),
+    );
+    await fs.mkdir(path.dirname(canonicalFilePath), { recursive: true });
+    await fs.copyFile(firstOutputFilePath, canonicalFilePath);
+
+    const sourceModuleIds = new Set<string>();
+    for (const requestKey of requestKeys) {
+      const request = requestByKey.get(requestKey);
+      if (!request) {
+        continue;
+      }
+      for (const sourceModuleId of request.sourceModuleIds) {
+        sourceModuleIds.add(sourceModuleId);
+      }
+      const outputFilePath = outputByRequestKey.get(requestKey);
+      if (outputFilePath && outputFilePath !== canonicalFilePath) {
+        omittedOutputFilePaths.add(outputFilePath);
+      }
+      outputByRequestKey.set(requestKey, canonicalFilePath);
+    }
+
+    canonicalModules.push({
+      filePath: canonicalFilePath,
+      id: canonicalFilePath,
+      relativePath: path
+        .relative(input.srcDir, canonicalFilePath)
+        .replace(/\\/g, "/"),
+      sourceModuleIds: [...sourceModuleIds].sort((left, right) =>
+        left.localeCompare(right),
+      ),
+    });
+  }
+
+  return {
+    canonicalModules,
+    omittedOutputFilePaths,
+    outputByRequestKey,
+  };
+}
+
 async function collectCollapsibleBundleEntryOutputs(outputFilePaths: string[]) {
   const collapsibleByPath = new Map<string, CollapsibleBundleEntryOutput>();
   for (const outputFilePath of outputFilePaths) {
@@ -1025,6 +1126,7 @@ function dedupeAuthoredImportStatements(filePath: string, sourceText: string) {
 }
 
 function collectBundledModules(input: {
+  extraModules: CapturedRuntimeModule[];
   metafile: NonNullable<Awaited<ReturnType<EsbuildBuild>>["metafile"]>;
   omittedFilePaths: Set<string>;
   originalSourceIdsByFilePath: Map<string, string[]>;
@@ -1069,6 +1171,8 @@ function collectBundledModules(input: {
     });
   }
 
+  modules.push(...input.extraModules);
+
   return modules.sort((left, right) =>
     left.relativePath.localeCompare(right.relativePath),
   );
@@ -1111,6 +1215,13 @@ function sanitizeRegionKey(regionKey: string) {
 
 function hashText(value: string) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function isPureLazyRegionKey(regionKey: string | undefined) {
+  if (!regionKey) {
+    return false;
+  }
+  return !regionKey.split("|").includes(EAGER_REGION_LABEL);
 }
 
 function normalizePath(filePath: string) {
