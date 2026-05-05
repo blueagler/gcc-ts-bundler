@@ -31,9 +31,7 @@ pub(crate) fn render_externs(
     lines.join("\n")
 }
 
-pub(crate) fn render_generated_externs(
-    static_property_names: &HashSet<String>,
-) -> String {
+pub(crate) fn render_generated_externs(static_property_names: &HashSet<String>) -> String {
     let mut lines = vec!["/** @externs */".to_string()];
     let mut static_names = static_property_names.iter().cloned().collect::<Vec<_>>();
     static_names.sort();

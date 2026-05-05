@@ -23,6 +23,7 @@ export function applyInternalClosureDebugOptions(
   closureOptions: ClosureCompilerOptions,
 ) {
   const mutableOptions = closureOptions as ClosureCompilerOptions & {
+    compilationLevel?: string;
     debug?: boolean;
     formatting?: string;
     useTypesForOptimization?: boolean;
@@ -31,7 +32,12 @@ export function applyInternalClosureDebugOptions(
     mutableOptions.debug = true;
     mutableOptions.formatting = "PRETTY_PRINT";
   }
-  if (process.env.GCC_USE_TYPES_FOR_OPTIMIZATION === "false") {
+  if (
+    mutableOptions.compilationLevel === "ADVANCED" &&
+    process.env.GCC_USE_TYPES_FOR_OPTIMIZATION !== "false"
+  ) {
+    mutableOptions.useTypesForOptimization = true;
+  } else if (process.env.GCC_USE_TYPES_FOR_OPTIMIZATION === "false") {
     mutableOptions.useTypesForOptimization = false;
   }
 }

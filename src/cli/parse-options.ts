@@ -27,7 +27,6 @@ export function parseCliArgs(args: string[]): CliParseResult {
       "chunks",
       "compilation-level",
       "entry",
-      "entry-point",
       "language-out",
       "out-dir",
       "packages",

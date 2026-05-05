@@ -4,14 +4,14 @@ mod render;
 #[cfg(test)]
 use super::*;
 
-pub(super) use self::analysis::{
-    is_valid_js_identifier, prop_name_to_string, ExternPropertyAnalysis,
-};
 pub(super) use self::analysis::collect_extern_property_names_with_externs;
 #[cfg(test)]
 pub(super) use self::analysis::{
-    collect_extern_property_names,
-    collect_preserved_property_names, collect_static_property_names_from_text,
+    collect_extern_property_names, collect_preserved_property_names,
+    collect_static_property_names_from_text,
+};
+pub(super) use self::analysis::{
+    is_valid_js_identifier, prop_name_to_string, ExternPropertyAnalysis,
 };
 #[cfg(test)]
 pub(super) use self::render::render_externs;

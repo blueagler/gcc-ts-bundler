@@ -3,15 +3,14 @@ use super::*;
 mod bindings;
 mod resolve;
 
+pub(super) use self::bindings::{
+    apply_import_binding_rewrites, exported_decl_names, member_access,
+    module_export_name_to_string, render_live_export_slot, render_packed_live_export_slots,
+    render_static_export_slot, stable_slot_access, BundlerExportSlotMode,
+};
 use self::bindings::{
     bind_import_specifiers, collect_named_export_bindings, plan_bundler_import_specifiers,
     reject_namespace_export_specifiers, ImportBindingRewrite, ImportBindingSlotAlias,
-};
-pub(super) use self::bindings::{
-    apply_import_binding_rewrites,
-    exported_decl_names, member_access, module_export_name_to_string, render_live_export_slot,
-    render_packed_live_export_slots, render_static_export_slot, stable_slot_access,
-    BundlerExportSlotMode,
 };
 pub(super) use self::resolve::resolve_module_id_for_specifier;
 
@@ -108,11 +107,8 @@ pub(super) fn convert_bundler_import_decl(
             .bundler_module_slots
             .get(&module_id)
             .ok_or_else(|| format!("Missing bundler-runtime export slots for {module_id}"))?;
-        let (specifier_lines, specifier_rewrites) = plan_bundler_import_specifiers(
-            &local_name,
-            &value_specifiers,
-            target_slots,
-        )?;
+        let (specifier_lines, specifier_rewrites) =
+            plan_bundler_import_specifiers(&local_name, &value_specifiers, target_slots)?;
         lines.extend(specifier_lines);
         binding_rewrites.extend(specifier_rewrites);
     }
@@ -244,7 +240,10 @@ pub(super) fn convert_bundler_named_export(
         }
     }
     for (source_object_name, slot_pairs) in grouped_alias_exports {
-        lines.extend(render_grouped_live_slot_exports(&source_object_name, slot_pairs));
+        lines.extend(render_grouped_live_slot_exports(
+            &source_object_name,
+            slot_pairs,
+        ));
     }
     Ok(lines)
 }
@@ -263,7 +262,10 @@ pub(super) fn render_grouped_live_slot_exports(
     slot_pairs
         .into_iter()
         .map(|(target_slot, source_slot)| {
-            render_live_export_slot(target_slot, &stable_slot_access(source_object_name, source_slot))
+            render_live_export_slot(
+                target_slot,
+                &stable_slot_access(source_object_name, source_slot),
+            )
         })
         .collect()
 }

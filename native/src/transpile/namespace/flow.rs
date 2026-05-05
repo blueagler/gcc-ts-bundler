@@ -6,8 +6,7 @@ pub(crate) fn rewrite_bundler_runtime_namespace_usage(
     context: &TranspileContext,
 ) -> std::result::Result<(), String> {
     let dynamic_import_wrappers = collect_dynamic_import_wrappers(module);
-    let object_carriers =
-        collect_dynamic_import_object_carriers(module, &dynamic_import_wrappers);
+    let object_carriers = collect_dynamic_import_object_carriers(module, &dynamic_import_wrappers);
     let promise_carriers =
         collect_dynamic_import_promise_carriers(module, &object_carriers, &dynamic_import_wrappers);
     let mut visitor = BundlerRuntimeNamespaceVisitor::new(

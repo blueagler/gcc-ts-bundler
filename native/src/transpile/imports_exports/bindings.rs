@@ -82,7 +82,10 @@ pub(super) fn plan_bundler_import_specifiers(
                 });
             }
             ImportSpecifier::Namespace(namespace_specifier) => {
-                lines.push(format!("const {} = {};", namespace_specifier.local.sym, local_name));
+                lines.push(format!(
+                    "const {} = {};",
+                    namespace_specifier.local.sym, local_name
+                ));
             }
             ImportSpecifier::Named(named_specifier) => {
                 let imported_name = named_specifier
@@ -219,7 +222,10 @@ fn slot_access_expr(object_name: &str, slot: usize) -> Expr {
     })
 }
 
-pub(crate) fn apply_import_binding_rewrites(module: &mut Module, rewrites: &[ImportBindingRewrite]) {
+pub(crate) fn apply_import_binding_rewrites(
+    module: &mut Module,
+    rewrites: &[ImportBindingRewrite],
+) {
     if rewrites.is_empty() {
         return;
     }
@@ -261,9 +267,7 @@ impl VisitMut for ImportBindingRewriteVisitor {
 }
 
 pub(crate) fn render_live_export_slot(slot: usize, value_expression: &str) -> String {
-    format!(
-        "__live(__exports,{slot},function(){{return {value_expression};}});"
-    )
+    format!("__live(__exports,{slot},function(){{return {value_expression};}});")
 }
 
 pub(crate) fn render_packed_live_export_slots(

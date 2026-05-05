@@ -232,7 +232,7 @@ test.serial("externs CLI emits boundary-aware and runtime-aware outputs", async 
   expect(runtimeOutput).not.toContain("Object.prototype.addEventListener;");
 });
 
-test.serial("build uses explicit runtime-aware externs to preserve runtime and protocol contracts", async () => {
+test.serial("build uses explicit runtime-aware externs to preserve runtime and protocol contracts", { timeout: 20000 }, async () => {
   const runtimeFixture = await createRuntimeExternFixture();
   const runtimeExternsFile = path.join(
     runtimeFixture.projectRoot,

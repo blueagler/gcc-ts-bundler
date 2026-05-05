@@ -43,8 +43,7 @@ impl Es5HelperChunkRewriter {
                     let runtime_alias =
                         next_available_alias(&names, &["G", "$G", "G$", "_G", "__G"]);
                     names.insert(runtime_alias.clone());
-                    let helper_alias =
-                        next_available_alias(&names, &["_", "$", "$_", "_$", "__"]);
+                    let helper_alias = next_available_alias(&names, &["_", "$", "$_", "_$", "__"]);
                     (runtime_alias, helper_alias, true)
                 }
             } else {
@@ -84,7 +83,8 @@ impl Es5HelperChunkRewriter {
             helper_name_to_kind.insert(helper_name.clone(), *kind);
         }
         if !current_scope_names.contains("ta") {
-            helper_name_to_kind.insert("ta".to_string(), SharedEs5HelperKind::ClosureTemplateObject);
+            helper_name_to_kind
+                .insert("ta".to_string(), SharedEs5HelperKind::ClosureTemplateObject);
         }
         if !current_scope_names.contains("qa") {
             helper_name_to_kind.insert("qa".to_string(), SharedEs5HelperKind::ClosureInherits);
@@ -160,7 +160,8 @@ impl Es5HelperChunkRewriter {
             helper_name_to_kind.insert(helper_name, kind);
         }
         if !module_scope_names.contains("ta") {
-            helper_name_to_kind.insert("ta".to_string(), SharedEs5HelperKind::ClosureTemplateObject);
+            helper_name_to_kind
+                .insert("ta".to_string(), SharedEs5HelperKind::ClosureTemplateObject);
         }
         if !module_scope_names.contains("qa") {
             helper_name_to_kind.insert("qa".to_string(), SharedEs5HelperKind::ClosureInherits);
@@ -205,9 +206,10 @@ impl VisitMut for Es5HelperChunkRewriter {
         let should_insert_module_alias = self.module_alias_used.pop().unwrap_or(false);
         self.shared_module_aliases = previous_aliases;
         if should_insert_module_alias {
-            module
-                .body
-                .insert(0, ModuleItem::Stmt(helper_alias_decl(&runtime_alias, &helper_alias)));
+            module.body.insert(
+                0,
+                ModuleItem::Stmt(helper_alias_decl(&runtime_alias, &helper_alias)),
+            );
         }
     }
 
@@ -382,7 +384,8 @@ fn classify_shared_es5_helper(fn_decl: &FnDecl) -> Option<SharedEs5HelperKind> {
     if printed.contains("Cannot write private member to an object whose class did not declare it") {
         return Some(SharedEs5HelperKind::ClassPrivateFieldSet);
     }
-    if printed.contains("Cannot read private member from an object whose class did not declare it") {
+    if printed.contains("Cannot read private member from an object whose class did not declare it")
+    {
         return Some(SharedEs5HelperKind::ClassPrivateFieldGet);
     }
     if printed.contains("Object.defineProperty(") && printed.contains(",\"name\",") {

@@ -65,10 +65,18 @@ mod tests {
         let rewritten = rewrite_bundler_runtime_es5_helpers(code.to_string()).unwrap();
         assert!(rewritten.code.contains("var G=globalThis.__g,_=G._;"));
         assert!(rewritten.helper_keys.contains(&"es-decorate".to_string()));
-        assert!(rewritten.helper_keys.contains(&"run-initializers".to_string()));
-        assert!(rewritten.helper_keys.contains(&"set-function-name".to_string()));
-        assert!(rewritten.helper_keys.contains(&"class-private-field-get".to_string()));
-        assert!(rewritten.helper_keys.contains(&"class-private-field-set".to_string()));
+        assert!(rewritten
+            .helper_keys
+            .contains(&"run-initializers".to_string()));
+        assert!(rewritten
+            .helper_keys
+            .contains(&"set-function-name".to_string()));
+        assert!(rewritten
+            .helper_keys
+            .contains(&"class-private-field-get".to_string()));
+        assert!(rewritten
+            .helper_keys
+            .contains(&"class-private-field-set".to_string()));
         assert!(!rewritten
             .code
             .contains("Cannot add initializers after decoration has completed"));
@@ -127,7 +135,9 @@ mod tests {
           });
         "#;
         let rewritten = rewrite_bundler_runtime_es5_helpers(code.to_string()).unwrap();
-        assert!(!rewritten.helper_keys.contains(&"closure-global".to_string()));
+        assert!(!rewritten
+            .helper_keys
+            .contains(&"closure-global".to_string()));
         assert!(rewritten
             .code
             .contains("globalThis.Object.defineProperties"));

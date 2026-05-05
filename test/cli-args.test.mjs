@@ -11,6 +11,8 @@ test("does not accept deprecated build flag aliases", () => {
     "./src",
     "--entry_point",
     "./main.ts",
+    "--entry-point",
+    "./main.ts",
     "--output_dir",
     "./dist",
   ]);

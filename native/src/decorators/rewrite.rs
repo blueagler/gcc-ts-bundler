@@ -123,8 +123,12 @@ impl<'a> PropertyProtocolRewriter<'a> {
             return false;
         };
 
-        if !elements.iter().any(|element| self.renames.contains_key(element))
-            || !elements.iter().all(|element| looks_like_property_name(element))
+        if !elements
+            .iter()
+            .any(|element| self.renames.contains_key(element))
+            || !elements
+                .iter()
+                .all(|element| looks_like_property_name(element))
         {
             return false;
         }

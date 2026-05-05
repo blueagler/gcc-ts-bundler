@@ -1,49 +1,156 @@
+import path from "path";
 import ts from "typescript";
 
-import { ClosureIrTypeDeclaration, FunctionObjectParamRecord } from "../types";
+import {
+  ClosureIrTopLevelDoc,
+  ClosureIrTypeDeclaration,
+  FunctionObjectParamRecord,
+} from "../types";
+
+export interface ClosureDocRenderContext {
+  recordNamesByKey: Map<string, string>;
+  sourceFileStem: string;
+  typeDeclarations: ClosureIrTypeDeclaration[];
+  usedRecordNames: Set<string>;
+}
+
+type FunctionLikeDeclaration =
+  | ts.ArrowFunction
+  | ts.ConstructorDeclaration
+  | ts.FunctionDeclaration
+  | ts.FunctionExpression
+  | ts.GetAccessorDeclaration
+  | ts.MethodDeclaration
+  | ts.SetAccessorDeclaration;
+
+type JsDocTagInput = {
+  name?: string;
+  text?: string;
+  type?: string;
+};
+
+type SignatureParamInfo = {
+  name: string;
+  optional: boolean;
+  rest: boolean;
+  thisParam: boolean;
+  type: string;
+};
+
+const MAX_RECORDS_PER_FILE = 160;
+const MAX_RECORD_PROPERTIES = 48;
+const MAX_TYPE_DEPTH = 28;
+const MAX_UNION_MEMBERS = 16;
+
+const BUILTIN_TYPE_NAMES = new Set([
+  "AbortController",
+  "AbortSignal",
+  "Array",
+  "ArrayBuffer",
+  "AsyncIterable",
+  "AsyncIterator",
+  "BigInt64Array",
+  "BigUint64Array",
+  "Blob",
+  "DataView",
+  "Date",
+  "Error",
+  "Float32Array",
+  "Float64Array",
+  "FormData",
+  "Function",
+  "Headers",
+  "Int16Array",
+  "Int32Array",
+  "Int8Array",
+  "Iterable",
+  "Iterator",
+  "Map",
+  "Object",
+  "Promise",
+  "ReadonlyArray",
+  "ReadonlyMap",
+  "ReadonlySet",
+  "ReadableStream",
+  "ReadableStreamDefaultController",
+  "ReadableStreamDefaultReader",
+  "RegExp",
+  "Request",
+  "Response",
+  "Set",
+  "TextDecoder",
+  "TextEncoder",
+  "TransformStream",
+  "URL",
+  "URLSearchParams",
+  "Uint16Array",
+  "Uint32Array",
+  "Uint8Array",
+  "Uint8ClampedArray",
+  "WeakMap",
+  "WeakSet",
+  "WritableStream",
+  "WritableStreamDefaultController",
+  "WritableStreamDefaultWriter",
+]);
+
+const BUILTIN_GENERIC_TYPE_NAMES = new Map([
+  ["AsyncIterable", "AsyncIterable"],
+  ["AsyncIterator", "AsyncIterator"],
+  ["Iterable", "Iterable"],
+  ["Iterator", "Iterator"],
+  ["Map", "Map"],
+  ["Promise", "Promise"],
+  ["ReadonlyMap", "Map"],
+  ["ReadonlySet", "Set"],
+  ["Set", "Set"],
+  ["WeakMap", "WeakMap"],
+  ["WeakSet", "WeakSet"],
+]);
+
+const CONFLICTING_GENERATED_TAGS = new Set([
+  "argument",
+  "constructor",
+  "extends",
+  "implements",
+  "param",
+  "return",
+  "template",
+  "this",
+  "type",
+  "typedef",
+]);
+
+export function createClosureDocRenderContext(
+  sourceFile: ts.SourceFile,
+): ClosureDocRenderContext {
+  return {
+    recordNamesByKey: new Map(),
+    sourceFileStem: sanitizeClosureName(
+      path.basename(sourceFile.fileName).replace(/\.[cm]?[jt]sx?$/u, ""),
+    ),
+    typeDeclarations: [],
+    usedRecordNames: new Set(),
+  };
+}
 
 export function buildInterfaceDeclarationSnippet(
   statement: ts.InterfaceDeclaration,
   checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
 ): ClosureIrTypeDeclaration {
+  const name = statement.name.text;
+  context.usedRecordNames.add(name);
   const lines: string[] = ["/**"];
   lines.push(" * @record");
-  for (const templateName of getTemplateNames(statement.typeParameters)) {
-    lines.push(` * @template ${templateName}`);
-  }
+  appendTemplateTags(lines, statement.typeParameters);
   lines.push(" */");
-  lines.push(`function ${statement.name.text}() {}`);
+  lines.push(`function ${name}() {}`);
 
-  for (const member of statement.members) {
-    const memberName = getPropertyNameText(member.name);
-    if (!memberName) {
-      continue;
-    }
-    if (ts.isPropertySignature(member)) {
-      const propertyType = member.type
-        ? toClosureType(checker.getTypeFromTypeNode(member.type), checker)
-        : "?";
-      lines.push(`/** @type {${propertyType}} */`);
-      lines.push(
-        `${statement.name.text}.prototype.${renderPropertyName(memberName)};`,
-      );
-      continue;
-    }
-    if (ts.isMethodSignature(member)) {
-      const signature = checker.getSignatureFromDeclaration(member);
-      if (!signature) {
-        continue;
-      }
-      const functionType = signatureToClosureFunctionType(signature, checker);
-      lines.push(`/** @type {${functionType}} */`);
-      lines.push(
-        `${statement.name.text}.prototype.${renderPropertyName(memberName)};`,
-      );
-    }
-  }
+  appendInterfaceMembers(lines, name, statement.members, checker, context);
 
   if (hasExportModifier(statement)) {
-    lines.push(`exports.${statement.name.text} = ${statement.name.text};`);
+    lines.push(`exports.${name} = ${name};`);
   }
 
   return {
@@ -54,13 +161,29 @@ export function buildInterfaceDeclarationSnippet(
 export function buildTypeAliasDeclarationSnippet(
   statement: ts.TypeAliasDeclaration,
   checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
 ): ClosureIrTypeDeclaration {
-  const aliasType = checker.getTypeAtLocation(statement);
-  const closureType = toClosureType(aliasType, checker);
-  const lines: string[] = ["/**"];
-  for (const templateName of getTemplateNames(statement.typeParameters)) {
-    lines.push(` * @template ${templateName}`);
+  if (ts.isTypeLiteralNode(statement.type)) {
+    const name = statement.name.text;
+    context.usedRecordNames.add(name);
+    const lines: string[] = ["/**"];
+    lines.push(" * @record");
+    appendTemplateTags(lines, statement.typeParameters);
+    lines.push(" */");
+    lines.push(`function ${name}() {}`);
+    appendInterfaceMembers(lines, name, statement.type.members, checker, context);
+    if (hasExportModifier(statement)) {
+      lines.push(`exports.${name} = ${name};`);
+    }
+    return {
+      snippet: `${lines.join("\n")}\n`,
+    };
   }
+
+  const aliasType = checker.getTypeAtLocation(statement);
+  const closureType = toClosureType(aliasType, checker, context);
+  const lines: string[] = ["/**"];
+  appendTemplateTags(lines, statement.typeParameters);
   lines.push(` * @typedef {${closureType}}`);
   lines.push(" */");
   lines.push(`let ${statement.name.text};`);
@@ -75,44 +198,26 @@ export function buildTypeAliasDeclarationSnippet(
 export function buildFunctionJsDoc(
   statement: ts.FunctionDeclaration,
   checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
   firstParamObjectRecordTypeName?: string,
 ) {
-  const signature = checker.getSignatureFromDeclaration(statement);
-  if (!signature) {
+  if (!statement.body) {
     return null;
   }
-  const lines = ["/**"];
-  for (const templateName of getTemplateNames(statement.typeParameters)) {
-    lines.push(` * @template ${templateName}`);
-  }
-  for (const [index, parameter] of signature.getParameters().entries()) {
-    const declaration = parameter.valueDeclaration;
-    const parameterType = declaration
-      ? checker.getTypeOfSymbolAtLocation(parameter, declaration)
-      : checker.getTypeOfSymbol(parameter);
-    const parameterName =
-      index === 0 && firstParamObjectRecordTypeName
-        ? "__props"
-        : parameter.getName();
-    const closureType =
-      index === 0 && firstParamObjectRecordTypeName
-        ? `!${firstParamObjectRecordTypeName}`
-        : toClosureType(parameterType, checker);
-    lines.push(` * @param {${closureType}} ${parameterName}`);
-  }
-  const returnType = checker.getReturnTypeOfSignature(signature);
-  lines.push(` * @return {${toClosureType(returnType, checker)}}`);
-  lines.push(" */");
-  return `${lines.join("\n")}\n`;
+  const declarations = collectFunctionOverloadDeclarations(statement);
+  return buildSignaturesJsDoc({
+        checker,
+        context,
+    declarations,
+        firstParamObjectRecordTypeName,
+  });
 }
 
 export function buildFunctionObjectParamRecord(
   statement: ts.FunctionDeclaration,
   checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
 ): FunctionObjectParamRecord | null {
-  if (!isComponentLikeName(statement.name?.text)) {
-    return null;
-  }
   const firstParameter = statement.parameters[0];
   if (
     !firstParameter ||
@@ -123,57 +228,970 @@ export function buildFunctionObjectParamRecord(
   }
 
   const parameterType = checker.getTypeAtLocation(firstParameter);
-  const properties = checker.getPropertiesOfType(parameterType);
-  if (properties.length === 0) {
+  const recordTypeName = buildRecordForObjectType({
+    checker,
+    context,
+    preferredName: `${statement.name!.text}$Param0`,
+    type: parameterType,
+  });
+  if (!recordTypeName) {
     return null;
   }
 
-  const typeName = `${statement.name!.text}$Param0`;
-  const lines = ["/**", " * @record", " */", `function ${typeName}() {}`];
-  for (const property of properties) {
-    const declaration =
-      property.valueDeclaration ?? property.declarations?.[0] ?? firstParameter;
-    const propertyType = checker.getTypeOfSymbolAtLocation(
-      property,
-      declaration,
-    );
-    lines.push(`/** @type {${toClosureType(propertyType, checker)}} */`);
-    lines.push(
-      `${typeName}.prototype.${renderPropertyName(property.getName())};`,
-    );
-  }
   return {
-    snippet: `${lines.join("\n")}\n`,
-    typeName,
+    snippet: "",
+    typeName: recordTypeName,
   };
 }
 
 export function buildClassJsDoc(
   statement: ts.ClassDeclaration,
   checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
 ) {
   const typeParameters = statement.typeParameters ?? [];
-  const lines = ["/**"];
-  for (const templateName of getTemplateNames(typeParameters)) {
-    lines.push(` * @template ${templateName}`);
-  }
+  const tags = [
+    ...collectPreservedJsDocTags(statement),
+    ...templateTags(typeParameters),
+  ];
   if (statement.heritageClauses) {
     for (const clause of statement.heritageClauses) {
       for (const typeNode of clause.types) {
-        const closureType = toClosureType(
-          checker.getTypeAtLocation(typeNode),
-          checker,
-        );
+        const closureType = toClosureHeritageType(typeNode, checker, context);
+        if (!closureType) {
+          continue;
+        }
         if (clause.token === ts.SyntaxKind.ExtendsKeyword) {
-          lines.push(` * @extends {${closureType}}`);
+          tags.push({ name: "extends", type: closureType });
         } else if (clause.token === ts.SyntaxKind.ImplementsKeyword) {
-          lines.push(` * @implements {${closureType}}`);
+          tags.push({ name: "implements", type: closureType });
         }
       }
     }
   }
+  return tags.length > 0 ? renderJsDoc(tags) : null;
+}
+
+export function buildFunctionLikeDoc(
+  declaration: FunctionLikeDeclaration,
+  checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
+) {
+  if (isBodylessFunctionLikeDeclaration(declaration)) {
+    return null;
+  }
+  const declarations = collectOverloadDeclarations(declaration);
+  return buildSignaturesJsDoc({ checker, context, declarations });
+}
+
+export function buildVariableJsDoc({
+  checker,
+  context,
+  initializer,
+  name,
+  typeNode,
+}: {
+  checker: ts.TypeChecker;
+  context: ClosureDocRenderContext;
+  initializer?: ts.Expression;
+  name: string;
+  typeNode?: ts.TypeNode;
+}) {
+  if (
+    initializer &&
+    (ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer))
+  ) {
+    return buildFunctionLikeDoc(initializer, checker, context);
+  }
+
+  const type = typeNode
+    ? checker.getTypeFromTypeNode(typeNode)
+    : initializer
+      ? checker.getTypeAtLocation(initializer)
+      : null;
+  if (!type || !isWorthAnnotatingVariableType(type, checker)) {
+    return null;
+  }
+
+  return buildTypeJsDoc(toClosureType(type, checker, context));
+}
+
+export function buildClassMemberDoc({
+  checker,
+  context,
+  member,
+}: {
+  checker: ts.TypeChecker;
+  context: ClosureDocRenderContext;
+  member: ts.ClassElement;
+}) {
+  if (
+    ts.isConstructorDeclaration(member) ||
+    ts.isMethodDeclaration(member) ||
+    ts.isGetAccessorDeclaration(member) ||
+    ts.isSetAccessorDeclaration(member)
+  ) {
+    return buildFunctionLikeDoc(member, checker, context);
+  }
+
+  if (!ts.isPropertyDeclaration(member) || !member.type) {
+    return null;
+  }
+  return buildTypeJsDoc(getTypedDeclarationClosureType(member, checker, context));
+}
+
+export function buildObjectMemberDoc({
+  checker,
+  context,
+  member,
+}: {
+  checker: ts.TypeChecker;
+  context: ClosureDocRenderContext;
+  member: ts.ObjectLiteralElementLike;
+}) {
+  if (
+    ts.isMethodDeclaration(member) ||
+    ts.isGetAccessorDeclaration(member) ||
+    ts.isSetAccessorDeclaration(member)
+  ) {
+    return buildFunctionLikeDoc(member, checker, context);
+  }
+
+  if (
+    ts.isPropertyAssignment(member) &&
+    (ts.isArrowFunction(member.initializer) ||
+      ts.isFunctionExpression(member.initializer))
+  ) {
+    return buildFunctionLikeDoc(member.initializer, checker, context);
+  }
+
+  if (ts.isPropertyAssignment(member)) {
+    const type = checker.getTypeAtLocation(member.initializer);
+    return isWorthAnnotatingVariableType(type, checker)
+      ? buildTypeJsDoc(toClosureType(type, checker, context))
+      : null;
+  }
+
+  return null;
+}
+
+export function buildClosureTypeReference(
+  type: ts.Type,
+  checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
+) {
+  return toClosureType(type, checker, context);
+}
+
+export function toClosureType(
+  type: ts.Type,
+  checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
+  seen = new Set<ts.Type>(),
+): string {
+  if (seen.size > MAX_TYPE_DEPTH) {
+    return "?";
+  }
+  if (seen.has(type)) {
+    return "?";
+  }
+  seen.add(type);
+
+  if (type.flags & ts.TypeFlags.Any) return "?";
+  if (type.flags & ts.TypeFlags.Unknown) return "?";
+  if (type.flags & ts.TypeFlags.StringLike) return "string";
+  if (type.flags & ts.TypeFlags.NumberLike) return "number";
+  if (type.flags & ts.TypeFlags.BooleanLike) return "boolean";
+  if (type.flags & ts.TypeFlags.Void) return "void";
+  if (type.flags & ts.TypeFlags.Undefined) return "undefined";
+  if (type.flags & ts.TypeFlags.Null) return "null";
+  if (type.flags & ts.TypeFlags.Never) return "?";
+  if (type.flags & ts.TypeFlags.TypeParameter) {
+    return sanitizeClosureName(checker.typeToString(type));
+  }
+
+  if (type.isUnion()) {
+    if (type.types.length > MAX_UNION_MEMBERS) {
+      return collapseLargeUnion(type, checker);
+    }
+    const rendered = uniqueSortedStrings(
+      type.types.map((item) => toClosureType(item, checker, context, seen)),
+    );
+    return rendered.length === 1 ? rendered[0] : `(${rendered.join("|")})`;
+  }
+
+  if (type.isIntersection()) {
+    const recordName = buildRecordForObjectType({
+      checker,
+      context,
+      type,
+    });
+    return recordName ? `!${recordName}` : "!Object";
+  }
+
+  if (checker.isArrayType(type) || isReadonlyArrayType(type, checker)) {
+    const typeArguments = checker.getTypeArguments(type as ts.TypeReference);
+    const elementType = typeArguments[0]
+      ? toClosureType(typeArguments[0], checker, context, seen)
+      : "?";
+    return `!Array<${elementType}>`;
+  }
+
+  if (checker.isTupleType(type)) {
+    const typeArguments = checker.getTypeArguments(type as ts.TypeReference);
+    if (typeArguments.length === 0) {
+      return "!Array<?>";
+    }
+    return `!Array<${uniqueSortedStrings(
+      typeArguments.map((item) => toClosureType(item, checker, context, seen)),
+    ).join("|")}>`;
+  }
+
+  const callSignatures = type.getCallSignatures();
+  if (callSignatures.length > 0 && type.getProperties().length === 0) {
+    return signatureToClosureFunctionType(
+      callSignatures[0],
+      checker,
+      context,
+      seen,
+    );
+  }
+
+  const namedType = renderNamedType(type, checker, context, seen);
+  if (namedType) {
+    return namedType;
+  }
+
+  const recordName = buildRecordForObjectType({ checker, context, type });
+  if (recordName) {
+    return `!${recordName}`;
+  }
+
+  return "?";
+}
+
+function buildSignaturesJsDoc({
+  checker,
+  context,
+  declarations,
+  firstParamObjectRecordTypeName,
+}: {
+  checker: ts.TypeChecker;
+  context: ClosureDocRenderContext;
+  declarations: FunctionLikeDeclaration[];
+  firstParamObjectRecordTypeName?: string;
+}) {
+  const signatures = declarations
+    .map((declaration) => ({
+      declaration,
+      signature: checker.getSignatureFromDeclaration(declaration),
+    }))
+    .filter(
+      (entry): entry is {
+        declaration: FunctionLikeDeclaration;
+        signature: ts.Signature;
+      } => !!entry.signature,
+    );
+  if (signatures.length === 0) {
+    return null;
+  }
+
+  const implementation = declarations[declarations.length - 1];
+  const tags = [
+    ...collectPreservedJsDocTags(implementation),
+    ...uniqueTemplateTags(declarations),
+  ];
+  const perSignatureParams = signatures.map(({ declaration, signature }) =>
+    collectSignatureParamInfos({
+      checker,
+      context,
+      declaration,
+      firstParamObjectRecordTypeName,
+      signature,
+    }),
+  );
+  const thisTypes = uniqueSortedStrings(
+    perSignatureParams
+      .flatMap((params) => params.filter((param) => param.thisParam))
+      .map((param) => param.type),
+  );
+  if (thisTypes.length > 0) {
+    tags.push({ name: "this", type: mergeClosureTypes(thisTypes) });
+  }
+
+  const realParams = perSignatureParams.map((params) =>
+    params.filter((param) => !param.thisParam),
+  );
+  const maxParamCount = Math.max(0, ...realParams.map((params) => params.length));
+  const minParamCount = Math.min(
+    ...realParams.map((params) => params.filter((param) => !param.rest).length),
+  );
+  let foundOptional = false;
+  for (let index = 0; index < maxParamCount; index += 1) {
+    const candidates = realParams
+      .map((params) => params[index])
+      .filter((param): param is SignatureParamInfo => !!param);
+    if (candidates.length === 0) {
+      continue;
+    }
+    const first = candidates[0];
+    const rest = candidates.some((param) => param.rest);
+    const isOptional: boolean =
+      !rest &&
+      (foundOptional ||
+        index >= minParamCount ||
+        candidates.some((param) => param.optional));
+    foundOptional ||= isOptional;
+    const mergedType = mergeClosureTypes(
+      candidates.map((param) =>
+        isOptional ? stripUndefinedFromClosureType(param.type) : param.type,
+      ),
+    );
+    tags.push({
+      name: "param",
+      text: first.name,
+      type: `${rest ? "..." : ""}${mergedType}${isOptional ? "=" : ""}`,
+    });
+    if (rest) {
+      break;
+    }
+  }
+
+  if (
+    !signatures.some(({ declaration }) => ts.isConstructorDeclaration(declaration)) &&
+    !isSetterDeclaration(implementation)
+  ) {
+    tags.push({
+      name: "return",
+      type: mergeClosureTypes(
+        signatures.map(({ signature }) =>
+          toClosureType(
+            checker.getReturnTypeOfSignature(signature),
+            checker,
+            context,
+          ),
+        ),
+      ),
+    });
+  }
+
+  return renderJsDoc(tags);
+}
+
+function buildTypeJsDoc(closureType: string) {
+  return renderJsDoc([{ name: "type", type: closureType }]);
+}
+
+function appendInterfaceMembers(
+  lines: string[],
+  typeName: string,
+  members: ts.NodeArray<ts.TypeElement>,
+  checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
+) {
+  for (const member of members) {
+    const memberName = getPropertyNameText(member.name);
+    if (!memberName) {
+      continue;
+    }
+    if (ts.isPropertySignature(member)) {
+      const propertyType = getTypedDeclarationClosureType(
+        member,
+        checker,
+        context,
+      );
+      lines.push(`/** @type {${propertyType}} */`);
+      lines.push(renderPrototypeProperty(typeName, memberName));
+      continue;
+    }
+    if (ts.isMethodSignature(member)) {
+      const signature = checker.getSignatureFromDeclaration(member);
+      if (!signature) {
+        continue;
+      }
+      const functionType = signatureToClosureFunctionType(
+        signature,
+        checker,
+        context,
+      );
+      lines.push(`/** @type {${functionType}} */`);
+      lines.push(renderPrototypeProperty(typeName, memberName));
+    }
+  }
+}
+
+function buildRecordForObjectType({
+  checker,
+  context,
+  preferredName,
+  type,
+}: {
+  checker: ts.TypeChecker;
+  context: ClosureDocRenderContext;
+  preferredName?: string;
+  type: ts.Type;
+}) {
+  const properties = checker.getPropertiesOfType(type).filter((property) => {
+    const name = property.getName();
+    return name !== "__type" && !name.startsWith("__@");
+  });
+  if (
+    properties.length === 0 ||
+    properties.length > MAX_RECORD_PROPERTIES ||
+    context.recordNamesByKey.size > MAX_RECORDS_PER_FILE ||
+    isGlobalObjectType(type, checker)
+  ) {
+    return null;
+  }
+
+  const key = structuralRecordKey(type, checker, properties);
+  const current = context.recordNamesByKey.get(key);
+  if (current) {
+    return current;
+  }
+
+  const baseName = preferredName
+    ? sanitizeClosureName(preferredName)
+    : `${context.sourceFileStem}$Record${context.recordNamesByKey.size}`;
+  const recordName = reserveRecordName(baseName, context);
+  context.recordNamesByKey.set(key, recordName);
+
+  const lines = ["/**", " * @record", " */", `function ${recordName}() {}`];
+  for (const property of properties) {
+    const declaration = property.valueDeclaration ?? property.declarations?.[0];
+    const propertyType = declaration
+      ? checker.getTypeOfSymbolAtLocation(property, declaration)
+      : checker.getTypeOfSymbol(property);
+    lines.push(
+      `/** @type {${toClosureType(propertyType, checker, context, new Set([type]))}} */`,
+    );
+    lines.push(renderPrototypeProperty(recordName, property.getName()));
+  }
+  context.typeDeclarations.push({ snippet: `${lines.join("\n")}\n` });
+  return recordName;
+}
+
+function getTypedDeclarationClosureType(
+  declaration:
+    | ts.ParameterDeclaration
+    | ts.PropertyDeclaration
+    | ts.PropertySignature,
+  checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
+) {
+  const symbol = declaration.name
+    ? checker.getSymbolAtLocation(declaration.name)
+    : undefined;
+  const type = symbol
+    ? checker.getTypeOfSymbolAtLocation(symbol, declaration)
+    : declaration.type
+      ? checker.getTypeFromTypeNode(declaration.type)
+      : checker.getTypeAtLocation(declaration);
+  const closureType = toClosureType(type, checker, context);
+  return declaration.questionToken
+    ? unionClosureTypes([closureType, "undefined"])
+    : closureType;
+}
+
+function renderNamedType(
+  type: ts.Type,
+  checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
+  seen: Set<ts.Type>,
+) {
+  const symbol = type.aliasSymbol ?? type.getSymbol();
+  if (!symbol) {
+    return null;
+  }
+  if (!type.aliasSymbol && !isTypeLikeSymbol(symbol)) {
+    return null;
+  }
+  const symbolName = checker.symbolToString(symbol);
+  if (
+    !symbolName ||
+    symbolName === "__type" ||
+    !isClosureQualifiedName(symbolName)
+  ) {
+    return null;
+  }
+  if (["Array", "ReadonlyArray"].includes(symbolName)) {
+    return null;
+  }
+  const builtinType = renderBuiltinNamedType(
+    symbolName,
+    type,
+    checker,
+    context,
+    seen,
+  );
+  if (builtinType) {
+    return builtinType;
+  }
+  if (
+    symbolName === "Record" &&
+    type.aliasTypeArguments &&
+    type.aliasTypeArguments.length >= 2
+  ) {
+    return `!Object<${toClosureType(type.aliasTypeArguments[0], checker, context, seen)}, ${toClosureType(type.aliasTypeArguments[1], checker, context, seen)}>`;
+  }
+  if (
+    isDeclarationFileSymbol(symbol) &&
+    !(symbol.flags & (ts.SymbolFlags.Class | ts.SymbolFlags.Enum)) &&
+    type.getProperties().length > 0
+  ) {
+    const recordName = buildRecordForObjectType({
+      checker,
+      context,
+      preferredName: symbolName,
+      type,
+    });
+    return recordName ? `!${recordName}` : null;
+  }
+  if (isGlobalObjectType(type, checker)) {
+    return "!Object";
+  }
+  const args = checker.getTypeArguments(type as ts.TypeReference);
+  const renderedArgs = args.map((arg) =>
+    toClosureType(arg, checker, context, seen),
+  );
+  return renderedArgs.length > 0
+    ? `!${symbolName}<${renderedArgs.join(", ")}>`
+    : `!${symbolName}`;
+}
+
+function renderBuiltinNamedType(
+  symbolName: string,
+  type: ts.Type,
+  checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
+  seen: Set<ts.Type>,
+) {
+  const closureName = BUILTIN_GENERIC_TYPE_NAMES.get(symbolName);
+  if (closureName) {
+    const args = checker.getTypeArguments(type as ts.TypeReference);
+    const renderedArgs = args.map((arg) =>
+      toClosureType(arg, checker, context, seen),
+    );
+    return renderedArgs.length > 0
+      ? `!${closureName}<${renderedArgs.join(", ")}>`
+      : `!${closureName}`;
+  }
+  if (!BUILTIN_TYPE_NAMES.has(symbolName)) {
+    return null;
+  }
+  if (symbolName === "Object") {
+    return "!Object";
+  }
+  if (symbolName === "Function") {
+    return "!Function";
+  }
+  return `!${symbolName}`;
+}
+
+function isTypeLikeSymbol(symbol: ts.Symbol) {
+  return Boolean(
+    symbol.flags &
+      (ts.SymbolFlags.Class |
+        ts.SymbolFlags.Enum |
+        ts.SymbolFlags.Interface |
+        ts.SymbolFlags.TypeAlias |
+        ts.SymbolFlags.TypeParameter),
+  );
+}
+
+function isDeclarationFileSymbol(symbol: ts.Symbol) {
+  return (symbol.declarations ?? []).some(
+    (declaration) => declaration.getSourceFile().isDeclarationFile,
+  );
+}
+
+function signatureToClosureFunctionType(
+  signature: ts.Signature,
+  checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
+  seen = new Set<ts.Type>(),
+) {
+  const params = collectSignatureParamInfos({
+    checker,
+    context,
+    declaration: signature.declaration as FunctionLikeDeclaration,
+    signature,
+  })
+    .filter((parameter) => !parameter.thisParam)
+    .map((parameter) =>
+      `${parameter.rest ? "..." : ""}${parameter.optional ? stripUndefinedFromClosureType(parameter.type) : parameter.type}${parameter.optional ? "=" : ""}`,
+    );
+  const returnType = toClosureType(
+    checker.getReturnTypeOfSignature(signature),
+    checker,
+    context,
+    new Set(seen),
+  );
+  return `function(${params.join(", ")}): ${returnType}`;
+}
+
+function collectFunctionOverloadDeclarations(
+  implementation: ts.FunctionDeclaration,
+): FunctionLikeDeclaration[] {
+  if (!implementation.name || !implementation.body) {
+    return [implementation];
+  }
+  if (
+    !ts.isSourceFile(implementation.parent) &&
+    !ts.isModuleBlock(implementation.parent)
+  ) {
+    return [implementation];
+  }
+  const declarations = implementation.parent.statements.filter(
+    (statement): statement is ts.FunctionDeclaration =>
+      ts.isFunctionDeclaration(statement) &&
+      statement.name?.text === implementation.name?.text,
+  );
+  const implementationIndex = declarations.indexOf(implementation);
+  return implementationIndex > 0
+    ? declarations.slice(0, implementationIndex + 1)
+    : [implementation];
+}
+
+function collectOverloadDeclarations(
+  implementation: FunctionLikeDeclaration,
+): FunctionLikeDeclaration[] {
+  if (!hasFunctionBody(implementation)) {
+    return [implementation];
+  }
+  if (ts.isFunctionDeclaration(implementation)) {
+    return collectFunctionOverloadDeclarations(implementation);
+  }
+  if (
+    ts.isMethodDeclaration(implementation) ||
+    ts.isConstructorDeclaration(implementation)
+  ) {
+    const members = ts.isClassDeclaration(implementation.parent) ||
+      ts.isClassExpression(implementation.parent)
+      ? implementation.parent.members
+      : undefined;
+    if (!members) {
+      return [implementation];
+    }
+    const implementationName = getClassMemberName(implementation);
+    const candidates = members.filter(
+      (member): member is ts.ConstructorDeclaration | ts.MethodDeclaration =>
+        (ts.isMethodDeclaration(member) ||
+          ts.isConstructorDeclaration(member)) &&
+        getClassMemberName(member) === implementationName,
+    );
+    const implementationIndex = candidates.indexOf(implementation);
+    return implementationIndex > 0
+      ? candidates.slice(0, implementationIndex + 1)
+      : [implementation];
+  }
+  return [implementation];
+}
+
+function collectSignatureParamInfos({
+  checker,
+  context,
+  declaration,
+  firstParamObjectRecordTypeName,
+  signature,
+}: {
+  checker: ts.TypeChecker;
+  context: ClosureDocRenderContext;
+  declaration: FunctionLikeDeclaration;
+  firstParamObjectRecordTypeName?: string;
+  signature: ts.Signature;
+}) {
+  const parameters = getDeclarationParameters(declaration);
+  return parameters.map((parameter, index): SignatureParamInfo => {
+    const thisParam = isThisParameter(parameter);
+    const rest = !!parameter.dotDotDotToken;
+    const optional = !!parameter.questionToken || !!parameter.initializer;
+    const name =
+      index === 0 && firstParamObjectRecordTypeName
+        ? "__props"
+        : parameterNameForJsDoc(parameter, index);
+    const type =
+      index === 0 && firstParamObjectRecordTypeName
+        ? `!${firstParamObjectRecordTypeName}`
+        : renderParameterType(parameter, checker, context, rest);
+    return {
+      name,
+      optional,
+      rest,
+      thisParam,
+      type,
+    };
+  });
+}
+
+function renderParameterType(
+  parameter: ts.ParameterDeclaration,
+  checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
+  rest: boolean,
+) {
+  const type = checker.getTypeAtLocation(parameter);
+  if (!rest) {
+    return toClosureType(type, checker, context);
+  }
+  const elementType = getArrayElementType(type, checker);
+  return elementType ? toClosureType(elementType, checker, context) : "?";
+}
+
+function getArrayElementType(type: ts.Type, checker: ts.TypeChecker) {
+  if (!checker.isArrayType(type) && !isReadonlyArrayType(type, checker)) {
+    return null;
+  }
+  return checker.getTypeArguments(type as ts.TypeReference)[0] ?? null;
+}
+
+function hasFunctionBody(declaration: FunctionLikeDeclaration) {
+  return "body" in declaration && !!declaration.body;
+}
+
+function isBodylessFunctionLikeDeclaration(declaration: FunctionLikeDeclaration) {
+  return "body" in declaration && !declaration.body;
+}
+
+function isThisParameter(parameter: ts.ParameterDeclaration) {
+  return ts.isIdentifier(parameter.name) && parameter.name.text === "this";
+}
+
+function mergeClosureTypes(types: string[]) {
+  return unionClosureTypes(types.filter(Boolean));
+}
+
+function unionClosureTypes(types: string[]) {
+  const unique = uniqueSortedStrings(types.flatMap(expandClosureUnionType));
+  return unique.length === 1 ? unique[0] : `(${unique.join("|")})`;
+}
+
+function expandClosureUnionType(type: string): string[] {
+  return type.startsWith("(") && type.endsWith(")")
+    ? splitTopLevelUnion(type.slice(1, -1))
+    : [type];
+}
+
+function stripUndefinedFromClosureType(type: string) {
+  if (type === "undefined") {
+    return "?";
+  }
+  if (!type.includes("undefined")) {
+    return type;
+  }
+  if (!type.startsWith("(") || !type.endsWith(")")) {
+    return type;
+  }
+  const parts = splitTopLevelUnion(type.slice(1, -1)).filter(
+    (part) => part !== "undefined",
+  );
+  return parts.length === 0
+    ? "?"
+    : parts.length === 1
+      ? parts[0]
+      : `(${parts.join("|")})`;
+}
+
+function splitTopLevelUnion(type: string) {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < type.length; index += 1) {
+    const char = type[index];
+    if (char === "<" || char === "(" || char === "{") {
+      depth += 1;
+    } else if (char === ">" || char === ")" || char === "}") {
+      depth -= 1;
+    } else if (char === "|" && depth === 0) {
+      parts.push(type.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(type.slice(start));
+  return parts;
+}
+
+function collectPreservedJsDocTags(node: ts.Node): JsDocTagInput[] {
+  const tags: JsDocTagInput[] = [];
+  for (const tag of ts.getJSDocTags(node)) {
+    const name = tag.tagName.text;
+    if (CONFLICTING_GENERATED_TAGS.has(name)) {
+      continue;
+    }
+    const text = jsDocCommentText(tag.comment);
+    tags.push(text ? { name, text } : { name });
+  }
+  return tags;
+}
+
+function jsDocCommentText(
+  comment: string | ts.NodeArray<ts.JSDocComment> | undefined,
+) {
+  if (!comment) {
+    return "";
+  }
+  if (typeof comment === "string") {
+    return comment.trim();
+  }
+  return comment.map((part) => part.getText()).join(" ").trim();
+}
+
+function uniqueTemplateTags(declarations: FunctionLikeDeclaration[]) {
+  return uniqueSortedStrings(
+    declarations.flatMap((declaration) =>
+      getTemplateNames(getSignatureTypeParameters(declaration)),
+    ),
+  ).map((name) => ({ name: "template", text: name }));
+}
+
+function templateTags(
+  typeParameters:
+    | readonly ts.TypeParameterDeclaration[]
+    | ts.NodeArray<ts.TypeParameterDeclaration>
+    | undefined,
+) {
+  return getTemplateNames(typeParameters).map((name) => ({
+    name: "template",
+    text: name,
+  }));
+}
+
+function renderJsDoc(tags: JsDocTagInput[]) {
+  const lines = ["/**"];
+  for (const tag of tags) {
+    if (!tag.name) {
+      continue;
+    }
+    if (tag.type && tag.text) {
+      lines.push(` * @${tag.name} {${tag.type}} ${tag.text}`);
+    } else if (tag.type) {
+      lines.push(` * @${tag.name} {${tag.type}}`);
+    } else if (tag.text) {
+      lines.push(` * @${tag.name} ${tag.text}`);
+    } else {
+      lines.push(` * @${tag.name}`);
+    }
+  }
   lines.push(" */");
   return `${lines.join("\n")}\n`;
+}
+
+function toClosureHeritageType(
+  typeNode: ts.ExpressionWithTypeArguments,
+  checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
+) {
+  const expressionName = getHeritageExpressionName(typeNode.expression);
+  if (expressionName) {
+    const args = (typeNode.typeArguments ?? []).map((argument) =>
+      toClosureType(checker.getTypeFromTypeNode(argument), checker, context),
+    );
+    return args.length > 0 ? `${expressionName}<${args.join(", ")}>` : expressionName;
+  }
+  return toClosureType(checker.getTypeAtLocation(typeNode), checker, context)
+    .replace(/^!/, "")
+    .replace(/<this>$/u, "")
+    .replace(/,\s*this(?=>)/gu, "");
+}
+
+function getHeritageExpressionName(expression: ts.Expression): string | null {
+  if (ts.isIdentifier(expression)) {
+    return expression.text;
+  }
+  if (ts.isPropertyAccessExpression(expression)) {
+    const left = getHeritageExpressionName(expression.expression);
+    return left ? `${left}.${expression.name.text}` : null;
+  }
+  return null;
+}
+
+function collapseLargeUnion(type: ts.UnionType, checker: ts.TypeChecker) {
+  const nonNullable = type.types.filter(
+    (item) =>
+      !(item.flags & ts.TypeFlags.Null) &&
+      !(item.flags & ts.TypeFlags.Undefined),
+  );
+  const suffix = type.types
+    .filter(
+      (item) =>
+        item.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined),
+    )
+    .map((item) => (item.flags & ts.TypeFlags.Null ? "null" : "undefined"));
+  if (nonNullable.every((item) => item.flags & ts.TypeFlags.StringLike)) {
+    return unionWithSuffix("string", suffix);
+  }
+  if (nonNullable.every((item) => item.flags & ts.TypeFlags.NumberLike)) {
+    return unionWithSuffix("number", suffix);
+  }
+  if (nonNullable.every((item) => item.flags & ts.TypeFlags.BooleanLike)) {
+    return unionWithSuffix("boolean", suffix);
+  }
+  if (nonNullable.every((item) => checker.isArrayType(item))) {
+    return unionWithSuffix("!Array<?>", suffix);
+  }
+  if (nonNullable.every((item) => item.getProperties().length > 0)) {
+    return unionWithSuffix("!Object", suffix);
+  }
+  return unionWithSuffix("?", suffix);
+}
+
+function unionWithSuffix(base: string, suffix: string[]) {
+  const rendered = uniqueSortedStrings([base, ...suffix]);
+  return rendered.length === 1 ? rendered[0] : `(${rendered.join("|")})`;
+}
+
+function isWorthAnnotatingVariableType(type: ts.Type, checker: ts.TypeChecker) {
+  if (
+    type.flags &
+    (ts.TypeFlags.Any |
+      ts.TypeFlags.Unknown |
+      ts.TypeFlags.StringLike |
+      ts.TypeFlags.NumberLike |
+      ts.TypeFlags.BooleanLike |
+      ts.TypeFlags.Void |
+      ts.TypeFlags.Undefined |
+      ts.TypeFlags.Null |
+      ts.TypeFlags.Never)
+  ) {
+    return false;
+  }
+  return (
+    checker.isArrayType(type) ||
+    checker.isTupleType(type) ||
+    type.getCallSignatures().length > 0 ||
+    type.getProperties().length > 0 ||
+    Boolean(type.getSymbol() || type.aliasSymbol)
+  );
+}
+
+function getSignatureTypeParameters(declaration: FunctionLikeDeclaration) {
+  return "typeParameters" in declaration ? declaration.typeParameters : undefined;
+}
+
+function getDeclarationParameters(declaration: FunctionLikeDeclaration) {
+  return "parameters" in declaration ? declaration.parameters : [];
+}
+
+function parameterNameForJsDoc(
+  declaration: ts.ParameterDeclaration | undefined,
+  index: number,
+) {
+  if (declaration && ts.isIdentifier(declaration.name)) {
+    return declaration.name.text;
+  }
+  return `__param${index}`;
+}
+
+function appendTemplateTags(
+  lines: string[],
+  typeParameters:
+    | readonly ts.TypeParameterDeclaration[]
+    | ts.NodeArray<ts.TypeParameterDeclaration>
+    | undefined,
+) {
+  for (const tag of templateTags(typeParameters)) {
+    lines.push(` * @template ${tag.text}`);
+  }
 }
 
 function getTemplateNames(
@@ -182,7 +1200,9 @@ function getTemplateNames(
     | ts.NodeArray<ts.TypeParameterDeclaration>
     | undefined,
 ) {
-  return (typeParameters ?? []).map((parameter) => parameter.name.text);
+  return (typeParameters ?? []).map((parameter) =>
+    sanitizeClosureName(parameter.name.text),
+  );
 }
 
 function hasExportModifier(node: ts.Node) {
@@ -191,6 +1211,10 @@ function hasExportModifier(node: ts.Node) {
       ts.ModifierFlags.Export) !==
     0
   );
+}
+
+function hasRestElement(pattern: ts.ObjectBindingPattern) {
+  return pattern.elements.some((element) => element.dotDotDotToken);
 }
 
 function getPropertyNameText(
@@ -210,95 +1234,107 @@ function getPropertyNameText(
   return null;
 }
 
-function renderPropertyName(name: string) {
-  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)
-    ? name
-    : `[${JSON.stringify(name)}]`;
+export function getClassMemberName(member: ts.ClassElement) {
+  if (ts.isConstructorDeclaration(member)) {
+    return "constructor";
+  }
+  return getPropertyNameText(member.name);
 }
 
-function hasRestElement(pattern: ts.ObjectBindingPattern) {
-  return pattern.elements.some((element) => element.dotDotDotToken);
+export function getObjectPropertyName(member: ts.ObjectLiteralElementLike) {
+  if (
+    ts.isPropertyAssignment(member) ||
+    ts.isMethodDeclaration(member) ||
+    ts.isGetAccessorDeclaration(member) ||
+    ts.isSetAccessorDeclaration(member) ||
+    ts.isShorthandPropertyAssignment(member)
+  ) {
+    return getPropertyNameText(member.name);
+  }
+  return null;
 }
 
-function isComponentLikeName(name: string | undefined) {
-  return !!name && /^[A-Z]/.test(name);
-}
-
-function signatureToClosureFunctionType(
-  signature: ts.Signature,
-  checker: ts.TypeChecker,
-) {
-  const params = signature.getParameters().map((parameter) => {
-    const declaration = parameter.valueDeclaration;
-    const parameterType = declaration
-      ? checker.getTypeOfSymbolAtLocation(parameter, declaration)
-      : checker.getTypeOfSymbol(parameter);
-    return toClosureType(parameterType, checker);
-  });
-  const returnType = toClosureType(
-    checker.getReturnTypeOfSignature(signature),
-    checker,
+export function hasStaticModifier(node: ts.Node) {
+  return (
+    (ts.getCombinedModifierFlags(node as ts.Declaration) &
+      ts.ModifierFlags.Static) !==
+    0
   );
-  return `function(${params.join(", ")}): ${returnType}`;
 }
 
-function toClosureType(
+function isSetterDeclaration(declaration: FunctionLikeDeclaration) {
+  return ts.isSetAccessorDeclaration(declaration);
+}
+
+function renderPrototypeProperty(typeName: string, propertyName: string) {
+  return isClosureIdentifier(propertyName)
+    ? `${typeName}.prototype.${propertyName};`
+    : `${typeName}.prototype[${JSON.stringify(propertyName)}];`;
+}
+
+function reserveRecordName(baseName: string, context: ClosureDocRenderContext) {
+  let candidate = baseName || "Record";
+  let index = 0;
+  while (context.usedRecordNames.has(candidate)) {
+    index += 1;
+    candidate = `${baseName}${index}`;
+  }
+  context.usedRecordNames.add(candidate);
+  return candidate;
+}
+
+function structuralRecordKey(
   type: ts.Type,
   checker: ts.TypeChecker,
-  seen = new Set<ts.Type>(),
-): string {
-  if (seen.has(type)) {
-    return "?";
+  properties: ts.Symbol[],
+) {
+  const typeId = (type as ts.Type & { id?: number }).id;
+  if (typeof typeId === "number") {
+    return `id:${typeId}`;
   }
-  seen.add(type);
+  return properties
+    .map((property) => {
+      const declaration = property.valueDeclaration ?? property.declarations?.[0];
+      const propertyType = declaration
+        ? checker.getTypeOfSymbolAtLocation(property, declaration)
+        : checker.getTypeOfSymbol(property);
+      return `${property.getName()}:${checker.typeToString(propertyType)}`;
+    })
+    .sort((left, right) => left.localeCompare(right))
+    .join("|");
+}
 
-  if (type.flags & ts.TypeFlags.Any) return "?";
-  if (type.flags & ts.TypeFlags.Unknown) return "?";
-  if (type.flags & ts.TypeFlags.StringLike) return "string";
-  if (type.flags & ts.TypeFlags.NumberLike) return "number";
-  if (type.flags & ts.TypeFlags.BooleanLike) return "boolean";
-  if (type.flags & ts.TypeFlags.Void) return "void";
-  if (type.flags & ts.TypeFlags.Undefined) return "undefined";
-  if (type.flags & ts.TypeFlags.Null) return "null";
-  if (type.flags & ts.TypeFlags.Never) return "never";
-  if (type.flags & ts.TypeFlags.TypeParameter)
-    return checker.typeToString(type);
-  if (type.isUnion()) {
-    return `(${type.types.map((item) => toClosureType(item, checker, seen)).join("|")})`;
-  }
-  if (checker.isArrayType(type)) {
-    const typeArguments = checker.getTypeArguments(type as ts.TypeReference);
-    const elementType = typeArguments[0]
-      ? toClosureType(typeArguments[0], checker, seen)
-      : "?";
-    return `!Array<${elementType}>`;
-  }
-  if (checker.isTupleType(type)) {
-    const typeArguments = checker.getTypeArguments(type as ts.TypeReference);
-    if (typeArguments.length === 0) {
-      return "!Array<?>";
-    }
-    return `!Array<${typeArguments.map((item) => toClosureType(item, checker, seen)).join("|")}>`;
-  }
+function isReadonlyArrayType(type: ts.Type, checker: ts.TypeChecker) {
+  const symbol = type.getSymbol();
+  return symbol ? checker.symbolToString(symbol) === "ReadonlyArray" : false;
+}
 
-  const callSignatures = type.getCallSignatures();
-  if (callSignatures.length > 0) {
-    return signatureToClosureFunctionType(callSignatures[0], checker);
+function isGlobalObjectType(type: ts.Type, checker: ts.TypeChecker) {
+  const symbol = type.getSymbol();
+  if (!symbol) {
+    return false;
   }
+  return BUILTIN_TYPE_NAMES.has(checker.symbolToString(symbol));
+}
 
-  if (type.getSymbol()) {
-    const symbolName = checker.symbolToString(type.getSymbol()!);
-    if (symbolName && symbolName !== "__type") {
-      return symbolName;
-    }
+function sanitizeClosureName(name: string) {
+  const sanitized = name.replace(/[^A-Za-z0-9_$]/gu, "_");
+  if (!sanitized || /^[0-9]/u.test(sanitized)) {
+    return `_${sanitized}`;
   }
+  return sanitized;
+}
 
-  if (
-    type.isClassOrInterface() ||
-    (type.getProperties().length > 0 && !(type.flags & ts.TypeFlags.Object))
-  ) {
-    return "!Object";
-  }
+function isClosureIdentifier(name: string) {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(name);
+}
 
-  return "?";
+function isClosureQualifiedName(name: string) {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$/u.test(
+    name,
+  );
+}
+
+function uniqueSortedStrings(values: string[]) {
+  return [...new Set(values)].sort((left, right) => left.localeCompare(right));
 }

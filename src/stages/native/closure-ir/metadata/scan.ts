@@ -8,6 +8,7 @@ export interface ClosureIrFileFeatures {
   filePath: string;
   hasDecorators: boolean;
   hasEnumDeclarations: boolean;
+  hasTypeDrivenClosureDocs: boolean;
   needsSemanticPreflight: boolean;
   hasTopLevelDocs: boolean;
   hasTypeDeclarations: boolean;
@@ -81,6 +82,10 @@ export function classifyClosureIrSourceFile(
   }
 
   const docEligibility = classifyClosureIrDocEligibility(sourceFile);
+  const hasExplicitTypeSignals =
+    sourceFile.statements.some(containsExplicitTypeSignal);
+  const hasTypeDrivenClosureDocs =
+    docEligibility.isTypeScriptLike && hasExplicitTypeSignals;
   const hasDecorators =
     sourceFile.text.includes("@") && containsDecorators(sourceFile);
   const needsSemanticPreflight =
@@ -89,20 +94,23 @@ export function classifyClosureIrSourceFile(
     hasDecorators ||
     hasEnumDeclarations ||
     hasTypeDeclarations ||
-    sourceFile.statements.some(containsExplicitTypeSignal);
+    hasExplicitTypeSignals;
+  const hasTopLevelDocs =
+    docEligibility.hasTopLevelDocs || hasTypeDrivenClosureDocs;
 
   return {
     docEligibility,
     filePath: sourceFile.fileName,
     hasDecorators,
     hasEnumDeclarations,
+    hasTypeDrivenClosureDocs,
     needsSemanticPreflight,
-    hasTopLevelDocs: docEligibility.hasTopLevelDocs,
+    hasTopLevelDocs,
     hasTypeDeclarations,
     shouldAnalyze:
       hasDecorators ||
       hasEnumDeclarations ||
-      docEligibility.hasTopLevelDocs ||
+      hasTopLevelDocs ||
       hasTypeDeclarations,
   };
 }

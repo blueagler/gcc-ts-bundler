@@ -29,10 +29,7 @@ pub(super) fn get_object_property_value_mut<'a>(
     None
 }
 
-pub(super) fn get_boolean_property_value(
-    object: &ObjectLit,
-    property_name: &str,
-) -> Option<bool> {
+pub(super) fn get_boolean_property_value(object: &ObjectLit, property_name: &str) -> Option<bool> {
     for property in &object.props {
         let PropOrSpread::Prop(prop) = property else {
             continue;
@@ -158,9 +155,9 @@ pub(super) fn collect_binding_names_from_pat(pattern: &Pat, names: &mut HashSet<
 
 pub(super) fn looks_like_property_name(value: &str) -> bool {
     !value.is_empty()
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '$')
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '$'
+        })
 }
 
 pub(super) fn property_key_member_path(member: &MemberExpr) -> Option<String> {

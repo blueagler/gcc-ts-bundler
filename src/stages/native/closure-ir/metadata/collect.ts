@@ -2,11 +2,19 @@ import ts from "typescript";
 
 import { transpileDecoratedSource } from "../decorators";
 import {
+  buildClassMemberDoc,
   buildClassJsDoc,
+  buildFunctionLikeDoc,
   buildFunctionJsDoc,
   buildFunctionObjectParamRecord,
   buildInterfaceDeclarationSnippet,
+  buildObjectMemberDoc,
   buildTypeAliasDeclarationSnippet,
+  buildVariableJsDoc,
+  createClosureDocRenderContext,
+  getClassMemberName,
+  getObjectPropertyName,
+  hasStaticModifier,
 } from "./docs";
 import { buildEnumDeclarationMetadata } from "./enums";
 import {
@@ -14,7 +22,6 @@ import {
   ClosureIrFileMetadata,
   ClosureIrTypeDeclaration,
 } from "../types";
-import { isDocRelevantTopLevelDeclaration } from "./doc-eligibility";
 import type { ClosureIrFileFeatures } from "./scan";
 
 export function collectClosureIrFileMetadata({
@@ -31,17 +38,17 @@ export function collectClosureIrFileMetadata({
   unsafeEnumSymbols: Set<ts.Symbol>;
 }): { diagnostics: ts.Diagnostic[]; file: ClosureIrFileMetadata } {
   const diagnostics: ts.Diagnostic[] = [];
-  const typeDeclarations = features.hasTypeDeclarations
-    ? collectTypeDeclarationsForSourceFile(sourceFile, checker)
+  const renderContext = createClosureDocRenderContext(sourceFile);
+  const explicitTypeDeclarations = features.hasTypeDeclarations
+    ? collectTypeDeclarationsForSourceFile(sourceFile, checker, renderContext)
     : [];
   const topLevelDocs = features.hasTopLevelDocs
-    ? collectTopLevelDocsForSourceFile(
-        sourceFile,
-        checker,
-        features,
-        typeDeclarations,
-      )
+    ? collectClosureDocsForSourceFile(sourceFile, checker, features, renderContext)
     : [];
+  const typeDeclarations = [
+    ...explicitTypeDeclarations,
+    ...renderContext.typeDeclarations,
+  ];
   const enumDeclarations = features.hasEnumDeclarations
     ? collectEnumDeclarationsForSourceFile(
         sourceFile,
@@ -73,20 +80,21 @@ export function collectClosureIrFileMetadata({
 function collectTypeDeclarationsForSourceFile(
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
+  renderContext: ReturnType<typeof createClosureDocRenderContext>,
 ) {
   const typeDeclarations: ClosureIrTypeDeclaration[] = [];
 
   for (const statement of sourceFile.statements) {
     if (ts.isInterfaceDeclaration(statement)) {
       typeDeclarations.push(
-        buildInterfaceDeclarationSnippet(statement, checker),
+        buildInterfaceDeclarationSnippet(statement, checker, renderContext),
       );
       continue;
     }
 
     if (ts.isTypeAliasDeclaration(statement)) {
       typeDeclarations.push(
-        buildTypeAliasDeclarationSnippet(statement, checker),
+        buildTypeAliasDeclarationSnippet(statement, checker, renderContext),
       );
     }
   }
@@ -94,55 +102,171 @@ function collectTypeDeclarationsForSourceFile(
   return typeDeclarations;
 }
 
-function collectTopLevelDocsForSourceFile(
+function collectClosureDocsForSourceFile(
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
   features: ClosureIrFileFeatures,
-  typeDeclarations: ClosureIrTypeDeclaration[],
+  renderContext: ReturnType<typeof createClosureDocRenderContext>,
 ) {
   const topLevelDocs: ClosureIrFileMetadata["topLevelDocs"] = [];
+  const shouldAnnotateJs =
+    !features.docEligibility.isTypeScriptLike &&
+    features.docEligibility.hasJsDocText;
+  const shouldAnnotateTypeScript = features.docEligibility.isTypeScriptLike;
 
-  for (const statement of sourceFile.statements) {
-    if (!isDocRelevantTopLevelDeclaration(statement, features.docEligibility)) {
-      continue;
+  const visit = (node: ts.Node) => {
+    if (ts.isFunctionDeclaration(node) && node.name) {
+      if (shouldAnnotateTypeScript || shouldAnnotateJs) {
+        const objectParamRecord = buildFunctionObjectParamRecord(
+          node,
+          checker,
+          renderContext,
+        );
+        const jsdoc = buildFunctionJsDoc(
+          node,
+          checker,
+          renderContext,
+          objectParamRecord?.typeName,
+        );
+        if (jsdoc) {
+          topLevelDocs.push({
+            jsdoc,
+            kind: "function",
+            name: node.name.text,
+          });
+        }
+      }
+      ts.forEachChild(node, visit);
+      return;
     }
 
-    if (ts.isFunctionDeclaration(statement)) {
-      const objectParamRecord = buildFunctionObjectParamRecord(
-        statement,
-        checker,
-      );
-      if (objectParamRecord) {
-        typeDeclarations.push({ snippet: objectParamRecord.snippet });
-      }
-      const jsdoc = buildFunctionJsDoc(
-        statement,
-        checker,
-        objectParamRecord?.typeName,
-      );
-      if (jsdoc) {
-        topLevelDocs.push({
-          jsdoc,
-          kind: "function",
-          name: statement.name!.text,
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+      if (shouldAnnotateTypeScript || shouldAnnotateJs) {
+        const jsdoc = buildVariableJsDoc({
+          checker,
+          context: renderContext,
+          initializer: node.initializer,
+          name: node.name.text,
+          typeNode: node.type,
         });
+        if (jsdoc) {
+          topLevelDocs.push({
+            jsdoc,
+            kind: "variable",
+            name: node.name.text,
+          });
+        }
+        if (node.initializer && ts.isObjectLiteralExpression(node.initializer)) {
+          for (const member of node.initializer.properties) {
+            const memberName = getObjectPropertyName(member);
+            if (!memberName) {
+              continue;
+            }
+            const memberDoc = buildObjectMemberDoc({
+              checker,
+              context: renderContext,
+              member,
+            });
+            if (memberDoc) {
+              topLevelDocs.push({
+                jsdoc: memberDoc,
+                kind: objectDocKind(member),
+                name: memberName,
+                owner: node.name.text,
+              });
+            }
+          }
+        }
       }
-      continue;
+      ts.forEachChild(node, visit);
+      return;
     }
 
-    if (ts.isClassDeclaration(statement)) {
-      const jsdoc = buildClassJsDoc(statement, checker);
+    if (ts.isClassDeclaration(node) && node.name) {
+      const className = node.name.text;
+      const jsdoc = buildClassJsDoc(node, checker, renderContext);
       if (jsdoc) {
         topLevelDocs.push({
           jsdoc,
           kind: "class",
-          name: statement.name!.text,
+          name: className,
         });
       }
+
+      for (const member of node.members) {
+        const memberName = getClassMemberName(member);
+        if (!memberName) {
+          continue;
+        }
+        const memberDoc = buildClassMemberDoc({
+          checker,
+          context: renderContext,
+          member,
+        });
+        if (memberDoc) {
+          topLevelDocs.push({
+            jsdoc: memberDoc,
+            kind: classDocKind(member),
+            name: memberName,
+            owner: className,
+            static: hasStaticModifier(member),
+          });
+        }
+      }
+      ts.forEachChild(node, visit);
+      return;
     }
-  }
+
+    if (
+      (ts.isMethodDeclaration(node) ||
+        ts.isGetAccessorDeclaration(node) ||
+        ts.isSetAccessorDeclaration(node)) &&
+      !ts.isClassDeclaration(node.parent) &&
+      !ts.isClassExpression(node.parent) &&
+      !ts.isObjectLiteralExpression(node.parent) &&
+      shouldAnnotateTypeScript
+    ) {
+      const name =
+        "name" in node && node.name && ts.isIdentifier(node.name)
+          ? node.name.text
+          : null;
+      if (name) {
+        const jsdoc = buildFunctionLikeDoc(node, checker, renderContext);
+        if (jsdoc) {
+          topLevelDocs.push({
+            jsdoc,
+            kind: "method",
+            name,
+          });
+        }
+      }
+    }
+
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
 
   return topLevelDocs;
+}
+
+function objectDocKind(
+  member: ts.ObjectLiteralElementLike,
+): ClosureIrFileMetadata["topLevelDocs"][number]["kind"] {
+  if (ts.isGetAccessorDeclaration(member)) return "objectGetter";
+  if (ts.isSetAccessorDeclaration(member)) return "objectSetter";
+  if (ts.isMethodDeclaration(member)) return "objectMethod";
+  return "objectProperty";
+}
+
+function classDocKind(
+  member: ts.ClassElement,
+): ClosureIrFileMetadata["topLevelDocs"][number]["kind"] {
+  if (ts.isConstructorDeclaration(member)) return "constructor";
+  if (ts.isGetAccessorDeclaration(member)) return "getter";
+  if (ts.isSetAccessorDeclaration(member)) return "setter";
+  if (ts.isPropertyDeclaration(member)) return "field";
+  return "method";
 }
 
 function collectEnumDeclarationsForSourceFile(

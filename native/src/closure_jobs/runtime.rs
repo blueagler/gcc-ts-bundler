@@ -121,7 +121,14 @@ pub(super) fn render_bundler_runtime_preamble(
         "\"s\"+a"
     };
     let storage_init = if numeric_module_ids {
-        ["r.f=[];", "r.c=[];", "r.s=[];", "r.d=[];", "r.k=null;", "r.m=[];"]
+        [
+            "r.f=[];",
+            "r.c=[];",
+            "r.s=[];",
+            "r.d=[];",
+            "r.k=null;",
+            "r.m=[];",
+        ]
     } else {
         [
             "r.f=Object.create(null);",
@@ -339,7 +346,10 @@ __runtime.h(function(__register){\n  __register(1,function(){});\n},3);\n"
         let rendered = render_bundler_runtime_preamble("[0,[],[],\"./\"]", true, false)
             .expect("render preamble");
         assert!(rendered.contains("typeof c===\"function\""), "{rendered}");
-        assert!(rendered.contains("for(var d=0;d<c.length;d+=2)"), "{rendered}");
+        assert!(
+            rendered.contains("for(var d=0;d<c.length;d+=2)"),
+            "{rendered}"
+        );
         assert!(rendered.contains("return b[f];"), "{rendered}");
     }
 }

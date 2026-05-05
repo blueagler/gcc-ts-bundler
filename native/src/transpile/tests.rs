@@ -2,8 +2,9 @@ use super::{
     apply_js_compat_text_fixes, collect_commonjs_extern_names, collect_enum_extern_names,
     collect_extern_property_names, collect_extern_property_names_with_externs,
     collect_preserved_property_names, collect_protocol_extern_names,
-    collect_static_property_names_from_text, print_program, render_externs, render_generated_externs,
-    transform_js_pass_through_module, transform_program, transform_source_file,
+    collect_static_property_names_from_text, print_program, render_externs,
+    render_generated_externs, transform_js_pass_through_module, transform_program,
+    transform_source_file,
 };
 use crate::module_cache::parse_module;
 use crate::pathing::to_goog_module_id;
@@ -25,6 +26,45 @@ fn empty_context() -> super::TranspileContext {
         package_aliases: Vec::new(),
         static_property_names: HashSet::new(),
         workspace_dir: PathBuf::from("/tmp"),
+    }
+}
+
+struct JsPassThroughFixture {
+    context: super::TranspileContext,
+    file_path: PathBuf,
+}
+
+fn make_js_pass_through_fixture(label: &str, source_text: &str) -> JsPassThroughFixture {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let workspace_dir = std::env::temp_dir().join(format!("gcc-ts-bundler-{label}-{unique}"));
+    let file_path = workspace_dir.join("node_modules/demo/index.js");
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(&file_path, source_text).unwrap();
+
+    JsPassThroughFixture {
+        context: super::TranspileContext {
+            bundler_module_slots: HashMap::new(),
+            bundler_runtime_logical_ids: HashMap::new(),
+            chunk_mode: super::ChunkMode::Off,
+            commonjs_specifiers: HashSet::new(),
+            file_metadata: HashMap::new(),
+            preserved_property_names: HashSet::new(),
+            lazy_imports_by_file: HashMap::new(),
+            package_aliases: vec![super::PackageAliasInput {
+                packageName: "react".to_string(),
+                subpath: ".".to_string(),
+                targetPath: workspace_dir
+                    .join("node_modules/react/index.js")
+                    .to_string_lossy()
+                    .to_string(),
+            }],
+            static_property_names: HashSet::new(),
+            workspace_dir,
+        },
+        file_path,
     }
 }
 
@@ -65,49 +105,12 @@ fn leaves_unrelated_identifiers_alone() {
 
 #[test]
 fn preserves_js_source_verbatim() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let file_path = std::env::temp_dir().join(format!("gcc-ts-bundler-js-compat-{unique}.js"));
     let source_text = "/** @nocollapse */\nconst JSCompiler_renameProperty=(prop,_obj)=>prop;\n";
-    fs::write(&file_path, source_text).unwrap();
+    let fixture = make_js_pass_through_fixture("js-compat", source_text);
 
     let output = GLOBALS
         .set(&Globals::new(), || {
-            transform_source_file(
-                &file_path,
-                &super::TranspileContext {
-                    bundler_module_slots: HashMap::new(),
-                    bundler_runtime_logical_ids: HashMap::new(),
-                    chunk_mode: super::ChunkMode::Off,
-                    commonjs_specifiers: HashSet::new(),
-                    file_metadata: HashMap::new(),
-                    preserved_property_names: HashSet::new(),
-                    lazy_imports_by_file: HashMap::new(),
-                    package_aliases: vec![super::PackageAliasInput {
-                        packageName: "react".to_string(),
-                        subpath: ".".to_string(),
-                        targetPath: file_path
-                            .parent()
-                            .unwrap()
-                            .parent()
-                            .unwrap()
-                            .join("react/index.js")
-                            .to_string_lossy()
-                            .to_string(),
-                    }],
-                    static_property_names: HashSet::new(),
-                    workspace_dir: file_path
-                        .parent()
-                        .unwrap()
-                        .parent()
-                        .unwrap()
-                        .parent()
-                        .unwrap()
-                        .to_path_buf(),
-                },
-            )
+            transform_source_file(&fixture.file_path, &fixture.context)
         })
         .unwrap();
 
@@ -117,49 +120,12 @@ fn preserves_js_source_verbatim() {
 
 #[test]
 fn leaves_non_platform_static_fallbacks_renamable() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let file_path = std::env::temp_dir().join(format!("gcc-ts-bundler-js-static-{unique}.js"));
     let source_text = "class Demo {}\nDemo.enabledWarnings = [\"x\"];\nfunction run(){ return this.constructor.enabledWarnings.includes(\"x\"); }\n";
-    fs::write(&file_path, source_text).unwrap();
+    let fixture = make_js_pass_through_fixture("js-static", source_text);
 
     let output = GLOBALS
         .set(&Globals::new(), || {
-            transform_source_file(
-                &file_path,
-                &super::TranspileContext {
-                    bundler_module_slots: HashMap::new(),
-                    bundler_runtime_logical_ids: HashMap::new(),
-                    chunk_mode: super::ChunkMode::Off,
-                    commonjs_specifiers: HashSet::new(),
-                    file_metadata: HashMap::new(),
-                    preserved_property_names: HashSet::new(),
-                    lazy_imports_by_file: HashMap::new(),
-                    package_aliases: vec![super::PackageAliasInput {
-                        packageName: "react".to_string(),
-                        subpath: ".".to_string(),
-                        targetPath: file_path
-                            .parent()
-                            .unwrap()
-                            .parent()
-                            .unwrap()
-                            .join("react/index.js")
-                            .to_string_lossy()
-                            .to_string(),
-                    }],
-                    static_property_names: HashSet::new(),
-                    workspace_dir: file_path
-                        .parent()
-                        .unwrap()
-                        .parent()
-                        .unwrap()
-                        .parent()
-                        .unwrap()
-                        .to_path_buf(),
-                },
-            )
+            transform_source_file(&fixture.file_path, &fixture.context)
         })
         .unwrap();
 
@@ -175,49 +141,12 @@ fn leaves_non_platform_static_fallbacks_renamable() {
 
 #[test]
 fn rewrites_global_alias_property_accesses_in_js_pass_through() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let file_path = std::env::temp_dir().join(format!("gcc-ts-bundler-js-alias-{unique}.js"));
     let source_text = "const global = globalThis;\nglobal.sharedRegistry ??= new WeakMap();\nconst item = sharedRegistry.get(meta);\n";
-    fs::write(&file_path, source_text).unwrap();
+    let fixture = make_js_pass_through_fixture("js-alias", source_text);
 
     let output = GLOBALS
         .set(&Globals::new(), || {
-            transform_source_file(
-                &file_path,
-                &super::TranspileContext {
-                    bundler_module_slots: HashMap::new(),
-                    bundler_runtime_logical_ids: HashMap::new(),
-                    chunk_mode: super::ChunkMode::Off,
-                    commonjs_specifiers: HashSet::new(),
-                    file_metadata: HashMap::new(),
-                    preserved_property_names: HashSet::new(),
-                    lazy_imports_by_file: HashMap::new(),
-                    package_aliases: vec![super::PackageAliasInput {
-                        packageName: "react".to_string(),
-                        subpath: ".".to_string(),
-                        targetPath: file_path
-                            .parent()
-                            .unwrap()
-                            .parent()
-                            .unwrap()
-                            .join("react/index.js")
-                            .to_string_lossy()
-                            .to_string(),
-                    }],
-                    static_property_names: HashSet::new(),
-                    workspace_dir: file_path
-                        .parent()
-                        .unwrap()
-                        .parent()
-                        .unwrap()
-                        .parent()
-                        .unwrap()
-                        .to_path_buf(),
-                },
-            )
+            transform_source_file(&fixture.file_path, &fixture.context)
         })
         .unwrap();
 
@@ -1049,7 +978,9 @@ fn bundler_runtime_rewrites_namespace_member_reads_to_numeric_slots() {
     );
     assert!(transformed.contains("__register("), "{transformed}");
     assert!(
-        transformed.contains("function(__require, __exports, __dynamicImport, __preloadDynamicImport, __live)"),
+        transformed.contains(
+            "function(__require, __exports, __dynamicImport, __preloadDynamicImport, __live)"
+        ),
         "{transformed}"
     );
     assert!(!transformed.contains(", []"), "{transformed}");
@@ -1278,7 +1209,10 @@ fn bundler_runtime_keeps_named_imports_live_instead_of_snapshotting_slots() {
         transformed.contains("__gcc_import_0[0].title = 'ok';"),
         "{transformed}"
     );
-    assert!(!transformed.contains("const documentRef ="), "{transformed}");
+    assert!(
+        !transformed.contains("const documentRef ="),
+        "{transformed}"
+    );
 }
 
 #[test]
@@ -1291,11 +1225,7 @@ fn bundler_runtime_keeps_exported_let_bindings_live() {
     let src_dir = root.join("src");
     let main_file = src_dir.join("main.ts");
     fs::create_dir_all(&src_dir).unwrap();
-    fs::write(
-        &main_file,
-        "export let count = 0;\ncount += 1;\n",
-    )
-    .unwrap();
+    fs::write(&main_file, "export let count = 0;\ncount += 1;\n").unwrap();
 
     let main_module_id = to_goog_module_id(&main_file, &root);
     let transformed = GLOBALS
@@ -1306,7 +1236,7 @@ fn bundler_runtime_keeps_exported_let_bindings_live() {
                     bundler_module_slots: HashMap::from([(
                         main_module_id,
                         super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
-                            "count".to_string(),
+                            "count".to_string()
                         ])),
                     )]),
                     bundler_runtime_logical_ids: HashMap::new(),
@@ -1323,7 +1253,10 @@ fn bundler_runtime_keeps_exported_let_bindings_live() {
         })
         .unwrap();
 
-    assert!(transformed.contains("__live(__exports,0,function(){return count;});"), "{transformed}");
+    assert!(
+        transformed.contains("__live(__exports,0,function(){return count;});"),
+        "{transformed}"
+    );
 }
 
 #[test]
@@ -1342,11 +1275,7 @@ fn bundler_runtime_packs_named_reexports_from_single_dependency() {
         "export const alpha = 1;\nexport const beta = 2;\nexport const gamma = 3;\n",
     )
     .unwrap();
-    fs::write(
-        &main_file,
-        "export { alpha, beta, gamma } from './dep';\n",
-    )
-    .unwrap();
+    fs::write(&main_file, "export { alpha, beta, gamma } from './dep';\n").unwrap();
 
     let dep_module_id = to_goog_module_id(&dep_file, &root);
     let main_module_id = to_goog_module_id(&main_file, &root);
@@ -1470,8 +1399,7 @@ fn bundler_runtime_packs_imported_slot_alias_reexports_per_source() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root =
-        std::env::temp_dir().join(format!("gcc-ts-bundler-packed-import-aliases-{unique}"));
+    let root = std::env::temp_dir().join(format!("gcc-ts-bundler-packed-import-aliases-{unique}"));
     let src_dir = root.join("src");
     let alpha_file = src_dir.join("alpha.ts");
     let beta_file = src_dir.join("beta.ts");
@@ -1690,7 +1618,10 @@ fn bundler_runtime_rewrites_wrapped_promise_consumer_callback_params_to_slots() 
         })
         .unwrap();
 
-    assert!(transformed.contains("get(module)[0](anchor)"), "{transformed}");
+    assert!(
+        transformed.contains("get(module)[0](anchor)"),
+        "{transformed}"
+    );
     assert!(!transformed.contains(".default"), "{transformed}");
 }
 
@@ -1700,8 +1631,7 @@ fn bundler_runtime_rewrites_nested_wrapped_promise_consumer_callback_params_to_s
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root =
-        std::env::temp_dir().join(format!("gcc-ts-bundler-slot-callback-nested-{unique}"));
+    let root = std::env::temp_dir().join(format!("gcc-ts-bundler-slot-callback-nested-{unique}"));
     let src_dir = root.join("src");
     let feature_file = src_dir.join("feature.ts");
     let main_file = src_dir.join("main.ts");
@@ -1875,7 +1805,9 @@ fn collects_realistic_helper_wrapped_object_and_promise_carriers() {
         "{wrappers:?}"
     );
     assert!(
-        object_carriers.keys().any(|id| id.0.as_ref() == "nextEntry"),
+        object_carriers
+            .keys()
+            .any(|id| id.0.as_ref() == "nextEntry"),
         "{object_carriers:?}"
     );
     assert!(

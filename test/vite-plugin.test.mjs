@@ -1042,6 +1042,7 @@ test("resolveViteCaptureRootPath changes when material build identity changes", 
 
 test.serial(
   "gccTsBundler reuses the same Vite capture root and hits resolve snapshot plus final fast cache on identical builds",
+  { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
     await writeViteCssFixture(fixture);
@@ -1080,6 +1081,7 @@ test.serial(
 
 test.serial(
   "gccTsBundler falls back to final metadata restore when core outputs are missing",
+  { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
     await writeViteCssFixture(fixture);

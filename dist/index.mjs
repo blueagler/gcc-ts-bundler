@@ -1147,38 +1147,27 @@ function transpileDecoratedSource({
 var init_decorators = () => {};
 
 // src/stages/native/closure-ir/metadata/docs.ts
+import path17 from "path";
 import ts11 from "typescript";
-function buildInterfaceDeclarationSnippet(statement, checker) {
+function createClosureDocRenderContext(sourceFile) {
+  return {
+    recordNamesByKey: new Map,
+    sourceFileStem: sanitizeClosureName(path17.basename(sourceFile.fileName).replace(/\.[cm]?[jt]sx?$/u, "")),
+    typeDeclarations: [],
+    usedRecordNames: new Set
+  };
+}
+function buildInterfaceDeclarationSnippet(statement, checker, context) {
+  const name = statement.name.text;
+  context.usedRecordNames.add(name);
   const lines = ["/**"];
   lines.push(" * @record");
-  for (const templateName of getTemplateNames(statement.typeParameters)) {
-    lines.push(` * @template ${templateName}`);
-  }
+  appendTemplateTags(lines, statement.typeParameters);
   lines.push(" */");
-  lines.push(`function ${statement.name.text}() {}`);
-  for (const member of statement.members) {
-    const memberName = getPropertyNameText2(member.name);
-    if (!memberName) {
-      continue;
-    }
-    if (ts11.isPropertySignature(member)) {
-      const propertyType = member.type ? toClosureType(checker.getTypeFromTypeNode(member.type), checker) : "?";
-      lines.push(`/** @type {${propertyType}} */`);
-      lines.push(`${statement.name.text}.prototype.${renderPropertyName(memberName)};`);
-      continue;
-    }
-    if (ts11.isMethodSignature(member)) {
-      const signature = checker.getSignatureFromDeclaration(member);
-      if (!signature) {
-        continue;
-      }
-      const functionType = signatureToClosureFunctionType(signature, checker);
-      lines.push(`/** @type {${functionType}} */`);
-      lines.push(`${statement.name.text}.prototype.${renderPropertyName(memberName)};`);
-    }
-  }
+  lines.push(`function ${name}() {}`);
+  appendInterfaceMembers(lines, name, statement.members, checker, context);
   if (hasExportModifier(statement)) {
-    lines.push(`exports.${statement.name.text} = ${statement.name.text};`);
+    lines.push(`exports.${name} = ${name};`);
   }
   return {
     snippet: `${lines.join(`
@@ -1186,13 +1175,29 @@ function buildInterfaceDeclarationSnippet(statement, checker) {
 `
   };
 }
-function buildTypeAliasDeclarationSnippet(statement, checker) {
-  const aliasType = checker.getTypeAtLocation(statement);
-  const closureType = toClosureType(aliasType, checker);
-  const lines = ["/**"];
-  for (const templateName of getTemplateNames(statement.typeParameters)) {
-    lines.push(` * @template ${templateName}`);
+function buildTypeAliasDeclarationSnippet(statement, checker, context) {
+  if (ts11.isTypeLiteralNode(statement.type)) {
+    const name = statement.name.text;
+    context.usedRecordNames.add(name);
+    const lines2 = ["/**"];
+    lines2.push(" * @record");
+    appendTemplateTags(lines2, statement.typeParameters);
+    lines2.push(" */");
+    lines2.push(`function ${name}() {}`);
+    appendInterfaceMembers(lines2, name, statement.type.members, checker, context);
+    if (hasExportModifier(statement)) {
+      lines2.push(`exports.${name} = ${name};`);
+    }
+    return {
+      snippet: `${lines2.join(`
+`)}
+`
+    };
   }
+  const aliasType = checker.getTypeAtLocation(statement);
+  const closureType = toClosureType(aliasType, checker, context);
+  const lines = ["/**"];
+  appendTemplateTags(lines, statement.typeParameters);
   lines.push(` * @typedef {${closureType}}`);
   lines.push(" */");
   lines.push(`let ${statement.name.text};`);
@@ -1205,114 +1210,118 @@ function buildTypeAliasDeclarationSnippet(statement, checker) {
 `
   };
 }
-function buildFunctionJsDoc(statement, checker, firstParamObjectRecordTypeName) {
-  const signature = checker.getSignatureFromDeclaration(statement);
-  if (!signature) {
+function buildFunctionJsDoc(statement, checker, context, firstParamObjectRecordTypeName) {
+  if (!statement.body) {
     return null;
   }
-  const lines = ["/**"];
-  for (const templateName of getTemplateNames(statement.typeParameters)) {
-    lines.push(` * @template ${templateName}`);
-  }
-  for (const [index, parameter] of signature.getParameters().entries()) {
-    const declaration = parameter.valueDeclaration;
-    const parameterType = declaration ? checker.getTypeOfSymbolAtLocation(parameter, declaration) : checker.getTypeOfSymbol(parameter);
-    const parameterName = index === 0 && firstParamObjectRecordTypeName ? "__props" : parameter.getName();
-    const closureType = index === 0 && firstParamObjectRecordTypeName ? `!${firstParamObjectRecordTypeName}` : toClosureType(parameterType, checker);
-    lines.push(` * @param {${closureType}} ${parameterName}`);
-  }
-  const returnType = checker.getReturnTypeOfSignature(signature);
-  lines.push(` * @return {${toClosureType(returnType, checker)}}`);
-  lines.push(" */");
-  return `${lines.join(`
-`)}
-`;
+  const declarations = collectFunctionOverloadDeclarations(statement);
+  return buildSignaturesJsDoc({
+    checker,
+    context,
+    declarations,
+    firstParamObjectRecordTypeName
+  });
 }
-function buildFunctionObjectParamRecord(statement, checker) {
-  if (!isComponentLikeName(statement.name?.text)) {
-    return null;
-  }
+function buildFunctionObjectParamRecord(statement, checker, context) {
   const firstParameter = statement.parameters[0];
   if (!firstParameter || !ts11.isObjectBindingPattern(firstParameter.name) || hasRestElement(firstParameter.name)) {
     return null;
   }
   const parameterType = checker.getTypeAtLocation(firstParameter);
-  const properties = checker.getPropertiesOfType(parameterType);
-  if (properties.length === 0) {
+  const recordTypeName = buildRecordForObjectType({
+    checker,
+    context,
+    preferredName: `${statement.name.text}$Param0`,
+    type: parameterType
+  });
+  if (!recordTypeName) {
     return null;
   }
-  const typeName = `${statement.name.text}$Param0`;
-  const lines = ["/**", " * @record", " */", `function ${typeName}() {}`];
-  for (const property of properties) {
-    const declaration = property.valueDeclaration ?? property.declarations?.[0] ?? firstParameter;
-    const propertyType = checker.getTypeOfSymbolAtLocation(property, declaration);
-    lines.push(`/** @type {${toClosureType(propertyType, checker)}} */`);
-    lines.push(`${typeName}.prototype.${renderPropertyName(property.getName())};`);
-  }
   return {
-    snippet: `${lines.join(`
-`)}
-`,
-    typeName
+    snippet: "",
+    typeName: recordTypeName
   };
 }
-function buildClassJsDoc(statement, checker) {
+function buildClassJsDoc(statement, checker, context) {
   const typeParameters = statement.typeParameters ?? [];
-  const lines = ["/**"];
-  for (const templateName of getTemplateNames(typeParameters)) {
-    lines.push(` * @template ${templateName}`);
-  }
+  const tags = [
+    ...collectPreservedJsDocTags(statement),
+    ...templateTags(typeParameters)
+  ];
   if (statement.heritageClauses) {
     for (const clause of statement.heritageClauses) {
       for (const typeNode of clause.types) {
-        const closureType = toClosureType(checker.getTypeAtLocation(typeNode), checker);
+        const closureType = toClosureHeritageType(typeNode, checker, context);
+        if (!closureType) {
+          continue;
+        }
         if (clause.token === ts11.SyntaxKind.ExtendsKeyword) {
-          lines.push(` * @extends {${closureType}}`);
+          tags.push({ name: "extends", type: closureType });
         } else if (clause.token === ts11.SyntaxKind.ImplementsKeyword) {
-          lines.push(` * @implements {${closureType}}`);
+          tags.push({ name: "implements", type: closureType });
         }
       }
     }
   }
-  lines.push(" */");
-  return `${lines.join(`
-`)}
-`;
+  return tags.length > 0 ? renderJsDoc(tags) : null;
 }
-function getTemplateNames(typeParameters) {
-  return (typeParameters ?? []).map((parameter) => parameter.name.text);
-}
-function hasExportModifier(node) {
-  return (ts11.getCombinedModifierFlags(node) & ts11.ModifierFlags.Export) !== 0;
-}
-function getPropertyNameText2(name) {
-  if (!name) {
+function buildFunctionLikeDoc(declaration, checker, context) {
+  if (isBodylessFunctionLikeDeclaration(declaration)) {
     return null;
   }
-  if (ts11.isIdentifier(name) || ts11.isStringLiteral(name) || ts11.isNumericLiteral(name) || ts11.isPrivateIdentifier(name)) {
-    return name.text;
+  const declarations = collectOverloadDeclarations(declaration);
+  return buildSignaturesJsDoc({ checker, context, declarations });
+}
+function buildVariableJsDoc({
+  checker,
+  context,
+  initializer,
+  name,
+  typeNode
+}) {
+  if (initializer && (ts11.isArrowFunction(initializer) || ts11.isFunctionExpression(initializer))) {
+    return buildFunctionLikeDoc(initializer, checker, context);
+  }
+  const type = typeNode ? checker.getTypeFromTypeNode(typeNode) : initializer ? checker.getTypeAtLocation(initializer) : null;
+  if (!type || !isWorthAnnotatingVariableType(type, checker)) {
+    return null;
+  }
+  return buildTypeJsDoc(toClosureType(type, checker, context));
+}
+function buildClassMemberDoc({
+  checker,
+  context,
+  member
+}) {
+  if (ts11.isConstructorDeclaration(member) || ts11.isMethodDeclaration(member) || ts11.isGetAccessorDeclaration(member) || ts11.isSetAccessorDeclaration(member)) {
+    return buildFunctionLikeDoc(member, checker, context);
+  }
+  if (!ts11.isPropertyDeclaration(member) || !member.type) {
+    return null;
+  }
+  return buildTypeJsDoc(getTypedDeclarationClosureType(member, checker, context));
+}
+function buildObjectMemberDoc({
+  checker,
+  context,
+  member
+}) {
+  if (ts11.isMethodDeclaration(member) || ts11.isGetAccessorDeclaration(member) || ts11.isSetAccessorDeclaration(member)) {
+    return buildFunctionLikeDoc(member, checker, context);
+  }
+  if (ts11.isPropertyAssignment(member) && (ts11.isArrowFunction(member.initializer) || ts11.isFunctionExpression(member.initializer))) {
+    return buildFunctionLikeDoc(member.initializer, checker, context);
+  }
+  if (ts11.isPropertyAssignment(member)) {
+    const type = checker.getTypeAtLocation(member.initializer);
+    return isWorthAnnotatingVariableType(type, checker) ? buildTypeJsDoc(toClosureType(type, checker, context)) : null;
   }
   return null;
 }
-function renderPropertyName(name) {
-  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? name : `[${JSON.stringify(name)}]`;
-}
-function hasRestElement(pattern) {
-  return pattern.elements.some((element) => element.dotDotDotToken);
-}
-function isComponentLikeName(name) {
-  return !!name && /^[A-Z]/.test(name);
-}
-function signatureToClosureFunctionType(signature, checker) {
-  const params = signature.getParameters().map((parameter) => {
-    const declaration = parameter.valueDeclaration;
-    const parameterType = declaration ? checker.getTypeOfSymbolAtLocation(parameter, declaration) : checker.getTypeOfSymbol(parameter);
-    return toClosureType(parameterType, checker);
-  });
-  const returnType = toClosureType(checker.getReturnTypeOfSignature(signature), checker);
-  return `function(${params.join(", ")}): ${returnType}`;
-}
-function toClosureType(type, checker, seen = new Set) {
+function toClosureType(type, checker, context, seen = new Set) {
+  if (seen.size > MAX_TYPE_DEPTH) {
+    return "?";
+  }
   if (seen.has(type)) {
     return "?";
   }
@@ -1334,15 +1343,28 @@ function toClosureType(type, checker, seen = new Set) {
   if (type.flags & ts11.TypeFlags.Null)
     return "null";
   if (type.flags & ts11.TypeFlags.Never)
-    return "never";
-  if (type.flags & ts11.TypeFlags.TypeParameter)
-    return checker.typeToString(type);
-  if (type.isUnion()) {
-    return `(${type.types.map((item) => toClosureType(item, checker, seen)).join("|")})`;
+    return "?";
+  if (type.flags & ts11.TypeFlags.TypeParameter) {
+    return sanitizeClosureName(checker.typeToString(type));
   }
-  if (checker.isArrayType(type)) {
+  if (type.isUnion()) {
+    if (type.types.length > MAX_UNION_MEMBERS) {
+      return collapseLargeUnion(type, checker);
+    }
+    const rendered = uniqueSortedStrings2(type.types.map((item) => toClosureType(item, checker, context, seen)));
+    return rendered.length === 1 ? rendered[0] : `(${rendered.join("|")})`;
+  }
+  if (type.isIntersection()) {
+    const recordName2 = buildRecordForObjectType({
+      checker,
+      context,
+      type
+    });
+    return recordName2 ? `!${recordName2}` : "!Object";
+  }
+  if (checker.isArrayType(type) || isReadonlyArrayType(type, checker)) {
     const typeArguments = checker.getTypeArguments(type);
-    const elementType = typeArguments[0] ? toClosureType(typeArguments[0], checker, seen) : "?";
+    const elementType = typeArguments[0] ? toClosureType(typeArguments[0], checker, context, seen) : "?";
     return `!Array<${elementType}>`;
   }
   if (checker.isTupleType(type)) {
@@ -1350,24 +1372,618 @@ function toClosureType(type, checker, seen = new Set) {
     if (typeArguments.length === 0) {
       return "!Array<?>";
     }
-    return `!Array<${typeArguments.map((item) => toClosureType(item, checker, seen)).join("|")}>`;
+    return `!Array<${uniqueSortedStrings2(typeArguments.map((item) => toClosureType(item, checker, context, seen))).join("|")}>`;
   }
   const callSignatures = type.getCallSignatures();
-  if (callSignatures.length > 0) {
-    return signatureToClosureFunctionType(callSignatures[0], checker);
+  if (callSignatures.length > 0 && type.getProperties().length === 0) {
+    return signatureToClosureFunctionType(callSignatures[0], checker, context, seen);
   }
-  if (type.getSymbol()) {
-    const symbolName = checker.symbolToString(type.getSymbol());
-    if (symbolName && symbolName !== "__type") {
-      return symbolName;
-    }
+  const namedType = renderNamedType(type, checker, context, seen);
+  if (namedType) {
+    return namedType;
   }
-  if (type.isClassOrInterface() || type.getProperties().length > 0 && !(type.flags & ts11.TypeFlags.Object)) {
-    return "!Object";
+  const recordName = buildRecordForObjectType({ checker, context, type });
+  if (recordName) {
+    return `!${recordName}`;
   }
   return "?";
 }
-var init_docs = () => {};
+function buildSignaturesJsDoc({
+  checker,
+  context,
+  declarations,
+  firstParamObjectRecordTypeName
+}) {
+  const signatures = declarations.map((declaration) => ({
+    declaration,
+    signature: checker.getSignatureFromDeclaration(declaration)
+  })).filter((entry) => !!entry.signature);
+  if (signatures.length === 0) {
+    return null;
+  }
+  const implementation = declarations[declarations.length - 1];
+  const tags = [
+    ...collectPreservedJsDocTags(implementation),
+    ...uniqueTemplateTags(declarations)
+  ];
+  const perSignatureParams = signatures.map(({ declaration, signature }) => collectSignatureParamInfos({
+    checker,
+    context,
+    declaration,
+    firstParamObjectRecordTypeName,
+    signature
+  }));
+  const thisTypes = uniqueSortedStrings2(perSignatureParams.flatMap((params) => params.filter((param) => param.thisParam)).map((param) => param.type));
+  if (thisTypes.length > 0) {
+    tags.push({ name: "this", type: mergeClosureTypes(thisTypes) });
+  }
+  const realParams = perSignatureParams.map((params) => params.filter((param) => !param.thisParam));
+  const maxParamCount = Math.max(0, ...realParams.map((params) => params.length));
+  const minParamCount = Math.min(...realParams.map((params) => params.filter((param) => !param.rest).length));
+  let foundOptional = false;
+  for (let index = 0;index < maxParamCount; index += 1) {
+    const candidates = realParams.map((params) => params[index]).filter((param) => !!param);
+    if (candidates.length === 0) {
+      continue;
+    }
+    const first = candidates[0];
+    const rest = candidates.some((param) => param.rest);
+    const isOptional = !rest && (foundOptional || index >= minParamCount || candidates.some((param) => param.optional));
+    foundOptional ||= isOptional;
+    const mergedType = mergeClosureTypes(candidates.map((param) => isOptional ? stripUndefinedFromClosureType(param.type) : param.type));
+    tags.push({
+      name: "param",
+      text: first.name,
+      type: `${rest ? "..." : ""}${mergedType}${isOptional ? "=" : ""}`
+    });
+    if (rest) {
+      break;
+    }
+  }
+  if (!signatures.some(({ declaration }) => ts11.isConstructorDeclaration(declaration)) && !isSetterDeclaration(implementation)) {
+    tags.push({
+      name: "return",
+      type: mergeClosureTypes(signatures.map(({ signature }) => toClosureType(checker.getReturnTypeOfSignature(signature), checker, context)))
+    });
+  }
+  return renderJsDoc(tags);
+}
+function buildTypeJsDoc(closureType) {
+  return renderJsDoc([{ name: "type", type: closureType }]);
+}
+function appendInterfaceMembers(lines, typeName, members, checker, context) {
+  for (const member of members) {
+    const memberName = getPropertyNameText2(member.name);
+    if (!memberName) {
+      continue;
+    }
+    if (ts11.isPropertySignature(member)) {
+      const propertyType = getTypedDeclarationClosureType(member, checker, context);
+      lines.push(`/** @type {${propertyType}} */`);
+      lines.push(renderPrototypeProperty(typeName, memberName));
+      continue;
+    }
+    if (ts11.isMethodSignature(member)) {
+      const signature = checker.getSignatureFromDeclaration(member);
+      if (!signature) {
+        continue;
+      }
+      const functionType = signatureToClosureFunctionType(signature, checker, context);
+      lines.push(`/** @type {${functionType}} */`);
+      lines.push(renderPrototypeProperty(typeName, memberName));
+    }
+  }
+}
+function buildRecordForObjectType({
+  checker,
+  context,
+  preferredName,
+  type
+}) {
+  const properties = checker.getPropertiesOfType(type).filter((property) => {
+    const name = property.getName();
+    return name !== "__type" && !name.startsWith("__@");
+  });
+  if (properties.length === 0 || properties.length > MAX_RECORD_PROPERTIES || context.recordNamesByKey.size > MAX_RECORDS_PER_FILE || isGlobalObjectType(type, checker)) {
+    return null;
+  }
+  const key = structuralRecordKey(type, checker, properties);
+  const current = context.recordNamesByKey.get(key);
+  if (current) {
+    return current;
+  }
+  const baseName = preferredName ? sanitizeClosureName(preferredName) : `${context.sourceFileStem}$Record${context.recordNamesByKey.size}`;
+  const recordName = reserveRecordName(baseName, context);
+  context.recordNamesByKey.set(key, recordName);
+  const lines = ["/**", " * @record", " */", `function ${recordName}() {}`];
+  for (const property of properties) {
+    const declaration = property.valueDeclaration ?? property.declarations?.[0];
+    const propertyType = declaration ? checker.getTypeOfSymbolAtLocation(property, declaration) : checker.getTypeOfSymbol(property);
+    lines.push(`/** @type {${toClosureType(propertyType, checker, context, new Set([type]))}} */`);
+    lines.push(renderPrototypeProperty(recordName, property.getName()));
+  }
+  context.typeDeclarations.push({ snippet: `${lines.join(`
+`)}
+` });
+  return recordName;
+}
+function getTypedDeclarationClosureType(declaration, checker, context) {
+  const symbol = declaration.name ? checker.getSymbolAtLocation(declaration.name) : undefined;
+  const type = symbol ? checker.getTypeOfSymbolAtLocation(symbol, declaration) : declaration.type ? checker.getTypeFromTypeNode(declaration.type) : checker.getTypeAtLocation(declaration);
+  const closureType = toClosureType(type, checker, context);
+  return declaration.questionToken ? unionClosureTypes([closureType, "undefined"]) : closureType;
+}
+function renderNamedType(type, checker, context, seen) {
+  const symbol = type.aliasSymbol ?? type.getSymbol();
+  if (!symbol) {
+    return null;
+  }
+  if (!type.aliasSymbol && !isTypeLikeSymbol(symbol)) {
+    return null;
+  }
+  const symbolName = checker.symbolToString(symbol);
+  if (!symbolName || symbolName === "__type" || !isClosureQualifiedName(symbolName)) {
+    return null;
+  }
+  if (["Array", "ReadonlyArray"].includes(symbolName)) {
+    return null;
+  }
+  const builtinType = renderBuiltinNamedType(symbolName, type, checker, context, seen);
+  if (builtinType) {
+    return builtinType;
+  }
+  if (symbolName === "Record" && type.aliasTypeArguments && type.aliasTypeArguments.length >= 2) {
+    return `!Object<${toClosureType(type.aliasTypeArguments[0], checker, context, seen)}, ${toClosureType(type.aliasTypeArguments[1], checker, context, seen)}>`;
+  }
+  if (isDeclarationFileSymbol(symbol) && !(symbol.flags & (ts11.SymbolFlags.Class | ts11.SymbolFlags.Enum)) && type.getProperties().length > 0) {
+    const recordName = buildRecordForObjectType({
+      checker,
+      context,
+      preferredName: symbolName,
+      type
+    });
+    return recordName ? `!${recordName}` : null;
+  }
+  if (isGlobalObjectType(type, checker)) {
+    return "!Object";
+  }
+  const args = checker.getTypeArguments(type);
+  const renderedArgs = args.map((arg) => toClosureType(arg, checker, context, seen));
+  return renderedArgs.length > 0 ? `!${symbolName}<${renderedArgs.join(", ")}>` : `!${symbolName}`;
+}
+function renderBuiltinNamedType(symbolName, type, checker, context, seen) {
+  const closureName = BUILTIN_GENERIC_TYPE_NAMES.get(symbolName);
+  if (closureName) {
+    const args = checker.getTypeArguments(type);
+    const renderedArgs = args.map((arg) => toClosureType(arg, checker, context, seen));
+    return renderedArgs.length > 0 ? `!${closureName}<${renderedArgs.join(", ")}>` : `!${closureName}`;
+  }
+  if (!BUILTIN_TYPE_NAMES.has(symbolName)) {
+    return null;
+  }
+  if (symbolName === "Object") {
+    return "!Object";
+  }
+  if (symbolName === "Function") {
+    return "!Function";
+  }
+  return `!${symbolName}`;
+}
+function isTypeLikeSymbol(symbol) {
+  return Boolean(symbol.flags & (ts11.SymbolFlags.Class | ts11.SymbolFlags.Enum | ts11.SymbolFlags.Interface | ts11.SymbolFlags.TypeAlias | ts11.SymbolFlags.TypeParameter));
+}
+function isDeclarationFileSymbol(symbol) {
+  return (symbol.declarations ?? []).some((declaration) => declaration.getSourceFile().isDeclarationFile);
+}
+function signatureToClosureFunctionType(signature, checker, context, seen = new Set) {
+  const params = collectSignatureParamInfos({
+    checker,
+    context,
+    declaration: signature.declaration,
+    signature
+  }).filter((parameter) => !parameter.thisParam).map((parameter) => `${parameter.rest ? "..." : ""}${parameter.optional ? stripUndefinedFromClosureType(parameter.type) : parameter.type}${parameter.optional ? "=" : ""}`);
+  const returnType = toClosureType(checker.getReturnTypeOfSignature(signature), checker, context, new Set(seen));
+  return `function(${params.join(", ")}): ${returnType}`;
+}
+function collectFunctionOverloadDeclarations(implementation) {
+  if (!implementation.name || !implementation.body) {
+    return [implementation];
+  }
+  if (!ts11.isSourceFile(implementation.parent) && !ts11.isModuleBlock(implementation.parent)) {
+    return [implementation];
+  }
+  const declarations = implementation.parent.statements.filter((statement) => ts11.isFunctionDeclaration(statement) && statement.name?.text === implementation.name?.text);
+  const implementationIndex = declarations.indexOf(implementation);
+  return implementationIndex > 0 ? declarations.slice(0, implementationIndex + 1) : [implementation];
+}
+function collectOverloadDeclarations(implementation) {
+  if (!hasFunctionBody(implementation)) {
+    return [implementation];
+  }
+  if (ts11.isFunctionDeclaration(implementation)) {
+    return collectFunctionOverloadDeclarations(implementation);
+  }
+  if (ts11.isMethodDeclaration(implementation) || ts11.isConstructorDeclaration(implementation)) {
+    const members = ts11.isClassDeclaration(implementation.parent) || ts11.isClassExpression(implementation.parent) ? implementation.parent.members : undefined;
+    if (!members) {
+      return [implementation];
+    }
+    const implementationName = getClassMemberName(implementation);
+    const candidates = members.filter((member) => (ts11.isMethodDeclaration(member) || ts11.isConstructorDeclaration(member)) && getClassMemberName(member) === implementationName);
+    const implementationIndex = candidates.indexOf(implementation);
+    return implementationIndex > 0 ? candidates.slice(0, implementationIndex + 1) : [implementation];
+  }
+  return [implementation];
+}
+function collectSignatureParamInfos({
+  checker,
+  context,
+  declaration,
+  firstParamObjectRecordTypeName,
+  signature
+}) {
+  const parameters = getDeclarationParameters(declaration);
+  return parameters.map((parameter, index) => {
+    const thisParam = isThisParameter(parameter);
+    const rest = !!parameter.dotDotDotToken;
+    const optional = !!parameter.questionToken || !!parameter.initializer;
+    const name = index === 0 && firstParamObjectRecordTypeName ? "__props" : parameterNameForJsDoc(parameter, index);
+    const type = index === 0 && firstParamObjectRecordTypeName ? `!${firstParamObjectRecordTypeName}` : renderParameterType(parameter, checker, context, rest);
+    return {
+      name,
+      optional,
+      rest,
+      thisParam,
+      type
+    };
+  });
+}
+function renderParameterType(parameter, checker, context, rest) {
+  const type = checker.getTypeAtLocation(parameter);
+  if (!rest) {
+    return toClosureType(type, checker, context);
+  }
+  const elementType = getArrayElementType(type, checker);
+  return elementType ? toClosureType(elementType, checker, context) : "?";
+}
+function getArrayElementType(type, checker) {
+  if (!checker.isArrayType(type) && !isReadonlyArrayType(type, checker)) {
+    return null;
+  }
+  return checker.getTypeArguments(type)[0] ?? null;
+}
+function hasFunctionBody(declaration) {
+  return "body" in declaration && !!declaration.body;
+}
+function isBodylessFunctionLikeDeclaration(declaration) {
+  return "body" in declaration && !declaration.body;
+}
+function isThisParameter(parameter) {
+  return ts11.isIdentifier(parameter.name) && parameter.name.text === "this";
+}
+function mergeClosureTypes(types) {
+  return unionClosureTypes(types.filter(Boolean));
+}
+function unionClosureTypes(types) {
+  const unique = uniqueSortedStrings2(types.flatMap(expandClosureUnionType));
+  return unique.length === 1 ? unique[0] : `(${unique.join("|")})`;
+}
+function expandClosureUnionType(type) {
+  return type.startsWith("(") && type.endsWith(")") ? splitTopLevelUnion(type.slice(1, -1)) : [type];
+}
+function stripUndefinedFromClosureType(type) {
+  if (type === "undefined") {
+    return "?";
+  }
+  if (!type.includes("undefined")) {
+    return type;
+  }
+  if (!type.startsWith("(") || !type.endsWith(")")) {
+    return type;
+  }
+  const parts = splitTopLevelUnion(type.slice(1, -1)).filter((part) => part !== "undefined");
+  return parts.length === 0 ? "?" : parts.length === 1 ? parts[0] : `(${parts.join("|")})`;
+}
+function splitTopLevelUnion(type) {
+  const parts = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0;index < type.length; index += 1) {
+    const char = type[index];
+    if (char === "<" || char === "(" || char === "{") {
+      depth += 1;
+    } else if (char === ">" || char === ")" || char === "}") {
+      depth -= 1;
+    } else if (char === "|" && depth === 0) {
+      parts.push(type.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(type.slice(start));
+  return parts;
+}
+function collectPreservedJsDocTags(node) {
+  const tags = [];
+  for (const tag of ts11.getJSDocTags(node)) {
+    const name = tag.tagName.text;
+    if (CONFLICTING_GENERATED_TAGS.has(name)) {
+      continue;
+    }
+    const text = jsDocCommentText(tag.comment);
+    tags.push(text ? { name, text } : { name });
+  }
+  return tags;
+}
+function jsDocCommentText(comment) {
+  if (!comment) {
+    return "";
+  }
+  if (typeof comment === "string") {
+    return comment.trim();
+  }
+  return comment.map((part) => part.getText()).join(" ").trim();
+}
+function uniqueTemplateTags(declarations) {
+  return uniqueSortedStrings2(declarations.flatMap((declaration) => getTemplateNames(getSignatureTypeParameters(declaration)))).map((name) => ({ name: "template", text: name }));
+}
+function templateTags(typeParameters) {
+  return getTemplateNames(typeParameters).map((name) => ({
+    name: "template",
+    text: name
+  }));
+}
+function renderJsDoc(tags) {
+  const lines = ["/**"];
+  for (const tag of tags) {
+    if (!tag.name) {
+      continue;
+    }
+    if (tag.type && tag.text) {
+      lines.push(` * @${tag.name} {${tag.type}} ${tag.text}`);
+    } else if (tag.type) {
+      lines.push(` * @${tag.name} {${tag.type}}`);
+    } else if (tag.text) {
+      lines.push(` * @${tag.name} ${tag.text}`);
+    } else {
+      lines.push(` * @${tag.name}`);
+    }
+  }
+  lines.push(" */");
+  return `${lines.join(`
+`)}
+`;
+}
+function toClosureHeritageType(typeNode, checker, context) {
+  const expressionName = getHeritageExpressionName(typeNode.expression);
+  if (expressionName) {
+    const args = (typeNode.typeArguments ?? []).map((argument) => toClosureType(checker.getTypeFromTypeNode(argument), checker, context));
+    return args.length > 0 ? `${expressionName}<${args.join(", ")}>` : expressionName;
+  }
+  return toClosureType(checker.getTypeAtLocation(typeNode), checker, context).replace(/^!/, "").replace(/<this>$/u, "").replace(/,\s*this(?=>)/gu, "");
+}
+function getHeritageExpressionName(expression) {
+  if (ts11.isIdentifier(expression)) {
+    return expression.text;
+  }
+  if (ts11.isPropertyAccessExpression(expression)) {
+    const left = getHeritageExpressionName(expression.expression);
+    return left ? `${left}.${expression.name.text}` : null;
+  }
+  return null;
+}
+function collapseLargeUnion(type, checker) {
+  const nonNullable = type.types.filter((item) => !(item.flags & ts11.TypeFlags.Null) && !(item.flags & ts11.TypeFlags.Undefined));
+  const suffix = type.types.filter((item) => item.flags & (ts11.TypeFlags.Null | ts11.TypeFlags.Undefined)).map((item) => item.flags & ts11.TypeFlags.Null ? "null" : "undefined");
+  if (nonNullable.every((item) => item.flags & ts11.TypeFlags.StringLike)) {
+    return unionWithSuffix("string", suffix);
+  }
+  if (nonNullable.every((item) => item.flags & ts11.TypeFlags.NumberLike)) {
+    return unionWithSuffix("number", suffix);
+  }
+  if (nonNullable.every((item) => item.flags & ts11.TypeFlags.BooleanLike)) {
+    return unionWithSuffix("boolean", suffix);
+  }
+  if (nonNullable.every((item) => checker.isArrayType(item))) {
+    return unionWithSuffix("!Array<?>", suffix);
+  }
+  if (nonNullable.every((item) => item.getProperties().length > 0)) {
+    return unionWithSuffix("!Object", suffix);
+  }
+  return unionWithSuffix("?", suffix);
+}
+function unionWithSuffix(base, suffix) {
+  const rendered = uniqueSortedStrings2([base, ...suffix]);
+  return rendered.length === 1 ? rendered[0] : `(${rendered.join("|")})`;
+}
+function isWorthAnnotatingVariableType(type, checker) {
+  if (type.flags & (ts11.TypeFlags.Any | ts11.TypeFlags.Unknown | ts11.TypeFlags.StringLike | ts11.TypeFlags.NumberLike | ts11.TypeFlags.BooleanLike | ts11.TypeFlags.Void | ts11.TypeFlags.Undefined | ts11.TypeFlags.Null | ts11.TypeFlags.Never)) {
+    return false;
+  }
+  return checker.isArrayType(type) || checker.isTupleType(type) || type.getCallSignatures().length > 0 || type.getProperties().length > 0 || Boolean(type.getSymbol() || type.aliasSymbol);
+}
+function getSignatureTypeParameters(declaration) {
+  return "typeParameters" in declaration ? declaration.typeParameters : undefined;
+}
+function getDeclarationParameters(declaration) {
+  return "parameters" in declaration ? declaration.parameters : [];
+}
+function parameterNameForJsDoc(declaration, index) {
+  if (declaration && ts11.isIdentifier(declaration.name)) {
+    return declaration.name.text;
+  }
+  return `__param${index}`;
+}
+function appendTemplateTags(lines, typeParameters) {
+  for (const tag of templateTags(typeParameters)) {
+    lines.push(` * @template ${tag.text}`);
+  }
+}
+function getTemplateNames(typeParameters) {
+  return (typeParameters ?? []).map((parameter) => sanitizeClosureName(parameter.name.text));
+}
+function hasExportModifier(node) {
+  return (ts11.getCombinedModifierFlags(node) & ts11.ModifierFlags.Export) !== 0;
+}
+function hasRestElement(pattern) {
+  return pattern.elements.some((element) => element.dotDotDotToken);
+}
+function getPropertyNameText2(name) {
+  if (!name) {
+    return null;
+  }
+  if (ts11.isIdentifier(name) || ts11.isStringLiteral(name) || ts11.isNumericLiteral(name) || ts11.isPrivateIdentifier(name)) {
+    return name.text;
+  }
+  return null;
+}
+function getClassMemberName(member) {
+  if (ts11.isConstructorDeclaration(member)) {
+    return "constructor";
+  }
+  return getPropertyNameText2(member.name);
+}
+function getObjectPropertyName(member) {
+  if (ts11.isPropertyAssignment(member) || ts11.isMethodDeclaration(member) || ts11.isGetAccessorDeclaration(member) || ts11.isSetAccessorDeclaration(member) || ts11.isShorthandPropertyAssignment(member)) {
+    return getPropertyNameText2(member.name);
+  }
+  return null;
+}
+function hasStaticModifier2(node) {
+  return (ts11.getCombinedModifierFlags(node) & ts11.ModifierFlags.Static) !== 0;
+}
+function isSetterDeclaration(declaration) {
+  return ts11.isSetAccessorDeclaration(declaration);
+}
+function renderPrototypeProperty(typeName, propertyName) {
+  return isClosureIdentifier(propertyName) ? `${typeName}.prototype.${propertyName};` : `${typeName}.prototype[${JSON.stringify(propertyName)}];`;
+}
+function reserveRecordName(baseName, context) {
+  let candidate = baseName || "Record";
+  let index = 0;
+  while (context.usedRecordNames.has(candidate)) {
+    index += 1;
+    candidate = `${baseName}${index}`;
+  }
+  context.usedRecordNames.add(candidate);
+  return candidate;
+}
+function structuralRecordKey(type, checker, properties) {
+  const typeId = type.id;
+  if (typeof typeId === "number") {
+    return `id:${typeId}`;
+  }
+  return properties.map((property) => {
+    const declaration = property.valueDeclaration ?? property.declarations?.[0];
+    const propertyType = declaration ? checker.getTypeOfSymbolAtLocation(property, declaration) : checker.getTypeOfSymbol(property);
+    return `${property.getName()}:${checker.typeToString(propertyType)}`;
+  }).sort((left, right) => left.localeCompare(right)).join("|");
+}
+function isReadonlyArrayType(type, checker) {
+  const symbol = type.getSymbol();
+  return symbol ? checker.symbolToString(symbol) === "ReadonlyArray" : false;
+}
+function isGlobalObjectType(type, checker) {
+  const symbol = type.getSymbol();
+  if (!symbol) {
+    return false;
+  }
+  return BUILTIN_TYPE_NAMES.has(checker.symbolToString(symbol));
+}
+function sanitizeClosureName(name) {
+  const sanitized = name.replace(/[^A-Za-z0-9_$]/gu, "_");
+  if (!sanitized || /^[0-9]/u.test(sanitized)) {
+    return `_${sanitized}`;
+  }
+  return sanitized;
+}
+function isClosureIdentifier(name) {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(name);
+}
+function isClosureQualifiedName(name) {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$/u.test(name);
+}
+function uniqueSortedStrings2(values) {
+  return [...new Set(values)].sort((left, right) => left.localeCompare(right));
+}
+var MAX_RECORDS_PER_FILE = 160, MAX_RECORD_PROPERTIES = 48, MAX_TYPE_DEPTH = 28, MAX_UNION_MEMBERS = 16, BUILTIN_TYPE_NAMES, BUILTIN_GENERIC_TYPE_NAMES, CONFLICTING_GENERATED_TAGS;
+var init_docs = __esm(() => {
+  BUILTIN_TYPE_NAMES = new Set([
+    "AbortController",
+    "AbortSignal",
+    "Array",
+    "ArrayBuffer",
+    "AsyncIterable",
+    "AsyncIterator",
+    "BigInt64Array",
+    "BigUint64Array",
+    "Blob",
+    "DataView",
+    "Date",
+    "Error",
+    "Float32Array",
+    "Float64Array",
+    "FormData",
+    "Function",
+    "Headers",
+    "Int16Array",
+    "Int32Array",
+    "Int8Array",
+    "Iterable",
+    "Iterator",
+    "Map",
+    "Object",
+    "Promise",
+    "ReadonlyArray",
+    "ReadonlyMap",
+    "ReadonlySet",
+    "ReadableStream",
+    "ReadableStreamDefaultController",
+    "ReadableStreamDefaultReader",
+    "RegExp",
+    "Request",
+    "Response",
+    "Set",
+    "TextDecoder",
+    "TextEncoder",
+    "TransformStream",
+    "URL",
+    "URLSearchParams",
+    "Uint16Array",
+    "Uint32Array",
+    "Uint8Array",
+    "Uint8ClampedArray",
+    "WeakMap",
+    "WeakSet",
+    "WritableStream",
+    "WritableStreamDefaultController",
+    "WritableStreamDefaultWriter"
+  ]);
+  BUILTIN_GENERIC_TYPE_NAMES = new Map([
+    ["AsyncIterable", "AsyncIterable"],
+    ["AsyncIterator", "AsyncIterator"],
+    ["Iterable", "Iterable"],
+    ["Iterator", "Iterator"],
+    ["Map", "Map"],
+    ["Promise", "Promise"],
+    ["ReadonlyMap", "Map"],
+    ["ReadonlySet", "Set"],
+    ["Set", "Set"],
+    ["WeakMap", "WeakMap"],
+    ["WeakSet", "WeakSet"]
+  ]);
+  CONFLICTING_GENERATED_TAGS = new Set([
+    "argument",
+    "constructor",
+    "extends",
+    "implements",
+    "param",
+    "return",
+    "template",
+    "this",
+    "type",
+    "typedef"
+  ]);
+});
 
 // src/stages/native/closure-ir/metadata/enums.ts
 import ts12 from "typescript";
@@ -1482,8 +2098,221 @@ function literalValueFromExpression(expression) {
 }
 var init_enums = () => {};
 
-// src/stages/native/closure-ir/metadata/doc-eligibility.ts
+// src/stages/native/closure-ir/metadata/collect.ts
 import ts13 from "typescript";
+function collectClosureIrFileMetadata({
+  compilerOptions,
+  checker,
+  features,
+  sourceFile,
+  unsafeEnumSymbols
+}) {
+  const diagnostics = [];
+  const renderContext = createClosureDocRenderContext(sourceFile);
+  const explicitTypeDeclarations = features.hasTypeDeclarations ? collectTypeDeclarationsForSourceFile(sourceFile, checker, renderContext) : [];
+  const topLevelDocs = features.hasTopLevelDocs ? collectClosureDocsForSourceFile(sourceFile, checker, features, renderContext) : [];
+  const typeDeclarations = [
+    ...explicitTypeDeclarations,
+    ...renderContext.typeDeclarations
+  ];
+  const enumDeclarations = features.hasEnumDeclarations ? collectEnumDeclarationsForSourceFile(sourceFile, checker, unsafeEnumSymbols) : [];
+  const decoratedOutputText = features.hasDecorators ? collectDecoratedOutputText({
+    compilerOptions,
+    diagnostics,
+    fileName: sourceFile.fileName,
+    sourceText: sourceFile.getFullText()
+  }) : undefined;
+  return {
+    diagnostics,
+    file: {
+      decoratedOutputText,
+      enumDeclarations,
+      filePath: sourceFile.fileName,
+      topLevelDocs,
+      typeDeclarations
+    }
+  };
+}
+function collectTypeDeclarationsForSourceFile(sourceFile, checker, renderContext) {
+  const typeDeclarations = [];
+  for (const statement of sourceFile.statements) {
+    if (ts13.isInterfaceDeclaration(statement)) {
+      typeDeclarations.push(buildInterfaceDeclarationSnippet(statement, checker, renderContext));
+      continue;
+    }
+    if (ts13.isTypeAliasDeclaration(statement)) {
+      typeDeclarations.push(buildTypeAliasDeclarationSnippet(statement, checker, renderContext));
+    }
+  }
+  return typeDeclarations;
+}
+function collectClosureDocsForSourceFile(sourceFile, checker, features, renderContext) {
+  const topLevelDocs = [];
+  const shouldAnnotateJs = !features.docEligibility.isTypeScriptLike && features.docEligibility.hasJsDocText;
+  const shouldAnnotateTypeScript = features.docEligibility.isTypeScriptLike;
+  const visit = (node) => {
+    if (ts13.isFunctionDeclaration(node) && node.name) {
+      if (shouldAnnotateTypeScript || shouldAnnotateJs) {
+        const objectParamRecord = buildFunctionObjectParamRecord(node, checker, renderContext);
+        const jsdoc = buildFunctionJsDoc(node, checker, renderContext, objectParamRecord?.typeName);
+        if (jsdoc) {
+          topLevelDocs.push({
+            jsdoc,
+            kind: "function",
+            name: node.name.text
+          });
+        }
+      }
+      ts13.forEachChild(node, visit);
+      return;
+    }
+    if (ts13.isVariableDeclaration(node) && ts13.isIdentifier(node.name)) {
+      if (shouldAnnotateTypeScript || shouldAnnotateJs) {
+        const jsdoc = buildVariableJsDoc({
+          checker,
+          context: renderContext,
+          initializer: node.initializer,
+          name: node.name.text,
+          typeNode: node.type
+        });
+        if (jsdoc) {
+          topLevelDocs.push({
+            jsdoc,
+            kind: "variable",
+            name: node.name.text
+          });
+        }
+        if (node.initializer && ts13.isObjectLiteralExpression(node.initializer)) {
+          for (const member of node.initializer.properties) {
+            const memberName = getObjectPropertyName(member);
+            if (!memberName) {
+              continue;
+            }
+            const memberDoc = buildObjectMemberDoc({
+              checker,
+              context: renderContext,
+              member
+            });
+            if (memberDoc) {
+              topLevelDocs.push({
+                jsdoc: memberDoc,
+                kind: objectDocKind(member),
+                name: memberName,
+                owner: node.name.text
+              });
+            }
+          }
+        }
+      }
+      ts13.forEachChild(node, visit);
+      return;
+    }
+    if (ts13.isClassDeclaration(node) && node.name) {
+      const className = node.name.text;
+      const jsdoc = buildClassJsDoc(node, checker, renderContext);
+      if (jsdoc) {
+        topLevelDocs.push({
+          jsdoc,
+          kind: "class",
+          name: className
+        });
+      }
+      for (const member of node.members) {
+        const memberName = getClassMemberName(member);
+        if (!memberName) {
+          continue;
+        }
+        const memberDoc = buildClassMemberDoc({
+          checker,
+          context: renderContext,
+          member
+        });
+        if (memberDoc) {
+          topLevelDocs.push({
+            jsdoc: memberDoc,
+            kind: classDocKind(member),
+            name: memberName,
+            owner: className,
+            static: hasStaticModifier2(member)
+          });
+        }
+      }
+      ts13.forEachChild(node, visit);
+      return;
+    }
+    if ((ts13.isMethodDeclaration(node) || ts13.isGetAccessorDeclaration(node) || ts13.isSetAccessorDeclaration(node)) && !ts13.isClassDeclaration(node.parent) && !ts13.isClassExpression(node.parent) && !ts13.isObjectLiteralExpression(node.parent) && shouldAnnotateTypeScript) {
+      const name = "name" in node && node.name && ts13.isIdentifier(node.name) ? node.name.text : null;
+      if (name) {
+        const jsdoc = buildFunctionLikeDoc(node, checker, renderContext);
+        if (jsdoc) {
+          topLevelDocs.push({
+            jsdoc,
+            kind: "method",
+            name
+          });
+        }
+      }
+    }
+    ts13.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return topLevelDocs;
+}
+function objectDocKind(member) {
+  if (ts13.isGetAccessorDeclaration(member))
+    return "objectGetter";
+  if (ts13.isSetAccessorDeclaration(member))
+    return "objectSetter";
+  if (ts13.isMethodDeclaration(member))
+    return "objectMethod";
+  return "objectProperty";
+}
+function classDocKind(member) {
+  if (ts13.isConstructorDeclaration(member))
+    return "constructor";
+  if (ts13.isGetAccessorDeclaration(member))
+    return "getter";
+  if (ts13.isSetAccessorDeclaration(member))
+    return "setter";
+  if (ts13.isPropertyDeclaration(member))
+    return "field";
+  return "method";
+}
+function collectEnumDeclarationsForSourceFile(sourceFile, checker, unsafeEnumSymbols) {
+  const enumDeclarations = [];
+  for (const statement of sourceFile.statements) {
+    if (!ts13.isEnumDeclaration(statement)) {
+      continue;
+    }
+    const enumDeclaration = buildEnumDeclarationMetadata(statement, checker, unsafeEnumSymbols);
+    if (enumDeclaration) {
+      enumDeclarations.push(enumDeclaration);
+    }
+  }
+  return enumDeclarations;
+}
+function collectDecoratedOutputText({
+  compilerOptions,
+  diagnostics,
+  fileName,
+  sourceText
+}) {
+  const transpiled = transpileDecoratedSource({
+    compilerOptions,
+    fileName,
+    sourceText
+  });
+  diagnostics.push(...(transpiled.diagnostics ?? []).filter((diagnostic) => diagnostic.category === ts13.DiagnosticCategory.Error));
+  return transpiled.outputText;
+}
+var init_collect = __esm(() => {
+  init_decorators();
+  init_docs();
+  init_enums();
+});
+
+// src/stages/native/closure-ir/metadata/doc-eligibility.ts
+import ts14 from "typescript";
 function classifyClosureIrDocEligibility(sourceFile) {
   const exportedDeclarationNames = collectExportedTopLevelDeclarationNames(sourceFile);
   const hasJsDocText = sourceFile.text.includes("/**");
@@ -1509,33 +2338,33 @@ function classifyClosureIrDocEligibility(sourceFile) {
   };
 }
 function isDocRelevantTopLevelDeclaration(statement, eligibility) {
-  if (!((ts13.isFunctionDeclaration(statement) || ts13.isClassDeclaration(statement)) && statement.name)) {
+  if (!((ts14.isFunctionDeclaration(statement) || ts14.isClassDeclaration(statement)) && statement.name)) {
     return false;
   }
   if (eligibility.isTypeScriptLike && hasNamedExport(statement, eligibility.exportedDeclarationNames)) {
     return true;
   }
-  if (ts13.isFunctionDeclaration(statement) && canGenerateComponentObjectParamRecord(statement)) {
+  if (ts14.isFunctionDeclaration(statement) && canGenerateComponentObjectParamRecord(statement)) {
     return true;
   }
-  return eligibility.hasJsDocText && ts13.getJSDocCommentsAndTags(statement).length > 0;
+  return eligibility.hasJsDocText && ts14.getJSDocCommentsAndTags(statement).length > 0;
 }
 function collectExportedTopLevelDeclarationNames(sourceFile) {
   const exportedNames = new Set;
   for (const statement of sourceFile.statements) {
-    if ((ts13.isFunctionDeclaration(statement) || ts13.isClassDeclaration(statement)) && statement.name && hasExportModifier3(statement)) {
+    if ((ts14.isFunctionDeclaration(statement) || ts14.isClassDeclaration(statement)) && statement.name && hasExportModifier3(statement)) {
       exportedNames.add(statement.name.text);
       continue;
     }
-    if (ts13.isExportDeclaration(statement) && statement.exportClause) {
-      if (ts13.isNamedExports(statement.exportClause) && !statement.moduleSpecifier) {
+    if (ts14.isExportDeclaration(statement) && statement.exportClause) {
+      if (ts14.isNamedExports(statement.exportClause) && !statement.moduleSpecifier) {
         for (const element of statement.exportClause.elements) {
           exportedNames.add(element.propertyName?.text ?? element.name.text);
         }
       }
       continue;
     }
-    if (ts13.isExportAssignment(statement) && ts13.isIdentifier(statement.expression)) {
+    if (ts14.isExportAssignment(statement) && ts14.isIdentifier(statement.expression)) {
       exportedNames.add(statement.expression.text);
     }
   }
@@ -1545,127 +2374,16 @@ function hasNamedExport(statement, exportedNames) {
   return !!statement.name && exportedNames.has(statement.name.text);
 }
 function hasExportModifier3(node) {
-  return (ts13.getCombinedModifierFlags(node) & ts13.ModifierFlags.Export) !== 0;
+  return (ts14.getCombinedModifierFlags(node) & ts14.ModifierFlags.Export) !== 0;
 }
 function canGenerateComponentObjectParamRecord(statement) {
   const firstParameter = statement.parameters[0];
-  return !!statement.name && /^[A-Z]/.test(statement.name.text) && !!firstParameter && ts13.isObjectBindingPattern(firstParameter.name) && !firstParameter.name.elements.some((element) => element.dotDotDotToken);
+  return !!statement.name && /^[A-Z]/.test(statement.name.text) && !!firstParameter && ts14.isObjectBindingPattern(firstParameter.name) && !firstParameter.name.elements.some((element) => element.dotDotDotToken);
 }
 function isTypeScriptLikeSourceFile(sourceFile) {
   return /\.(?:cts|mts|ts|tsx)$/u.test(sourceFile.fileName);
 }
 var init_doc_eligibility = () => {};
-
-// src/stages/native/closure-ir/metadata/collect.ts
-import ts14 from "typescript";
-function collectClosureIrFileMetadata({
-  compilerOptions,
-  checker,
-  features,
-  sourceFile,
-  unsafeEnumSymbols
-}) {
-  const diagnostics = [];
-  const typeDeclarations = features.hasTypeDeclarations ? collectTypeDeclarationsForSourceFile(sourceFile, checker) : [];
-  const topLevelDocs = features.hasTopLevelDocs ? collectTopLevelDocsForSourceFile(sourceFile, checker, features, typeDeclarations) : [];
-  const enumDeclarations = features.hasEnumDeclarations ? collectEnumDeclarationsForSourceFile(sourceFile, checker, unsafeEnumSymbols) : [];
-  const decoratedOutputText = features.hasDecorators ? collectDecoratedOutputText({
-    compilerOptions,
-    diagnostics,
-    fileName: sourceFile.fileName,
-    sourceText: sourceFile.getFullText()
-  }) : undefined;
-  return {
-    diagnostics,
-    file: {
-      decoratedOutputText,
-      enumDeclarations,
-      filePath: sourceFile.fileName,
-      topLevelDocs,
-      typeDeclarations
-    }
-  };
-}
-function collectTypeDeclarationsForSourceFile(sourceFile, checker) {
-  const typeDeclarations = [];
-  for (const statement of sourceFile.statements) {
-    if (ts14.isInterfaceDeclaration(statement)) {
-      typeDeclarations.push(buildInterfaceDeclarationSnippet(statement, checker));
-      continue;
-    }
-    if (ts14.isTypeAliasDeclaration(statement)) {
-      typeDeclarations.push(buildTypeAliasDeclarationSnippet(statement, checker));
-    }
-  }
-  return typeDeclarations;
-}
-function collectTopLevelDocsForSourceFile(sourceFile, checker, features, typeDeclarations) {
-  const topLevelDocs = [];
-  for (const statement of sourceFile.statements) {
-    if (!isDocRelevantTopLevelDeclaration(statement, features.docEligibility)) {
-      continue;
-    }
-    if (ts14.isFunctionDeclaration(statement)) {
-      const objectParamRecord = buildFunctionObjectParamRecord(statement, checker);
-      if (objectParamRecord) {
-        typeDeclarations.push({ snippet: objectParamRecord.snippet });
-      }
-      const jsdoc = buildFunctionJsDoc(statement, checker, objectParamRecord?.typeName);
-      if (jsdoc) {
-        topLevelDocs.push({
-          jsdoc,
-          kind: "function",
-          name: statement.name.text
-        });
-      }
-      continue;
-    }
-    if (ts14.isClassDeclaration(statement)) {
-      const jsdoc = buildClassJsDoc(statement, checker);
-      if (jsdoc) {
-        topLevelDocs.push({
-          jsdoc,
-          kind: "class",
-          name: statement.name.text
-        });
-      }
-    }
-  }
-  return topLevelDocs;
-}
-function collectEnumDeclarationsForSourceFile(sourceFile, checker, unsafeEnumSymbols) {
-  const enumDeclarations = [];
-  for (const statement of sourceFile.statements) {
-    if (!ts14.isEnumDeclaration(statement)) {
-      continue;
-    }
-    const enumDeclaration = buildEnumDeclarationMetadata(statement, checker, unsafeEnumSymbols);
-    if (enumDeclaration) {
-      enumDeclarations.push(enumDeclaration);
-    }
-  }
-  return enumDeclarations;
-}
-function collectDecoratedOutputText({
-  compilerOptions,
-  diagnostics,
-  fileName,
-  sourceText
-}) {
-  const transpiled = transpileDecoratedSource({
-    compilerOptions,
-    fileName,
-    sourceText
-  });
-  diagnostics.push(...(transpiled.diagnostics ?? []).filter((diagnostic) => diagnostic.category === ts14.DiagnosticCategory.Error));
-  return transpiled.outputText;
-}
-var init_collect = __esm(() => {
-  init_decorators();
-  init_docs();
-  init_enums();
-  init_doc_eligibility();
-});
 
 // src/stages/native/closure-ir/metadata/scan.ts
 import ts15 from "typescript";
@@ -1711,17 +2429,21 @@ function classifyClosureIrSourceFile(sourceFile) {
     }
   }
   const docEligibility = classifyClosureIrDocEligibility(sourceFile);
+  const hasExplicitTypeSignals = sourceFile.statements.some(containsExplicitTypeSignal);
+  const hasTypeDrivenClosureDocs = docEligibility.isTypeScriptLike && hasExplicitTypeSignals;
   const hasDecorators = sourceFile.text.includes("@") && containsDecorators(sourceFile);
-  const needsSemanticPreflight = docEligibility.hasJsDocText || docEligibility.hasTsCheckText || hasDecorators || hasEnumDeclarations || hasTypeDeclarations || sourceFile.statements.some(containsExplicitTypeSignal);
+  const needsSemanticPreflight = docEligibility.hasJsDocText || docEligibility.hasTsCheckText || hasDecorators || hasEnumDeclarations || hasTypeDeclarations || hasExplicitTypeSignals;
+  const hasTopLevelDocs = docEligibility.hasTopLevelDocs || hasTypeDrivenClosureDocs;
   return {
     docEligibility,
     filePath: sourceFile.fileName,
     hasDecorators,
     hasEnumDeclarations,
+    hasTypeDrivenClosureDocs,
     needsSemanticPreflight,
-    hasTopLevelDocs: docEligibility.hasTopLevelDocs,
+    hasTopLevelDocs,
     hasTypeDeclarations,
-    shouldAnalyze: hasDecorators || hasEnumDeclarations || docEligibility.hasTopLevelDocs || hasTypeDeclarations
+    shouldAnalyze: hasDecorators || hasEnumDeclarations || hasTopLevelDocs || hasTypeDeclarations
   };
 }
 function classifyClosureIrFile(sourceFile) {
@@ -2006,7 +2728,7 @@ var init_closure_ir = __esm(() => {
 
 // src/stages/native/emit.ts
 import fs12 from "fs";
-import path17 from "path";
+import path18 from "path";
 import ts19 from "typescript";
 async function emitNativeStage({
   cacheDir,
@@ -2197,10 +2919,10 @@ function createNativeEmitPaths({
   tsxRuntimeSourceFiles,
   workspaceDir
 }) {
-  const outDir = path17.join(cacheDir, "out");
+  const outDir = path18.join(cacheDir, "out");
   return {
-    externsPath: path17.join(cacheDir, "native-generated.externs.js"),
-    metadataPathForNative: path17.join(cacheDir, "closure-ir.json"),
+    externsPath: path18.join(cacheDir, "native-generated.externs.js"),
+    metadataPathForNative: path18.join(cacheDir, "closure-ir.json"),
     outDir,
     runtimeSupportFiles: tsxRuntimeSourceFiles.map((fileName) => toEmittedPath(fileName, outDir, workspaceDir))
   };
@@ -2340,7 +3062,7 @@ async function readMetadata(metadataPath) {
   }
 }
 function toEmittedPath(sourcePath, outDir, workspaceDir) {
-  return path17.join(outDir, path17.relative(workspaceDir, sourcePath)).replace(/\.[^/.]+$/, ".js");
+  return path18.join(outDir, path18.relative(workspaceDir, sourcePath)).replace(/\.[^/.]+$/, ".js");
 }
 function collectDependencyModules(packageAliases) {
   return uniqueSortedStrings(packageAliases.filter((alias) => isDependencyFile(alias.targetPath)).map((alias) => alias.subpath === "." ? alias.packageName : `${alias.packageName}/${alias.subpath.replace(/^\.\//, "")}`));
@@ -2353,7 +3075,7 @@ function collectDependencyRuntimeFiles({
   return uniqueSortedStrings(sourceFiles.filter((filePath) => isDependencyFile(filePath)).map((filePath) => toEmittedPath(filePath, outDir, workspaceDir)));
 }
 function isDependencyFile(filePath) {
-  return path17.resolve(filePath).includes(`${path17.sep}node_modules${path17.sep}`);
+  return path18.resolve(filePath).includes(`${path18.sep}node_modules${path18.sep}`);
 }
 async function scanNativeFilesQuickly(fileNames) {
   const files = await Promise.all(fileNames.map(async (fileName) => {
@@ -2413,7 +3135,9 @@ function applyInternalClosureDebugOptions(closureOptions) {
     mutableOptions.debug = true;
     mutableOptions.formatting = "PRETTY_PRINT";
   }
-  if (process.env.GCC_USE_TYPES_FOR_OPTIMIZATION === "false") {
+  if (mutableOptions.compilationLevel === "ADVANCED" && process.env.GCC_USE_TYPES_FOR_OPTIMIZATION !== "false") {
+    mutableOptions.useTypesForOptimization = true;
+  } else if (process.env.GCC_USE_TYPES_FOR_OPTIMIZATION === "false") {
     mutableOptions.useTypesForOptimization = false;
   }
 }
@@ -2467,13 +3191,13 @@ var init_compiler = () => {};
 
 // src/stages/closure/cache.ts
 import fs13 from "fs/promises";
-import path18 from "path";
+import path19 from "path";
 function getCompileJobOutputFiles(job) {
   if (job.jsOutputFile) {
     return [job.jsOutputFile];
   }
   if (job.chunk && job.chunkOutputPathPrefix) {
-    return job.chunk.map((chunkSpec) => path18.join(job.chunkOutputPathPrefix, `${chunkSpec.split(":", 1)[0]}.js`));
+    return job.chunk.map((chunkSpec) => path19.join(job.chunkOutputPathPrefix, `${chunkSpec.split(":", 1)[0]}.js`));
   }
   throw new Error("Closure compile job is missing output configuration.");
 }
@@ -2491,17 +3215,17 @@ async function tryRestoreCachedClosureJob({
   artifactFiles
 }) {
   const jobCacheDir = await getClosureJobCacheDir(cacheDir, job, compilerVersion);
-  const metadata = await readJsonIfExists(path18.join(jobCacheDir, "meta.json"));
+  const metadata = await readJsonIfExists(path19.join(jobCacheDir, "meta.json"));
   if (!metadata || metadata.version !== CLOSURE_JOB_CACHE_VERSION || metadata.artifactFiles.length !== artifactFiles.length) {
     return false;
   }
-  const cachedFiles = metadata.artifactFiles.map((fileName) => path18.join(jobCacheDir, fileName));
+  const cachedFiles = metadata.artifactFiles.map((fileName) => path19.join(jobCacheDir, fileName));
   const filesReady = await Promise.all(cachedFiles.map((filePath) => fs13.stat(filePath).then(() => true).catch(() => false)));
   if (filesReady.some((ready) => !ready)) {
     return false;
   }
   await Promise.all(artifactFiles.map(async (artifactFile, index) => {
-    await ensureDirectory(path18.dirname(artifactFile));
+    await ensureDirectory(path19.dirname(artifactFile));
     await fs13.copyFile(cachedFiles[index], artifactFile);
   }));
   return true;
@@ -2515,9 +3239,9 @@ async function persistCachedClosureJob({
   const jobCacheDir = await getClosureJobCacheDir(cacheDir, job, compilerVersion);
   await fs13.rm(jobCacheDir, { force: true, recursive: true });
   await ensureDirectory(jobCacheDir);
-  const artifactNames = artifactFiles.map((artifactFile) => path18.basename(artifactFile));
-  await Promise.all(artifactFiles.map((artifactFile, index) => fs13.copyFile(artifactFile, path18.join(jobCacheDir, artifactNames[index]))));
-  await writeJson(path18.join(jobCacheDir, "meta.json"), {
+  const artifactNames = artifactFiles.map((artifactFile) => path19.basename(artifactFile));
+  await Promise.all(artifactFiles.map((artifactFile, index) => fs13.copyFile(artifactFile, path19.join(jobCacheDir, artifactNames[index]))));
+  await writeJson(path19.join(jobCacheDir, "meta.json"), {
     artifactFiles: artifactNames,
     version: CLOSURE_JOB_CACHE_VERSION
   });
@@ -2536,7 +3260,7 @@ async function getClosureJobCacheDir(cacheDir, job, compilerVersion) {
       dependencyMode: job.dependencyMode ?? null,
       entryPoint: job.entryPoint ?? null,
       hasPropertyRenamingReport: Boolean(job.propertyRenamingReportPath),
-      jsOutputKinds: outputFiles.map((outputFile) => path18.basename(outputFile)),
+      jsOutputKinds: outputFiles.map((outputFile) => path19.basename(outputFile)),
       languageIn: job.languageIn,
       languageOut: job.languageOut,
       rewritePolyfills: job.rewritePolyfills,
@@ -2545,7 +3269,7 @@ async function getClosureJobCacheDir(cacheDir, job, compilerVersion) {
     jsHash,
     version: CLOSURE_JOB_CACHE_VERSION
   });
-  return path18.join(cacheDir, cacheKey);
+  return path19.join(cacheDir, cacheKey);
 }
 var CLOSURE_JOB_CACHE_VERSION = 2;
 var init_cache2 = __esm(() => {
@@ -2798,7 +3522,7 @@ var init_postprocess = __esm(() => {
 
 // src/stages/closure/run-closure.ts
 import fs16 from "fs/promises";
-import path19 from "path";
+import path20 from "path";
 async function runClosureStage({
   chunkPlan,
   emittedOutDir,
@@ -2852,7 +3576,7 @@ async function runClosureStage({
     prepared
   }));
   await withInternalTiming("closure:publish", () => publishPreparedClosureOutputs(prepared.publishedOutputs, cacheOutputDir));
-  const cacheOutputFiles = prepared.publishedOutputs.map((outputFile) => path19.join(cacheOutputDir, path19.relative(outDir, outputFile)));
+  const cacheOutputFiles = prepared.publishedOutputs.map((outputFile) => path20.join(cacheOutputDir, path20.relative(outDir, outputFile)));
   return {
     cacheOutputFiles,
     exitCode: 0,
@@ -2865,8 +3589,8 @@ async function prepareClosureStageDirectories({
 }) {
   await fs16.rm(finalCacheDir, { force: true, recursive: true });
   await ensureDirectory(finalCacheDir);
-  const rawDir = path19.join(finalCacheDir, "raw");
-  const cacheOutputDir = path19.join(finalCacheDir, "outputs");
+  const rawDir = path20.join(finalCacheDir, "raw");
+  const cacheOutputDir = path20.join(finalCacheDir, "outputs");
   await ensureDirectory(rawDir);
   await ensureDirectory(cacheOutputDir);
   await fs16.rm(outDir, { force: true, recursive: true });
@@ -2885,7 +3609,7 @@ async function compilePreparedClosureJobs({
   projectCacheDir,
   usesPersistentCache
 }) {
-  const cacheDir = usesPersistentCache ? path19.join(projectCacheDir, "closure-jobs") : null;
+  const cacheDir = usesPersistentCache ? path20.join(projectCacheDir, "closure-jobs") : null;
   const concurrency = chunkMode === "bundler-runtime" ? determineClosureConcurrency(prepared.compileJobs.length) : 1;
   const results = await runWithConcurrency(prepared.compileJobs, concurrency, async (job) => runPreparedClosureJob({
     cacheDir,
@@ -2979,7 +3703,7 @@ var init_run_closure = __esm(() => {
 
 // src/pipeline/build-helpers.ts
 import fs17 from "fs";
-import path20 from "path";
+import path21 from "path";
 async function publishOutputs(outputFiles, outDir) {
   if (await publishedOutputsMatch2(outputFiles, outDir)) {
     return;
@@ -2991,7 +3715,7 @@ function toImportPath(relativePath) {
   return normalized.startsWith(".") ? normalized : `./${normalized}`;
 }
 function toPublishedOutputPaths(publishedOutputs, outDir) {
-  return publishedOutputs.map(({ name }) => path20.join(outDir, name));
+  return publishedOutputs.map(({ name }) => path21.join(outDir, name));
 }
 function createBuildDiagnostic(error) {
   return {
@@ -3014,7 +3738,7 @@ __export(exports_build_pipeline, {
   cleanCache: () => cleanCache,
   build: () => build
 });
-import path21 from "path";
+import path22 from "path";
 async function build(options) {
   const context = await createBuildContext(normalizeBuildOptions(options));
   const usesPersistentCache = context.options.cache.mode === "persistent";
@@ -3022,7 +3746,7 @@ async function build(options) {
   try {
     resolved = await withInternalTiming("resolve-build", () => resolveBuild(context));
     const resolvedBuild = resolved;
-    const finalFastSnapshotPath = path21.join(context.projectCacheDir, "final-fast.json");
+    const finalFastSnapshotPath = path22.join(context.projectCacheDir, "final-fast.json");
     const finalFastSnapshot = usesPersistentCache ? await readJsonIfExists(finalFastSnapshotPath) : null;
     const finalFastCacheHit = usesPersistentCache && !!finalFastSnapshot && finalFastSnapshot.finalKey === resolvedBuild.finalKey && finalFastSnapshot.optionsSignature === context.optionsSignature && finalFastSnapshot.packageSignature === context.packageSignature && await publishedOutputsMatchSnapshot(finalFastSnapshot.publishedOutputs, context.options.outDir);
     if (usesPersistentCache) {
@@ -3037,7 +3761,7 @@ async function build(options) {
         outputFiles: toPublishedOutputPaths(finalFastSnapshot.publishedOutputs, context.options.outDir)
       };
     }
-    const finalMetadataPath = path21.join(resolvedBuild.finalCacheDir, "meta.json");
+    const finalMetadataPath = path22.join(resolvedBuild.finalCacheDir, "meta.json");
     const finalMetadata = usesPersistentCache ? await readJsonIfExists(finalMetadataPath) : null;
     const finalMetadataHit = usesPersistentCache && !!finalMetadata && await filesExist(finalMetadata.outputFiles);
     if (usesPersistentCache) {
@@ -3051,7 +3775,7 @@ async function build(options) {
         emitSkipped: false,
         exitCode: 0,
         outputFiles: toPublishedOutputPaths(finalMetadata.outputFiles.map((outputFile) => ({
-          name: path21.basename(outputFile)
+          name: path22.basename(outputFile)
         })), context.options.outDir)
       };
     }
@@ -3082,12 +3806,12 @@ async function build(options) {
         entries: resolvedBuild.entryFiles.map((entry) => ({
           exportNames: entry.exportNames,
           hasDefaultExport: entry.hasDefaultExport,
-          importPath: toImportPath(path21.relative(path21.dirname(path21.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`)), entry.sourcePath)),
-          shimPath: path21.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`)
+          importPath: toImportPath(path22.relative(path22.dirname(path22.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`)), entry.sourcePath)),
+          shimPath: path22.join(resolvedBuild.shimDir, `${entry.chunkName}.ts`)
         }))
       });
     }
-    const nativeEmitMetadataPath = path21.join(resolvedBuild.nativeEmitCacheDir, "meta.json");
+    const nativeEmitMetadataPath = path22.join(resolvedBuild.nativeEmitCacheDir, "meta.json");
     const nativeEmitResult = await emitNativeStage({
       cacheDir: resolvedBuild.nativeEmitCacheDir,
       fileNames: context.options.chunks.mode !== "off" ? resolvedBuild.sourceFiles : [...resolvedBuild.sourceFiles, ...resolvedBuild.shimFiles],
@@ -3162,8 +3886,8 @@ async function build(options) {
   }
 }
 async function cleanCache(options = {}) {
-  const projectRoot = path21.resolve(options.projectRoot ?? process.cwd());
-  const cacheRoot = path21.resolve(options.cacheDir || getDefaultPersistentCacheRoot());
+  const projectRoot = path22.resolve(options.projectRoot ?? process.cwd());
+  const cacheRoot = path22.resolve(options.cacheDir || getDefaultPersistentCacheRoot());
   const projectCacheDir = getProjectCacheDir(cacheRoot, projectRoot);
   await removeProjectCacheDir(projectCacheDir);
 }

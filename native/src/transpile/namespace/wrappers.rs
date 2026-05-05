@@ -426,7 +426,11 @@ fn extract_dynamic_import_object_wrapper_from_arrow(
         }
         BlockStmtOrExpr::BlockStmt(block) => {
             let argument = extract_wrapper_return_argument(&block.stmts)?;
-            resolve_dynamic_import_object_wrapper(argument, &object_carriers, dynamic_import_wrappers)
+            resolve_dynamic_import_object_wrapper(
+                argument,
+                &object_carriers,
+                dynamic_import_wrappers,
+            )
         }
     }
 }
@@ -446,7 +450,10 @@ fn is_wrapper_prelude_statement(statement: &Stmt) -> bool {
     let Stmt::Decl(swc_core::ecma::ast::Decl::Var(var_decl)) = statement else {
         return false;
     };
-    var_decl.decls.iter().all(|declarator| declarator.init.is_none())
+    var_decl
+        .decls
+        .iter()
+        .all(|declarator| declarator.init.is_none())
 }
 
 pub(crate) fn dynamic_import_module_ids_from_call(
@@ -493,21 +500,23 @@ fn resolve_dynamic_import_call_module_ids(
         Expr::Member(member) if call_expr.args.is_empty() => {
             collect_member_wrapper_module_ids(member, object_carriers, dynamic_import_wrappers)
         }
-        _ if allow_passthrough_calls && call_expr.args.len() == 1 => merge_dynamic_import_module_ids(
-            resolve_dynamic_import_module_ids_with_options(
-                &call_expr.args[0].expr,
-                carriers,
-                object_carriers,
-                dynamic_import_wrappers,
-                allow_passthrough_calls,
-            ),
-            resolve_dynamic_import_object_wrapper(
-                &call_expr.args[0].expr,
-                object_carriers,
-                dynamic_import_wrappers,
+        _ if allow_passthrough_calls && call_expr.args.len() == 1 => {
+            merge_dynamic_import_module_ids(
+                resolve_dynamic_import_module_ids_with_options(
+                    &call_expr.args[0].expr,
+                    carriers,
+                    object_carriers,
+                    dynamic_import_wrappers,
+                    allow_passthrough_calls,
+                ),
+                resolve_dynamic_import_object_wrapper(
+                    &call_expr.args[0].expr,
+                    object_carriers,
+                    dynamic_import_wrappers,
+                )
+                .and_then(|wrapper| collect_wrapper_module_ids(&wrapper)),
             )
-            .and_then(|wrapper| collect_wrapper_module_ids(&wrapper)),
-        ),
+        }
         Expr::Member(member) => {
             if let Some(wrapper) = resolve_dynamic_import_object_wrapper(
                 &member.obj,
@@ -530,8 +539,11 @@ fn collect_member_wrapper_module_ids(
     object_carriers: &HashMap<Id, DynamicImportObjectWrapper>,
     dynamic_import_wrappers: &DynamicImportWrappers,
 ) -> Option<BTreeSet<String>> {
-    let wrapper_map =
-        resolve_dynamic_import_object_wrapper(&member.obj, object_carriers, dynamic_import_wrappers)?;
+    let wrapper_map = resolve_dynamic_import_object_wrapper(
+        &member.obj,
+        object_carriers,
+        dynamic_import_wrappers,
+    )?;
     let prop_name = member_prop_name(&member.prop);
     if let Some(prop_name) = prop_name {
         wrapper_map.get(&prop_name).cloned()
@@ -550,10 +562,12 @@ pub(crate) fn resolve_dynamic_import_object_wrapper(
     dynamic_import_wrappers: &DynamicImportWrappers,
 ) -> Option<DynamicImportObjectWrapper> {
     match expr {
-        Expr::Ident(ident) => object_carriers
-            .get(&ident.to_id())
-            .cloned()
-            .or_else(|| dynamic_import_wrappers.object_wrappers.get(&ident.to_id()).cloned()),
+        Expr::Ident(ident) => object_carriers.get(&ident.to_id()).cloned().or_else(|| {
+            dynamic_import_wrappers
+                .object_wrappers
+                .get(&ident.to_id())
+                .cloned()
+        }),
         Expr::Call(call_expr) => resolve_dynamic_import_object_wrapper_from_call(
             call_expr,
             object_carriers,
@@ -564,9 +578,11 @@ pub(crate) fn resolve_dynamic_import_object_wrapper(
             object_carriers,
             dynamic_import_wrappers,
         ),
-        Expr::Paren(paren) => {
-            resolve_dynamic_import_object_wrapper(&paren.expr, object_carriers, dynamic_import_wrappers)
-        }
+        Expr::Paren(paren) => resolve_dynamic_import_object_wrapper(
+            &paren.expr,
+            object_carriers,
+            dynamic_import_wrappers,
+        ),
         Expr::Cond(cond) => merge_object_wrappers(
             resolve_dynamic_import_object_wrapper(
                 &cond.cons,
@@ -671,7 +687,10 @@ fn resolve_dynamic_import_object_wrapper_from_member(
     )?;
     match &member.prop {
         MemberProp::Computed(computed)
-            if matches!(&*computed.expr, Expr::Lit(Lit::Num(_)) | Expr::Lit(Lit::Str(_))) =>
+            if matches!(
+                &*computed.expr,
+                Expr::Lit(Lit::Num(_)) | Expr::Lit(Lit::Str(_))
+            ) =>
         {
             Some(wrapper)
         }

@@ -33,6 +33,10 @@ pub struct ClosureTopLevelDoc {
     pub jsdoc: String,
     pub kind: String,
     pub name: String,
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub r#static: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]

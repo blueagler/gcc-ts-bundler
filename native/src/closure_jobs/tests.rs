@@ -175,9 +175,10 @@ fn skips_es5_custom_elements_adapter_when_no_native_dom_subclasses_exist() {
     })
     .unwrap();
 
-    assert!(!output.generatedAssets.iter().any(|asset| {
-        asset.path.ends_with("custom-elements-es5-adapter.js")
-    }));
+    assert!(!output
+        .generatedAssets
+        .iter()
+        .any(|asset| { asset.path.ends_with("custom-elements-es5-adapter.js") }));
 }
 
 #[test]

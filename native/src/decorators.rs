@@ -113,9 +113,8 @@ mod tests {
     #[test]
     fn leaves_plain_string_arrays_untouched() {
         let input = "const letters=[\"L\",\"I\",\"T\"];".to_string();
-        let output =
-            rewrite_decorator_metadata(input.clone(), "L:fc\nI:qb\nT:Pa\n".to_string())
-                .expect("rewrite");
+        let output = rewrite_decorator_metadata(input.clone(), "L:fc\nI:qb\nT:Pa\n".to_string())
+            .expect("rewrite");
 
         assert_eq!(output, input);
     }
@@ -137,7 +136,8 @@ mod tests {
     #[test]
     fn rewrites_switch_cases_for_property_key_variables() {
         let output = rewrite_decorator_metadata(
-            "for(const key in attrs){switch(key){case\"class\":a();break;case\"role\":b();break;}}".to_string(),
+            "for(const key in attrs){switch(key){case\"class\":a();break;case\"role\":b();break;}}"
+                .to_string(),
             "class:o\nrole:r\n".to_string(),
         )
         .expect("rewrite");

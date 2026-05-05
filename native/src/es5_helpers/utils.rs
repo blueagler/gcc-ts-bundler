@@ -42,11 +42,7 @@ pub(super) fn helper_alias_decl(runtime_alias: &str, helper_alias: &str) -> Stmt
             VarDeclarator {
                 span: Default::default(),
                 name: Pat::Ident(BindingIdent {
-                    id: Ident::new(
-                        runtime_alias.into(),
-                        Default::default(),
-                        Default::default(),
-                    ),
+                    id: Ident::new(runtime_alias.into(), Default::default(), Default::default()),
                     type_ann: None,
                 }),
                 init: Some(Box::new(Expr::Member(MemberExpr {
@@ -63,11 +59,7 @@ pub(super) fn helper_alias_decl(runtime_alias: &str, helper_alias: &str) -> Stmt
             VarDeclarator {
                 span: Default::default(),
                 name: Pat::Ident(BindingIdent {
-                    id: Ident::new(
-                        helper_alias.into(),
-                        Default::default(),
-                        Default::default(),
-                    ),
+                    id: Ident::new(helper_alias.into(), Default::default(), Default::default()),
                     type_ann: None,
                 }),
                 init: Some(Box::new(Expr::Member(MemberExpr {
@@ -164,7 +156,9 @@ pub(super) fn print_function_decl_minified(
 ) -> std::result::Result<String, String> {
     print_module_minified(&Module {
         span: Default::default(),
-        body: vec![ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function_decl.clone())))],
+        body: vec![ModuleItem::Stmt(Stmt::Decl(Decl::Fn(
+            function_decl.clone(),
+        )))],
         shebang: None,
     })
 }

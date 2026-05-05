@@ -113,9 +113,10 @@ pub(crate) fn prepare_bundler_runtime_jobs(
                 .dependencies
                 .iter()
                 .map(|dependency| {
-                    chunk_index_by_name.get(dependency).copied().ok_or_else(|| {
-                        format!("Missing chunk index for dependency {}", dependency)
-                    })
+                    chunk_index_by_name
+                        .get(dependency)
+                        .copied()
+                        .ok_or_else(|| format!("Missing chunk index for dependency {}", dependency))
                 })
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             Ok::<_, String>(BundlerRuntimeInitChunk(
@@ -128,7 +129,9 @@ pub(crate) fn prepare_bundler_runtime_jobs(
                         runtime_chunk_id_by_name
                             .get(&chunk.name)
                             .map(String::as_str)
-                            .ok_or_else(|| format!("Missing runtime chunk id for {}", chunk.name))?,
+                            .ok_or_else(|| {
+                                format!("Missing runtime chunk id for {}", chunk.name)
+                            })?,
                         &base_chunk.name,
                     )
                 },
@@ -410,13 +413,20 @@ fn rewrite_runtime_module_ids(
     for (regex, callee_name) in rewrites {
         current = regex
             .replace_all(&current, |captures: &regex::Captures| {
-                let runtime_module_id = captures.get(1).map(|capture| capture.as_str()).unwrap_or_default();
+                let runtime_module_id = captures
+                    .get(1)
+                    .map(|capture| capture.as_str())
+                    .unwrap_or_default();
                 let module_index = runtime_module_index_by_id
                     .get(runtime_module_id)
                     .copied()
                     .unwrap_or_else(|| panic!("Missing module index for {}", runtime_module_id));
                 format!("{callee_name}({module_index}")
-                    + if callee_name == "__register" { "," } else { ")" }
+                    + if callee_name == "__register" {
+                        ","
+                    } else {
+                        ")"
+                    }
             })
             .into_owned();
     }

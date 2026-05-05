@@ -247,6 +247,49 @@ test.serial("builds decorated TypeScript sources", async () => {
   expect(builtModule.total).toBe(2);
 });
 
+test.serial("type-aware annotations preserve extern properties while internal typed properties optimize away", async () => {
+  const fixture = await createFixture();
+  await fixture.write(
+    "src/index.ts",
+    [
+      "type InternalShape = { internalVerboseProperty: number; keepPublic: number };",
+      "function makeShape(value: number): InternalShape {",
+      "  return { internalVerboseProperty: value + 1, keepPublic: value };",
+      "}",
+      "class Box {",
+      "  longInternalField: number;",
+      "  constructor(value: number) { this.longInternalField = value; }",
+      "  read(): number { return this.longInternalField; }",
+      "}",
+      "export function readPublic(input: { keepPublic: number }): number {",
+      "  const shape = makeShape(input.keepPublic);",
+      "  const box = new Box(shape.internalVerboseProperty);",
+      "  return box.read() + input.keepPublic;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "externs.js",
+    "/** @externs */\nObject.prototype.keepPublic;\n",
+  );
+
+  const result = await build({
+    cache: { mode: "off" },
+    entries: ["./index.ts"],
+    externs: ["./externs.js"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  expect(result.exitCode).toBe(0);
+  const output = await fixture.read("dist/index.js");
+  expect(output).toContain("keepPublic");
+  expect(output).not.toContain("internalVerboseProperty");
+  expect(output).not.toContain("longInternalField");
+});
+
 test.serial("exported entry bundles do not retain GCC wrapper exports", async () => {
   const fixture = await createFixture();
   await fixture.write(

@@ -24,14 +24,9 @@ pub(super) fn emit_bundler_runtime_module_program(
         .body
         .iter()
         .filter_map(|item| match item {
-            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import_decl)) => {
-                Some(convert_bundler_import_decl(
-                    file_path,
-                    import_decl,
-                    context,
-                    &mut import_counter,
-                ))
-            }
+            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import_decl)) => Some(
+                convert_bundler_import_decl(file_path, import_decl, context, &mut import_counter),
+            ),
             _ => None,
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -361,7 +356,9 @@ fn collect_local_export_modes(module: &Module) -> HashMap<String, BundlerExportS
                 for specifier in &import_decl.specifiers {
                     let local = match specifier {
                         ImportSpecifier::Default(default_specifier) => &default_specifier.local,
-                        ImportSpecifier::Namespace(namespace_specifier) => &namespace_specifier.local,
+                        ImportSpecifier::Namespace(namespace_specifier) => {
+                            &namespace_specifier.local
+                        }
                         ImportSpecifier::Named(named_specifier) => &named_specifier.local,
                     };
                     binding_candidates.insert(
@@ -408,13 +405,19 @@ fn collect_decl_export_candidates(
         swc_core::ecma::ast::Decl::Fn(function_decl) => {
             binding_candidates.insert(
                 function_decl.ident.to_id(),
-                (function_decl.ident.sym.to_string(), BundlerExportSlotMode::Static),
+                (
+                    function_decl.ident.sym.to_string(),
+                    BundlerExportSlotMode::Static,
+                ),
             );
         }
         swc_core::ecma::ast::Decl::Class(class_decl) => {
             binding_candidates.insert(
                 class_decl.ident.to_id(),
-                (class_decl.ident.sym.to_string(), BundlerExportSlotMode::Static),
+                (
+                    class_decl.ident.sym.to_string(),
+                    BundlerExportSlotMode::Static,
+                ),
             );
         }
         swc_core::ecma::ast::Decl::Var(var_decl) => {
@@ -473,7 +476,11 @@ struct ReassignedBindingCollector {
 impl Visit for ReassignedBindingCollector {
     fn visit_assign_expr(&mut self, assign_expr: &swc_core::ecma::ast::AssignExpr) {
         assign_expr.visit_children_with(self);
-        collect_assign_target_ids(&assign_expr.left, &self.tracked_ids, &mut self.reassigned_ids);
+        collect_assign_target_ids(
+            &assign_expr.left,
+            &self.tracked_ids,
+            &mut self.reassigned_ids,
+        );
     }
 
     fn visit_update_expr(&mut self, update_expr: &swc_core::ecma::ast::UpdateExpr) {

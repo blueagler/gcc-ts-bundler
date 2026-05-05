@@ -18,8 +18,22 @@ export interface ClosureIrEnumDeclaration {
 
 export interface ClosureIrTopLevelDoc {
   jsdoc: string;
-  kind: "class" | "function";
+  kind:
+    | "class"
+    | "constructor"
+    | "field"
+    | "function"
+    | "getter"
+    | "method"
+    | "objectGetter"
+    | "objectMethod"
+    | "objectProperty"
+    | "objectSetter"
+    | "setter"
+    | "variable";
   name: string;
+  owner?: string;
+  static?: boolean;
 }
 
 export interface ClosureIrTypeDeclaration {
