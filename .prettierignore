@@ -1,6 +1,7 @@
 **/*.log
 **/.DS_Store
 *.
+.tmp
 .vscode/settings.json
 .history
 .yarn
@@ -16,11 +17,16 @@ lib-types
 etc
 external
 node_modules
+npm
 temp
 tsc-out
 tsdoc-metadata.json
 target
+native/target
 output
+coverage
+out
+*.tgz
 rollup.config.js
 build
 .cache
