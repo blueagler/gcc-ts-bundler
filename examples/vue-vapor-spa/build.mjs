@@ -34,7 +34,7 @@ await augmentGeneratedExterns(compiledDir, externsFile);
 
 const result = await build({
   cache: { mode: "off" },
-  chunks: { loader: "script", mode: "bundler-runtime", publicPath: "./dist/" },
+  chunks: { mode: "bundler-runtime", publicPath: "./dist/" },
   diagnostics: { preflight: "full" },
   entries: ["./main.js"],
   // externs: ["./vue.generated.externs.js"],
@@ -60,7 +60,9 @@ if (result.exitCode !== 0) {
 console.log(
   `Built Vue Vapor SPA to ${path.relative(projectRoot, result.outputFiles[0] ?? "./dist/main.js")}`,
 );
-console.log(`Compiled Vue SFCs into ${path.relative(projectRoot, compiledDir)}`);
+console.log(
+  `Compiled Vue SFCs into ${path.relative(projectRoot, compiledDir)}`,
+);
 console.log(`Generated externs at ${path.relative(projectRoot, externsFile)}`);
 
 async function compileVueProject(sourceDir, outDir) {
@@ -89,7 +91,11 @@ async function copyAndCompileDirectory(sourceDir, outDir) {
     }
     if (entry.name.endsWith(".js") || entry.name.endsWith(".mjs")) {
       const source = await fs.readFile(sourcePath, "utf8");
-      await fs.writeFile(outPath, rewriteVueSpecifiers(source, outPath), "utf8");
+      await fs.writeFile(
+        outPath,
+        rewriteVueSpecifiers(source, outPath),
+        "utf8",
+      );
     }
   }
 }
@@ -222,12 +228,16 @@ async function collectVueProtocolKeys(rootDir) {
         dotAccessKeys.add(match[1]);
       }
     }
-    for (const match of source.matchAll(/\[\s*["']([$_A-Za-z][$_0-9A-Za-z]*)["']\s*\]/g)) {
+    for (const match of source.matchAll(
+      /\[\s*["']([$_A-Za-z][$_0-9A-Za-z]*)["']\s*\]/g,
+    )) {
       if (!blockedKeys.has(match[1])) {
         stringAccessKeys.add(match[1]);
       }
     }
-    for (const match of source.matchAll(/["']([$_A-Za-z][$_0-9A-Za-z]*)["']\s+in\b/g)) {
+    for (const match of source.matchAll(
+      /["']([$_A-Za-z][$_0-9A-Za-z]*)["']\s+in\b/g,
+    )) {
       if (!blockedKeys.has(match[1])) {
         stringAccessKeys.add(match[1]);
       }
@@ -257,10 +267,16 @@ function collectVueComponentPropKeys(sourceText, target, blockedKeys) {
   );
 
   const visit = (node) => {
-    if (ts.isPropertyAssignment(node) && propertyNameText(node.name) === "props") {
+    if (
+      ts.isPropertyAssignment(node) &&
+      propertyNameText(node.name) === "props"
+    ) {
       if (ts.isObjectLiteralExpression(node.initializer)) {
         for (const property of node.initializer.properties) {
-          if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) {
+          if (
+            !ts.isPropertyAssignment(property) &&
+            !ts.isShorthandPropertyAssignment(property)
+          ) {
             continue;
           }
           const key = propertyNameText(property.name);
@@ -277,7 +293,11 @@ function collectVueComponentPropKeys(sourceText, target, blockedKeys) {
 }
 
 function propertyNameText(name) {
-  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) {
+  if (
+    ts.isIdentifier(name) ||
+    ts.isStringLiteral(name) ||
+    ts.isNumericLiteral(name)
+  ) {
     return name.text;
   }
   return null;

@@ -30,14 +30,12 @@ test("parses repeated typed build options", () => {
     "./browser.externs.js",
     "--cache-mode",
     "temp",
-    "--chunk-loader",
-    "script",
   ]);
 
   expect(parsed.options.entries).toEqual(["./main.ts", "./worker.ts"]);
   expect(parsed.options.externs).toEqual(["./browser.externs.js"]);
   expect(parsed.options.cache?.mode).toBe("temp");
-  expect(parsed.options.chunks?.loader).toBe("script");
+  expect(parsed.options.packages).toBeUndefined();
 });
 
 test("rejects invalid option values during parsing", () => {

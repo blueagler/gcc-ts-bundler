@@ -1,5 +1,5 @@
 import type { GenerateExternsMode } from "../externs";
-import type { BuildOptions, ChunkLoader } from "../api/types";
+import type { BuildOptions } from "../api/types";
 
 export interface GccTsBundlerGeneratedExternsOptions {
   appendLines?: readonly string[] | undefined;
@@ -23,7 +23,6 @@ export interface GccTsBundlerVitePluginOptions {
     | undefined;
   runtime?:
     | {
-        loader?: ChunkLoader | undefined;
         manifestFile?: string | undefined;
         publicPath?: string | undefined;
       }

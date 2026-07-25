@@ -40,18 +40,17 @@ if (!result.ok) {
 
 ### Build options
 
-| Option             | Default              | Meaning                                                                                                                      |
-| ------------------ | -------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `entries`          | required             | Entry files. At least one is required.                                                                                       |
-| `projectRoot`      | current directory    | Root for configuration, dependencies, and relative paths.                                                                    |
-| `srcDir`           | `src`                | Source root used for entry resolution and output-relative module IDs.                                                        |
-| `outDir`           | `dist`               | Published output directory. It is replaced on a non-cached compile.                                                          |
-| `outputNames`      | derived from entries | Optional output filename per entry; length must match `entries`.                                                             |
-| `compilationLevel` | `ADVANCED`           | Closure level: `WHITESPACE_ONLY`, `SIMPLE`, or `ADVANCED`.                                                                   |
-| `languageOut`      | `ECMASCRIPT_NEXT`    | Closure output syntax: `ECMASCRIPT3`, `ECMASCRIPT5`, `ECMASCRIPT6`, or `ECMASCRIPT_NEXT`.                                    |
-| `externs`          | `[]`                 | Additional Closure extern files.                                                                                             |
-| `js`               | `[]`                 | Additional JavaScript inputs passed to Closure jobs.                                                                         |
-| `packages.mode`    | `esm-only`           | `esm-only` resolves supported browser package graphs; `off` restricts graph resolution to the materialized source workspace. |
+| Option             | Default           | Meaning                                                                                                                      |
+| ------------------ | ----------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `entries`          | required          | Entry files: a path, or `{ file, name }` with an explicit output filename. At least one is required.                         |
+| `projectRoot`      | current directory | Root for configuration, dependencies, and relative paths.                                                                    |
+| `srcDir`           | `src`             | Source root used for entry resolution and output-relative module IDs.                                                        |
+| `outDir`           | `dist`            | Published output directory. It is replaced on a non-cached compile.                                                          |
+| `compilationLevel` | `ADVANCED`        | Closure level: `WHITESPACE_ONLY`, `SIMPLE`, or `ADVANCED`.                                                                   |
+| `languageOut`      | `ECMASCRIPT_NEXT` | Closure output syntax: `ECMASCRIPT3`, `ECMASCRIPT5`, `ECMASCRIPT6`, or `ECMASCRIPT_NEXT`.                                    |
+| `externs`          | `[]`              | Additional Closure extern files.                                                                                             |
+| `js`               | `[]`              | Additional JavaScript inputs passed to Closure jobs.                                                                         |
+| `packages`         | `esm-only`        | `esm-only` resolves supported browser package graphs; `off` restricts graph resolution to the materialized source workspace. |
 
 ### Cache options
 
@@ -89,7 +88,6 @@ diagnostics: {
 ```ts
 chunks: {
   mode: "off",              // "off" | "bundler-runtime"
-  loader: "script",         // the only supported loader
   publicPath: "./",
   baseChunkName: "main",
   manifestFile: "",
@@ -100,9 +98,8 @@ chunks: {
 
 - entries must not export values;
 - lazy boundaries use native `import("./literal")` syntax;
-- the script loader appends chunk files using `publicPath`;
-- `manifestFile`, when non-empty, is emitted in `outDir`;
-- `fetch` loading is not supported.
+- chunks are loaded by appending script tags using `publicPath`;
+- `manifestFile`, when non-empty, is emitted in `outDir`.
 
 Off mode emits importable entry bundles and can produce a shared chunk for common code.
 

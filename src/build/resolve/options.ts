@@ -2,7 +2,6 @@ import path from "path";
 
 import {
   CACHE_MODES,
-  CHUNK_LOADERS,
   CHUNK_MODES,
   COMPILATION_LEVELS,
   DEFAULT_BUILD_OPTIONS,
@@ -10,7 +9,7 @@ import {
   LANGUAGE_OUTPUTS,
   PACKAGE_MODES,
 } from "../../api/types";
-import type { BuildOptions, ChunkLoader } from "../../api/types";
+import type { BuildEntryOption, BuildOptions } from "../../api/types";
 import type { ResolvedBuildOptions } from "../types";
 import { requireChoice } from "../../shared/validation";
 
@@ -48,9 +47,6 @@ export function normalizeBuildOptions(
       baseChunkName:
         options.chunks?.baseChunkName ??
         DEFAULT_BUILD_OPTIONS.chunks.baseChunkName,
-      loader: normalizeChunkLoader(
-        options.chunks?.loader ?? DEFAULT_BUILD_OPTIONS.chunks.loader,
-      ),
       manifestFile: chunkManifestFile,
       mode: requireChoice(
         options.chunks?.mode ?? DEFAULT_BUILD_OPTIONS.chunks.mode,
@@ -78,9 +74,7 @@ export function normalizeBuildOptions(
         options.diagnostics?.verbose ??
         DEFAULT_BUILD_OPTIONS.diagnostics.verbose,
     },
-    entries: options.entries.map((entry) =>
-      path.isAbsolute(entry) ? entry : path.resolve(srcDir, entry),
-    ),
+    entries: options.entries.map((entry) => normalizeEntry(entry, srcDir)),
     externs: [...(options.externs ?? [])].map((filePath) =>
       path.isAbsolute(filePath)
         ? filePath
@@ -97,16 +91,22 @@ export function normalizeBuildOptions(
       "languageOut",
     ),
     outDir,
-    outputNames: [...(options.outputNames ?? [])],
-    packages: {
-      mode: requireChoice(
-        options.packages?.mode ?? DEFAULT_BUILD_OPTIONS.packages.mode,
-        PACKAGE_MODES,
-        "packages.mode",
-      ),
-    },
+    packages: requireChoice(
+      options.packages ?? DEFAULT_BUILD_OPTIONS.packages,
+      PACKAGE_MODES,
+      "packages",
+    ),
     projectRoot,
     srcDir,
+  };
+}
+
+function normalizeEntry(entry: BuildEntryOption, srcDir: string) {
+  const file = typeof entry === "string" ? entry : entry.file;
+  const name = typeof entry === "string" ? null : (entry.name ?? null);
+  return {
+    file: path.isAbsolute(file) ? file : path.resolve(srcDir, file),
+    name,
   };
 }
 
@@ -115,8 +115,4 @@ function normalizeChunkPublicPath(publicPath: string) {
     return "./";
   }
   return publicPath.endsWith("/") ? publicPath : `${publicPath}/`;
-}
-
-export function normalizeChunkLoader(loader: unknown): ChunkLoader {
-  return requireChoice(loader, CHUNK_LOADERS, "chunks.loader");
 }

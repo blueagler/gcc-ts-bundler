@@ -46,7 +46,7 @@ BuildOptions
 
 ### 1. Normalize and create a workspace
 
-`normalizeBuildOptions()` resolves `projectRoot`, `srcDir`, `outDir`, extern paths, and extra JavaScript inputs. A build workspace exposes the source tree as `workspace/src`; when `packages.mode` is `esm-only`, the project `node_modules` directory is exposed in the workspace too.
+`normalizeBuildOptions()` resolves `projectRoot`, `srcDir`, `outDir`, extern paths, and extra JavaScript inputs. A build workspace exposes the source tree as `workspace/src`; when `packages` is `esm-only`, the project `node_modules` directory is exposed in the workspace too.
 
 A `tsconfig.json` must be discoverable from `projectRoot`.
 

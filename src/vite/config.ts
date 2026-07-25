@@ -3,7 +3,6 @@ import type { ResolvedConfig, UserConfig } from "vite";
 import { DEFAULT_BUILD_OPTIONS } from "../api/types";
 import type { BuildOptions, LanguageOut } from "../api/types";
 import { isRecord } from "../shared/validation";
-import { normalizeChunkLoader } from "../build/resolve/options";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type { ManifestFileSettings } from "./internal-types";
 
@@ -86,7 +85,6 @@ export function createCompilerOptions(input: {
   srcDir: string;
 }): BuildOptions {
   assertNoViteLanguageOut(input.options);
-  assertValidViteChunkLoader(input.options);
   const compiler = input.options.compiler ?? {};
   const compilerChunks = compiler.chunks ?? {};
 
@@ -95,7 +93,7 @@ export function createCompilerOptions(input: {
     entries: input.entries,
     externs: input.externs,
     outDir: input.outDir,
-    packages: { mode: "off" },
+    packages: "off",
     projectRoot: input.projectRoot,
     srcDir: input.srcDir,
     languageOut: resolveViteLanguageOut(input.config),
@@ -104,11 +102,6 @@ export function createCompilerOptions(input: {
       baseChunkName:
         compilerChunks.baseChunkName ??
         DEFAULT_BUILD_OPTIONS.chunks.baseChunkName,
-      loader: normalizeChunkLoader(
-        input.options.runtime?.loader ??
-          compilerChunks.loader ??
-          DEFAULT_BUILD_OPTIONS.chunks.loader,
-      ),
       manifestFile: input.manifestFile,
       mode: "bundler-runtime",
       publicPath: input.publicPath,
@@ -126,14 +119,6 @@ export function assertNoViteLanguageOut(
     return;
   }
   throw new Error(VITE_LANGUAGE_OUT_ERROR);
-}
-
-export function assertValidViteChunkLoader(
-  options: GccTsBundlerVitePluginOptions,
-) {
-  normalizeChunkLoader(
-    options.runtime?.loader ?? DEFAULT_BUILD_OPTIONS.chunks.loader,
-  );
 }
 
 export function resolveViteLanguageOut(config: ResolvedConfig): LanguageOut {

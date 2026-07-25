@@ -16,7 +16,6 @@ import type { CapturedModuleResolutionCache } from "./capture";
 import {
   applyViteBuildGuards,
   assertNoViteLanguageOut,
-  assertValidViteChunkLoader,
   createCompilerOptions,
   INTERNAL_VITE_AUTHORED_FILES_FILE,
   INTERNAL_VITE_RUNTIME_MODULE_SOURCES_FILE,
@@ -114,7 +113,6 @@ export function gccTsBundler(
     enforce: "post",
     config(userConfig: UserConfig) {
       assertNoViteLanguageOut(options);
-      assertValidViteChunkLoader(options);
       return applyViteBuildGuards(userConfig);
     },
     configResolved(config) {

@@ -4,33 +4,27 @@ import { zipExact } from "../../shared/arrays";
 import type { BuildEntry } from "../types";
 
 export function resolveOutputNames(
-  entryPaths: string[],
-  outputNames: string[],
+  entries: Array<{ name: string | null; relativePath: string }>,
 ): string[] {
-  if (outputNames.length > 0) {
-    if (outputNames.length !== entryPaths.length) {
-      throw new Error("outputNames length must match entries length.");
-    }
-
-    return outputNames;
-  }
-
   const basenameCounts = new Map<string, number>();
-  const basenames = entryPaths.map((entryPath) =>
-    path.basename(entryPath).replace(/\.[^/.]+$/, ".js"),
+  const basenames = entries.map((entry) =>
+    path.basename(entry.relativePath).replace(/\.[^/.]+$/, ".js"),
   );
 
   for (const basename of basenames) {
     basenameCounts.set(basename, (basenameCounts.get(basename) ?? 0) + 1);
   }
 
-  return zipExact(entryPaths, basenames, "entries and basenames").map(
-    ([entryPath, basename]) => {
+  return zipExact(entries, basenames, "entries and basenames").map(
+    ([entry, basename]) => {
+      if (entry.name !== null) {
+        return entry.name;
+      }
       if ((basenameCounts.get(basename) ?? 0) === 1) {
         return basename;
       }
 
-      return `${entryPath.replace(/\.[^/.]+$/, "").replace(/[\\/]/g, "__")}.js`;
+      return `${entry.relativePath.replace(/\.[^/.]+$/, "").replace(/[\\/]/g, "__")}.js`;
     },
   );
 }

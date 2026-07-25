@@ -16,7 +16,6 @@ export type {
   DiagnosticsPreflight,
   LanguageOut,
   PackageMode,
-  PackageOptions,
   ResolvedBuildOptions,
 } from "./api/types";
 export type { GenerateExternsOptions, GenerateExternsResult } from "./externs";

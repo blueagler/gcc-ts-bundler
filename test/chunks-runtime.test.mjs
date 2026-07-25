@@ -35,7 +35,7 @@ test.serial(
 
     const result = await build({
       cache: { mode: "off" },
-      chunks: { loader: "script", mode: "bundler-runtime" },
+      chunks: { mode: "bundler-runtime" },
       entries: ["./main.ts"],
       outDir: fixture.outDir,
       projectRoot: fixture.projectRoot,
@@ -69,38 +69,6 @@ test.serial(
   },
 );
 
-test.serial("rejects the removed auto chunk loader alias", async () => {
-  const fixture = await createFixture();
-  await fixture.write("src/main.ts", 'document.body.textContent = "base";\n');
-
-  await expect(
-    build({
-      cache: { mode: "off" },
-      chunks: { loader: "auto", mode: "bundler-runtime" },
-      entries: ["./main.ts"],
-      outDir: fixture.outDir,
-      projectRoot: fixture.projectRoot,
-      srcDir: fixture.srcDir,
-    }),
-  ).rejects.toThrow(/chunks\.loader must be one of: script/);
-});
-
-test.serial("rejects the removed fetch chunk loader", async () => {
-  const fixture = await createFixture();
-  await fixture.write("src/main.ts", 'export const marker = "FETCH";\n');
-
-  await expect(
-    build({
-      cache: { mode: "off" },
-      chunks: { loader: "fetch", mode: "bundler-runtime" },
-      entries: ["./main.ts"],
-      outDir: fixture.outDir,
-      projectRoot: fixture.projectRoot,
-      srcDir: fixture.srcDir,
-    }),
-  ).rejects.toThrow(/chunks\.loader must be one of: script/);
-});
-
 test.serial(
   "emits bundler-runtime chunks for explicit lazy modules",
   async () => {
@@ -127,7 +95,7 @@ test.serial(
 
     const result = await build({
       cache: { mode: "off" },
-      chunks: { loader: "script", mode: "bundler-runtime" },
+      chunks: { mode: "bundler-runtime" },
       entries: ["./main.ts"],
       outDir: fixture.outDir,
       projectRoot: fixture.projectRoot,
@@ -211,7 +179,7 @@ test.serial(
 
     const result = await build({
       cache: { mode: "off" },
-      chunks: { loader: "script", mode: "bundler-runtime" },
+      chunks: { mode: "bundler-runtime" },
       entries: ["./main.ts"],
       languageOut: "ECMASCRIPT5",
       outDir: fixture.outDir,
@@ -291,7 +259,7 @@ test.serial(
 
     const result = await build({
       cache: { mode: "off" },
-      chunks: { loader: "script", mode: "bundler-runtime" },
+      chunks: { mode: "bundler-runtime" },
       entries: ["./main.js"],
       outDir: fixture.outDir,
       projectRoot: fixture.projectRoot,
@@ -332,7 +300,7 @@ test.serial(
 
     const firstResult = await build({
       cache: { dir: cacheDir, mode: "persistent" },
-      chunks: { loader: "script", mode: "bundler-runtime" },
+      chunks: { mode: "bundler-runtime" },
       entries: ["./main.ts"],
       outDir: fixture.outDir,
       projectRoot: fixture.projectRoot,
@@ -358,7 +326,7 @@ test.serial(
 
     const secondResult = await build({
       cache: { dir: cacheDir, mode: "persistent" },
-      chunks: { loader: "script", mode: "bundler-runtime" },
+      chunks: { mode: "bundler-runtime" },
       entries: ["./main.ts"],
       outDir: fixture.outDir,
       projectRoot: fixture.projectRoot,
@@ -403,7 +371,7 @@ test.serial(
     try {
       const serialResult = await build({
         cache: { mode: "off" },
-        chunks: { loader: "script", mode: "bundler-runtime" },
+        chunks: { mode: "bundler-runtime" },
         entries: ["./main.ts"],
         outDir: serialOutDir,
         projectRoot: fixture.projectRoot,
@@ -420,7 +388,7 @@ test.serial(
 
     const parallelResult = await build({
       cache: { mode: "off" },
-      chunks: { loader: "script", mode: "bundler-runtime" },
+      chunks: { mode: "bundler-runtime" },
       entries: ["./main.ts"],
       outDir: parallelOutDir,
       projectRoot: fixture.projectRoot,
@@ -463,7 +431,6 @@ test.serial(
     const result = await build({
       cache: { mode: "off" },
       chunks: {
-        loader: "script",
         manifestFile: "chunk-map.json",
         mode: "bundler-runtime",
       },
@@ -526,7 +493,7 @@ test.serial("rejects non-literal dynamic import specifiers", async () => {
 
   const result = await build({
     cache: { mode: "off" },
-    chunks: { loader: "script", mode: "bundler-runtime" },
+    chunks: { mode: "bundler-runtime" },
     entries: ["./main.ts"],
     outDir: fixture.outDir,
     projectRoot: fixture.projectRoot,

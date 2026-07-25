@@ -34,7 +34,7 @@ export async function ensureWorkspaceNodeModules(
   options: ResolvedBuildOptions,
 ) {
   const linkPath = path.join(workspaceDir, "node_modules");
-  if (options.packages.mode === "off") {
+  if (options.packages === "off") {
     await removePathIfExists(linkPath);
     return;
   }

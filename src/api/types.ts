@@ -31,9 +31,6 @@ export type PackageMode = (typeof PACKAGE_MODES)[number];
 export const CHUNK_MODES = defineValues("off", "bundler-runtime");
 export type ChunkMode = (typeof CHUNK_MODES)[number];
 
-export const CHUNK_LOADERS = defineValues("script");
-export type ChunkLoader = (typeof CHUNK_LOADERS)[number];
-
 export interface CacheOptions {
   dir?: string | undefined;
   mode?: CacheMode | undefined;
@@ -45,30 +42,29 @@ export interface DiagnosticsOptions {
   verbose?: boolean | undefined;
 }
 
-export interface PackageOptions {
-  mode?: PackageMode | undefined;
-}
-
 export interface ChunkOptions {
   baseChunkName?: string | undefined;
-  loader?: ChunkLoader | undefined;
   manifestFile?: string | undefined;
   mode?: ChunkMode | undefined;
   publicPath?: string | undefined;
 }
+
+/** An entry file, optionally with an explicit output name. */
+export type BuildEntryOption =
+  | string
+  | { file: string; name?: string | undefined };
 
 export interface BuildOptions {
   cache?: CacheOptions | undefined;
   chunks?: ChunkOptions | undefined;
   compilationLevel?: CompilationLevel | undefined;
   diagnostics?: DiagnosticsOptions | undefined;
-  entries: readonly string[];
+  entries: readonly BuildEntryOption[];
   externs?: readonly string[] | undefined;
   js?: readonly string[] | undefined;
   languageOut?: LanguageOut | undefined;
   outDir?: string | undefined;
-  outputNames?: readonly string[] | undefined;
-  packages?: PackageOptions | undefined;
+  packages?: PackageMode | undefined;
   projectRoot?: string | undefined;
   srcDir?: string | undefined;
 }
@@ -102,7 +98,6 @@ export interface ResolvedBuildOptions {
   cache: { dir: string; mode: CacheMode };
   chunks: {
     baseChunkName: string;
-    loader: ChunkLoader;
     manifestFile: string;
     mode: ChunkMode;
     publicPath: string;
@@ -113,13 +108,13 @@ export interface ResolvedBuildOptions {
     preflight: DiagnosticsPreflight;
     verbose: boolean;
   };
-  entries: string[];
+  /** Absolute entry file paths with explicit or `null` (derived) names. */
+  entries: Array<{ file: string; name: string | null }>;
   externs: string[];
   js: string[];
   languageOut: LanguageOut;
   outDir: string;
-  outputNames: string[];
-  packages: { mode: PackageMode };
+  packages: PackageMode;
   projectRoot: string;
   srcDir: string;
 }
@@ -131,7 +126,6 @@ export const DEFAULT_BUILD_OPTIONS = Object.freeze({
   },
   chunks: {
     baseChunkName: "main",
-    loader: "script",
     manifestFile: "",
     mode: "off",
     publicPath: "./",
@@ -147,10 +141,7 @@ export const DEFAULT_BUILD_OPTIONS = Object.freeze({
   js: [],
   languageOut: "ECMASCRIPT_NEXT",
   outDir: "",
-  outputNames: [],
-  packages: {
-    mode: "esm-only",
-  },
+  packages: "esm-only",
   projectRoot: "",
   srcDir: "",
 } satisfies ResolvedBuildOptions);

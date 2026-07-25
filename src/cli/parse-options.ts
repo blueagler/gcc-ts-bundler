@@ -3,7 +3,6 @@ import { parseArgs } from "node:util";
 import type { BuildOptions } from "../api/types";
 import {
   CACHE_MODES,
-  CHUNK_LOADERS,
   CHUNK_MODES,
   COMPILATION_LEVELS,
   DIAGNOSTICS_PREFLIGHT_MODES,
@@ -24,7 +23,6 @@ export function parseCliArgs(args: string[]): CliParseResult {
       "cache-dir": { type: "string" },
       "cache-mode": { type: "string" },
       "chunk-base-name": { type: "string" },
-      "chunk-loader": { type: "string" },
       "chunk-manifest": { type: "string" },
       "chunk-public-path": { type: "string" },
       chunks: { type: "string" },
@@ -56,11 +54,6 @@ export function parseCliArgs(args: string[]): CliParseResult {
     },
     chunks: {
       baseChunkName: values["chunk-base-name"],
-      loader: parseChoice(
-        values["chunk-loader"],
-        CHUNK_LOADERS,
-        "--chunk-loader",
-      ),
       manifestFile: values["chunk-manifest"],
       mode: parseChoice(values.chunks, CHUNK_MODES, "--chunks"),
       publicPath: values["chunk-public-path"],
@@ -88,9 +81,7 @@ export function parseCliArgs(args: string[]): CliParseResult {
       "--language-out",
     ),
     outDir: values["out-dir"],
-    packages: {
-      mode: parseChoice(values.packages, PACKAGE_MODES, "--packages"),
-    },
+    packages: parseChoice(values.packages, PACKAGE_MODES, "--packages"),
     projectRoot: values["project-root"],
     srcDir: values["src-dir"],
   };

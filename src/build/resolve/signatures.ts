@@ -62,14 +62,14 @@ export function getOptionsSignature(options: ResolvedBuildOptions) {
     compilationLevel: options.compilationLevel,
     chunks: options.chunks,
     diagnostics: options.diagnostics,
-    entries: options.entries.map((entry) =>
-      path.relative(options.srcDir, entry),
-    ),
+    entries: options.entries.map((entry) => ({
+      name: entry.name,
+      relativePath: path.relative(options.srcDir, entry.file),
+    })),
     externs: [...options.externs].sort(),
     js: [...options.js].sort(),
     languageOut: options.languageOut,
     outDir: options.outDir,
-    outputNames: [...options.outputNames],
     packages: options.packages,
     projectRoot: options.projectRoot,
     srcDir: options.srcDir,

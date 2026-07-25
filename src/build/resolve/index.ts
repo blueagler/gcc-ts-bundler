@@ -98,10 +98,10 @@ export async function resolveBuild(
     ? await hashTsConfig(tsConfigPath)
     : "";
   const entryRelativePaths = options.entries.map((entry) =>
-    path.relative(options.srcDir, entry),
+    path.relative(options.srcDir, entry.file),
   );
   const overlayEntries = options.entries.map((entry) =>
-    path.join(sourceRoot, path.relative(options.srcDir, entry)),
+    path.join(sourceRoot, path.relative(options.srcDir, entry.file)),
   );
   const resolveSnapshotPath = path.join(
     cacheStore.projectCacheDir,
@@ -166,13 +166,14 @@ export async function resolveBuild(
 
   const graphResult = resolveGraph({
     entries: overlayEntries,
-    packageMode: options.packages.mode,
+    packageMode: options.packages,
     srcDir: sourceRoot,
     workspaceDir: cacheStore.workspaceDir,
   });
   const outputNames = resolveOutputNames(
-    entryRelativePaths,
-    options.outputNames,
+    zipExact(options.entries, entryRelativePaths, "entries").map(
+      ([entry, relativePath]) => ({ name: entry.name, relativePath }),
+    ),
   );
   const resolvedLazyImports = graphResult.lazyImports;
   const tsxRuntimeSupport = await collectTsxRuntimeSupport({

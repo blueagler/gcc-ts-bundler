@@ -12,7 +12,7 @@ await compileLitProject();
 
 const result = await build({
   cache: { mode: "off" },
-  chunks: { loader: "script", mode: "bundler-runtime" },
+  chunks: { mode: "bundler-runtime" },
   entries: ["./main.ts"],
   outDir: "./dist",
   projectRoot,
@@ -26,9 +26,9 @@ if (result.exitCode !== 0) {
       typeof diagnostic?.messageText === "string"
         ? diagnostic.messageText
         : ts.flattenDiagnosticMessageText(
-          diagnostic?.messageText ?? diagnostic,
-          "\n",
-        );
+            diagnostic?.messageText ?? diagnostic,
+            "\n",
+          );
     console.error(message);
   }
   process.exit(result.exitCode);
@@ -37,13 +37,19 @@ if (result.exitCode !== 0) {
 console.log(
   `Built Lit playground to ${path.relative(projectRoot, result.outputFiles[0] ?? "./dist/main.js")}`,
 );
-console.log(`Compiled Lit templates into ${path.relative(projectRoot, compiledDir)}`);
+console.log(
+  `Compiled Lit templates into ${path.relative(projectRoot, compiledDir)}`,
+);
 
 async function compileLitProject() {
   await fs.rm(compiledDir, { force: true, recursive: true });
   await fs.mkdir(compiledDir, { recursive: true });
 
-  const configPath = ts.findConfigFile(projectRoot, ts.sys.fileExists, "tsconfig.json");
+  const configPath = ts.findConfigFile(
+    projectRoot,
+    ts.sys.fileExists,
+    "tsconfig.json",
+  );
   if (!configPath) {
     throw new Error("Unable to find tsconfig.json for Lit playground.");
   }
@@ -51,7 +57,10 @@ async function compileLitProject() {
   const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
   if (configFile.error) {
     throw new Error(
-      ts.formatDiagnosticsWithColorAndContext([configFile.error], createCompilerHost()),
+      ts.formatDiagnosticsWithColorAndContext(
+        [configFile.error],
+        createCompilerHost(),
+      ),
     );
   }
 
@@ -73,7 +82,10 @@ async function compileLitProject() {
 
   if (parsedConfig.errors.length > 0) {
     throw new Error(
-      ts.formatDiagnosticsWithColorAndContext(parsedConfig.errors, createCompilerHost()),
+      ts.formatDiagnosticsWithColorAndContext(
+        parsedConfig.errors,
+        createCompilerHost(),
+      ),
     );
   }
 
@@ -110,7 +122,10 @@ async function compileLitProject() {
 
   if (diagnostics.length > 0) {
     throw new Error(
-      ts.formatDiagnosticsWithColorAndContext(diagnostics, createCompilerHost()),
+      ts.formatDiagnosticsWithColorAndContext(
+        diagnostics,
+        createCompilerHost(),
+      ),
     );
   }
 }

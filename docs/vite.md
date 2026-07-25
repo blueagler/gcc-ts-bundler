@@ -23,7 +23,7 @@ Place framework and source-transform plugins before `gccTsBundler()`. The plugin
 The plugin captures transformed modules during Vite's transform phase. At `generateBundle`, it uses Rollup's final chunk graph to keep only retained modules, materializes that graph, prebundles dependency regions, and invokes the core compiler with:
 
 - `chunks.mode = "bundler-runtime"`;
-- `packages.mode = "off"` because dependencies are already materialized;
+- `packages = "off"` because dependencies are already materialized;
 - entries derived from Vite entry facades;
 - `languageOut` derived from `build.target`.
 
@@ -40,7 +40,6 @@ gccTsBundler({
     externs: ["./closure-externs/custom.js"],
   },
   runtime: {
-    loader: "script",
     publicPath: "/assets/",
     manifestFile: "gcc-manifest.json",
   },
@@ -78,7 +77,6 @@ For a target array, the oldest mapped output level wins. Browser-specific target
 
 ### `runtime`
 
-- `loader` supports `script`. Other loader values are rejected.
 - `publicPath` defaults to Vite's resolved `base` and is normalized with a trailing slash.
 - `manifestFile` publishes the internal runtime manifest under the requested filename. Without it, the plugin uses a temporary internal manifest and removes it from final output.
 
@@ -127,8 +125,7 @@ The plugin targets browser application builds. It rejects:
 - Vite library mode;
 - Vite manifest output;
 - Vite sourcemaps;
-- worker entry graphs;
-- the removed `fetch` chunk loader.
+- worker entry graphs.
 
 It also disables Vite module preload because the emitted runtime owns script dependency loading.
 

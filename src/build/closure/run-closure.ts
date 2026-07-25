@@ -63,7 +63,7 @@ export async function runClosureStage({
   });
 
   const prepared = prepareClosureJobs({
-    chunkLoader: options.chunks.loader,
+    chunkLoader: "script",
     chunkMode: options.chunks.mode,
     chunkPlan,
     compilationLevel: options.compilationLevel,

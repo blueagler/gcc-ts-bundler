@@ -4,7 +4,10 @@ import { fileURLToPath } from "url";
 import { build, generateExterns } from "../../dist/index.mjs";
 
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
-const generatedExternsFile = path.join(projectRoot, "react.generated.externs.js");
+const generatedExternsFile = path.join(
+  projectRoot,
+  "react.generated.externs.js",
+);
 
 await generateExterns({
   appEntryFiles: ["./main.tsx"],
@@ -30,7 +33,10 @@ if (result.exitCode !== 0) {
     const message =
       typeof diagnostic?.messageText === "string"
         ? diagnostic.messageText
-        : ts.flattenDiagnosticMessageText(diagnostic?.messageText ?? diagnostic, "\n");
+        : ts.flattenDiagnosticMessageText(
+            diagnostic?.messageText ?? diagnostic,
+            "\n",
+          );
     console.error(message);
   }
   process.exit(result.exitCode);
@@ -39,4 +45,6 @@ if (result.exitCode !== 0) {
 console.log(
   `Built React SPA to ${path.relative(projectRoot, result.outputFiles[0] ?? "./dist/main.js")}`,
 );
-console.log(`Generated externs at ${path.relative(projectRoot, generatedExternsFile)}`);
+console.log(
+  `Generated externs at ${path.relative(projectRoot, generatedExternsFile)}`,
+);

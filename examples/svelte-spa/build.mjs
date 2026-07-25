@@ -17,10 +17,18 @@ const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.join(projectRoot, "src");
 const m3CompiledDir = path.join(projectRoot, ".m3-compiled");
 const m3CompiledPackageDir = path.join(m3CompiledDir, "package");
-const m3PackageDir = path.join(projectRoot, "node_modules", "m3-svelte", "package");
+const m3PackageDir = path.join(
+  projectRoot,
+  "node_modules",
+  "m3-svelte",
+  "package",
+);
 const prebundleDir = path.join(projectRoot, ".prebundle");
 const prebundleEntry = path.join(prebundleDir, "main.js");
-const generatedExternsFile = path.join(projectRoot, "svelte.generated.externs.js");
+const generatedExternsFile = path.join(
+  projectRoot,
+  "svelte.generated.externs.js",
+);
 const m3ThemeSnippet = `
 :root {
   color-scheme: light;
@@ -107,8 +115,16 @@ const transformSource = await createMixinsTransformer(projectRoot);
 await fs.rm(m3CompiledDir, { force: true, recursive: true });
 await fs.mkdir(m3CompiledDir, { recursive: true });
 await compileSvelteDirectory(srcDir, srcDir, transformSource);
-await prepareM3SveltePackage(m3PackageDir, m3CompiledPackageDir, transformSource);
-await writeM3ThemeModule(m3PackageDir, path.join(m3CompiledDir, "theme.js"), transformSource);
+await prepareM3SveltePackage(
+  m3PackageDir,
+  m3CompiledPackageDir,
+  transformSource,
+);
+await writeM3ThemeModule(
+  m3PackageDir,
+  path.join(m3CompiledDir, "theme.js"),
+  transformSource,
+);
 await logPureGraphSnapshot("compiled", [srcDir, m3CompiledDir], {
   lazyRootCount: 0,
 });
@@ -141,7 +157,7 @@ await generateExterns({
 
 const result = await build({
   cache: { mode: "off" },
-  chunks: { loader: "script", mode: "bundler-runtime" },
+  chunks: { mode: "bundler-runtime" },
   diagnostics: { preflight: "full" },
   entries: ["./main.js"],
   externs: ["./svelte.generated.externs.js"],
@@ -168,8 +184,12 @@ if (result.exitCode !== 0) {
 console.log(
   `Built Svelte SPA to ${path.relative(projectRoot, result.outputFiles[0] ?? "./dist/main.js")}`,
 );
-console.log(`Bundled Svelte runtime through ${path.relative(projectRoot, prebundleEntry)}`);
-console.log(`Generated externs at ${path.relative(projectRoot, generatedExternsFile)}`);
+console.log(
+  `Bundled Svelte runtime through ${path.relative(projectRoot, prebundleEntry)}`,
+);
+console.log(
+  `Generated externs at ${path.relative(projectRoot, generatedExternsFile)}`,
+);
 await logPureDistSnapshot();
 
 async function compileSvelteDirectory(sourceDir, outDir, transformSourceCode) {
@@ -253,7 +273,7 @@ async function collectRuntimeEntries(directory) {
   for (const entry of entries) {
     const entryPath = path.join(directory, entry.name);
     if (entry.isDirectory()) {
-      runtimeEntries.push(...await collectRuntimeEntries(entryPath));
+      runtimeEntries.push(...(await collectRuntimeEntries(entryPath)));
       continue;
     }
     if (entry.isFile() && entry.name.endsWith(".js")) {
@@ -293,7 +313,7 @@ async function logPureGraphSnapshot(label, roots, { lazyRootCount }) {
 
   const files = [];
   for (const root of roots) {
-    files.push(...await collectJsFiles(root));
+    files.push(...(await collectJsFiles(root)));
   }
   const uniqueFiles = [...new Set(files)].sort((left, right) =>
     left.localeCompare(right),
@@ -326,7 +346,7 @@ async function collectJsFiles(directory) {
   for (const entry of entries) {
     const entryPath = path.join(directory, entry.name);
     if (entry.isDirectory()) {
-      files.push(...await collectJsFiles(entryPath));
+      files.push(...(await collectJsFiles(entryPath)));
       continue;
     }
     if (entry.isFile() && entry.name.endsWith(".js")) {

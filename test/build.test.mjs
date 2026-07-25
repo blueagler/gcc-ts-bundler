@@ -42,6 +42,24 @@ test.serial(
   },
 );
 
+test.serial("object entries carry an explicit output name", async () => {
+  const fixture = await createFixture();
+  await fixture.write("src/index.ts", "export default 41 + 1;\n");
+
+  const result = await build({
+    cache: { mode: "off" },
+    entries: [{ file: "./index.ts", name: "custom-bundle.js" }],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+
+  expect(result.ok).toBe(true);
+  expect(result.outputFiles.map((file) => path.basename(file))).toEqual([
+    "custom-bundle.js",
+  ]);
+});
+
 test.serial(
   "emits a shared chunk when multiple entries use the same package",
   async () => {

@@ -87,13 +87,13 @@ Defaults:
 - `cache.mode = "persistent"`
 - `chunks.mode = "off"`
 - `chunks.manifestFile` is off by default
-- `packages.mode = "esm-only"`
+- `packages = "esm-only"`
 - persistent cache lives outside the user project
 - `diagnostics.preflight = "errors-only"`
 
 The runtime path uses a native Rust addon for graph resolution, shim emission, and GCC export rewriting. Closure Compiler remains the final aggressive optimizer.
 
-`packages.mode = "esm-only"` supports browser-safe ESM dependencies from `node_modules`, plus statically analyzable CommonJS package entrypoints and internal package modules. Dynamic `require()`, Node builtins, JSON modules, and native addons are still rejected.
+`packages = "esm-only"` supports browser-safe ESM dependencies from `node_modules`, plus statically analyzable CommonJS package entrypoints and internal package modules. Dynamic `require()`, Node builtins, JSON modules, and native addons are still rejected.
 
 `chunks.mode = "bundler-runtime"` switches output to app-oriented script chunks owned by `gcc-ts-bundler`. In that mode entries are treated as bootstrap scripts, not exported library bundles.
 
@@ -130,7 +130,6 @@ gcc-ts-bundler externs --project-root=. --src-dir=./src --entry=./main.ts --modu
 - `--extern`: Closure extern file. May be repeated
 - `--js`: Additional Closure JavaScript input. May be repeated
 - `--chunks`: `off | bundler-runtime`
-- `--chunk-loader`: `script`
 - `--chunk-public-path`: public URL prefix used to load chunk files
 - `--chunk-base-name`: base chunk output name
 - `--chunk-manifest`: output filename for the generated chunk manifest
