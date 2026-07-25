@@ -9,14 +9,27 @@ import type {
   ParsedMaterializedModule,
 } from "./shared";
 
+interface ParseTargets {
+  authoredFiles: Set<string>;
+  moduleFilePaths: Set<string>;
+}
+
+type ParsedStatementTarget =
+  | { kind: "authored"; target: string }
+  | { kind: "dependency"; dependencyImport: ParsedDependencyImport }
+  | {
+      kind: "reexport";
+      dependencyImport: ParsedDependencyImport | null;
+      hasDefaultExport: boolean;
+      localExportedNames: string[];
+    }
+  | null;
+
 /**
  * A cached parser over materialized runtime modules: exports, authored
  * imports, and dependency imports that may become region bundles.
  */
-export function createModuleParser(input: {
-  authoredFiles: Set<string>;
-  moduleFilePaths: Set<string>;
-}) {
+export function createModuleParser(targets: ParseTargets) {
   const parseCache = new Map<string, ParsedMaterializedModule>();
 
   return async function parseModule(
@@ -41,166 +54,35 @@ export function createModuleParser(input: {
     const exportedNames = new Set<string>();
     let hasDefaultExport = false;
 
-    const resolveRelativeTarget = (specifier: string) => {
-      if (!specifier.startsWith(".")) {
-        return null;
-      }
-      return normalizePath(
-        path.resolve(path.dirname(normalizedFilePath), specifier),
-      );
-    };
-
     for (const statement of sourceFile.statements) {
-      if (ts.isExportAssignment(statement) && !statement.isExportEquals) {
-        hasDefaultExport = true;
-        exportedNames.add("default");
+      hasDefaultExport =
+        collectLocalExportNames(statement, exportedNames) || hasDefaultExport;
+
+      const parsed = parseStatementTarget(
+        statement,
+        normalizedFilePath,
+        targets,
+      );
+      if (!parsed) {
         continue;
       }
-      if (
-        (ts.isFunctionDeclaration(statement) ||
-          ts.isClassDeclaration(statement)) &&
-        statement.modifiers?.some(
-          (modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword,
-        ) &&
-        statement.modifiers.some(
-          (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
-        )
-      ) {
-        hasDefaultExport = true;
-        exportedNames.add("default");
-      } else if (
-        (ts.isFunctionDeclaration(statement) ||
-          ts.isClassDeclaration(statement) ||
-          ts.isVariableStatement(statement)) &&
-        statement.modifiers?.some(
-          (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
-        )
-      ) {
-        if (ts.isVariableStatement(statement)) {
-          for (const declaration of statement.declarationList.declarations) {
-            if (ts.isIdentifier(declaration.name)) {
-              exportedNames.add(declaration.name.text);
-            }
-          }
-        } else if (statement.name) {
-          exportedNames.add(statement.name.text);
-        }
-      }
-
-      if (
-        ts.isImportDeclaration(statement) &&
-        statement.moduleSpecifier &&
-        ts.isStringLiteralLike(statement.moduleSpecifier)
-      ) {
-        const targetFilePath = resolveRelativeTarget(
-          statement.moduleSpecifier.text,
-        );
-        if (!targetFilePath) {
-          continue;
-        }
-        if (input.authoredFiles.has(targetFilePath)) {
-          staticAuthoredImports.add(targetFilePath);
-          continue;
-        }
-
-        if (!input.moduleFilePaths.has(targetFilePath)) {
-          continue;
-        }
-
-        const importClause = statement.importClause;
-        const isSideEffectOnly = !importClause;
-        let hasDefault = false;
-        let hasNamespace = false;
-        const namedExports = new Set<string>();
-
-        if (importClause) {
-          if (importClause.name) {
-            hasDefault = true;
-          }
-          if (importClause.namedBindings) {
-            if (ts.isNamespaceImport(importClause.namedBindings)) {
-              hasNamespace = true;
-            } else {
-              for (const element of importClause.namedBindings.elements) {
-                namedExports.add((element.propertyName ?? element.name).text);
-              }
-            }
-          }
-        }
-
-        dependencyImports.push({
-          hasDefault,
-          hasNamespace,
-          isSideEffectOnly,
-          namedExports: [...namedExports].sort((left, right) =>
-            left.localeCompare(right),
-          ),
-          node: statement,
-          targetFilePath,
-        });
+      if (parsed.kind === "authored") {
+        staticAuthoredImports.add(parsed.target);
         continue;
       }
-
-      if (
-        ts.isExportDeclaration(statement) &&
-        statement.moduleSpecifier &&
-        ts.isStringLiteralLike(statement.moduleSpecifier)
-      ) {
-        const targetFilePath = resolveRelativeTarget(
-          statement.moduleSpecifier.text,
-        );
-        if (!targetFilePath) {
-          continue;
-        }
-        if (input.authoredFiles.has(targetFilePath)) {
-          staticAuthoredImports.add(targetFilePath);
-          continue;
-        }
-        if (!input.moduleFilePaths.has(targetFilePath)) {
-          continue;
-        }
-        if (
-          statement.exportClause &&
-          ts.isNamespaceExport(statement.exportClause)
-        ) {
-          continue;
-        }
-
-        if (!statement.exportClause) {
-          dependencyImports.push({
-            hasDefault: false,
-            hasNamespace: true,
-            isSideEffectOnly: false,
-            namedExports: [],
-            node: statement,
-            targetFilePath,
-          });
-          continue;
-        }
-
-        if (ts.isNamedExports(statement.exportClause)) {
-          const namedExports = new Set<string>();
-          for (const element of statement.exportClause.elements) {
-            const exportedName = (element.propertyName ?? element.name).text;
-            namedExports.add(exportedName);
-            exportedNames.add(element.name.text);
-          }
-          if (namedExports.has("default")) {
-            namedExports.delete("default");
-            hasDefaultExport = true;
-            exportedNames.add("default");
-          }
-          dependencyImports.push({
-            hasDefault: false,
-            hasNamespace: false,
-            isSideEffectOnly: false,
-            namedExports: [...namedExports].sort((left, right) =>
-              left.localeCompare(right),
-            ),
-            node: statement,
-            targetFilePath,
-          });
-        }
+      if (parsed.kind === "dependency") {
+        dependencyImports.push(parsed.dependencyImport);
+        continue;
+      }
+      for (const name of parsed.localExportedNames) {
+        exportedNames.add(name);
+      }
+      if (parsed.hasDefaultExport) {
+        hasDefaultExport = true;
+        exportedNames.add("default");
+      }
+      if (parsed.dependencyImport) {
+        dependencyImports.push(parsed.dependencyImport);
       }
     }
 
@@ -216,5 +98,169 @@ export function createModuleParser(input: {
     } satisfies ParsedMaterializedModule;
     parseCache.set(normalizedFilePath, parsed);
     return parsed;
+  };
+}
+
+/** Record locally declared export names; returns whether one is a default. */
+function collectLocalExportNames(
+  statement: ts.Statement,
+  exportedNames: Set<string>,
+): boolean {
+  if (ts.isExportAssignment(statement) && !statement.isExportEquals) {
+    exportedNames.add("default");
+    return true;
+  }
+  if (
+    (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) &&
+    statement.modifiers?.some(
+      (modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword,
+    ) &&
+    statement.modifiers.some(
+      (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+    )
+  ) {
+    exportedNames.add("default");
+    return true;
+  }
+  if (
+    (ts.isFunctionDeclaration(statement) ||
+      ts.isClassDeclaration(statement) ||
+      ts.isVariableStatement(statement)) &&
+    statement.modifiers?.some(
+      (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+    )
+  ) {
+    if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name)) {
+          exportedNames.add(declaration.name.text);
+        }
+      }
+    } else if (statement.name) {
+      exportedNames.add(statement.name.text);
+    }
+  }
+  return false;
+}
+
+function parseStatementTarget(
+  statement: ts.Statement,
+  importerFilePath: string,
+  targets: ParseTargets,
+): ParsedStatementTarget {
+  if (
+    !(ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) ||
+    !statement.moduleSpecifier ||
+    !ts.isStringLiteralLike(statement.moduleSpecifier) ||
+    !statement.moduleSpecifier.text.startsWith(".")
+  ) {
+    return null;
+  }
+  const targetFilePath = normalizePath(
+    path.resolve(
+      path.dirname(importerFilePath),
+      statement.moduleSpecifier.text,
+    ),
+  );
+  if (targets.authoredFiles.has(targetFilePath)) {
+    return { kind: "authored", target: targetFilePath };
+  }
+  if (!targets.moduleFilePaths.has(targetFilePath)) {
+    return null;
+  }
+
+  return ts.isImportDeclaration(statement)
+    ? parseDependencyImport(statement, targetFilePath)
+    : parseDependencyReexport(statement, targetFilePath);
+}
+
+function parseDependencyImport(
+  statement: ts.ImportDeclaration,
+  targetFilePath: string,
+): ParsedStatementTarget {
+  const importClause = statement.importClause;
+  let hasDefault = false;
+  let hasNamespace = false;
+  const namedExports = new Set<string>();
+
+  if (importClause) {
+    if (importClause.name) {
+      hasDefault = true;
+    }
+    if (importClause.namedBindings) {
+      if (ts.isNamespaceImport(importClause.namedBindings)) {
+        hasNamespace = true;
+      } else {
+        for (const element of importClause.namedBindings.elements) {
+          namedExports.add((element.propertyName ?? element.name).text);
+        }
+      }
+    }
+  }
+
+  return {
+    dependencyImport: {
+      hasDefault,
+      hasNamespace,
+      isSideEffectOnly: !importClause,
+      namedExports: [...namedExports].sort((left, right) =>
+        left.localeCompare(right),
+      ),
+      node: statement,
+      targetFilePath,
+    },
+    kind: "dependency",
+  };
+}
+
+function parseDependencyReexport(
+  statement: ts.ExportDeclaration,
+  targetFilePath: string,
+): ParsedStatementTarget {
+  if (statement.exportClause && ts.isNamespaceExport(statement.exportClause)) {
+    return null;
+  }
+
+  if (!statement.exportClause) {
+    return {
+      dependencyImport: {
+        hasDefault: false,
+        hasNamespace: true,
+        isSideEffectOnly: false,
+        namedExports: [],
+        node: statement,
+        targetFilePath,
+      },
+      hasDefaultExport: false,
+      kind: "reexport",
+      localExportedNames: [],
+    };
+  }
+
+  if (!ts.isNamedExports(statement.exportClause)) {
+    return null;
+  }
+
+  const namedExports = new Set<string>();
+  const localExportedNames: string[] = [];
+  for (const element of statement.exportClause.elements) {
+    namedExports.add((element.propertyName ?? element.name).text);
+    localExportedNames.push(element.name.text);
+  }
+  const hasDefaultExport = namedExports.delete("default");
+  return {
+    dependencyImport: {
+      hasDefault: false,
+      hasNamespace: false,
+      isSideEffectOnly: false,
+      namedExports: [...namedExports].sort((left, right) =>
+        left.localeCompare(right),
+      ),
+      node: statement,
+      targetFilePath,
+    },
+    hasDefaultExport,
+    kind: "reexport",
+    localExportedNames,
   };
 }
