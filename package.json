@@ -1,6 +1,6 @@
 {
   "name": "gcc-ts-bundler",
-  "version": "0.1.8",
+  "version": "0.2.0",
   "description": "A TypeScript bundler that uses a native Rust front-end with Google Closure Compiler for aggressive optimization.",
   "type": "module",
   "types": "./dist/index.d.ts",
@@ -57,14 +57,14 @@
     "typescript": "^6.0.2"
   },
   "optionalDependencies": {
-    "gcc-ts-bundler-darwin-arm64": "0.1.8",
-    "gcc-ts-bundler-darwin-x64": "0.1.8",
-    "gcc-ts-bundler-linux-arm64-gnu": "0.1.8",
-    "gcc-ts-bundler-linux-arm64-musl": "0.1.8",
-    "gcc-ts-bundler-linux-x64-gnu": "0.1.8",
-    "gcc-ts-bundler-linux-x64-musl": "0.1.8",
-    "gcc-ts-bundler-win32-arm64-msvc": "0.1.8",
-    "gcc-ts-bundler-win32-x64-msvc": "0.1.8"
+    "gcc-ts-bundler-darwin-arm64": "0.2.0",
+    "gcc-ts-bundler-darwin-x64": "0.2.0",
+    "gcc-ts-bundler-linux-arm64-gnu": "0.2.0",
+    "gcc-ts-bundler-linux-arm64-musl": "0.2.0",
+    "gcc-ts-bundler-linux-x64-gnu": "0.2.0",
+    "gcc-ts-bundler-linux-x64-musl": "0.2.0",
+    "gcc-ts-bundler-win32-arm64-msvc": "0.2.0",
+    "gcc-ts-bundler-win32-x64-msvc": "0.2.0"
   },
   "files": [
     "bin",
