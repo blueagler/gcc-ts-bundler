@@ -21,9 +21,11 @@ const result = await build({
   outDir: "./dist",
 });
 
-if (result.exitCode !== 0) {
-  console.error(result.diagnostics);
-  process.exitCode = result.exitCode;
+if (!result.ok) {
+  for (const diagnostic of result.diagnostics) {
+    console.error(diagnostic.message);
+  }
+  process.exitCode = 1;
 }
 ```
 
@@ -107,20 +109,22 @@ Off mode emits importable entry bundles and can produce a shared chunk for commo
 ### Build result
 
 ```ts
-interface BuildResult {
-  cacheHit: boolean;
-  diagnostics: unknown[];
-  emitSkipped: boolean;
-  exitCode: number;
-  outputFiles: string[];
+interface BuildDiagnostic {
+  file?: string;
+  line?: number;
+  message: string;
 }
+
+type BuildResult =
+  | { ok: true; cacheHit: boolean; outputFiles: readonly string[] }
+  | { ok: false; diagnostics: readonly BuildDiagnostic[] };
 ```
 
-- `exitCode === 0` indicates success.
+- `ok` discriminates success from failure; there is no exit code in the API.
 - `outputFiles` contains absolute published paths.
 - `cacheHit` means a final cached result was restored or reused.
-- `emitSkipped` is true when diagnostics or compiler failure prevented publication.
-- Expected compiler and graph failures are normally returned in the result. Invalid option normalization can reject the promise, so callers should still use normal promise error handling.
+- Diagnostics are flattened messages with an optional file and 1-based line.
+- Expected compiler and graph failures are returned as `ok: false`. Invalid option normalization can reject the promise, so callers should still use normal promise error handling.
 
 ## `cleanCache(options)`
 

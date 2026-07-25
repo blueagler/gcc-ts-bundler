@@ -3,29 +3,21 @@
   "version": "0.1.8",
   "description": "A TypeScript bundler that uses a native Rust front-end with Google Closure Compiler for aggressive optimization.",
   "type": "module",
-  "main": "./dist/index.cjs",
-  "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
   "bin": {
-    "gcc-ts-bundler": "bin/gcc-ts-bundler.cjs"
+    "gcc-ts-bundler": "bin/gcc-ts-bundler.mjs"
   },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.cjs",
       "default": "./dist/index.mjs"
     },
     "./vite": {
       "types": "./dist/vite/index.d.ts",
-      "import": "./dist/vite/index.mjs",
-      "require": "./dist/vite/index.cjs",
       "default": "./dist/vite/index.mjs"
     },
     "./native": {
       "types": "./dist/native/index.d.ts",
-      "import": "./dist/native/index.mjs",
-      "require": "./dist/native/index.cjs",
       "default": "./dist/native/index.mjs"
     }
   },

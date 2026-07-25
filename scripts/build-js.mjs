@@ -1,8 +1,14 @@
 import { spawn } from "node:child_process";
+import { rm } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 
 const BUN = process.platform === "win32" ? "bun.exe" : "bun";
 const SHOW_TIMINGS = process.env.GCC_BUILD_TIMINGS === "1";
+
+await Promise.all([
+  rm("./dist", { force: true, recursive: true }),
+  rm("./bin", { force: true, recursive: true }),
+]);
 
 await runCommandsInParallel([
   {
@@ -32,41 +38,17 @@ await runCommandsInParallel([
   {
     args: [
       "build",
-      "./src/index.ts",
-      "./src/vite/index.ts",
-      "./src/native/index.ts",
-      "./src/internal/lifecycle-size.ts",
-      "--outdir",
-      "./dist",
-      "--format",
-      "cjs",
-      "--packages",
-      "external",
-      "--banner",
-      "const __gcc_current_module_url = require('node:url').pathToFileURL(__filename).href;",
-      "--entry-naming",
-      "[dir]/[name].cjs",
-      "--target",
-      "node",
-      "--root",
-      "./src",
-    ],
-    label: "build-js:cjs",
-  },
-  {
-    args: [
-      "build",
       "./src/entry/cli.ts",
       "--outdir",
       "./bin",
       "--format",
-      "cjs",
+      "esm",
       "--packages",
       "external",
       "--banner",
-      "#!/usr/bin/env node\nconst __gcc_current_module_url = require('node:url').pathToFileURL(__filename).href;",
+      "#!/usr/bin/env node\nconst __gcc_current_module_url = import.meta.url;",
       "--entry-naming",
-      "gcc-ts-bundler.cjs",
+      "gcc-ts-bundler.mjs",
       "--target",
       "node",
     ],
@@ -127,7 +109,5 @@ function logTiming(label, startedAt) {
   }
 
   const durationMs = performance.now() - startedAt;
-  console.error(
-    `[gcc-ts-bundler timing] ${label}: ${durationMs.toFixed(1)}ms`,
-  );
+  console.error(`[gcc-ts-bundler timing] ${label}: ${durationMs.toFixed(1)}ms`);
 }

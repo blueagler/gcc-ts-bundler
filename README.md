@@ -43,8 +43,8 @@ const result = await build({
   srcDir: "./src",
 });
 
-if (result.exitCode !== 0) {
-  process.exit(result.exitCode);
+if (!result.ok) {
+  process.exit(1);
 }
 
 await cleanCache({ projectRoot: process.cwd() });

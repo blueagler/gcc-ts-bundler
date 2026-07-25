@@ -52,16 +52,16 @@ Prefer types derived from value tuples, `satisfies`, and exact internal contract
 
 ## Useful build commands
 
-| Command                                        | Purpose                                                                    |
-| ---------------------------------------------- | -------------------------------------------------------------------------- |
-| `bun run build:js`                             | Build ESM, CommonJS, CLI, and declaration outputs into `dist/` and `bin/`. |
-| `bun run build:native`                         | Build the host Rust addon and its platform package.                        |
-| `bun run build:native:cross`                   | Build Linux x64 GNU and Windows x64 MSVC targets.                          |
-| `bun run build:native:all`                     | Build every configured native target.                                      |
-| `bun run build`                                | Run host native and JavaScript builds in parallel.                         |
-| `bun run typecheck`                            | Check source and declaration-build TypeScript configurations.              |
-| `cargo test --manifest-path native/Cargo.toml` | Run only Rust tests.                                                       |
-| `bun test ./test/vite-plugin.test.mjs`         | Run one JavaScript integration test file.                                  |
+| Command                                        | Purpose                                                          |
+| ---------------------------------------------- | ---------------------------------------------------------------- |
+| `bun run build:js`                             | Build ESM, CLI, and declaration outputs into `dist/` and `bin/`. |
+| `bun run build:native`                         | Build the host Rust addon and its platform package.              |
+| `bun run build:native:cross`                   | Build Linux x64 GNU and Windows x64 MSVC targets.                |
+| `bun run build:native:all`                     | Build every configured native target.                            |
+| `bun run build`                                | Run host native and JavaScript builds in parallel.               |
+| `bun run typecheck`                            | Check source and declaration-build TypeScript configurations.    |
+| `cargo test --manifest-path native/Cargo.toml` | Run only Rust tests.                                             |
+| `bun test ./test/vite-plugin.test.mjs`         | Run one JavaScript integration test file.                        |
 
 Set `GCC_BUILD_TIMINGS=1` to print internal cache and stage timings during builds. `GCC_CLOSURE_CONCURRENCY` can force the number of concurrent Closure jobs in bundler-runtime mode; `1` is useful for deterministic comparison while debugging.
 
@@ -112,7 +112,7 @@ Musl cross-builds use `cargo-zigbuild`. The GitHub Actions workflow builds every
 The root package publishes:
 
 - `bin/` for the CLI;
-- `dist/` for ESM, CommonJS, declarations, Vite, and native loader entries;
+- `dist/` for ESM, declarations, Vite, and native loader entries (the package is ESM-only);
 - `closure-externs/` and `closure-lib/`;
 - `docs/` and the root README.
 
