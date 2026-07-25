@@ -1,15 +1,18 @@
 import path from "path";
 
 import {
-  BuildOptions,
-  ChunkLoader,
-  ChunkLoaderInput,
+  CACHE_MODES,
+  CHUNK_LOADERS,
+  CHUNK_MODES,
+  COMPILATION_LEVELS,
   DEFAULT_BUILD_OPTIONS,
+  DIAGNOSTICS_PREFLIGHT_MODES,
+  LANGUAGE_OUTPUTS,
+  PACKAGE_MODES,
 } from "../../api/types";
-import { NormalizedBuildOptions } from "../../internal/types";
-
-export const UNSUPPORTED_FETCH_LOADER_ERROR =
-  'gcc-ts-bundler does not support chunks.loader="fetch". Use "script" instead.';
+import type { BuildOptions, ChunkLoader } from "../../api/types";
+import type { NormalizedBuildOptions } from "../../internal/types";
+import { requireChoice } from "../../internal/validation";
 
 export function normalizeBuildOptions(
   options: BuildOptions,
@@ -35,7 +38,11 @@ export function normalizeBuildOptions(
       dir: options.cache?.dir
         ? path.resolve(projectRoot, options.cache.dir)
         : DEFAULT_BUILD_OPTIONS.cache.dir,
-      mode: options.cache?.mode ?? DEFAULT_BUILD_OPTIONS.cache.mode,
+      mode: requireChoice(
+        options.cache?.mode ?? DEFAULT_BUILD_OPTIONS.cache.mode,
+        CACHE_MODES,
+        "cache.mode",
+      ),
     },
     chunks: {
       baseChunkName:
@@ -45,18 +52,28 @@ export function normalizeBuildOptions(
         options.chunks?.loader ?? DEFAULT_BUILD_OPTIONS.chunks.loader,
       ),
       manifestFile: chunkManifestFile,
-      mode: options.chunks?.mode ?? DEFAULT_BUILD_OPTIONS.chunks.mode,
+      mode: requireChoice(
+        options.chunks?.mode ?? DEFAULT_BUILD_OPTIONS.chunks.mode,
+        CHUNK_MODES,
+        "chunks.mode",
+      ),
       publicPath: chunkPublicPath,
     },
-    compilationLevel:
+    compilationLevel: requireChoice(
       options.compilationLevel ?? DEFAULT_BUILD_OPTIONS.compilationLevel,
+      COMPILATION_LEVELS,
+      "compilationLevel",
+    ),
     diagnostics: {
       fatalWarnings:
         options.diagnostics?.fatalWarnings ??
         DEFAULT_BUILD_OPTIONS.diagnostics.fatalWarnings,
-      preflight:
+      preflight: requireChoice(
         options.diagnostics?.preflight ??
-        DEFAULT_BUILD_OPTIONS.diagnostics.preflight,
+          DEFAULT_BUILD_OPTIONS.diagnostics.preflight,
+        DIAGNOSTICS_PREFLIGHT_MODES,
+        "diagnostics.preflight",
+      ),
       verbose:
         options.diagnostics?.verbose ??
         DEFAULT_BUILD_OPTIONS.diagnostics.verbose,
@@ -74,11 +91,19 @@ export function normalizeBuildOptions(
         ? filePath
         : path.resolve(projectRoot, filePath),
     ),
-    languageOut: options.languageOut ?? DEFAULT_BUILD_OPTIONS.languageOut,
+    languageOut: requireChoice(
+      options.languageOut ?? DEFAULT_BUILD_OPTIONS.languageOut,
+      LANGUAGE_OUTPUTS,
+      "languageOut",
+    ),
     outDir,
     outputNames: [...(options.outputNames ?? [])],
     packages: {
-      mode: options.packages?.mode ?? DEFAULT_BUILD_OPTIONS.packages.mode,
+      mode: requireChoice(
+        options.packages?.mode ?? DEFAULT_BUILD_OPTIONS.packages.mode,
+        PACKAGE_MODES,
+        "packages.mode",
+      ),
     },
     projectRoot,
     srcDir,
@@ -92,11 +117,6 @@ function normalizeChunkPublicPath(publicPath: string) {
   return publicPath.endsWith("/") ? publicPath : `${publicPath}/`;
 }
 
-export function normalizeChunkLoader(
-  loader: ChunkLoaderInput | "fetch",
-): ChunkLoader {
-  if (loader === "fetch") {
-    throw new Error(UNSUPPORTED_FETCH_LOADER_ERROR);
-  }
-  return "script";
+export function normalizeChunkLoader(loader: unknown): ChunkLoader {
+  return requireChoice(loader, CHUNK_LOADERS, "chunks.loader");
 }

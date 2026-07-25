@@ -222,26 +222,31 @@ export function isProjectAppSourceFile(filePath: string, projectRoot: string) {
 }
 
 export function isExportedDeclaration(node: ts.Node) {
-  return (
-    (ts.getCombinedModifierFlags(node as ts.Declaration) &
-      ts.ModifierFlags.Export) !==
-    0
-  );
+  return hasModifier(node, ts.SyntaxKind.ExportKeyword);
 }
 
 export function hasStaticModifier(node: ts.Node) {
-  return (
-    (ts.getCombinedModifierFlags(node as ts.Declaration) &
-      ts.ModifierFlags.Static) !==
-    0
-  );
+  return hasModifier(node, ts.SyntaxKind.StaticKeyword);
 }
 
 export function hasNonPublicModifier(node: ts.Node) {
-  const modifierFlags = ts.getCombinedModifierFlags(node as ts.Declaration);
   return (
-    (modifierFlags & ts.ModifierFlags.Private) !== 0 ||
-    (modifierFlags & ts.ModifierFlags.Protected) !== 0
+    hasModifier(node, ts.SyntaxKind.PrivateKeyword) ||
+    hasModifier(node, ts.SyntaxKind.ProtectedKeyword)
+  );
+}
+
+function hasModifier(
+  node: ts.Node,
+  kind:
+    | ts.SyntaxKind.ExportKeyword
+    | ts.SyntaxKind.PrivateKeyword
+    | ts.SyntaxKind.ProtectedKeyword
+    | ts.SyntaxKind.StaticKeyword,
+) {
+  return Boolean(
+    ts.canHaveModifiers(node) &&
+    ts.getModifiers(node)?.some((modifier) => modifier.kind === kind),
   );
 }
 

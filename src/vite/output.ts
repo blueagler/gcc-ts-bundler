@@ -6,7 +6,7 @@ import type {
   OutputBundle,
   OutputChunk,
   PluginContext,
-} from "rollup";
+} from "./internal-types";
 
 export function listJavaScriptChunks(bundle: OutputBundle) {
   return Object.values(bundle).filter(
@@ -91,12 +91,12 @@ export function rewriteHtmlAssets(input: {
     let html = readAssetText(asset);
     html = html.replace(
       /<link\b[^>]*rel=(["'])modulepreload\1[^>]*href=(["'])([^"']+)\2[^>]*\/?>/giu,
-      (match, _quote, _hrefQuote, href) =>
+      (match: string, _quote: string, _hrefQuote: string, href: string) =>
         endsWithAnyFileName(href, input.removedChunkFileNames) ? "" : match,
     );
     html = html.replace(
       /<script\b[^>]*type=(["'])module\1[^>]*src=(["'])([^"']+)\2[^>]*><\/script>/giu,
-      (match, _quote, _srcQuote, src) =>
+      (match: string, _quote: string, _srcQuote: string, src: string) =>
         endsWithAnyFileName(src, input.removedChunkFileNames) ? "" : match,
     );
 

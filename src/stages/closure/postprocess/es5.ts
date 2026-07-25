@@ -5,7 +5,7 @@ export function createEs5HelperRewriteContext({
   chunkMode,
   languageOut,
 }: {
-  bundlerRuntimeBaseInputPath?: string;
+  bundlerRuntimeBaseInputPath: string | undefined;
   chunkMode: string;
   languageOut: string;
 }) {

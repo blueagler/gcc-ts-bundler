@@ -199,11 +199,16 @@ function collectRuntimeCallMembers(
   hazards: RuntimeRenameHazards,
 ) {
   const callee = node.expression;
-  if (isPublicFieldHelperCall(callee) && node.arguments.length >= 2) {
-    const memberName = getStringLiteralMemberName(node.arguments[1]);
+  const [target, memberExpression] = node.arguments;
+  if (target === undefined || memberExpression === undefined) {
+    return;
+  }
+
+  if (isPublicFieldHelperCall(callee)) {
+    const memberName = getStringLiteralMemberName(memberExpression);
     if (
       memberName &&
-      isRelevantRuntimeTarget(node.arguments[0], knownConstructors) &&
+      isRelevantRuntimeTarget(target, knownConstructors) &&
       isRuntimeExternPropertyName(memberName)
     ) {
       hazards.definedMembers.add(memberName);
@@ -211,15 +216,14 @@ function collectRuntimeCallMembers(
     return;
   }
 
-  if (!isObjectDefinePropertyCall(callee) || node.arguments.length < 2) {
+  if (!isObjectDefinePropertyCall(callee)) {
     return;
   }
 
-  const memberName = getStringLiteralMemberName(node.arguments[1]);
+  const memberName = getStringLiteralMemberName(memberExpression);
   if (!memberName || !isRuntimeExternPropertyName(memberName)) {
     return;
   }
-  const target = node.arguments[0];
   if (isRelevantRuntimeTarget(target, knownConstructors)) {
     hazards.definedMembers.add(memberName);
   }
@@ -239,15 +243,12 @@ function isPublicFieldHelperCall(expression: ts.Expression): boolean {
 }
 
 function isRelevantRuntimeTarget(
-  expression: ts.Node,
+  expression: ts.Expression,
   knownConstructors: Set<string>,
 ) {
   return (
     isThisOrSuperExpression(expression) ||
-    isKnownPrototypeExpression(
-      expression as ts.Expression,
-      knownConstructors,
-    ) ||
-    isKnownConstructorExpression(expression as ts.Expression, knownConstructors)
+    isKnownPrototypeExpression(expression, knownConstructors) ||
+    isKnownConstructorExpression(expression, knownConstructors)
   );
 }

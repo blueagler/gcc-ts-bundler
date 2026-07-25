@@ -3,7 +3,7 @@ import path from "path";
 
 import { hashContent, hashJson } from "../../cache/hash";
 import { getPackageRootFromBundle } from "../../internal/bundle-location";
-import { NormalizedBuildOptions } from "../../internal/types";
+import type { NormalizedBuildOptions } from "../../internal/types";
 
 export async function hashTsConfig(configPath: string): Promise<string> {
   return hashContent(await fs.promises.readFile(configPath, "utf-8"));
@@ -25,10 +25,14 @@ export function getPackageRoot() {
   return getPackageRootFromBundle();
 }
 
-const packageSignaturePromises = new Map<string, Promise<string>>();
+let packageSignaturePromises: Map<string, Promise<string>> | undefined;
 
 export async function getPackageSignature(packageRoot = getPackageRoot()) {
-  let packageSignaturePromise = packageSignaturePromises.get(packageRoot);
+  const cache = (packageSignaturePromises ??= new Map<
+    string,
+    Promise<string>
+  >());
+  let packageSignaturePromise = cache.get(packageRoot);
   if (!packageSignaturePromise) {
     packageSignaturePromise = (async () => {
       const packageJsonStat = await fs.promises.stat(
@@ -47,7 +51,7 @@ export async function getPackageSignature(packageRoot = getPackageRoot()) {
         }),
       );
     })();
-    packageSignaturePromises.set(packageRoot, packageSignaturePromise);
+    cache.set(packageRoot, packageSignaturePromise);
   }
 
   return packageSignaturePromise;

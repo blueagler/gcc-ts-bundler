@@ -2,6 +2,11 @@ import fs from "fs";
 import path from "path";
 
 import { writeFileIfChanged } from "../internal/files";
+import {
+  assertNever,
+  defineValues,
+  requireChoice,
+} from "../internal/validation";
 import { createExternAnalysisContext } from "./externs/context";
 import {
   collectReachableTypeFiles,
@@ -15,122 +20,179 @@ import {
   renderRuntimeAwareExterns,
 } from "./externs/render";
 
-export type GenerateExternsMode =
-  | "boundary-aware"
-  | "candidates"
-  | "runtime-aware";
+export const EXTERN_MODES = defineValues(
+  "boundary-aware",
+  "candidates",
+  "runtime-aware",
+);
+export type GenerateExternsMode = (typeof EXTERN_MODES)[number];
 
 export interface GenerateExternsOptions {
-  appEntryFiles?: string[];
-  includeDependencies?: boolean;
-  mode?: GenerateExternsMode;
-  modules: string[];
-  outputFile?: string;
-  projectRoot?: string;
-  runtimeEntryFiles?: string[];
-  srcDir?: string;
-  tsConfigPath?: string;
+  appEntryFiles?: readonly string[] | undefined;
+  includeDependencies?: boolean | undefined;
+  mode?: GenerateExternsMode | undefined;
+  modules: readonly string[];
+  outputFile?: string | undefined;
+  projectRoot?: string | undefined;
+  runtimeEntryFiles?: readonly string[] | undefined;
+  srcDir?: string | undefined;
+  tsConfigPath?: string | undefined;
 }
 
 export interface GenerateExternsResult {
   mode: GenerateExternsMode;
-  modules: string[];
-  outputFile?: string;
-  scannedFiles: string[];
+  modules: readonly string[];
+  outputFile: string | undefined;
+  scannedFiles: readonly string[];
   text: string;
+}
+
+interface ResolvedExternOptions {
+  appEntryFiles: string[];
+  compilerOptions: Awaited<ReturnType<typeof loadExternCompilerOptions>>;
+  includeDependencies: boolean;
+  mode: GenerateExternsMode;
+  modules: string[];
+  outputFile: string | undefined;
+  projectRoot: string;
+  runtimeEntryFiles: string[];
+  srcDir: string;
 }
 
 export async function generateExterns(
   options: GenerateExternsOptions,
 ): Promise<GenerateExternsResult> {
+  const resolved = await resolveExternOptions(options);
+  const scannedFiles = await resolveScannedFiles(resolved);
+  const analysis = createExternAnalysisContext({
+    appEntryFiles: resolved.appEntryFiles,
+    compilerOptions: resolved.compilerOptions,
+    projectRoot: resolved.projectRoot,
+    scannedFiles,
+  });
+  const text = await renderExterns(resolved, analysis);
+
+  if (resolved.outputFile !== undefined) {
+    await fs.promises.mkdir(path.dirname(resolved.outputFile), {
+      recursive: true,
+    });
+    await writeFileIfChanged(resolved.outputFile, text);
+  }
+
+  return {
+    mode: resolved.mode,
+    modules: resolved.modules,
+    outputFile: resolved.outputFile,
+    scannedFiles,
+    text,
+  };
+}
+
+async function resolveExternOptions(
+  options: GenerateExternsOptions,
+): Promise<ResolvedExternOptions> {
   if (options.modules.length === 0) {
     throw new Error("generateExterns requires at least one module specifier.");
   }
 
-  const mode = options.mode ?? "boundary-aware";
+  const mode = requireChoice(
+    options.mode ?? "boundary-aware",
+    EXTERN_MODES,
+    "mode",
+  );
   const projectRoot = path.resolve(options.projectRoot ?? process.cwd());
   const srcDir = path.resolve(projectRoot, options.srcDir ?? ".");
-  const tsConfigPath =
-    options.tsConfigPath && path.resolve(projectRoot, options.tsConfigPath);
-  const compilerOptions = await loadExternCompilerOptions({
-    projectRoot,
-    tsConfigPath,
-  });
-  const includeDependencies = options.includeDependencies ?? true;
-  const resolvedAppEntryFiles = resolveAnalysisEntryFiles({
-    entryFiles: options.appEntryFiles ?? [],
+  const appEntryFiles = resolveAnalysisEntryFiles({
+    entryFiles: [...(options.appEntryFiles ?? [])],
     projectRoot,
     srcDir,
   });
-  const resolvedRuntimeEntryFiles = resolveAnalysisEntryFiles({
-    entryFiles: options.runtimeEntryFiles ?? [],
+  const runtimeEntryFiles = resolveAnalysisEntryFiles({
+    entryFiles: [...(options.runtimeEntryFiles ?? [])],
     projectRoot,
     srcDir,
   });
 
-  if (mode === "boundary-aware" && (options.appEntryFiles?.length ?? 0) === 0) {
+  validateModeInputs(mode, appEntryFiles, runtimeEntryFiles);
+
+  return {
+    appEntryFiles,
+    compilerOptions: await loadExternCompilerOptions({
+      projectRoot,
+      tsConfigPath:
+        options.tsConfigPath === undefined
+          ? undefined
+          : path.resolve(projectRoot, options.tsConfigPath),
+    }),
+    includeDependencies: options.includeDependencies ?? true,
+    mode,
+    modules: [...options.modules],
+    outputFile:
+      options.outputFile === undefined
+        ? undefined
+        : path.resolve(projectRoot, options.outputFile),
+    projectRoot,
+    runtimeEntryFiles,
+    srcDir,
+  };
+}
+
+function validateModeInputs(
+  mode: GenerateExternsMode,
+  appEntryFiles: readonly string[],
+  runtimeEntryFiles: readonly string[],
+) {
+  if (mode === "boundary-aware" && appEntryFiles.length === 0) {
     throw new Error(
       "generateExterns in boundary-aware mode requires appEntryFiles.",
     );
   }
-  if (
-    mode === "runtime-aware" &&
-    (options.runtimeEntryFiles?.length ?? 0) === 0
-  ) {
+  if (mode === "runtime-aware" && runtimeEntryFiles.length === 0) {
     throw new Error(
       "generateExterns in runtime-aware mode requires runtimeEntryFiles.",
     );
   }
+}
 
+async function resolveScannedFiles(options: ResolvedExternOptions) {
   const typeEntryFiles = await resolveModuleTypeEntries({
-    compilerOptions,
-    projectRoot,
+    compilerOptions: options.compilerOptions,
+    projectRoot: options.projectRoot,
     specifiers: options.modules,
-    tolerateMissing: mode === "runtime-aware",
+    tolerateMissing: options.mode === "runtime-aware",
   });
-  const scannedFiles =
-    typeEntryFiles.length === 0
-      ? []
-      : await collectReachableTypeFiles({
-          compilerOptions,
-          entryFiles: typeEntryFiles,
-          includeDependencies,
-        });
-  const analysis = createExternAnalysisContext({
-    appEntryFiles: resolvedAppEntryFiles,
-    compilerOptions,
-    projectRoot,
-    scannedFiles,
-  });
-  const text =
-    mode === "candidates"
-      ? renderCandidateExterns({
-          analysis,
-          modules: options.modules,
-        })
-      : mode === "boundary-aware"
-        ? renderBoundaryAwareExterns({
-            analysis,
-            modules: options.modules,
-          })
-        : await renderRuntimeAwareExterns({
-            analysis,
-            modules: options.modules,
-            runtimeEntryFiles: resolvedRuntimeEntryFiles,
-          });
-
-  const outputFile =
-    options.outputFile && path.resolve(projectRoot, options.outputFile);
-  if (outputFile) {
-    await fs.promises.mkdir(path.dirname(outputFile), { recursive: true });
-    await writeFileIfChanged(outputFile, text);
+  if (typeEntryFiles.length === 0) {
+    return [];
   }
+  return collectReachableTypeFiles({
+    compilerOptions: options.compilerOptions,
+    entryFiles: typeEntryFiles,
+    includeDependencies: options.includeDependencies,
+  });
+}
 
-  return {
-    mode,
-    modules: [...options.modules],
-    outputFile,
-    scannedFiles,
-    text,
-  };
+async function renderExterns(
+  options: ResolvedExternOptions,
+  analysis: ReturnType<typeof createExternAnalysisContext>,
+) {
+  switch (options.mode) {
+    case "boundary-aware":
+      return renderBoundaryAwareExterns({
+        analysis,
+        modules: options.modules,
+      });
+    case "candidates":
+      return renderCandidateExterns({
+        analysis,
+        modules: options.modules,
+      });
+    case "runtime-aware":
+      return renderRuntimeAwareExterns({
+        analysis,
+        modules: options.modules,
+        runtimeEntryFiles: options.runtimeEntryFiles,
+      });
+    default:
+      return assertNever(options.mode);
+  }
 }

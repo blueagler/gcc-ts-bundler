@@ -16,7 +16,7 @@ const FINAL_OUTPUT_DIR = "gcc-final-out";
 
 export async function prepareViteWorkspace(input: {
   config: ResolvedConfig;
-  debugDir?: string;
+  debugDir: string | undefined;
   options: GccTsBundlerVitePluginOptions;
   projectRoot: string;
 }): Promise<ViteWorkspaceLayout> {
@@ -52,7 +52,7 @@ export async function prepareViteWorkspace(input: {
 export async function stageCompiledCoreOutputs(input: {
   coreOutDir: string;
   finalOutDir: string;
-  outputFiles: string[];
+  outputFiles: readonly string[];
 }): Promise<CompiledCoreOutputSet> {
   const stagedEntries = await Promise.all(
     input.outputFiles.map(async (outputFile) => ({

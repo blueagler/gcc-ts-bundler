@@ -1,44 +1,30 @@
 import * as closureCompilerPackage from "google-closure-compiler";
-// @ts-expect-error - package does not expose types for this internal helper.
 import { getNativeImagePath } from "google-closure-compiler/lib/utils.js";
 
-export type ClosureCompilerClass =
-  (typeof closureCompilerPackage)["compiler"] & {
-    JAR_PATH?: unknown;
-  };
+export type ClosureCompilerOption = string | boolean;
+export type ClosureCompilerOptions = Record<
+  string,
+  ClosureCompilerOption | ClosureCompilerOption[]
+>;
 
-type ClosureCompilerInstance = InstanceType<ClosureCompilerClass> & {
-  JAR_PATH?: null | string;
-  javaPath?: string;
-};
-
-type ClosureCompilerPackageShape = typeof closureCompilerPackage & {
-  JAR_PATH?: unknown;
-};
-
-export type ClosureCompilerOptions =
-  ConstructorParameters<ClosureCompilerClass>[0];
+type ClosureCompilerInstance = InstanceType<
+  typeof closureCompilerPackage.compiler
+>;
 
 export function applyInternalClosureDebugOptions(
   closureOptions: ClosureCompilerOptions,
 ) {
-  const mutableOptions = closureOptions as ClosureCompilerOptions & {
-    compilationLevel?: string;
-    debug?: boolean;
-    formatting?: string;
-    useTypesForOptimization?: boolean;
-  };
-  if (process.env.GCC_CLOSURE_DEBUG === "1") {
-    mutableOptions.debug = true;
-    mutableOptions.formatting = "PRETTY_PRINT";
+  if (process.env["GCC_CLOSURE_DEBUG"] === "1") {
+    closureOptions["debug"] = true;
+    closureOptions["formatting"] = "PRETTY_PRINT";
   }
   if (
-    mutableOptions.compilationLevel === "ADVANCED" &&
-    process.env.GCC_USE_TYPES_FOR_OPTIMIZATION !== "false"
+    closureOptions["compilationLevel"] === "ADVANCED" &&
+    process.env["GCC_USE_TYPES_FOR_OPTIMIZATION"] !== "false"
   ) {
-    mutableOptions.useTypesForOptimization = true;
-  } else if (process.env.GCC_USE_TYPES_FOR_OPTIMIZATION === "false") {
-    mutableOptions.useTypesForOptimization = false;
+    closureOptions["useTypesForOptimization"] = true;
+  } else if (process.env["GCC_USE_TYPES_FOR_OPTIMIZATION"] === "false") {
+    closureOptions["useTypesForOptimization"] = false;
   }
 }
 
@@ -51,12 +37,9 @@ export function configureClosureCompilerOptions(
 export async function runClosureCompiler(
   options: ClosureCompilerOptions,
 ): Promise<number> {
-  const closureCompiler =
-    closureCompilerPackage.compiler as ClosureCompilerClass;
-
   return new Promise((resolve) => {
     const compilerProcess = configureClosureCompilerInstance(
-      new closureCompiler(options),
+      new closureCompilerPackage.compiler(options),
     );
     compilerProcess.run((exitCode, stdOut, stdErr) => {
       if (stdOut) {
@@ -74,33 +57,9 @@ export function resolveClosureCompilerVersionTag() {
   return resolveClosureCompilerJarPath() ?? getNativeImagePath() ?? "native";
 }
 
-function getDefaultString(value: unknown): string | undefined {
-  if (
-    typeof value === "object" &&
-    value !== null &&
-    "default" in value &&
-    typeof value.default === "string"
-  ) {
-    return value.default;
-  }
-
-  return undefined;
-}
-
 function resolveClosureCompilerJarPath(): string | undefined {
-  const closureCompilerModule =
-    closureCompilerPackage as ClosureCompilerPackageShape;
-  const closureCompiler =
-    closureCompilerPackage.compiler as ClosureCompilerClass;
-  const jarPath =
-    typeof closureCompiler.JAR_PATH === "string"
-      ? closureCompiler.JAR_PATH
-      : typeof closureCompilerModule.JAR_PATH === "string"
-        ? closureCompilerModule.JAR_PATH
-        : (getDefaultString(closureCompiler.JAR_PATH) ??
-          getDefaultString(closureCompilerModule.JAR_PATH));
-
-  return jarPath;
+  const jarPath = closureCompilerPackage.compiler.JAR_PATH;
+  return typeof jarPath === "string" ? jarPath : undefined;
 }
 
 function configureClosureCompilerInstance(
@@ -108,15 +67,16 @@ function configureClosureCompilerInstance(
 ): ClosureCompilerInstance {
   const nativeImagePath = getNativeImagePath();
   if (nativeImagePath) {
-    instance.JAR_PATH = null;
-    instance.javaPath = nativeImagePath;
+    Object.assign(instance, {
+      JAR_PATH: null,
+      javaPath: nativeImagePath,
+    });
     return instance;
   }
 
   const jarPath = resolveClosureCompilerJarPath();
   if (jarPath) {
-    instance.JAR_PATH = jarPath;
+    Object.assign(instance, { JAR_PATH: jarPath });
   }
-
   return instance;
 }

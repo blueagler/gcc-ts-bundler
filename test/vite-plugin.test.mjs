@@ -13,7 +13,6 @@ import { resolveNormalizedBridgeModuleIds } from "../src/vite/graph.ts";
 import { materializeCapturedGraph } from "../src/vite/materialize.ts";
 import { prebundleMaterializedDependencies } from "../src/vite/prebundle.ts";
 import {
-  VITE_FETCH_LOADER_ERROR,
   resolveViteLanguageOut,
   VITE_LANGUAGE_OUT_ERROR,
 } from "../src/vite/config.ts";
@@ -1218,7 +1217,9 @@ test.serial(
         cwd: fixture.projectRoot,
       }),
     ).rejects.toMatchObject({
-      stderr: expect.stringContaining(VITE_FETCH_LOADER_ERROR),
+      stderr: expect.stringContaining(
+        "chunks.loader must be one of: script",
+      ),
     });
   },
 );

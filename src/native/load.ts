@@ -1,3 +1,5 @@
+import { toRecord } from "../internal/records";
+import { defineValues, isRecord } from "../internal/validation";
 import nativeBinding from "./index";
 
 interface NativeEntryExportMetadata {
@@ -214,13 +216,41 @@ interface NativeBinding {
 
 let cachedBinding: NativeBinding | null = null;
 
+const NATIVE_BINDING_METHODS = defineValues(
+  "collectFileStates",
+  "collectPublishedOutputStats",
+  "matchFileStates",
+  "planChunks",
+  "prepareClosureJobs",
+  "publishedOutputSnapshotMatches",
+  "publishedOutputsMatch",
+  "resolveGraph",
+  "rewriteBundlerRuntimeEs5Helpers",
+  "rewriteDecoratorMetadata",
+  "rewriteGccExports",
+  "transpileSources",
+  "writeEntryShims",
+);
+
 function loadBinding(): NativeBinding {
   if (cachedBinding) {
     return cachedBinding;
   }
+  if (!isNativeBinding(nativeBinding)) {
+    throw new TypeError("Loaded native addon has an invalid API surface.");
+  }
 
-  cachedBinding = nativeBinding as NativeBinding;
+  cachedBinding = nativeBinding;
   return cachedBinding;
+}
+
+function isNativeBinding(value: unknown): value is NativeBinding {
+  return (
+    isRecord(value) &&
+    NATIVE_BINDING_METHODS.every(
+      (methodName) => typeof value[methodName] === "function",
+    )
+  );
 }
 
 export function resolveGraph(input: {
@@ -237,12 +267,18 @@ export function resolveGraph(input: {
   );
   return {
     entries: result.entries,
-    fileHashes: Object.fromEntries(
-      result.fileHashes.map((entry) => [entry.filePath, entry.hash]),
-    ) as Record<string, string>,
-    graph: Object.fromEntries(
-      result.graph.map((entry) => [entry.filePath, entry.dependencies]),
-    ) as Record<string, string[]>,
+    fileHashes: toRecord(
+      result.fileHashes.map((entry): readonly [string, string] => [
+        entry.filePath,
+        entry.hash,
+      ]),
+    ),
+    graph: toRecord(
+      result.graph.map((entry): readonly [string, string[]] => [
+        entry.filePath,
+        entry.dependencies,
+      ]),
+    ),
     lazyImports: result.lazyImports,
     packageAliases: result.packageAliases,
     packageJsonFiles: result.packageJsonFiles,
@@ -284,29 +320,29 @@ export function rewriteDecoratorMetadata(
 
 export function transpileSources(input: {
   chunkMode: string;
-  explicitExternPaths?: string[];
+  explicitExternPaths: string[];
   externsPath: string;
   fileNames: string[];
   metadataPath: string;
   outDir: string;
-  packageAliases?: NativeTranspilePackageAlias[];
-  packageJsonFiles?: string[];
-  lazyImports?: NativeLazyImportInput[];
-  runtimeModuleSourceMapFile?: string;
+  packageAliases: NativeTranspilePackageAlias[];
+  packageJsonFiles: string[];
+  lazyImports: NativeLazyImportInput[];
+  runtimeModuleSourceMapFile: string | undefined;
   workspaceDir: string;
 }) {
   return loadBinding().transpileSources(
     input.fileNames,
-    input.explicitExternPaths ?? [],
+    input.explicitExternPaths,
     input.outDir,
     input.externsPath,
     input.metadataPath,
     input.chunkMode,
     input.runtimeModuleSourceMapFile ?? null,
     input.workspaceDir,
-    input.packageAliases ?? [],
-    input.packageJsonFiles ?? [],
-    input.lazyImports ?? [],
+    input.packageAliases,
+    input.packageJsonFiles,
+    input.lazyImports,
   );
 }
 

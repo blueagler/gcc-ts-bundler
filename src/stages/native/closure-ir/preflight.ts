@@ -1,8 +1,9 @@
 import fs from "fs";
 import ts from "typescript";
 
-import { DiagnosticsPreflight } from "../../../api/types";
+import type { DiagnosticsPreflight } from "../../../api/types";
 import { logInternalDetail } from "../../../internal/timing";
+import { isUnknownArray } from "../../../internal/validation";
 import { shouldIgnorePreflightDiagnostic } from "./diagnostics";
 import type { ClosureIrScanResult } from "./metadata/scan";
 
@@ -101,8 +102,8 @@ export function loadViteAuthoredFiles(
 
   try {
     const raw = fs.readFileSync(filePath, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isUnknownArray(parsed)) {
       return null;
     }
     const authoredFiles = new Set(

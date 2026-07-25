@@ -9,34 +9,35 @@ export function determineClosureConcurrency(jobCount: number) {
     }
   }
 
-  const available = os.availableParallelism?.() ?? os.cpus().length ?? 1;
-  return Math.min(jobCount, Math.max(1, available - 1));
+  return Math.min(jobCount, Math.max(1, os.availableParallelism() - 1));
 }
 
 export async function runWithConcurrency<T, R>(
-  items: T[],
+  items: readonly T[],
   concurrency: number,
   worker: (item: T) => Promise<R>,
-) {
-  if (items.length === 0) {
-    return [] as R[];
-  }
-
-  const results = new Array<R>(items.length);
-  let index = 0;
+): Promise<R[]> {
+  const queue = items.entries();
+  const results = new Map<number, { value: R }>();
 
   await Promise.all(
     Array.from({ length: Math.max(1, concurrency) }, async () => {
       for (;;) {
-        const current = index;
-        index += 1;
-        if (current >= items.length) {
+        const next = queue.next();
+        if (next.done) {
           return;
         }
-        results[current] = await worker(items[current]);
+        const [index, item] = next.value;
+        results.set(index, { value: await worker(item) });
       }
     }),
   );
 
-  return results;
+  return items.map((_, index) => {
+    const result = results.get(index);
+    if (result === undefined) {
+      throw new Error(`Missing concurrent result at index ${index}.`);
+    }
+    return result.value;
+  });
 }

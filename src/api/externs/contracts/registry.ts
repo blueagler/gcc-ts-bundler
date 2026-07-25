@@ -2,19 +2,23 @@ import path from "path";
 import ts from "typescript";
 
 import {
-  ClassContract,
-  ContractRegistry,
+  createEmptyContractRegistry,
   getPropertyNameText,
   hasNonPublicModifier,
   hasStaticModifier,
-  InterfaceContract,
   isExportedDeclaration,
   isExternPropertyName,
   isScannedDeclarationSymbol,
   resolveAliasedSymbol,
   symbolCacheKey,
-  TypeAliasContract,
 } from "../shared";
+import type { ContractRegistry } from "../shared";
+
+interface ContractCollectionContext {
+  checker: ts.TypeChecker;
+  registry: ContractRegistry;
+  scannedFileSet: Set<string>;
+}
 
 export function collectContracts({
   checker,
@@ -25,114 +29,126 @@ export function collectContracts({
   program: ts.Program;
   scannedFiles: string[];
 }): ContractRegistry {
-  const scannedFileSet = new Set(
-    scannedFiles.map((filePath) => path.resolve(filePath)),
-  );
-  const interfaceContracts = new Map<ts.Symbol, InterfaceContract>();
-  const typeAliasContracts = new Map<ts.Symbol, TypeAliasContract>();
-  const classContracts = new Map<ts.Symbol, ClassContract>();
+  const registry = createEmptyContractRegistry();
+  const context: ContractCollectionContext = {
+    checker,
+    registry,
+    scannedFileSet: registry.scannedFiles,
+  };
+  for (const filePath of scannedFiles) {
+    registry.scannedFiles.add(path.resolve(filePath));
+  }
 
   for (const sourceFile of program.getSourceFiles()) {
-    if (!scannedFileSet.has(path.resolve(sourceFile.fileName))) {
+    if (!registry.scannedFiles.has(path.resolve(sourceFile.fileName))) {
       continue;
     }
-
     for (const statement of sourceFile.statements) {
-      if (
-        ts.isInterfaceDeclaration(statement) &&
-        isExportedDeclaration(statement)
-      ) {
-        const symbol = checker.getSymbolAtLocation(statement.name);
-        if (!symbol) {
-          continue;
-        }
-        interfaceContracts.set(symbol, {
-          extends: getReferencedContractSymbols(
-            statement.heritageClauses?.flatMap((clause) => clause.types) ?? [],
-            checker,
-            scannedFileSet,
-          ),
-          members: collectTypeElementMembers(statement.members),
-          name: statement.name.text,
-          symbol,
-        });
-        continue;
-      }
-
-      if (
-        ts.isTypeAliasDeclaration(statement) &&
-        isExportedDeclaration(statement)
-      ) {
-        const symbol = checker.getSymbolAtLocation(statement.name);
-        if (!symbol) {
-          continue;
-        }
-        const members = collectAliasMembers(statement.type);
-        if (members.size === 0) {
-          continue;
-        }
-        typeAliasContracts.set(symbol, {
-          members,
-          name: statement.name.text,
-          symbol,
-        });
-        continue;
-      }
-
-      if (
-        ts.isClassDeclaration(statement) &&
-        statement.name &&
-        isExportedDeclaration(statement)
-      ) {
-        const symbol = checker.getSymbolAtLocation(statement.name);
-        if (!symbol) {
-          continue;
-        }
-        const instanceMembers = new Set<string>();
-        const staticMembers = new Set<string>();
-        for (const member of statement.members) {
-          if (ts.isConstructorDeclaration(member)) {
-            continue;
-          }
-          if (hasNonPublicModifier(member)) {
-            continue;
-          }
-          const memberName = getPropertyNameText(member.name);
-          if (!memberName || !isExternPropertyName(memberName)) {
-            continue;
-          }
-          if (hasStaticModifier(member)) {
-            staticMembers.add(memberName);
-          } else {
-            instanceMembers.add(memberName);
-          }
-        }
-        classContracts.set(symbol, {
-          constructorParamContracts: collectConstructorParamContracts(
-            statement,
-            checker,
-            scannedFileSet,
-          ),
-          instanceMembers,
-          name: statement.name.text,
-          staticMembers,
-          symbol,
-          usedImplementedContracts: getClassImplementedContracts(
-            statement,
-            checker,
-            scannedFileSet,
-          ),
-        });
-      }
+      collectContract(statement, context);
     }
   }
 
-  return {
-    classContracts,
-    interfaceContracts,
-    scannedFiles: scannedFileSet,
-    typeAliasContracts,
-  };
+  return registry;
+}
+
+function collectContract(
+  statement: ts.Statement,
+  context: ContractCollectionContext,
+) {
+  if (!isExportedDeclaration(statement)) {
+    return;
+  }
+  if (ts.isInterfaceDeclaration(statement)) {
+    collectInterfaceContract(statement, context);
+  } else if (ts.isTypeAliasDeclaration(statement)) {
+    collectTypeAliasContract(statement, context);
+  } else if (ts.isClassDeclaration(statement) && statement.name) {
+    collectClassContract(statement, context);
+  }
+}
+
+function collectInterfaceContract(
+  statement: ts.InterfaceDeclaration,
+  context: ContractCollectionContext,
+) {
+  const symbol = context.checker.getSymbolAtLocation(statement.name);
+  if (!symbol) {
+    return;
+  }
+  context.registry.interfaceContracts.set(symbol, {
+    extends: getReferencedContractSymbols(
+      statement.heritageClauses?.flatMap((clause) => clause.types) ?? [],
+      context.checker,
+      context.scannedFileSet,
+    ),
+    members: collectTypeElementMembers(statement.members),
+    name: statement.name.text,
+    symbol,
+  });
+}
+
+function collectTypeAliasContract(
+  statement: ts.TypeAliasDeclaration,
+  context: ContractCollectionContext,
+) {
+  const symbol = context.checker.getSymbolAtLocation(statement.name);
+  const members = collectAliasMembers(statement.type);
+  if (!symbol || members.size === 0) {
+    return;
+  }
+  context.registry.typeAliasContracts.set(symbol, {
+    members,
+    name: statement.name.text,
+    symbol,
+  });
+}
+
+function collectClassContract(
+  statement: ts.ClassDeclaration,
+  context: ContractCollectionContext,
+) {
+  if (!statement.name) {
+    return;
+  }
+  const symbol = context.checker.getSymbolAtLocation(statement.name);
+  if (!symbol) {
+    return;
+  }
+  const { instanceMembers, staticMembers } = collectClassMembers(statement);
+  context.registry.classContracts.set(symbol, {
+    constructorParamContracts: collectConstructorParamContracts(
+      statement,
+      context.checker,
+      context.scannedFileSet,
+    ),
+    instanceMembers,
+    name: statement.name.text,
+    staticMembers,
+    symbol,
+    usedImplementedContracts: getClassImplementedContracts(
+      statement,
+      context.checker,
+      context.scannedFileSet,
+    ),
+  });
+}
+
+function collectClassMembers(statement: ts.ClassDeclaration) {
+  const instanceMembers = new Set<string>();
+  const staticMembers = new Set<string>();
+  for (const member of statement.members) {
+    if (ts.isConstructorDeclaration(member) || hasNonPublicModifier(member)) {
+      continue;
+    }
+    const memberName = getPropertyNameText(member.name);
+    if (!memberName || !isExternPropertyName(memberName)) {
+      continue;
+    }
+    (hasStaticModifier(member) ? staticMembers : instanceMembers).add(
+      memberName,
+    );
+  }
+  return { instanceMembers, staticMembers };
 }
 
 function collectTypeElementMembers(members: ts.NodeArray<ts.TypeElement>) {

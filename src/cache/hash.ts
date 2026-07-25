@@ -7,7 +7,7 @@ function normalizeValue(value: unknown): unknown {
 
   if (value && typeof value === "object") {
     return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
+      Object.entries(value)
         .filter(([, nestedValue]) => typeof nestedValue !== "function")
         .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))
         .map(([key, nestedValue]) => [key, normalizeValue(nestedValue)]),

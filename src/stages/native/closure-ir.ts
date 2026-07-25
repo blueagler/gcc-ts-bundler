@@ -1,6 +1,6 @@
 import ts from "typescript";
 
-import { DiagnosticsPreflight } from "../../api/types";
+import type { DiagnosticsPreflight } from "../../api/types";
 import { logInternalDetail } from "../../internal/timing";
 import { loadCompilerOptions } from "./compiler-options";
 import {
@@ -65,7 +65,7 @@ export function collectNativeTypeAnalysisFromContext({
 }: {
   context: NativeTypeAnalysisContext;
   preflight: DiagnosticsPreflight;
-  scan?: NativeTypeAnalysisScanResult;
+  scan: NativeTypeAnalysisScanResult | undefined;
 }) {
   const preflightDiagnostics = collectNativePreflightDiagnosticsFromContext({
     context,
@@ -87,7 +87,7 @@ export function collectNativePreflightDiagnosticsFromContext({
 }: {
   context: NativeTypeAnalysisContext;
   preflight: DiagnosticsPreflight;
-  scan?: NativeTypeAnalysisScanResult;
+  scan: NativeTypeAnalysisScanResult | undefined;
 }) {
   const closureIrScan = scan ?? scanNativeTypeAnalysisContext({ context });
   return collectNativePreflightDiagnostics({
@@ -102,7 +102,7 @@ export function collectNativeClosureIrFromContext({
   scan,
 }: {
   context: NativeTypeAnalysisContext;
-  scan?: NativeTypeAnalysisScanResult;
+  scan: NativeTypeAnalysisScanResult | undefined;
 }) {
   const { compilerOptions, fileNames, program } = context;
   const closureIrScan = scan ?? scanNativeTypeAnalysisContext({ context });
@@ -134,7 +134,11 @@ export async function collectNativeTypeAnalysis({
     tsConfigPath,
     workspaceDir,
   });
-  return collectNativeTypeAnalysisFromContext({ context, preflight });
+  return collectNativeTypeAnalysisFromContext({
+    context,
+    preflight,
+    scan: undefined,
+  });
 }
 
 export async function collectClosureIrMetadata({

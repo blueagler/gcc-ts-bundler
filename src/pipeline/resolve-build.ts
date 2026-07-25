@@ -8,8 +8,9 @@ import {
   writeJson,
   getDefaultPersistentCacheRoot,
 } from "../cache/store";
+import { zipExact } from "../internal/arrays";
 import { collectTrackedFiles, trackedFilesMatch } from "../internal/file-state";
-import {
+import type {
   BuildContext,
   BuildEntry,
   NormalizedBuildOptions,
@@ -29,10 +30,11 @@ import {
   hashExternalInputs,
   hashTsConfig,
 } from "./resolve-build/signatures";
+import type { ResolveSnapshot } from "./resolve-build/cache";
 import {
+  isResolveMetadata,
+  isResolveSnapshot,
   readChunkPlan,
-  ResolveMetadata,
-  ResolveSnapshot,
 } from "./resolve-build/cache";
 import {
   collectTsxRuntimeSupport,
@@ -107,7 +109,7 @@ export async function resolveBuild(
     "latest.json",
   );
   const cachedSnapshot = usesPersistentCache
-    ? await readJsonIfExists<ResolveSnapshot>(resolveSnapshotPath)
+    ? await readJsonIfExists(resolveSnapshotPath, isResolveSnapshot)
     : null;
   const resolveSnapshotHit =
     !!cachedSnapshot &&
@@ -201,7 +203,7 @@ export async function resolveBuild(
     `${resolveKey}.json`,
   );
   let resolveMetadata = usesPersistentCache
-    ? await readJsonIfExists<ResolveMetadata>(resolveMetadataPath)
+    ? await readJsonIfExists(resolveMetadataPath, isResolveMetadata)
     : null;
   if (resolveMetadata) {
     resolveMetadata = {
@@ -214,12 +216,16 @@ export async function resolveBuild(
   }
 
   if (!resolveMetadata) {
-    const entryFiles = graphResult.entries.map(
-      (entry, index): BuildEntry => ({
-        chunkName: sanitizeChunkName(outputNames[index]),
+    const entryFiles = zipExact(
+      graphResult.entries,
+      outputNames,
+      "resolved entries and output names",
+    ).map(
+      ([entry, outputName]): BuildEntry => ({
+        chunkName: sanitizeChunkName(outputName),
         exportNames: entry.exportNames,
         hasDefaultExport: entry.hasDefaultExport,
-        outputName: outputNames[index],
+        outputName,
         sourcePath: entry.sourcePath,
         sourceRelativePath: path.relative(sourceRoot, entry.sourcePath),
       }),
@@ -242,8 +248,12 @@ export async function resolveBuild(
               filePath,
             }),
           ),
-          ...shimFiles.map((shimFile, index) => ({
-            dependencies: [entryFiles[index].sourcePath],
+          ...zipExact(
+            shimFiles,
+            entryFiles,
+            "entry shims and resolved entries",
+          ).map(([shimFile, entry]) => ({
+            dependencies: [entry.sourcePath],
             filePath: shimFile,
           })),
         ],

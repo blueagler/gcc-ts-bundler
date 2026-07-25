@@ -1,4 +1,4 @@
-import ts from "typescript";
+import type ts from "typescript";
 
 import { collectClosureIrFileMetadata } from "./metadata/collect";
 import { collectUnsafeEnumSymbols } from "./metadata/enums";
@@ -6,7 +6,7 @@ import {
   scanClosureIrSourceFiles,
   type ClosureIrScanResult,
 } from "./metadata/scan";
-import { ClosureIrFileMetadata } from "./types";
+import type { ClosureIrFileMetadata } from "./types";
 
 export interface ClosureIrCollectionResult {
   diagnostics: ts.Diagnostic[];

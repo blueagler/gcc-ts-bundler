@@ -17,7 +17,7 @@ import {
   hasStaticModifier,
 } from "./docs";
 import { buildEnumDeclarationMetadata } from "./enums";
-import {
+import type {
   ClosureIrEnumDeclaration,
   ClosureIrFileMetadata,
   ClosureIrTypeDeclaration,
@@ -146,7 +146,6 @@ function collectClosureDocsForSourceFile(
           checker,
           context: renderContext,
           initializer: node.initializer,
-          name: node.name.text,
           typeNode: node.type,
         });
         if (jsdoc) {

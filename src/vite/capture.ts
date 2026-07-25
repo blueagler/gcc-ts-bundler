@@ -2,26 +2,22 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 
 import ts from "typescript";
-import type { ResolvedConfig } from "vite";
-import type { PluginContext } from "rollup";
+import type { ResolvedConfig, transformWithEsbuild } from "vite";
 
 import { hashJson } from "../cache/hash";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type {
   CapturedModule,
   CapturedModuleAnalysis,
+  PluginContext,
   ViteBuildMetrics,
 } from "./internal-types";
 
 const GCC_CAPTURE_DIR = ".gcc-ts-bundler-vite";
 
-let cachedViteEsbuildTransform: Promise<
-  (
-    code: string,
-    filename: string,
-    options: Record<string, unknown>,
-  ) => Promise<{ code: string }>
-> | null = null;
+type ViteEsbuildTransform = typeof transformWithEsbuild;
+
+let cachedViteEsbuildTransform: Promise<ViteEsbuildTransform> | null = null;
 
 export type CapturedModuleResolution = Awaited<
   ReturnType<PluginContext["resolve"]>
@@ -170,23 +166,25 @@ export async function normalizeCapturedCode(
 
 export async function normalizeRetainedCapturedModules(input: {
   capturedModules: Map<string, CapturedModule>;
-  metrics?: ViteBuildMetrics;
+  metrics?: ViteBuildMetrics | undefined;
   moduleIds: string[];
 }) {
   const normalizedEntries = await Promise.all(
-    input.moduleIds.map(async (moduleId) => {
-      const record = input.capturedModules.get(moduleId);
-      if (!record) {
-        throw new Error(
-          `gccTsBundler() could not normalize retained module ${moduleId}.`,
+    input.moduleIds.map(
+      async (moduleId): Promise<readonly [string, CapturedModule]> => {
+        const record = input.capturedModules.get(moduleId);
+        if (!record) {
+          throw new Error(
+            `gccTsBundler() could not normalize retained module ${moduleId}.`,
+          );
+        }
+        const normalizedRecord = await getNormalizedCapturedModule(
+          record,
+          input.metrics,
         );
-      }
-      const normalizedRecord = await getNormalizedCapturedModule(
-        record,
-        input.metrics,
-      );
-      return [moduleId, normalizedRecord] as const;
-    }),
+        return [moduleId, normalizedRecord];
+      },
+    ),
   );
 
   return new Map(normalizedEntries);
@@ -234,7 +232,7 @@ export async function resolveCapturedSpecifier(
   this: PluginContext,
   input: {
     importerId: string;
-    metrics?: ViteBuildMetrics;
+    metrics?: ViteBuildMetrics | undefined;
     resolutionCache: CapturedModuleResolutionCache;
     specifier: string;
   },
@@ -456,13 +454,16 @@ function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
   }
 
   const visit = (node: ts.Node) => {
+    const firstArgument = ts.isCallExpression(node)
+      ? node.arguments[0]
+      : undefined;
     if (
       ts.isCallExpression(node) &&
       node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-      node.arguments.length === 1 &&
-      ts.isStringLiteralLike(node.arguments[0])
+      firstArgument !== undefined &&
+      ts.isStringLiteralLike(firstArgument)
     ) {
-      const specifier = node.arguments[0].text;
+      const specifier = firstArgument.text;
       importSpecifiers.add(specifier);
       dynamicImportSpecifiers.add(specifier);
       bridgeSpecifiers.add(specifier);
@@ -522,18 +523,7 @@ function isClassStaticBlockNode(node: ts.Node) {
 
 async function loadViteEsbuildTransform() {
   if (!cachedViteEsbuildTransform) {
-    type ViteEsbuildModule = {
-      transformWithEsbuild: (
-        code: string,
-        filename: string,
-        options: Record<string, unknown>,
-      ) => Promise<{ code: string }>;
-    };
-    const dynamicImport = new Function(
-      "specifier",
-      "return import(specifier);",
-    ) as (specifier: string) => Promise<ViteEsbuildModule>;
-    cachedViteEsbuildTransform = dynamicImport("vite").then(
+    cachedViteEsbuildTransform = import("vite").then(
       (module) => module.transformWithEsbuild,
     );
   }

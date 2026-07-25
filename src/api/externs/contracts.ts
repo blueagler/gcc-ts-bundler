@@ -8,9 +8,9 @@ export { createEmptyContractRegistry } from "./shared";
 
 import {
   collectStructuralContractMembers,
-  ContractRegistry,
   renderStructuralExternLine,
 } from "./shared";
+import type { ContractRegistry } from "./shared";
 
 export const collectContracts = collectRegistryContracts;
 

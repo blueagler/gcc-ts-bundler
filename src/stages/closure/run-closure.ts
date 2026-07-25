@@ -7,14 +7,17 @@ import {
   ensureParentDirectory,
 } from "../../internal/files";
 import { logInternalDetail, withInternalTiming } from "../../internal/timing";
-import { ChunkPlanChunk, NormalizedBuildOptions } from "../../internal/types";
+import type {
+  ChunkPlanChunk,
+  NormalizedBuildOptions,
+} from "../../internal/types";
 import { prepareClosureJobs } from "../../native/load";
 import {
-  ClosureCompilerOptions,
   configureClosureCompilerOptions,
   resolveClosureCompilerVersionTag,
   runClosureCompiler,
 } from "./compiler";
+import type { ClosureCompilerOptions } from "./compiler";
 import {
   getCompileJobArtifactFiles,
   persistCachedClosureJob,
@@ -217,35 +220,31 @@ async function runPreparedClosureJob({
 
   const closureOptions: ClosureCompilerOptions = {
     assumeFunctionWrapper: job.assumeFunctionWrapper,
-    compilationLevel: job.compilationLevel as never,
+    compilationLevel: job.compilationLevel,
     externs: [...new Set(job.externs)],
     js: [...new Set(job.js)],
-    languageIn: job.languageIn as never,
-    languageOut: job.languageOut as never,
+    languageIn: job.languageIn,
+    languageOut: job.languageOut,
     rewritePolyfills: job.rewritePolyfills,
-    warningLevel: job.warningLevel as never,
+    warningLevel: job.warningLevel,
   };
   if (job.chunk) {
-    closureOptions.chunk = job.chunk;
+    closureOptions["chunk"] = job.chunk;
   }
   if (job.chunkOutputPathPrefix) {
-    closureOptions.chunkOutputPathPrefix = job.chunkOutputPathPrefix;
+    closureOptions["chunkOutputPathPrefix"] = job.chunkOutputPathPrefix;
   }
   if (job.dependencyMode) {
-    closureOptions.dependencyMode = job.dependencyMode as never;
+    closureOptions["dependencyMode"] = job.dependencyMode;
   }
   if (job.entryPoint && job.entryPoint.length > 0) {
-    closureOptions.entryPoint = job.entryPoint;
+    closureOptions["entryPoint"] = job.entryPoint;
   }
   if (job.jsOutputFile) {
-    closureOptions.jsOutputFile = job.jsOutputFile;
+    closureOptions["jsOutputFile"] = job.jsOutputFile;
   }
   if (job.propertyRenamingReportPath) {
-    (
-      closureOptions as ClosureCompilerOptions & {
-        propertyRenamingReport?: string;
-      }
-    ).propertyRenamingReport = job.propertyRenamingReportPath;
+    closureOptions["propertyRenamingReport"] = job.propertyRenamingReportPath;
   }
   configureClosureCompilerOptions(closureOptions);
   const exitCode = await runClosureCompiler(closureOptions);

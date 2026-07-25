@@ -1,5 +1,5 @@
 export interface ClosureIrFileMetadata {
-  decoratedOutputText?: string;
+  decoratedOutputText: string | undefined;
   enumDeclarations: ClosureIrEnumDeclaration[];
   filePath: string;
   topLevelDocs: ClosureIrTopLevelDoc[];

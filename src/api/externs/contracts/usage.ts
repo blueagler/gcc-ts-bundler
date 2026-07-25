@@ -4,13 +4,12 @@ import type { ExternAnalysisContext } from "../context";
 import {
   addMapSetValue,
   collectStructuralContractMembers,
-  ContractRegistry,
   isExternPropertyName,
   isProjectAppSourceFile,
   resolveTypeSymbol,
   resolveValueSymbol,
-  UsageAnalysis,
 } from "../shared";
+import type { ContractRegistry, UsageAnalysis } from "../shared";
 
 export function analyzeAppUsage(
   analysis: ExternAnalysisContext,

@@ -2,8 +2,10 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
-import { CacheMode } from "../api/types";
+import type { CacheMode } from "../api/types";
 import { ensureParentDirectory } from "../internal/files";
+import type { Validator } from "../internal/validation";
+import { hasErrorCode, parseJson } from "../internal/validation";
 import { hashContent } from "./hash";
 
 export interface CacheStore {
@@ -41,7 +43,7 @@ export async function createCacheStore({
   mode,
   projectRoot,
 }: {
-  cacheDir?: string;
+  cacheDir: string | undefined;
   mode: CacheMode;
   projectRoot: string;
 }): Promise<CacheStore> {
@@ -77,12 +79,15 @@ export async function createCacheStore({
   };
 }
 
-export async function readJsonIfExists<T>(filePath: string): Promise<T | null> {
+export async function readJsonIfExists<T>(
+  filePath: string,
+  validate: Validator<T>,
+): Promise<T | null> {
   try {
     const raw = await fs.promises.readFile(filePath, "utf-8");
-    return JSON.parse(raw) as T;
+    return parseJson(raw, validate, filePath);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+    if (hasErrorCode(error, "ENOENT")) {
       return null;
     }
 

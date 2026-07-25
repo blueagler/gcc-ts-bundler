@@ -1,11 +1,8 @@
 import fs from "fs/promises";
 
 import { ensureParentDirectory } from "../../internal/files";
-import {
-  prepareClosureJobs,
-  rewriteDecoratorMetadata,
-  rewriteGccExports,
-} from "../../native/load";
+import { rewriteDecoratorMetadata, rewriteGccExports } from "../../native/load";
+import type { prepareClosureJobs } from "../../native/load";
 import {
   applyEs5HelperRewrite,
   createEs5HelperRewriteContext,

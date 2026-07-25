@@ -1,41 +1,22 @@
-function findMatchingParen(sourceText: string, openParenIndex: number) {
-  let depth = 0;
-  let inString: '"' | "'" | "`" | null = null;
-  for (let index = openParenIndex; index < sourceText.length; index += 1) {
-    const character = sourceText[index];
-    if (inString) {
-      if (character === "\\") {
-        index += 1;
-        continue;
-      }
-      if (character === inString) {
-        inString = null;
-      }
-      continue;
-    }
-    if (character === '"' || character === "'" || character === "`") {
-      inString = character as '"' | "'" | "`";
-      continue;
-    }
-    if (character === "(") {
-      depth += 1;
-      continue;
-    }
-    if (character === ")") {
-      depth -= 1;
-      if (depth === 0) {
-        return index;
-      }
-    }
-  }
-  throw new Error("gccTsBundler() could not parse the runtime manifest call.");
-}
+import {
+  isObjectOf,
+  isString,
+  isStringArray,
+  optional,
+  parseJson,
+  recordOf,
+} from "../internal/validation";
+import type {
+  GccRuntimeManifest,
+  GccRuntimeManifestChunk,
+} from "./internal-types";
 
 function findMatchingDelimiter(
   sourceText: string,
   openIndex: number,
   openCharacter: string,
   closeCharacter: string,
+  errorMessage: string,
 ) {
   let depth = 0;
   let inString: '"' | "'" | "`" | null = null;
@@ -51,8 +32,8 @@ function findMatchingDelimiter(
       }
       continue;
     }
-    if (character === '"' || character === "'" || character === "`") {
-      inString = character as '"' | "'" | "`";
+    if (isQuoteCharacter(character)) {
+      inString = character;
       continue;
     }
     if (character === openCharacter) {
@@ -66,9 +47,7 @@ function findMatchingDelimiter(
       }
     }
   }
-  throw new Error(
-    "gccTsBundler() could not parse the runtime manifest payload.",
-  );
+  throw new Error(errorMessage);
 }
 
 export function extractRuntimeInitManifest(sourceText: string) {
@@ -97,10 +76,17 @@ export function extractRuntimeInitManifest(sourceText: string) {
     arrayStartIndex,
     "[",
     "]",
+    "gccTsBundler() could not parse the runtime manifest payload.",
   );
   const manifestText = sourceText.slice(arrayStartIndex, arrayEndIndex + 1);
-  const manifest = Function(`return (${manifestText});`)();
-  const closeParenIndex = findMatchingParen(sourceText, openParenIndex);
+  const manifest: unknown = JSON.parse(manifestText);
+  const closeParenIndex = findMatchingDelimiter(
+    sourceText,
+    openParenIndex,
+    "(",
+    ")",
+    "gccTsBundler() could not parse the runtime manifest call.",
+  );
   let insertIndex = closeParenIndex + 1;
   if (sourceText[insertIndex] === ";") {
     insertIndex += 1;
@@ -112,6 +98,31 @@ export function extractRuntimeInitManifest(sourceText: string) {
     insertIndex,
     manifest,
   };
+}
+
+export function parseGccRuntimeManifest(text: string, source: string) {
+  return parseJson(text, isGccRuntimeManifest, source);
+}
+
+const isGccRuntimeManifestChunk = isObjectOf<GccRuntimeManifestChunk>({
+  css: optional(isStringArray),
+  deps: isStringArray,
+  modules: isStringArray,
+  url: isString,
+});
+
+export const isGccRuntimeManifest = isObjectOf<GccRuntimeManifest>({
+  baseChunk: isString,
+  chunks: recordOf(isGccRuntimeManifestChunk),
+  loader: isString,
+  modules: recordOf(isString),
+  publicPath: isString,
+});
+
+function isQuoteCharacter(
+  character: string | undefined,
+): character is '"' | "'" | "`" {
+  return character === '"' || character === "'" || character === "`";
 }
 
 export function replaceRuntimeInitManifest(

@@ -2,11 +2,19 @@ import fs from "fs";
 import path from "path";
 import ts from "typescript";
 
-import { DiagnosticsPreflight } from "../../api/types";
+import type { DiagnosticsPreflight } from "../../api/types";
 import { uniqueSortedStrings } from "../../internal/files";
 import { filesExist } from "../../internal/file-state";
 import { logInternalDetail, withInternalTiming } from "../../internal/timing";
 import {
+  hasErrorCode,
+  isNumber,
+  isObjectOf,
+  isString,
+  isStringArray,
+  parseJson,
+} from "../../internal/validation";
+import type {
   LazyImport,
   NormalizedBuildOptions,
   PackageAlias,
@@ -323,7 +331,10 @@ async function collectNativeAnalysis({
         )
       : [];
 
-  const checkerAnalysis =
+  const checkerAnalysis: {
+    diagnostics: ts.Diagnostic[];
+    files: ClosureIrFileMetadata[];
+  } =
     analysisContext && analysisScan && checkerRequiredFileNames.length > 0
       ? await withInternalTiming("native-emit:closure-ir", () =>
           Promise.resolve(
@@ -333,9 +344,11 @@ async function collectNativeAnalysis({
             }),
           ),
         )
-      : { diagnostics: [], files: [] as ClosureIrFileMetadata[] };
+      : { diagnostics: [], files: [] };
   const checkerFileMap = new Map(
-    checkerAnalysis.files.map((file) => [file.filePath, file] as const),
+    checkerAnalysis.files.map(
+      (file): readonly [string, ClosureIrFileMetadata] => [file.filePath, file],
+    ),
   );
 
   return {
@@ -546,21 +559,13 @@ async function readMetadata(
 ): Promise<NativeEmitMetadata | null> {
   try {
     const raw = await fs.promises.readFile(metadataPath, "utf-8");
-    const parsed = JSON.parse(raw) as Partial<NativeEmitMetadata>;
+    const parsed = parseJson(raw, isNativeEmitMetadata, metadataPath);
     if (parsed.version !== NATIVE_EMIT_METADATA_VERSION) {
       return null;
     }
-    return {
-      dependencyModules: parsed.dependencyModules ?? [],
-      dependencyRuntimeFiles: parsed.dependencyRuntimeFiles ?? [],
-      emittedFiles: parsed.emittedFiles ?? [],
-      externsPath: parsed.externsPath ?? "",
-      metadataPath: parsed.metadataPath ?? "",
-      supportFiles: parsed.supportFiles ?? [],
-      version: parsed.version,
-    };
+    return parsed;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+    if (hasErrorCode(error, "ENOENT")) {
       return null;
     }
 
@@ -655,12 +660,29 @@ function resolveScriptKind(fileName: string) {
   return ts.ScriptKind.JS;
 }
 
+const isNativeEmitMetadata = isObjectOf<NativeEmitMetadata>({
+  dependencyModules: isStringArray,
+  dependencyRuntimeFiles: isStringArray,
+  emittedFiles: isStringArray,
+  externsPath: isString,
+  metadataPath: isString,
+  supportFiles: isStringArray,
+  version: isNumber,
+});
+
 function getSourceFileParseDiagnostics(sourceFile: ts.SourceFile) {
-  return [
-    ...(((
-      sourceFile as ts.SourceFile & {
-        parseDiagnostics?: readonly ts.Diagnostic[];
-      }
-    ).parseDiagnostics ?? []) as readonly ts.Diagnostic[]),
-  ];
+  return hasParseDiagnostics(sourceFile)
+    ? [...sourceFile.parseDiagnostics]
+    : [];
+}
+
+function hasParseDiagnostics(
+  sourceFile: ts.SourceFile,
+): sourceFile is ts.SourceFile & {
+  readonly parseDiagnostics: readonly ts.Diagnostic[];
+} {
+  return (
+    "parseDiagnostics" in sourceFile &&
+    Array.isArray(sourceFile.parseDiagnostics)
+  );
 }

@@ -19,6 +19,7 @@ import {
 import { hashJson } from "../cache/hash";
 import { hashFileInput, writeFileIfChanged } from "../internal/files";
 import { logInternalDetail } from "../internal/timing";
+import { isRecord, isStringArray } from "../internal/validation";
 import { getPackageSignature } from "../pipeline/resolve-build/signatures";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type { MaterializedGraph } from "./internal-types";
@@ -74,9 +75,10 @@ export async function resolveCompilerExterns(input: {
     });
   }
 
-  if ((generateOptions.appendLines?.length ?? 0) > 0) {
+  const appendLines = generateOptions.appendLines ?? [];
+  if (appendLines.length > 0) {
     const currentText = await fs.readFile(generatedExternFile, "utf8");
-    const appendedText = `${currentText.replace(/\s*$/u, "\n")}${generateOptions.appendLines!.join("\n")}\n`;
+    const appendedText = `${currentText.replace(/\s*$/u, "\n")}${appendLines.join("\n")}\n`;
     await writeFileIfChanged(generatedExternFile, appendedText);
   }
 
@@ -86,7 +88,7 @@ export async function resolveCompilerExterns(input: {
 async function generateViteRuntimeAwareExterns(input: {
   captureRoot: string;
   generatedExternFile: string;
-  includeDependencies?: boolean;
+  includeDependencies: boolean | undefined;
   materialized: MaterializedGraph;
   modules: string[];
   options: GccTsBundlerVitePluginOptions;
@@ -204,7 +206,7 @@ async function loadCachedPackageRuntimeHazards(input: {
     packageSignature: input.packageSignature,
   });
   const cacheFile = path.join(input.cacheRoot, `${cacheKey}.json`);
-  const cached = await readJsonIfExists<CachedRuntimeHazards>(cacheFile);
+  const cached = await readJsonIfExists(cacheFile, isCachedRuntimeHazards);
   if (cached) {
     return {
       cacheHit: true,
@@ -275,6 +277,15 @@ function mergeRuntimeHazards(
   }
 
   return merged;
+}
+
+function isCachedRuntimeHazards(value: unknown): value is CachedRuntimeHazards {
+  return (
+    isRecord(value) &&
+    isStringArray(value.accessedMembers) &&
+    isStringArray(value.definedMembers) &&
+    isStringArray(value.protocolMembers)
+  );
 }
 
 function serializeRuntimeHazards(

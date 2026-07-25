@@ -3,45 +3,45 @@ import { expect, test } from "bun:test";
 import { parseExternsCliArgs } from "../src/cli/parse-externs-options.ts";
 import { parseCliArgs } from "../src/cli/parse-options.ts";
 
-test("does not accept deprecated build flag aliases", () => {
-  const parsed = parseCliArgs([
-    "--project-root",
-    "/tmp/demo",
-    "--src_dir",
-    "./src",
-    "--entry_point",
-    "./main.ts",
-    "--entry-point",
-    "./main.ts",
-    "--output_dir",
-    "./dist",
-  ]);
-
-  expect(parsed.options.projectRoot).toBe("/tmp/demo");
-  expect(parsed.options.srcDir).toBeUndefined();
-  expect(parsed.options.entries).toEqual([]);
-  expect(parsed.options.outDir).toBeUndefined();
+test("rejects deprecated build flag aliases", () => {
+  expect(() =>
+    parseCliArgs(["--project-root", "/tmp/demo", "--src_dir", "./src"]),
+  ).toThrow(/Unknown option/);
 });
 
-test("does not accept deprecated extern flag aliases", () => {
-  const parsed = parseExternsCliArgs([
-    "--project-root",
-    "/tmp/demo",
-    "--project_root",
-    "/tmp/legacy",
-    "--src_dir",
-    "./src",
-    "--runtime_entry",
-    "./runtime.js",
-    "--output_file",
-    "./externs.js",
-    "--package",
-    "lit",
+test("rejects deprecated extern flag aliases", () => {
+  expect(() =>
+    parseExternsCliArgs([
+      "--project-root",
+      "/tmp/demo",
+      "--runtime_entry",
+      "./runtime.js",
+    ]),
+  ).toThrow(/Unknown option/);
+});
+
+test("parses repeated typed build options", () => {
+  const parsed = parseCliArgs([
+    "--entry",
+    "./main.ts",
+    "--entry",
+    "./worker.ts",
+    "--extern",
+    "./browser.externs.js",
+    "--cache-mode",
+    "temp",
+    "--chunk-loader",
+    "script",
   ]);
 
-  expect(parsed.options.projectRoot).toBe("/tmp/demo");
-  expect(parsed.options.srcDir).toBeUndefined();
-  expect(parsed.options.runtimeEntryFiles).toEqual([]);
-  expect(parsed.options.outputFile).toBeUndefined();
-  expect(parsed.options.modules).toEqual([]);
+  expect(parsed.options.entries).toEqual(["./main.ts", "./worker.ts"]);
+  expect(parsed.options.externs).toEqual(["./browser.externs.js"]);
+  expect(parsed.options.cache?.mode).toBe("temp");
+  expect(parsed.options.chunks?.loader).toBe("script");
+});
+
+test("rejects invalid option values during parsing", () => {
+  expect(() =>
+    parseCliArgs(["--entry", "./main.ts", "--cache-mode", "forever"]),
+  ).toThrow(/--cache-mode must be one of/);
 });

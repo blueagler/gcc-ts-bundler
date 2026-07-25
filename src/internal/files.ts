@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 
 import { hashContent } from "../cache/hash";
+import { hasErrorCode } from "./validation";
 
 const fileInputHashCache = new Map<string, Promise<string>>();
 
@@ -61,8 +62,11 @@ export async function publishFilesToDirectory(
       try {
         await fs.link(sourceFile, destinationFile);
       } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code !== "EXDEV" && code !== "EEXIST" && code !== "EPERM") {
+        if (
+          !hasErrorCode(error, "EXDEV") &&
+          !hasErrorCode(error, "EEXIST") &&
+          !hasErrorCode(error, "EPERM")
+        ) {
           throw error;
         }
 
@@ -123,7 +127,7 @@ export async function writeFileIfChanged(
       typeof content === "string" ? "utf8" : undefined,
     );
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+    if (!hasErrorCode(error, "ENOENT")) {
       throw error;
     }
   }
@@ -143,7 +147,7 @@ async function listRelativeFiles(rootDir: string, currentDir = rootDir) {
   try {
     entries = await fs.readdir(currentDir, { withFileTypes: true });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+    if (hasErrorCode(error, "ENOENT")) {
       return [];
     }
     throw error;
@@ -166,7 +170,7 @@ async function removeEmptyDirectories(rootDir: string, currentDir = rootDir) {
   try {
     entries = await fs.readdir(currentDir, { withFileTypes: true });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+    if (hasErrorCode(error, "ENOENT")) {
       return;
     }
     throw error;
@@ -179,14 +183,14 @@ async function removeEmptyDirectories(rootDir: string, currentDir = rootDir) {
         const entryPath = path.join(currentDir, entry.name);
         await removeEmptyDirectories(rootDir, entryPath);
         const nestedEntries = await fs.readdir(entryPath).catch((error) => {
-          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          if (hasErrorCode(error, "ENOENT")) {
             return [];
           }
           throw error;
         });
         if (nestedEntries.length === 0 && entryPath !== rootDir) {
           await fs.rmdir(entryPath).catch((error) => {
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            if (!hasErrorCode(error, "ENOENT")) {
               throw error;
             }
           });

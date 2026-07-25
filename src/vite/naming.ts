@@ -2,24 +2,24 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import type { NormalizedOutputOptions, OutputChunk } from "rollup";
-
-import type { GccRuntimeManifest, MaterializedGraph } from "./internal-types";
+import { readJsonIfExists } from "../cache/store";
+import { firstOrUndefined } from "../internal/arrays";
+import { isRecordOf, isString } from "../internal/validation";
+import type {
+  GccRuntimeManifest,
+  MaterializedGraph,
+  NormalizedOutputOptions,
+  OutputChunk,
+  PreRenderedChunk,
+} from "./internal-types";
 import { joinPublicPath } from "./output";
 import {
   extractRuntimeInitManifest,
+  parseGccRuntimeManifest,
   replaceRuntimeInitManifest,
 } from "./runtime-manifest";
 
-interface RenderableChunkInfo {
-  exports: string[];
-  facadeModuleId: string | null;
-  isDynamicEntry: boolean;
-  isEntry: boolean;
-  moduleIds: string[];
-  name: string;
-  type: "chunk";
-}
+type RenderableChunkInfo = PreRenderedChunk;
 
 interface BaseOutputSeed {
   info: RenderableChunkInfo;
@@ -46,9 +46,10 @@ export async function renameCompiledNonBaseJsOutputs(input: {
   publicPath: string;
   runtimeModuleSourceMapFilePath: string;
 }) {
-  const manifest = (await readJson(
+  const manifest = parseGccRuntimeManifest(
+    await fs.readFile(input.manifestFilePath, "utf8"),
     input.manifestFilePath,
-  )) as GccRuntimeManifest;
+  );
   const baseChunkId = manifest.baseChunk;
   const baseChunk = manifest.chunks[baseChunkId];
   if (!baseChunk) {
@@ -57,15 +58,13 @@ export async function renameCompiledNonBaseJsOutputs(input: {
 
   const runtimeModuleSourceMap = await readJsonIfExists(
     input.runtimeModuleSourceMapFilePath,
+    isRuntimeModuleSourceMap,
   );
   const chunkModuleIds = buildChunkModuleIdLookup({
     jsChunks: input.jsChunks,
     manifest,
     materialized: input.materialized,
-    runtimeModuleSourceMap:
-      runtimeModuleSourceMap && typeof runtimeModuleSourceMap === "object"
-        ? (runtimeModuleSourceMap as Record<string, string>)
-        : {},
+    runtimeModuleSourceMap: runtimeModuleSourceMap ?? {},
   });
   const dynamicRootModuleIds = new Set(input.dynamicRootModuleIds);
   const renameMap = new Map<string, string>();
@@ -178,9 +177,10 @@ export async function finalizeBaseJsOutputName(input: {
   outDir: string;
   publicPath: string;
 }) {
-  const manifest = (await readJson(
+  const manifest = parseGccRuntimeManifest(
+    await fs.readFile(input.manifestFilePath, "utf8"),
     input.manifestFilePath,
-  )) as GccRuntimeManifest;
+  );
   const baseChunk = manifest.chunks[manifest.baseChunk];
   if (!baseChunk) {
     throw new Error("gccTsBundler() could not resolve the base runtime chunk.");
@@ -234,9 +234,10 @@ function deriveBaseOutputSeed(input: {
   jsChunks: OutputChunk[];
 }): BaseOutputSeed {
   const entryChunks = input.jsChunks.filter((chunk) => chunk.isEntry);
-  if (entryChunks.length === 1) {
+  const onlyEntryChunk = firstOrUndefined(entryChunks);
+  if (entryChunks.length === 1 && onlyEntryChunk !== undefined) {
     return {
-      info: toRenderableChunkInfo(entryChunks[0]),
+      info: toRenderableChunkInfo(onlyEntryChunk),
       preferredName: null,
     };
   }
@@ -247,6 +248,7 @@ function deriveBaseOutputSeed(input: {
       facadeModuleId: input.entryModuleIds[0] ?? null,
       isDynamicEntry: false,
       isEntry: true,
+      isImplicitEntry: false,
       moduleIds: [...input.entryModuleIds].sort((left, right) =>
         left.localeCompare(right),
       ),
@@ -320,6 +322,7 @@ function createFallbackChunkInfo(input: {
     facadeModuleId: dynamicRoot ?? null,
     isDynamicEntry: Boolean(dynamicRoot),
     isEntry: false,
+    isImplicitEntry: false,
     moduleIds: [...input.moduleIds].sort((left, right) =>
       left.localeCompare(right),
     ),
@@ -334,6 +337,7 @@ function toRenderableChunkInfo(chunk: OutputChunk): RenderableChunkInfo {
     facadeModuleId: chunk.facadeModuleId ?? null,
     isDynamicEntry: chunk.isDynamicEntry,
     isEntry: chunk.isEntry,
+    isImplicitEntry: chunk.isImplicitEntry,
     moduleIds: Object.keys(chunk.modules).sort((left, right) =>
       left.localeCompare(right),
     ),
@@ -350,8 +354,7 @@ function renderPatternFileName(
   sourceText: string,
   format: NormalizedOutputOptions["format"],
 ) {
-  const rendered =
-    typeof pattern === "function" ? pattern(chunkInfo as never) : pattern;
+  const rendered = typeof pattern === "function" ? pattern(chunkInfo) : pattern;
   return normalizeOutputFileName(
     rendered.replace(/\[(name|format|ext|extname|hash(?::\d+)?)\]/gu, (token) =>
       renderTokenReplacement(token, chunkInfo, sourceText, format),
@@ -577,19 +580,10 @@ function normalizePath(value: string) {
   return value.replace(/\\/g, "/");
 }
 
-async function readJson(filePath: string) {
-  return JSON.parse(await fs.readFile(filePath, "utf8")) as unknown;
-}
-
-async function readJsonIfExists(filePath: string) {
-  try {
-    return await readJson(filePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return null;
-    }
-    throw error;
-  }
+function isRuntimeModuleSourceMap(
+  value: unknown,
+): value is Record<string, string> {
+  return isRecordOf(value, isString);
 }
 
 async function writeManifest(filePath: string, manifest: GccRuntimeManifest) {

@@ -1,6 +1,7 @@
 import ts from "typescript";
 
-import { ClosureIrEnumDeclaration } from "../types";
+import type { ClosureIrEnumDeclaration } from "../types";
+import { hasExportModifier } from "./modifiers";
 
 export function collectUnsafeEnumSymbols(
   sourceFiles: Iterable<ts.SourceFile>,
@@ -26,16 +27,19 @@ export function collectUnsafeEnumSymbols(
       ) {
         mark(node.expression);
       }
+      const firstArgument = ts.isCallExpression(node)
+        ? node.arguments[0]
+        : undefined;
       if (
         ts.isCallExpression(node) &&
         ts.isPropertyAccessExpression(node.expression) &&
         ts.isIdentifier(node.expression.expression) &&
         node.expression.expression.text === "Object" &&
         ["entries", "keys", "values"].includes(node.expression.name.text) &&
-        node.arguments.length > 0 &&
-        ts.isIdentifier(node.arguments[0])
+        firstArgument !== undefined &&
+        ts.isIdentifier(firstArgument)
       ) {
-        mark(node.arguments[0]);
+        mark(firstArgument);
       }
       if (
         ts.isIdentifier(node) &&
@@ -132,14 +136,6 @@ export function buildEnumDeclarationMetadata(
     name: statement.name.text,
     valueType,
   };
-}
-
-function hasExportModifier(node: ts.Node) {
-  return (
-    (ts.getCombinedModifierFlags(node as ts.Declaration) &
-      ts.ModifierFlags.Export) !==
-    0
-  );
 }
 
 function hasConstModifier(node: ts.EnumDeclaration) {

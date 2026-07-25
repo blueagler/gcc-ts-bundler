@@ -1,30 +1,16 @@
-import type {
-  BuildOptions,
-  CacheOptions,
-  ChunkLoader,
-  ChunkOptions,
-  CompilationLevel,
-  DiagnosticsOptions,
-  LanguageOut,
-  PackageOptions,
-} from "../api/types";
+import type { BuildOptions } from "../api/types";
+import { defineValues } from "./validation";
 import type { FileStateSnapshot } from "./file-state";
 
-export interface NormalizedBuildOptions {
-  cache: Required<CacheOptions>;
-  chunks: Omit<Required<ChunkOptions>, "loader"> & { loader: ChunkLoader };
-  compilationLevel: CompilationLevel;
-  diagnostics: Required<DiagnosticsOptions>;
-  entries: string[];
-  externs: string[];
-  js: string[];
-  languageOut: LanguageOut;
-  outDir: string;
-  outputNames: string[];
-  packages: Required<PackageOptions>;
-  projectRoot: string;
-  srcDir: string;
-}
+type DeepRequired<Value> = Value extends readonly (infer Item)[]
+  ? Item[]
+  : Value extends object
+    ? {
+        [Key in keyof Value]-?: DeepRequired<Exclude<Value[Key], undefined>>;
+      }
+    : Exclude<Value, undefined>;
+
+export type NormalizedBuildOptions = DeepRequired<BuildOptions>;
 
 export interface CliParseResult {
   options: BuildOptions;
@@ -46,11 +32,14 @@ export interface PackageAlias {
   targetPath: string;
 }
 
+export const CHUNK_KINDS = defineValues("base", "entry", "lazy", "shared");
+export type ChunkKind = (typeof CHUNK_KINDS)[number];
+
 export interface ChunkPlanChunk {
   dependencies: string[];
   entryFiles?: string[];
   files: string[];
-  kind?: "base" | "entry" | "lazy" | "shared";
+  kind?: ChunkKind;
   lazyModuleIds?: string[];
   name: string;
 }

@@ -2,7 +2,8 @@ import fs from "fs";
 import path from "path";
 import ts from "typescript";
 
-import { NormalizedBuildOptions } from "../../internal/types";
+import type { NormalizedBuildOptions } from "../../internal/types";
+import { hasErrorCode } from "../../internal/validation";
 
 export async function ensureDirectorySymlink(
   linkPath: string,
@@ -15,7 +16,7 @@ export async function ensureDirectorySymlink(
     }
     await fs.promises.rm(linkPath, { force: true, recursive: true });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+    if (!hasErrorCode(error, "ENOENT")) {
       await fs.promises.rm(linkPath, { force: true, recursive: true });
     }
   }
@@ -70,7 +71,7 @@ async function removePathIfExists(targetPath: string) {
   try {
     await fs.promises.rm(targetPath, { force: true, recursive: true });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+    if (!hasErrorCode(error, "ENOENT")) {
       throw error;
     }
   }

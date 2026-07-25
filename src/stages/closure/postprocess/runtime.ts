@@ -58,7 +58,10 @@ function findBundlerRuntimeRootAliases(code: string) {
     /(?:^|[;(])([A-Za-z_$][\w$]*)=globalThis(?:\.__g|\["__g"\])(?=;)/gm,
   ]) {
     for (const match of code.matchAll(pattern)) {
-      aliases.add(match[1]!);
+      const alias = match[1];
+      if (alias !== undefined) {
+        aliases.add(alias);
+      }
     }
   }
   return [...aliases];

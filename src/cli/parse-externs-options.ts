@@ -1,65 +1,55 @@
-import minimist from "minimist";
+import { parseArgs } from "node:util";
 
 import type { GenerateExternsOptions } from "../api/externs";
-
-function asStringArray(value: string | string[] | undefined) {
-  if (!value) {
-    return [];
-  }
-
-  return Array.isArray(value) ? value : [value];
-}
+import { EXTERN_MODES } from "../api/externs";
+import { parseChoice } from "../internal/validation";
 
 export function parseExternsCliArgs(args: string[]) {
-  const hasIncludeDependenciesFlag = args.includes("--include-dependencies");
-  const hasNoIncludeDependenciesFlag = args.includes(
-    "--no-include-dependencies",
-  );
-  const parsedArgs = minimist(args, {
-    alias: {
-      e: "entry",
-      h: "help",
-      o: "output-file",
-      p: "project-root",
+  const { values } = parseArgs({
+    allowPositionals: false,
+    args,
+    options: {
+      entry: { multiple: true, short: "e", type: "string" },
+      help: { short: "h", type: "boolean" },
+      "include-dependencies": { type: "boolean" },
+      mode: { type: "string" },
+      module: { multiple: true, type: "string" },
+      "no-include-dependencies": { type: "boolean" },
+      "output-file": { short: "o", type: "string" },
+      "project-root": { short: "p", type: "string" },
+      "runtime-entry": { multiple: true, type: "string" },
+      "src-dir": { type: "string" },
+      tsconfig: { type: "string" },
     },
-    boolean: ["help", "include-dependencies"],
-    string: [
-      "entry",
-      "mode",
-      "module",
-      "output-file",
-      "project-root",
-      "runtime-entry",
-      "src-dir",
-      "tsconfig",
-    ],
+    strict: true,
   });
 
-  if (parsedArgs.help) {
+  if (values.help) {
     return {
       options: { modules: [] } satisfies GenerateExternsOptions,
       showHelp: true,
     };
   }
 
-  const modules = [...asStringArray(parsedArgs.module)];
+  if (values["include-dependencies"] && values["no-include-dependencies"]) {
+    throw new TypeError(
+      "Use only one of --include-dependencies or --no-include-dependencies.",
+    );
+  }
 
-  return {
-    options: {
-      appEntryFiles: asStringArray(parsedArgs.entry),
-      includeDependencies: hasNoIncludeDependenciesFlag
-        ? false
-        : hasIncludeDependenciesFlag
-          ? true
-          : undefined,
-      mode: parsedArgs.mode,
-      modules,
-      outputFile: parsedArgs["output-file"],
-      projectRoot: parsedArgs["project-root"],
-      runtimeEntryFiles: asStringArray(parsedArgs["runtime-entry"]),
-      srcDir: parsedArgs["src-dir"],
-      tsConfigPath: parsedArgs.tsconfig,
-    } satisfies GenerateExternsOptions,
-    showHelp: false,
+  const options: GenerateExternsOptions = {
+    appEntryFiles: values.entry,
+    includeDependencies: values["no-include-dependencies"]
+      ? false
+      : values["include-dependencies"],
+    mode: parseChoice(values.mode, EXTERN_MODES, "--mode"),
+    modules: values.module ?? [],
+    outputFile: values["output-file"],
+    projectRoot: values["project-root"],
+    runtimeEntryFiles: values["runtime-entry"],
+    srcDir: values["src-dir"],
+    tsConfigPath: values.tsconfig,
   };
+
+  return { options, showHelp: false };
 }

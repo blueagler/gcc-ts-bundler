@@ -1,3 +1,12 @@
+import type { Rollup } from "vite";
+
+export type NormalizedOutputOptions = Rollup.NormalizedOutputOptions;
+export type OutputAsset = Rollup.OutputAsset;
+export type OutputBundle = Rollup.OutputBundle;
+export type OutputChunk = Rollup.OutputChunk;
+export type PluginContext = Rollup.PluginContext;
+export type PreRenderedChunk = Rollup.PreRenderedChunk;
+
 export interface CapturedModuleAnalysis {
   bridgeSpecifiers: string[];
   dynamicImportSpecifiers: string[];

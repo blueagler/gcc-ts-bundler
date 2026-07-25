@@ -3,6 +3,13 @@ import path from "path";
 import ts from "typescript";
 
 import { hashJson } from "../../cache/hash";
+import {
+  isRecord,
+  isRecordOf,
+  isString,
+  isStringArray,
+} from "../../internal/validation";
+
 const compilerOptionsCache = new Map<string, ts.CompilerOptions>();
 
 export async function loadCompilerOptions(
@@ -29,22 +36,35 @@ export async function loadCompilerOptions(
     );
   }
 
+  const rawConfig: unknown = configFile.config;
+  const config = isRecord(rawConfig) ? rawConfig : {};
+  const compilerConfig = isRecord(config.compilerOptions)
+    ? config.compilerOptions
+    : {};
+  const configuredBaseUrl = isString(compilerConfig.baseUrl)
+    ? compilerConfig.baseUrl
+    : undefined;
+  const configuredIgnoreDeprecations = isString(
+    compilerConfig.ignoreDeprecations,
+  )
+    ? compilerConfig.ignoreDeprecations
+    : undefined;
+  const configuredPaths = isRecordOf(compilerConfig.paths, isStringArray)
+    ? compilerConfig.paths
+    : {};
   const parsedConfig = ts.parseJsonConfigFileContent(
-    configFile.config,
+    config,
     ts.sys,
     configDir,
     {
       ...extraOptions,
-      baseUrl:
-        extraOptions.baseUrl ??
-        configFile.config.compilerOptions?.baseUrl ??
-        configDir,
+      baseUrl: extraOptions.baseUrl ?? configuredBaseUrl ?? configDir,
       ignoreDeprecations:
         extraOptions.ignoreDeprecations ??
-        configFile.config.compilerOptions?.ignoreDeprecations ??
+        configuredIgnoreDeprecations ??
         "6.0",
       paths: {
-        ...(configFile.config.compilerOptions?.paths ?? {}),
+        ...configuredPaths,
         ...(extraOptions.paths ?? {}),
       },
     },

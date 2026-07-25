@@ -3,7 +3,7 @@ import ts from "typescript";
 
 import { resolveGraph } from "../../native/load";
 import { loadCompilerOptions } from "../../stages/native/compiler-options";
-import { PackageAlias } from "../../internal/types";
+import type { PackageAlias } from "../../internal/types";
 import { uniqueSortedStrings } from "../../internal/files";
 import { createBundleRequire } from "../../internal/bundle-location";
 
@@ -127,15 +127,21 @@ function toRuntimePackageAlias(
   specifier: string,
   targetPath: string,
 ): PackageAlias {
-  const segments = specifier.startsWith("@")
-    ? specifier.split("/", 3)
-    : specifier.split("/", 2);
-  const packageName = specifier.startsWith("@")
-    ? `${segments[0]}/${segments[1]}`
-    : segments[0];
-  const subpathSegments = specifier.startsWith("@")
-    ? segments.slice(2)
-    : segments.slice(1);
+  const segments = specifier.split("/");
+  const [firstSegment, secondSegment] = segments;
+  if (firstSegment === undefined) {
+    throw new Error(`Invalid runtime package specifier: ${specifier}`);
+  }
+
+  const scoped = specifier.startsWith("@");
+  if (scoped && secondSegment === undefined) {
+    throw new Error(`Invalid scoped runtime package specifier: ${specifier}`);
+  }
+
+  const packageName = scoped
+    ? `${firstSegment}/${secondSegment}`
+    : firstSegment;
+  const subpathSegments = segments.slice(scoped ? 2 : 1);
 
   return {
     packageName,

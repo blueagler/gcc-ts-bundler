@@ -1,4 +1,4 @@
-import { BuildOptions, BuildResult } from "./types";
+import type { BuildOptions, BuildResult, CleanCacheOptions } from "./types";
 import { generateExterns } from "./externs";
 import { usage } from "../cli/usage";
 import { parseCliArgs } from "../cli/parse-options";
@@ -8,10 +8,9 @@ async function loadBuildPipeline() {
   return import("../pipeline/build-pipeline");
 }
 
-export async function cleanCache(options: {
-  cacheDir?: string;
-  projectRoot?: string;
-}): Promise<void> {
+export async function cleanCache(
+  options: CleanCacheOptions = {},
+): Promise<void> {
   const pipeline = await loadBuildPipeline();
   return pipeline.cleanCache(options);
 }

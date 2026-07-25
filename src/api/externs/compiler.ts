@@ -3,6 +3,7 @@ import path from "path";
 import ts from "typescript";
 
 import { loadCompilerOptions } from "../../stages/native/compiler-options";
+import { hasErrorCode } from "../../internal/validation";
 import {
   DECLARATION_EXTENSIONS,
   findPackageDir,
@@ -17,7 +18,7 @@ export async function loadExternCompilerOptions({
   tsConfigPath,
 }: {
   projectRoot: string;
-  tsConfigPath?: string;
+  tsConfigPath: string | undefined;
 }) {
   const fallbackOptions = {
     allowJs: true,
@@ -41,7 +42,7 @@ export async function loadExternCompilerOptions({
       }
     }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+    if (!hasErrorCode(error, "ENOENT")) {
       throw error;
     }
   }

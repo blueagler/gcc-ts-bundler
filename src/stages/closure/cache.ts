@@ -3,7 +3,9 @@ import path from "path";
 
 import { hashJson } from "../../cache/hash";
 import { readJsonIfExists, writeJson } from "../../cache/store";
+import { zipExact } from "../../internal/arrays";
 import { ensureDirectory, hashFilesInOrder } from "../../internal/files";
+import { isNumber, isRecord, isStringArray } from "../../internal/validation";
 
 export interface ClosureJobCacheMetadata {
   artifactFiles: string[];
@@ -21,8 +23,9 @@ export function getCompileJobOutputFiles(job: {
     return [job.jsOutputFile];
   }
   if (job.chunk && job.chunkOutputPathPrefix) {
+    const outputPathPrefix = job.chunkOutputPathPrefix;
     return job.chunk.map((chunkSpec) =>
-      path.join(job.chunkOutputPathPrefix!, `${chunkSpec.split(":", 1)[0]}.js`),
+      path.join(outputPathPrefix, `${chunkSpec.split(":", 1)[0]}.js`),
     );
   }
   throw new Error("Closure compile job is missing output configuration.");
@@ -71,8 +74,9 @@ export async function tryRestoreCachedClosureJob({
     job,
     compilerVersion,
   );
-  const metadata = await readJsonIfExists<ClosureJobCacheMetadata>(
+  const metadata = await readJsonIfExists(
     path.join(jobCacheDir, "meta.json"),
+    isClosureJobCacheMetadata,
   );
   if (
     !metadata ||
@@ -98,12 +102,26 @@ export async function tryRestoreCachedClosureJob({
   }
 
   await Promise.all(
-    artifactFiles.map(async (artifactFile, index) => {
+    zipExact(
+      artifactFiles,
+      cachedFiles,
+      "Closure artifacts and cached files",
+    ).map(async ([artifactFile, cachedFile]) => {
       await ensureDirectory(path.dirname(artifactFile));
-      await fs.copyFile(cachedFiles[index], artifactFile);
+      await fs.copyFile(cachedFile, artifactFile);
     }),
   );
   return true;
+}
+
+function isClosureJobCacheMetadata(
+  value: unknown,
+): value is ClosureJobCacheMetadata {
+  return (
+    isRecord(value) &&
+    isStringArray(value.artifactFiles) &&
+    isNumber(value.version)
+  );
 }
 
 export async function persistCachedClosureJob({
@@ -142,8 +160,12 @@ export async function persistCachedClosureJob({
     path.basename(artifactFile),
   );
   await Promise.all(
-    artifactFiles.map((artifactFile, index) =>
-      fs.copyFile(artifactFile, path.join(jobCacheDir, artifactNames[index])),
+    zipExact(
+      artifactFiles,
+      artifactNames,
+      "Closure artifacts and artifact names",
+    ).map(([artifactFile, artifactName]) =>
+      fs.copyFile(artifactFile, path.join(jobCacheDir, artifactName)),
     ),
   );
   await writeJson(path.join(jobCacheDir, "meta.json"), {

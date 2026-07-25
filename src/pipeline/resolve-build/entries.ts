@@ -1,6 +1,7 @@
 import path from "path";
 
-import { BuildEntry } from "../../internal/types";
+import { zipExact } from "../../internal/arrays";
+import type { BuildEntry } from "../../internal/types";
 
 export function resolveOutputNames(
   entryPaths: string[],
@@ -23,14 +24,15 @@ export function resolveOutputNames(
     basenameCounts.set(basename, (basenameCounts.get(basename) ?? 0) + 1);
   }
 
-  return entryPaths.map((entryPath, index) => {
-    const basename = basenames[index];
-    if ((basenameCounts.get(basename) ?? 0) === 1) {
-      return basename;
-    }
+  return zipExact(entryPaths, basenames, "entries and basenames").map(
+    ([entryPath, basename]) => {
+      if ((basenameCounts.get(basename) ?? 0) === 1) {
+        return basename;
+      }
 
-    return `${entryPath.replace(/\.[^/.]+$/, "").replace(/[\\/]/g, "__")}.js`;
-  });
+      return `${entryPath.replace(/\.[^/.]+$/, "").replace(/[\\/]/g, "__")}.js`;
+    },
+  );
 }
 
 export function sanitizeChunkName(outputName: string) {

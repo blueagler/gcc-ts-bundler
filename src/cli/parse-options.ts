@@ -1,78 +1,96 @@
-import minimist from "minimist";
+import { parseArgs } from "node:util";
 
-import { DEFAULT_BUILD_OPTIONS } from "../api/types";
-import { CliParseResult } from "../internal/types";
-
-function asStringArray(value: string | string[] | undefined): string[] {
-  if (!value) {
-    return [];
-  }
-
-  return Array.isArray(value) ? value : [value];
-}
+import type { BuildOptions } from "../api/types";
+import {
+  CACHE_MODES,
+  CHUNK_LOADERS,
+  CHUNK_MODES,
+  COMPILATION_LEVELS,
+  DIAGNOSTICS_PREFLIGHT_MODES,
+  LANGUAGE_OUTPUTS,
+  PACKAGE_MODES,
+} from "../api/types";
+import type { CliParseResult } from "../internal/types";
+import { parseChoice } from "../internal/validation";
 
 export function parseCliArgs(args: string[]): CliParseResult {
-  const parsedArgs = minimist(args, {
-    alias: {
-      h: "help",
+  const { values } = parseArgs({
+    allowPositionals: false,
+    args,
+    options: {
+      "cache-dir": { type: "string" },
+      "cache-mode": { type: "string" },
+      "chunk-base-name": { type: "string" },
+      "chunk-loader": { type: "string" },
+      "chunk-manifest": { type: "string" },
+      "chunk-public-path": { type: "string" },
+      chunks: { type: "string" },
+      "compilation-level": { type: "string" },
+      entry: { multiple: true, type: "string" },
+      extern: { multiple: true, type: "string" },
+      "fatal-warnings": { type: "boolean" },
+      help: { short: "h", type: "boolean" },
+      js: { multiple: true, type: "string" },
+      "language-out": { type: "string" },
+      "out-dir": { type: "string" },
+      packages: { type: "string" },
+      preflight: { type: "string" },
+      "project-root": { type: "string" },
+      "src-dir": { type: "string" },
+      verbose: { type: "boolean" },
     },
-    boolean: ["fatal-warnings", "help", "verbose"],
-    string: [
-      "cache-dir",
-      "cache-mode",
-      "chunk-base-name",
-      "chunk-loader",
-      "chunk-manifest",
-      "chunk-public-path",
-      "chunks",
-      "compilation-level",
-      "entry",
-      "language-out",
-      "out-dir",
-      "packages",
-      "preflight",
-      "project-root",
-      "src-dir",
-    ],
+    strict: true,
   });
 
-  if (parsedArgs.help) {
+  if (values.help) {
     return { options: { entries: [] }, showHelp: true };
   }
 
-  const entries = asStringArray(parsedArgs.entry);
-
-  return {
-    options: {
-      cache: {
-        dir: parsedArgs["cache-dir"],
-        mode: parsedArgs["cache-mode"] ?? DEFAULT_BUILD_OPTIONS.cache.mode,
-      },
-      chunks: {
-        baseChunkName: parsedArgs["chunk-base-name"],
-        loader: parsedArgs["chunk-loader"],
-        manifestFile: parsedArgs["chunk-manifest"],
-        mode: parsedArgs.chunks ?? DEFAULT_BUILD_OPTIONS.chunks.mode,
-        publicPath: parsedArgs["chunk-public-path"],
-      },
-      compilationLevel: parsedArgs["compilation-level"],
-      diagnostics: {
-        fatalWarnings: Boolean(parsedArgs["fatal-warnings"]),
-        preflight:
-          parsedArgs.preflight ?? DEFAULT_BUILD_OPTIONS.diagnostics.preflight,
-        verbose: Boolean(parsedArgs.verbose),
-      },
-      entries,
-      externs: asStringArray(parsedArgs.externs),
-      js: asStringArray(parsedArgs.js),
-      languageOut: parsedArgs["language-out"],
-      outDir: parsedArgs["out-dir"],
-      projectRoot: parsedArgs["project-root"],
-      packages: {
-        mode: parsedArgs.packages ?? DEFAULT_BUILD_OPTIONS.packages.mode,
-      },
-      srcDir: parsedArgs["src-dir"],
+  const options: BuildOptions = {
+    cache: {
+      dir: values["cache-dir"],
+      mode: parseChoice(values["cache-mode"], CACHE_MODES, "--cache-mode"),
     },
-    showHelp: false,
+    chunks: {
+      baseChunkName: values["chunk-base-name"],
+      loader: parseChoice(
+        values["chunk-loader"],
+        CHUNK_LOADERS,
+        "--chunk-loader",
+      ),
+      manifestFile: values["chunk-manifest"],
+      mode: parseChoice(values.chunks, CHUNK_MODES, "--chunks"),
+      publicPath: values["chunk-public-path"],
+    },
+    compilationLevel: parseChoice(
+      values["compilation-level"],
+      COMPILATION_LEVELS,
+      "--compilation-level",
+    ),
+    diagnostics: {
+      fatalWarnings: values["fatal-warnings"],
+      preflight: parseChoice(
+        values.preflight,
+        DIAGNOSTICS_PREFLIGHT_MODES,
+        "--preflight",
+      ),
+      verbose: values.verbose,
+    },
+    entries: values.entry ?? [],
+    externs: values.extern,
+    js: values.js,
+    languageOut: parseChoice(
+      values["language-out"],
+      LANGUAGE_OUTPUTS,
+      "--language-out",
+    ),
+    outDir: values["out-dir"],
+    packages: {
+      mode: parseChoice(values.packages, PACKAGE_MODES, "--packages"),
+    },
+    projectRoot: values["project-root"],
+    srcDir: values["src-dir"],
   };
+
+  return { options, showHelp: false };
 }

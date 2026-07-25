@@ -4,9 +4,12 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import type { build as esbuildBuild } from "esbuild";
 import ts from "typescript";
 
+import { firstOrUndefined } from "../internal/arrays";
 import { syncDirectoryEntries } from "../internal/files";
+import { isRecord } from "../internal/validation";
 import { toRelativeImportSpecifier } from "./capture";
 import type {
   CapturedRuntimeModule,
@@ -17,7 +20,7 @@ const DEP_BUNDLE_INPUT_DIR = "__dep-bundle-inputs";
 const DEP_BUNDLE_OUTPUT_DIR = "__dep-bundles";
 const EAGER_REGION_LABEL = "@eager";
 
-type EsbuildBuild = typeof import("esbuild").build;
+type EsbuildBuild = typeof esbuildBuild;
 
 interface ParsedDependencyImport {
   hasDefault: boolean;
@@ -911,7 +914,11 @@ async function canonicalizeDuplicateLazyEntryOutputs(input: {
       continue;
     }
 
-    const firstOutputFilePath = outputByRequestKey.get(requestKeys[0]!);
+    const firstRequestKey = firstOrUndefined(requestKeys);
+    if (firstRequestKey === undefined) {
+      continue;
+    }
+    const firstOutputFilePath = outputByRequestKey.get(firstRequestKey);
     if (!firstOutputFilePath) {
       continue;
     }
@@ -1374,11 +1381,18 @@ async function loadEsbuildBuild() {
     const esbuildPath = require.resolve("esbuild", {
       paths: [path.dirname(vitePackagePath)],
     });
-    const esbuildModule = (await import(
+    const esbuildModule: unknown = await import(
       pathToFileURL(esbuildPath).href
-    )) as typeof import("esbuild");
+    );
+    if (!isEsbuildModule(esbuildModule)) {
+      throw new TypeError(`Invalid esbuild module loaded from ${esbuildPath}.`);
+    }
     return esbuildModule.build;
   })();
 
   return await cachedEsbuildBuild;
+}
+
+function isEsbuildModule(value: unknown): value is { build: EsbuildBuild } {
+  return isRecord(value) && typeof value.build === "function";
 }

@@ -1,5 +1,7 @@
 import ts from "typescript";
 
+import { hasExportModifier } from "./modifiers";
+
 export interface ClosureIrDocEligibility {
   exportedDeclarationNames: Set<string>;
   hasJsDocText: boolean;
@@ -118,14 +120,6 @@ function hasNamedExport(
   exportedNames: ReadonlySet<string>,
 ) {
   return !!statement.name && exportedNames.has(statement.name.text);
-}
-
-function hasExportModifier(node: ts.Node) {
-  return (
-    (ts.getCombinedModifierFlags(node as ts.Declaration) &
-      ts.ModifierFlags.Export) !==
-    0
-  );
 }
 
 function canGenerateComponentObjectParamRecord(

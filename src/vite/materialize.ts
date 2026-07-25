@@ -2,7 +2,6 @@ import path from "node:path";
 
 import ts from "typescript";
 import type { ResolvedConfig } from "vite";
-import type { PluginContext } from "rollup";
 
 import { syncDirectoryEntries } from "../internal/files";
 import {
@@ -20,6 +19,7 @@ import type {
   CapturedModule,
   CapturedRuntimeModule,
   MaterializedGraph,
+  PluginContext,
   ViteBuildMetrics,
 } from "./internal-types";
 
@@ -31,7 +31,7 @@ export async function materializeCapturedGraph(
     config: ResolvedConfig;
     dynamicRootModuleIds: string[];
     entryModuleIds: string[];
-    metrics?: ViteBuildMetrics;
+    metrics?: ViteBuildMetrics | undefined;
     moduleIds: string[];
     resolutionCache: CapturedModuleResolutionCache;
     srcDir: string;
@@ -172,7 +172,7 @@ async function rewriteModuleImports(
     code: string;
     filePathByModuleId: Map<string, string>;
     importerId: string;
-    metrics?: ViteBuildMetrics;
+    metrics?: ViteBuildMetrics | undefined;
     resolutionCache: CapturedModuleResolutionCache;
   },
 ) {
@@ -236,6 +236,9 @@ async function rewriteModuleImports(
   };
 
   const visit = (node: ts.Node) => {
+    const firstArgument = ts.isCallExpression(node)
+      ? node.arguments[0]
+      : undefined;
     if (
       (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
       node.moduleSpecifier &&
@@ -245,10 +248,10 @@ async function rewriteModuleImports(
     } else if (
       ts.isCallExpression(node) &&
       node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-      node.arguments.length === 1 &&
-      ts.isStringLiteralLike(node.arguments[0])
+      firstArgument !== undefined &&
+      ts.isStringLiteralLike(firstArgument)
     ) {
-      pendingEdits.push(addSpecifierEdit(node.arguments[0], node));
+      pendingEdits.push(addSpecifierEdit(firstArgument, node));
     }
 
     ts.forEachChild(node, visit);

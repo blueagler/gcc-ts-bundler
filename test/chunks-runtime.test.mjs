@@ -3,7 +3,6 @@ import path from "node:path";
 import { expect, test } from "bun:test";
 
 import { build } from "../dist/index.mjs";
-import { UNSUPPORTED_FETCH_LOADER_ERROR } from "../src/pipeline/resolve-build/options.ts";
 import {
   createFixture,
   getProjectCacheDir,
@@ -65,35 +64,20 @@ test.serial("emits smaller script chunks for explicit lazy modules", async () =>
   expect(lazyOutput).toMatch(/LAZY_FEATURE/);
 });
 
-test.serial("normalizes the legacy auto chunk loader alias to script", async () => {
+test.serial("rejects the removed auto chunk loader alias", async () => {
   const fixture = await createFixture();
-  await fixture.write(
-    "src/main.ts",
-    [
-      'const loadFeature = () => import("./feature");',
-      "globalThis.__lazyLoader = loadFeature;",
-      'document.body.textContent = "base";',
-      "",
-    ].join("\n"),
-  );
-  await fixture.write(
-    "src/feature.ts",
-    'export const marker = "AUTO_LOADER";\n',
-  );
+  await fixture.write("src/main.ts", 'document.body.textContent = "base";\n');
 
-  const result = await build({
-    cache: { mode: "off" },
-    chunks: { loader: "auto", mode: "bundler-runtime" },
-    entries: ["./main.ts"],
-    outDir: fixture.outDir,
-    projectRoot: fixture.projectRoot,
-    srcDir: fixture.srcDir,
-  });
-
-  expect(result.exitCode).toBe(0);
-  const baseOutput = await fixture.read("dist/main.js");
-  expect(baseOutput).toContain('createElement("script")');
-  expect(baseOutput).not.toContain("global.fetch(");
+  await expect(
+    build({
+      cache: { mode: "off" },
+      chunks: { loader: "auto", mode: "bundler-runtime" },
+      entries: ["./main.ts"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    }),
+  ).rejects.toThrow(/chunks\.loader must be one of: script/);
 });
 
 test.serial("rejects the removed fetch chunk loader", async () => {
@@ -109,7 +93,7 @@ test.serial("rejects the removed fetch chunk loader", async () => {
       projectRoot: fixture.projectRoot,
       srcDir: fixture.srcDir,
     }),
-  ).rejects.toThrow(UNSUPPORTED_FETCH_LOADER_ERROR);
+  ).rejects.toThrow(/chunks\.loader must be one of: script/);
 });
 
 test.serial("emits bundler-runtime chunks for explicit lazy modules", async () => {

@@ -1,11 +1,8 @@
 import ts from "typescript";
 
 import { collectContracts } from "./contracts/registry";
-import {
-  createEmptyContractRegistry,
-  ContractRegistry,
-  uniqueStrings,
-} from "./shared";
+import { createEmptyContractRegistry, uniqueStrings } from "./shared";
+import type { ContractRegistry } from "./shared";
 
 export interface ExternAnalysisContext {
   appEntryFiles: string[];

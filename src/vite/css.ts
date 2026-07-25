@@ -2,15 +2,26 @@ import syncFs from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import type { OutputAsset, OutputBundle, OutputChunk } from "rollup";
-
+import {
+  isRecord,
+  isRecordOf,
+  isString,
+  isUnknownArray,
+  parseJson,
+} from "../internal/validation";
 import type {
   GccRuntimeManifest,
   MaterializedGraph,
+  OutputAsset,
+  OutputBundle,
+  OutputChunk,
   ViteCssOwnership,
 } from "./internal-types";
 import { joinPublicPath, readAssetText } from "./output";
-import { extractRuntimeInitManifest } from "./runtime-manifest";
+import {
+  extractRuntimeInitManifest,
+  parseGccRuntimeManifest,
+} from "./runtime-manifest";
 
 export function analyzeViteCssOwnership(
   bundle: OutputBundle,
@@ -85,10 +96,10 @@ export function analyzeViteCssOwnership(
     htmlLinkedCss,
     moduleCssById: new Map<string, string[]>(
       [...moduleCss.entries()]
-        .map(
-          ([moduleId, cssFiles]) =>
-            [moduleId, [...cssFiles].sort()] as [string, string[]],
-        )
+        .map(([moduleId, cssFiles]): [string, string[]] => [
+          moduleId,
+          [...cssFiles].sort(),
+        ])
         .sort(([left], [right]) => left.localeCompare(right)),
     ),
   };
@@ -101,12 +112,15 @@ export async function augmentCompiledViteCss(input: {
   ownership: ViteCssOwnership;
   runtimeModuleSourceMapFilePath: string;
 }) {
-  const manifest = JSON.parse(
+  const manifest = parseGccRuntimeManifest(
     await fs.readFile(input.manifestFilePath, "utf8"),
-  ) as GccRuntimeManifest;
-  const runtimeModuleSourceMap = JSON.parse(
+    input.manifestFilePath,
+  );
+  const runtimeModuleSourceMap = parseJson(
     await fs.readFile(input.runtimeModuleSourceMapFilePath, "utf8"),
-  ) as Record<string, string>;
+    isRuntimeModuleSourceMap,
+    input.runtimeModuleSourceMapFilePath,
+  );
   const runtimeCssByChunkId = collectRuntimeChunkCss({
     htmlLinkedCss: input.ownership.htmlLinkedCss,
     manifest,
@@ -241,8 +255,13 @@ function buildRuntimeCssIndexPatch(input: {
   runtimeCssByChunkId: Map<string, string[]>;
 }) {
   const runtimeInitCall = extractRuntimeInitCall(input.baseChunkSource);
+  if (!isUnknownArray(runtimeInitCall.manifest)) {
+    throw new Error(
+      "gccTsBundler() could not read runtime metadata from the base chunk.",
+    );
+  }
   const runtimeChunkEntries = runtimeInitCall.manifest[1];
-  if (!Array.isArray(runtimeChunkEntries)) {
+  if (!isUnknownArray(runtimeChunkEntries)) {
     throw new Error(
       "gccTsBundler() could not read runtime chunk metadata from the base chunk.",
     );
@@ -258,10 +277,10 @@ function buildRuntimeCssIndexPatch(input: {
 
   const cssByChunkIndex = Array.from(
     { length: runtimeChunkEntries.length },
-    () => [] as string[],
+    (): string[] => [],
   );
   runtimeChunkEntries.forEach((entry, index) => {
-    if (!Array.isArray(entry)) {
+    if (!isUnknownArray(entry)) {
       return;
     }
     const relativeUrl =
@@ -312,6 +331,9 @@ function collectHtmlLinkedCss(bundle: OutputBundle) {
     ];
     for (const match of matches) {
       const href = match[3];
+      if (href === undefined) {
+        continue;
+      }
       const cssAsset = cssAssets.find((candidate) =>
         href.endsWith(candidate.fileName),
       );
@@ -324,13 +346,23 @@ function collectHtmlLinkedCss(bundle: OutputBundle) {
   return linkedCss;
 }
 
+function isRuntimeModuleSourceMap(
+  value: unknown,
+): value is Record<string, string> {
+  return isRecordOf(value, isString);
+}
+
 function getImportedCss(chunk: OutputChunk) {
-  const metadata = (
-    chunk as OutputChunk & {
-      viteMetadata?: { importedCss?: Set<string> };
-    }
-  ).viteMetadata;
-  return [...(metadata?.importedCss ?? new Set<string>())];
+  if (!("viteMetadata" in chunk) || !isRecord(chunk.viteMetadata)) {
+    return [];
+  }
+  const importedCss = chunk.viteMetadata.importedCss;
+  if (!(importedCss instanceof Set)) {
+    return [];
+  }
+  return [...importedCss].filter(
+    (fileName): fileName is string => typeof fileName === "string",
+  );
 }
 
 function stripPublicPathPrefix(url: string, publicPath: string) {

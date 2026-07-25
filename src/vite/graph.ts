@@ -1,5 +1,3 @@
-import type { OutputBundle, OutputChunk, PluginContext } from "rollup";
-
 import {
   classifyModuleId,
   getCapturedModuleAnalysis,
@@ -7,7 +5,13 @@ import {
   resolveCapturedSpecifier,
   type CapturedModuleResolutionCache,
 } from "./capture";
-import type { CapturedModule, ViteBuildMetrics } from "./internal-types";
+import type {
+  CapturedModule,
+  OutputBundle,
+  OutputChunk,
+  PluginContext,
+  ViteBuildMetrics,
+} from "./internal-types";
 
 export function resolveEntryModuleIds(
   bundle: OutputBundle,
@@ -30,6 +34,9 @@ export function resolveEntryModuleIds(
     ];
     for (const match of entryScripts) {
       const sourcePath = match[3];
+      if (sourcePath === undefined) {
+        continue;
+      }
       const chunk = [...chunkByFileName.entries()].find(([fileName]) =>
         sourcePath.endsWith(fileName),
       )?.[1];
@@ -44,8 +51,9 @@ export function resolveEntryModuleIds(
   }
 
   return chunks
-    .filter((chunk) => chunk.isEntry && chunk.facadeModuleId)
-    .map((chunk) => chunk.facadeModuleId as string);
+    .filter(hasFacadeModuleId)
+    .filter((chunk) => chunk.isEntry)
+    .map((chunk) => chunk.facadeModuleId);
 }
 
 export function resolveRetainedModuleIds(
@@ -65,8 +73,9 @@ export function resolveDynamicRootModuleIds(chunks: OutputChunk[]) {
   return [
     ...new Set(
       chunks
-        .filter((chunk) => chunk.isDynamicEntry && chunk.facadeModuleId)
-        .map((chunk) => chunk.facadeModuleId as string),
+        .filter(hasFacadeModuleId)
+        .filter((chunk) => chunk.isDynamicEntry)
+        .map((chunk) => chunk.facadeModuleId),
     ),
   ].sort((left, right) => left.localeCompare(right));
 }
@@ -75,7 +84,7 @@ export async function resolveRetainedCapturedModuleIds(
   this: PluginContext,
   input: {
     capturedModules: Map<string, CapturedModule>;
-    metrics?: ViteBuildMetrics;
+    metrics: ViteBuildMetrics | undefined;
     resolutionCache: CapturedModuleResolutionCache;
     retainedModuleIds: string[];
   },
@@ -137,7 +146,7 @@ export async function resolveNormalizedBridgeModuleIds(
   this: PluginContext,
   input: {
     capturedModules: Map<string, CapturedModule>;
-    metrics?: ViteBuildMetrics;
+    metrics: ViteBuildMetrics | undefined;
     normalizedCapturedModules: Map<string, CapturedModule>;
     resolutionCache: CapturedModuleResolutionCache;
     retainedModuleIds: string[];
@@ -207,7 +216,7 @@ async function collectBridgeModuleIds(
     analysisModules: Map<string, CapturedModule>;
     capturedModules: Map<string, CapturedModule>;
     importerId: string;
-    metrics?: ViteBuildMetrics;
+    metrics: ViteBuildMetrics | undefined;
     resolutionCache: CapturedModuleResolutionCache;
     retainedModuleIds: Set<string>;
   },
@@ -244,6 +253,12 @@ async function collectBridgeModuleIds(
     }),
   );
   return bridgeModuleIds;
+}
+
+function hasFacadeModuleId(
+  chunk: OutputChunk,
+): chunk is OutputChunk & { facadeModuleId: string } {
+  return typeof chunk.facadeModuleId === "string";
 }
 
 function readAssetText(asset: { source: string | Uint8Array }) {
