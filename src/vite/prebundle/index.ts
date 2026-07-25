@@ -1,10 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import ts from "typescript";
-
 import { syncDirectoryEntries } from "../../shared/files";
-import { toRelativeImportSpecifier } from "../capture";
 import type {
   CapturedRuntimeModule,
   MaterializedGraph,
@@ -12,11 +9,11 @@ import type {
 import {
   canonicalizeDuplicateLazyEntryOutputs,
   collectCollapsibleBundleEntryOutputs,
-  dedupeAuthoredImportStatements,
-  renderCollapsedBundleImportStatement,
+  rewriteAuthoredModules,
 } from "./entry-outputs";
 import { loadEsbuildBuild } from "./esbuild";
 import type { EsbuildBuild } from "./esbuild";
+import { createModuleParser } from "./parse";
 import {
   assignRegionLabels,
   groupBundleRequests,
@@ -36,17 +33,61 @@ import {
   hashText,
   normalizePath,
 } from "./shared";
-import type {
-  ParsedDependencyImport,
-  ParsedMaterializedModule,
-} from "./shared";
+import type { ParsedMaterializedModule } from "./shared";
+
+interface PrebundleContext {
+  authoredFiles: Set<string>;
+  materialized: MaterializedGraph;
+  moduleByFilePath: Map<string, CapturedRuntimeModule>;
+  moduleBySourceId: Map<string, CapturedRuntimeModule>;
+  parseModule: (filePath: string) => Promise<ParsedMaterializedModule>;
+  runtimeSrcDir: string;
+}
+
+interface DependencyBundleSet {
+  canonicalizedEntryOutputs: Awaited<
+    ReturnType<typeof canonicalizeDuplicateLazyEntryOutputs>
+  >;
+  collapsedEntryOutputByPath: Awaited<
+    ReturnType<typeof collectCollapsibleBundleEntryOutputs>
+  >;
+  metafile: NonNullable<Awaited<ReturnType<EsbuildBuild>>["metafile"]>;
+  requestGroupKeyByTarget: Map<string, string>;
+  writtenRequests: WrittenRegionBundleRequest[];
+}
 
 export async function prebundleMaterializedDependencies(input: {
   dynamicRootModuleIds: string[];
   materialized: MaterializedGraph;
   outputSrcDir?: string;
-}) {
-  const runtimeSrcDir = input.outputSrcDir ?? input.materialized.srcDir;
+}): Promise<MaterializedGraph> {
+  const context = createPrebundleContext(input);
+  const { bundleRequests, regionLabelsByAuthoredFile } =
+    await collectBundleRequests(context, input.dynamicRootModuleIds);
+  if (bundleRequests.size === 0) {
+    return mirrorGraphWithoutBundles(context);
+  }
+
+  const bundles = await buildDependencyBundles(context, bundleRequests);
+  if (!bundles) {
+    return context.materialized;
+  }
+
+  const authoredEntries = await rewriteAuthoredModules({
+    collapsedEntryOutputByPath: bundles.collapsedEntryOutputByPath,
+    materialized: context.materialized,
+    outputByRequestKey: bundles.canonicalizedEntryOutputs.outputByRequestKey,
+    regionLabelsByAuthoredFile,
+    requestGroupKeyByTarget: bundles.requestGroupKeyByTarget,
+    runtimeSrcDir: context.runtimeSrcDir,
+  });
+  return assembleGraph(context, bundles, authoredEntries);
+}
+
+function createPrebundleContext(input: {
+  materialized: MaterializedGraph;
+  outputSrcDir?: string | undefined;
+}): PrebundleContext {
   const authoredFiles = new Set(
     input.materialized.authoredFiles.map((filePath) => normalizePath(filePath)),
   );
@@ -63,235 +104,54 @@ export async function prebundleMaterializedDependencies(input: {
     }
   }
 
-  const parseCache = new Map<string, ParsedMaterializedModule>();
-  const parseModule = async (filePath: string) => {
-    const normalizedFilePath = normalizePath(filePath);
-    const cached = parseCache.get(normalizedFilePath);
-    if (cached) {
-      return cached;
-    }
-
-    const sourceText = await fs.readFile(normalizedFilePath, "utf8");
-    const sourceFile = ts.createSourceFile(
-      normalizedFilePath,
-      sourceText,
-      ts.ScriptTarget.Latest,
-      true,
-      ts.ScriptKind.JS,
-    );
-    const staticAuthoredImports = new Set<string>();
-    const dependencyImports: ParsedDependencyImport[] = [];
-    const exportedNames = new Set<string>();
-    let hasDefaultExport = false;
-
-    const resolveRelativeTarget = (specifier: string) => {
-      if (!specifier.startsWith(".")) {
-        return null;
-      }
-      return normalizePath(
-        path.resolve(path.dirname(normalizedFilePath), specifier),
-      );
-    };
-
-    for (const statement of sourceFile.statements) {
-      if (ts.isExportAssignment(statement) && !statement.isExportEquals) {
-        hasDefaultExport = true;
-        exportedNames.add("default");
-        continue;
-      }
-      if (
-        (ts.isFunctionDeclaration(statement) ||
-          ts.isClassDeclaration(statement)) &&
-        statement.modifiers?.some(
-          (modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword,
-        ) &&
-        statement.modifiers.some(
-          (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
-        )
-      ) {
-        hasDefaultExport = true;
-        exportedNames.add("default");
-      } else if (
-        (ts.isFunctionDeclaration(statement) ||
-          ts.isClassDeclaration(statement) ||
-          ts.isVariableStatement(statement)) &&
-        statement.modifiers?.some(
-          (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
-        )
-      ) {
-        if (ts.isVariableStatement(statement)) {
-          for (const declaration of statement.declarationList.declarations) {
-            if (ts.isIdentifier(declaration.name)) {
-              exportedNames.add(declaration.name.text);
-            }
-          }
-        } else if (statement.name) {
-          exportedNames.add(statement.name.text);
-        }
-      }
-
-      if (
-        ts.isImportDeclaration(statement) &&
-        statement.moduleSpecifier &&
-        ts.isStringLiteralLike(statement.moduleSpecifier)
-      ) {
-        const targetFilePath = resolveRelativeTarget(
-          statement.moduleSpecifier.text,
-        );
-        if (!targetFilePath) {
-          continue;
-        }
-        if (authoredFiles.has(targetFilePath)) {
-          staticAuthoredImports.add(targetFilePath);
-          continue;
-        }
-
-        if (!moduleByFilePath.has(targetFilePath)) {
-          continue;
-        }
-
-        const importClause = statement.importClause;
-        const isSideEffectOnly = !importClause;
-        let hasDefault = false;
-        let hasNamespace = false;
-        const namedExports = new Set<string>();
-
-        if (importClause) {
-          if (importClause.name) {
-            hasDefault = true;
-          }
-          if (importClause.namedBindings) {
-            if (ts.isNamespaceImport(importClause.namedBindings)) {
-              hasNamespace = true;
-            } else {
-              for (const element of importClause.namedBindings.elements) {
-                namedExports.add((element.propertyName ?? element.name).text);
-              }
-            }
-          }
-        }
-
-        dependencyImports.push({
-          hasDefault,
-          hasNamespace,
-          isSideEffectOnly,
-          namedExports: [...namedExports].sort((left, right) =>
-            left.localeCompare(right),
-          ),
-          node: statement,
-          targetFilePath,
-        });
-        continue;
-      }
-
-      if (
-        ts.isExportDeclaration(statement) &&
-        statement.moduleSpecifier &&
-        ts.isStringLiteralLike(statement.moduleSpecifier)
-      ) {
-        const targetFilePath = resolveRelativeTarget(
-          statement.moduleSpecifier.text,
-        );
-        if (!targetFilePath) {
-          continue;
-        }
-        if (authoredFiles.has(targetFilePath)) {
-          staticAuthoredImports.add(targetFilePath);
-          continue;
-        }
-        if (!moduleByFilePath.has(targetFilePath)) {
-          continue;
-        }
-        if (
-          statement.exportClause &&
-          ts.isNamespaceExport(statement.exportClause)
-        ) {
-          continue;
-        }
-
-        if (!statement.exportClause) {
-          dependencyImports.push({
-            hasDefault: false,
-            hasNamespace: true,
-            isSideEffectOnly: false,
-            namedExports: [],
-            node: statement,
-            targetFilePath,
-          });
-          continue;
-        }
-
-        if (ts.isNamedExports(statement.exportClause)) {
-          const namedExports = new Set<string>();
-          for (const element of statement.exportClause.elements) {
-            const exportedName = (element.propertyName ?? element.name).text;
-            namedExports.add(exportedName);
-            exportedNames.add(element.name.text);
-          }
-          if (namedExports.has("default")) {
-            namedExports.delete("default");
-            hasDefaultExport = true;
-            exportedNames.add("default");
-          }
-          dependencyImports.push({
-            hasDefault: false,
-            hasNamespace: false,
-            isSideEffectOnly: false,
-            namedExports: [...namedExports].sort((left, right) =>
-              left.localeCompare(right),
-            ),
-            node: statement,
-            targetFilePath,
-          });
-        }
-      }
-    }
-
-    const parsed = {
-      dependencyImports,
-      exportedNames: [...exportedNames].sort((left, right) =>
-        left.localeCompare(right),
-      ),
-      hasDefaultExport,
-      staticAuthoredImports: [...staticAuthoredImports].sort((left, right) =>
-        left.localeCompare(right),
-      ),
-    } satisfies ParsedMaterializedModule;
-    parseCache.set(normalizedFilePath, parsed);
-    return parsed;
+  return {
+    authoredFiles,
+    materialized: input.materialized,
+    moduleByFilePath,
+    moduleBySourceId,
+    parseModule: createModuleParser({
+      authoredFiles,
+      moduleFilePaths: new Set(moduleByFilePath.keys()),
+    }),
+    runtimeSrcDir: input.outputSrcDir ?? input.materialized.srcDir,
   };
+}
 
-  const entryFilePaths = input.materialized.entries.map((entry) =>
-    normalizePath(path.resolve(input.materialized.srcDir, entry)),
+async function collectBundleRequests(
+  context: PrebundleContext,
+  dynamicRootModuleIds: string[],
+) {
+  const entryFilePaths = context.materialized.entries.map((entry) =>
+    normalizePath(path.resolve(context.materialized.srcDir, entry)),
   );
-  const dynamicRootFilePaths = input.dynamicRootModuleIds
-    .map((moduleId) => moduleBySourceId.get(moduleId)?.filePath)
+  const dynamicRootFilePaths = dynamicRootModuleIds
+    .map((moduleId) => context.moduleBySourceId.get(moduleId)?.filePath)
     .filter(
       (filePath): filePath is string =>
         typeof filePath === "string" &&
-        authoredFiles.has(normalizePath(filePath)),
+        context.authoredFiles.has(normalizePath(filePath)),
     )
     .map((filePath) => normalizePath(filePath))
     .sort((left, right) => left.localeCompare(right));
 
   const regionLabelsByAuthoredFile = await assignRegionLabels({
-    authoredFiles,
+    authoredFiles: context.authoredFiles,
     dynamicRootFilePaths,
     entryFilePaths,
-    parseModule,
+    parseModule: context.parseModule,
   });
 
   const bundleRequests = new Map<string, RegionBundleRequest>();
-  for (const filePath of input.materialized.authoredFiles) {
+  for (const filePath of context.materialized.authoredFiles) {
     const normalizedFilePath = normalizePath(filePath);
     const regionKey = regionLabelsByAuthoredFile.get(normalizedFilePath);
     if (!regionKey) {
       continue;
     }
 
-    const parsed = await parseModule(normalizedFilePath);
+    const parsed = await context.parseModule(normalizedFilePath);
     for (const dependencyImport of parsed.dependencyImports) {
-      const targetModule = moduleByFilePath.get(
+      const targetModule = context.moduleByFilePath.get(
         normalizePath(dependencyImport.targetFilePath),
       );
       if (!targetModule) {
@@ -310,7 +170,7 @@ export async function prebundleMaterializedDependencies(input: {
         continue;
       }
 
-      const parsedTarget = await parseModule(targetModule.filePath);
+      const parsedTarget = await context.parseModule(targetModule.filePath);
       bundleRequests.set(requestKey, {
         exportedNames: parsedTarget.exportedNames,
         hasDefaultExport: parsedTarget.hasDefaultExport,
@@ -326,55 +186,62 @@ export async function prebundleMaterializedDependencies(input: {
     }
   }
 
-  if (bundleRequests.size === 0) {
-    if (runtimeSrcDir === input.materialized.srcDir) {
-      return input.materialized;
-    }
-    const runtimeEntries = await Promise.all(
-      [
-        ...new Set(
-          input.materialized.modules.map((module) =>
-            normalizePath(module.filePath),
-          ),
-        ),
-      ]
-        .sort((left, right) => left.localeCompare(right))
-        .map(async (filePath) => ({
-          content: await fs.readFile(filePath, "utf8"),
-          relativePath: path
-            .relative(input.materialized.srcDir, filePath)
-            .replace(/\\/g, "/"),
-        })),
-    );
-    await syncDirectoryEntries(runtimeSrcDir, runtimeEntries);
-    return {
-      ...input.materialized,
-      authoredFiles: input.materialized.authoredFiles
-        .map((filePath) =>
-          normalizePath(
-            path.join(
-              runtimeSrcDir,
-              path.relative(input.materialized.srcDir, filePath),
-            ),
-          ),
-        )
-        .sort((left, right) => left.localeCompare(right)),
-      modules: input.materialized.modules.map((module) =>
-        remapRuntimeModuleToSrcDir(
-          module,
-          input.materialized.srcDir,
-          runtimeSrcDir,
-        ),
-      ),
-      srcDir: runtimeSrcDir,
-    };
-  }
+  return { bundleRequests, regionLabelsByAuthoredFile };
+}
 
+/** No dependency bundles: mirror the graph into the runtime dir unchanged. */
+async function mirrorGraphWithoutBundles(
+  context: PrebundleContext,
+): Promise<MaterializedGraph> {
+  const { materialized, runtimeSrcDir } = context;
+  if (runtimeSrcDir === materialized.srcDir) {
+    return materialized;
+  }
+  const runtimeEntries = await Promise.all(
+    [
+      ...new Set(
+        materialized.modules.map((module) => normalizePath(module.filePath)),
+      ),
+    ]
+      .sort((left, right) => left.localeCompare(right))
+      .map(async (filePath) => ({
+        content: await fs.readFile(filePath, "utf8"),
+        relativePath: path
+          .relative(materialized.srcDir, filePath)
+          .replace(/\\/g, "/"),
+      })),
+  );
+  await syncDirectoryEntries(runtimeSrcDir, runtimeEntries);
+  return {
+    ...materialized,
+    authoredFiles: materialized.authoredFiles
+      .map((filePath) =>
+        normalizePath(
+          path.join(
+            runtimeSrcDir,
+            path.relative(materialized.srcDir, filePath),
+          ),
+        ),
+      )
+      .sort((left, right) => left.localeCompare(right)),
+    modules: materialized.modules.map((module) =>
+      remapRuntimeModuleToSrcDir(module, materialized.srcDir, runtimeSrcDir),
+    ),
+    srcDir: runtimeSrcDir,
+  };
+}
+
+/** Write region entries, bundle them with esbuild, and stage the outputs. */
+async function buildDependencyBundles(
+  context: PrebundleContext,
+  bundleRequests: Map<string, RegionBundleRequest>,
+): Promise<DependencyBundleSet | null> {
+  const { materialized, runtimeSrcDir } = context;
   const { groupedRequests, requestGroupKeyByTarget } = groupBundleRequests([
     ...bundleRequests.values(),
   ]);
 
-  const inputDir = path.join(input.materialized.srcDir, DEP_BUNDLE_INPUT_DIR);
+  const inputDir = path.join(materialized.srcDir, DEP_BUNDLE_INPUT_DIR);
   const outputDir = path.join(runtimeSrcDir, DEP_BUNDLE_OUTPUT_DIR);
 
   const writtenRequests: WrittenRegionBundleRequest[] = [];
@@ -407,12 +274,10 @@ export async function prebundleMaterializedDependencies(input: {
 
   const esbuildBuild = await loadEsbuildBuild();
   const entryPoints = writtenRequests.map((request) =>
-    path
-      .relative(input.materialized.srcDir, request.entryPoint)
-      .replace(/\\/g, "/"),
+    path.relative(materialized.srcDir, request.entryPoint).replace(/\\/g, "/"),
   );
   const bundleResult = await esbuildBuild({
-    absWorkingDir: input.materialized.srcDir,
+    absWorkingDir: materialized.srcDir,
     bundle: true,
     chunkNames: "chunks/[name]-[hash]",
     entryNames: "[dir]/[name]",
@@ -429,7 +294,7 @@ export async function prebundleMaterializedDependencies(input: {
     write: false,
   });
   const bundleOutputRoot = path.join(
-    input.materialized.srcDir,
+    materialized.srcDir,
     DEP_BUNDLE_OUTPUT_DIR,
   );
   await syncDirectoryEntries(
@@ -450,13 +315,13 @@ export async function prebundleMaterializedDependencies(input: {
   );
 
   const entryOutputByRequestKey = resolveEntryOutputsByRequest({
-    bundleSrcDir: input.materialized.srcDir,
+    bundleSrcDir: materialized.srcDir,
     metafile: bundleResult.metafile,
     outputSrcDir: runtimeSrcDir,
     writtenRequests,
   });
   if (entryOutputByRequestKey.size === 0) {
-    return input.materialized;
+    return null;
   }
 
   const canonicalizedEntryOutputs = await canonicalizeDuplicateLazyEntryOutputs(
@@ -472,126 +337,41 @@ export async function prebundleMaterializedDependencies(input: {
     [...new Set(canonicalizedEntryOutputs.outputByRequestKey.values())],
   );
 
-  const authoredEntries = await Promise.all(
-    input.materialized.authoredFiles.map(async (filePath) => {
-      const normalizedFilePath = normalizePath(filePath);
-      const regionKey = regionLabelsByAuthoredFile.get(normalizedFilePath);
-      const sourceText = await fs.readFile(normalizedFilePath, "utf8");
-      if (!regionKey) {
-        return {
-          content: sourceText,
-          relativePath: path
-            .relative(input.materialized.srcDir, normalizedFilePath)
-            .replace(/\\/g, "/"),
-        };
-      }
-      const sourceFile = ts.createSourceFile(
-        normalizedFilePath,
-        sourceText,
-        ts.ScriptTarget.Latest,
-        true,
-        ts.ScriptKind.JS,
-      );
-      const outputFilePath = normalizePath(
-        path.join(
-          runtimeSrcDir,
-          path.relative(input.materialized.srcDir, normalizedFilePath),
-        ),
-      );
-      const edits: Array<{ end: number; start: number; text: string }> = [];
+  return {
+    canonicalizedEntryOutputs,
+    collapsedEntryOutputByPath,
+    metafile: bundleResult.metafile,
+    requestGroupKeyByTarget,
+    writtenRequests,
+  };
+}
 
-      for (const statement of sourceFile.statements) {
-        if (
-          !(
-            (ts.isImportDeclaration(statement) ||
-              ts.isExportDeclaration(statement)) &&
-            statement.moduleSpecifier &&
-            ts.isStringLiteralLike(statement.moduleSpecifier) &&
-            statement.moduleSpecifier.text.startsWith(".")
-          )
-        ) {
-          continue;
-        }
-        const targetFilePath = normalizePath(
-          path.resolve(
-            path.dirname(normalizedFilePath),
-            statement.moduleSpecifier.text,
-          ),
-        );
-        const targetRequestKey = `${regionKey}\u0000${targetFilePath}`;
-        const bundledOutput = canonicalizedEntryOutputs.outputByRequestKey.get(
-          requestGroupKeyByTarget.get(targetRequestKey) ?? targetRequestKey,
-        );
-        if (!bundledOutput) {
-          continue;
-        }
-        const collapsedOutput = collapsedEntryOutputByPath.get(bundledOutput);
-        if (!collapsedOutput) {
-          edits.push({
-            end: statement.moduleSpecifier.getEnd() - 1,
-            start: statement.moduleSpecifier.getStart() + 1,
-            text: toRelativeImportSpecifier(outputFilePath, bundledOutput),
-          });
-          continue;
-        }
-
-        edits.push({
-          end: statement.getEnd(),
-          start: statement.getStart(sourceFile),
-          text: renderCollapsedBundleImportStatement({
-            importerFilePath: outputFilePath,
-            sourceFile,
-            statement,
-            wrapperOutput: collapsedOutput,
-          }),
-        });
-      }
-
-      let rewritten = sourceText;
-      for (const edit of edits.sort(
-        (left, right) => right.start - left.start,
-      )) {
-        rewritten =
-          rewritten.slice(0, edit.start) +
-          edit.text +
-          rewritten.slice(edit.end);
-      }
-      return {
-        content: dedupeAuthoredImportStatements(outputFilePath, rewritten),
-        relativePath: path
-          .relative(runtimeSrcDir, outputFilePath)
-          .replace(/\\/g, "/"),
-      };
-    }),
-  );
-  await syncDirectoryEntries(runtimeSrcDir, authoredEntries, {
-    preserve(relativePath) {
-      return (
-        relativePath.startsWith(`${DEP_BUNDLE_INPUT_DIR}/`) ||
-        relativePath.startsWith(`${DEP_BUNDLE_OUTPUT_DIR}/`)
-      );
-    },
-  });
-
+/** Merge rewritten authored modules and bundle outputs into the final graph. */
+function assembleGraph(
+  context: PrebundleContext,
+  bundles: DependencyBundleSet,
+  authoredEntries: Array<{ content: string; relativePath: string }>,
+): MaterializedGraph {
+  const { authoredFiles, materialized, runtimeSrcDir } = context;
   const originalSourceIdsByFilePath = new Map(
-    input.materialized.modules.map((module) => [
+    materialized.modules.map((module) => [
       normalizePath(module.filePath),
       [...module.sourceModuleIds],
     ]),
   );
   const bundleInputSourceIdsByEntry = new Map(
-    writtenRequests.map((request) => [
+    bundles.writtenRequests.map((request) => [
       request.entryPoint,
       request.sourceModuleIds,
     ]),
   );
   const bundledModules = collectBundledModules({
-    extraModules: canonicalizedEntryOutputs.canonicalModules,
-    bundleSrcDir: input.materialized.srcDir,
-    metafile: bundleResult.metafile,
+    extraModules: bundles.canonicalizedEntryOutputs.canonicalModules,
+    bundleSrcDir: materialized.srcDir,
+    metafile: bundles.metafile,
     omittedFilePaths: new Set([
-      ...collapsedEntryOutputByPath.keys(),
-      ...canonicalizedEntryOutputs.omittedOutputFilePaths,
+      ...bundles.collapsedEntryOutputByPath.keys(),
+      ...bundles.canonicalizedEntryOutputs.omittedOutputFilePaths,
     ]),
     outputSrcDir: runtimeSrcDir,
     originalSourceIdsByFilePath,
@@ -599,17 +379,17 @@ export async function prebundleMaterializedDependencies(input: {
   });
 
   return {
-    ...input.materialized,
+    ...materialized,
     authoredFiles: authoredEntries
       .map((entry) => path.join(runtimeSrcDir, entry.relativePath))
       .sort((left, right) => left.localeCompare(right)),
     modules: [
-      ...input.materialized.modules
+      ...materialized.modules
         .filter((module) => authoredFiles.has(normalizePath(module.filePath)))
         .map((module) =>
           remapRuntimeModuleToSrcDir(
             module,
-            input.materialized.srcDir,
+            materialized.srcDir,
             runtimeSrcDir,
           ),
         ),
@@ -620,7 +400,7 @@ export async function prebundleMaterializedDependencies(input: {
     runtimeEntries: [
       ...new Set(
         [
-          ...input.materialized.entries,
+          ...materialized.entries,
           ...authoredEntries.map((entry) => `./${entry.relativePath}`),
           ...bundledModules.map((module) => `./${module.relativePath}`),
         ].sort((left, right) => left.localeCompare(right)),

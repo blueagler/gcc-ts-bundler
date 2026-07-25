@@ -6,10 +6,136 @@ import ts from "typescript";
 import { firstOrUndefined } from "../../shared/arrays";
 import { syncDirectoryEntries } from "../../shared/files";
 import { toRelativeImportSpecifier } from "../capture";
-import type { CapturedRuntimeModule } from "../internal-types";
+import type {
+  CapturedRuntimeModule,
+  MaterializedGraph,
+} from "../internal-types";
 import type { WrittenRegionBundleRequest } from "./regions";
 import { isPureLazyRegionKey } from "./regions";
-import { hashText, normalizePath } from "./shared";
+import {
+  DEP_BUNDLE_INPUT_DIR,
+  DEP_BUNDLE_OUTPUT_DIR,
+  hashText,
+  normalizePath,
+} from "./shared";
+
+/**
+ * Rewrite authored modules so dependency imports point at their region
+ * bundles, then stage the rewritten sources into the runtime source dir.
+ */
+export async function rewriteAuthoredModules(input: {
+  collapsedEntryOutputByPath: Map<string, CollapsibleBundleEntryOutput>;
+  materialized: MaterializedGraph;
+  outputByRequestKey: Map<string, string>;
+  regionLabelsByAuthoredFile: Map<string, string>;
+  requestGroupKeyByTarget: Map<string, string>;
+  runtimeSrcDir: string;
+}): Promise<Array<{ content: string; relativePath: string }>> {
+  const authoredEntries = await Promise.all(
+    input.materialized.authoredFiles.map(async (filePath) => {
+      const normalizedFilePath = normalizePath(filePath);
+      const regionKey =
+        input.regionLabelsByAuthoredFile.get(normalizedFilePath);
+      const sourceText = await fs.readFile(normalizedFilePath, "utf8");
+      if (!regionKey) {
+        return {
+          content: sourceText,
+          relativePath: path
+            .relative(input.materialized.srcDir, normalizedFilePath)
+            .replace(/\\/g, "/"),
+        };
+      }
+      const sourceFile = ts.createSourceFile(
+        normalizedFilePath,
+        sourceText,
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.JS,
+      );
+      const outputFilePath = normalizePath(
+        path.join(
+          input.runtimeSrcDir,
+          path.relative(input.materialized.srcDir, normalizedFilePath),
+        ),
+      );
+      const edits: Array<{ end: number; start: number; text: string }> = [];
+
+      for (const statement of sourceFile.statements) {
+        if (
+          !(
+            (ts.isImportDeclaration(statement) ||
+              ts.isExportDeclaration(statement)) &&
+            statement.moduleSpecifier &&
+            ts.isStringLiteralLike(statement.moduleSpecifier) &&
+            statement.moduleSpecifier.text.startsWith(".")
+          )
+        ) {
+          continue;
+        }
+        const targetFilePath = normalizePath(
+          path.resolve(
+            path.dirname(normalizedFilePath),
+            statement.moduleSpecifier.text,
+          ),
+        );
+        const targetRequestKey = `${regionKey}\u0000${targetFilePath}`;
+        const bundledOutput = input.outputByRequestKey.get(
+          input.requestGroupKeyByTarget.get(targetRequestKey) ??
+            targetRequestKey,
+        );
+        if (!bundledOutput) {
+          continue;
+        }
+        const collapsedOutput =
+          input.collapsedEntryOutputByPath.get(bundledOutput);
+        if (!collapsedOutput) {
+          edits.push({
+            end: statement.moduleSpecifier.getEnd() - 1,
+            start: statement.moduleSpecifier.getStart() + 1,
+            text: toRelativeImportSpecifier(outputFilePath, bundledOutput),
+          });
+          continue;
+        }
+
+        edits.push({
+          end: statement.getEnd(),
+          start: statement.getStart(sourceFile),
+          text: renderCollapsedBundleImportStatement({
+            importerFilePath: outputFilePath,
+            sourceFile,
+            statement,
+            wrapperOutput: collapsedOutput,
+          }),
+        });
+      }
+
+      let rewritten = sourceText;
+      for (const edit of edits.sort(
+        (left, right) => right.start - left.start,
+      )) {
+        rewritten =
+          rewritten.slice(0, edit.start) +
+          edit.text +
+          rewritten.slice(edit.end);
+      }
+      return {
+        content: dedupeAuthoredImportStatements(outputFilePath, rewritten),
+        relativePath: path
+          .relative(input.runtimeSrcDir, outputFilePath)
+          .replace(/\\/g, "/"),
+      };
+    }),
+  );
+  await syncDirectoryEntries(input.runtimeSrcDir, authoredEntries, {
+    preserve(relativePath) {
+      return (
+        relativePath.startsWith(`${DEP_BUNDLE_INPUT_DIR}/`) ||
+        relativePath.startsWith(`${DEP_BUNDLE_OUTPUT_DIR}/`)
+      );
+    },
+  });
+  return authoredEntries;
+}
 
 export interface CollapsibleBundleEntryOutput {
   directTargetFilePath: string;
