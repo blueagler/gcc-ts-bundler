@@ -44,7 +44,7 @@ The lint script applies formatting and ESLint fixes, so review its diff before c
 
 The TypeScript configuration enables exact optional properties, unchecked index protection, unused-symbol checks, isolated modules, and verbatim module syntax. ESLint rejects explicit `any`, type assertions, non-null assertions, unsafe `any` flow, and value imports used only as types.
 
-Treat filesystem caches, native addons, package configuration, and generated manifests as trust boundaries. Parse them as `unknown` and narrow them with validators from `src/internal/validation.ts`; do not add a generic cast-based JSON reader.
+Treat filesystem caches, native addons, package configuration, and generated manifests as trust boundaries. Parse them as `unknown` and narrow them with validators from `src/shared/validation.ts`; do not add a generic cast-based JSON reader.
 
 Build those validators with `isObjectOf<T>({ ... })` rather than hand-written `value is T` predicates. A hand-written predicate is an unchecked assertion: adding a field to `T` and forgetting to check it compiles cleanly and yields a validator that accepts data missing that field, so the type lies about parsed input. `ObjectSchema<T>` requires an entry for every key of `T`, which turns that drift into a compile error, and it forces literal unions to be validated with `oneOf` instead of a bare `isString`.
 
@@ -69,11 +69,13 @@ Set `GCC_BUILD_TIMINGS=1` to print internal cache and stage timings during build
 
 | Path              | Contents                                               |
 | ----------------- | ------------------------------------------------------ |
-| `src/api`         | Public API and extern generator                        |
-| `src/pipeline`    | Core build orchestration and cache identities          |
-| `src/stages`      | Native analysis/transpile and Closure execution stages |
+| `src/api`         | Public API surface: option and result types, facades   |
+| `src/cli`         | CLI entry, argument parsing, usage text                |
+| `src/build`       | Build pipeline: resolve, transpile, and Closure stages |
+| `src/externs`     | Extern generator                                       |
 | `src/vite`        | Vite adapter                                           |
 | `src/native`      | Validated native binding loader and TypeScript wrapper |
+| `src/shared`      | Generic primitives: validation, files, caching, timing |
 | `native/src`      | Rust N-API implementation                              |
 | `test`            | Bun integration and behavior tests                     |
 | `examples`        | Browser and framework fixtures                         |

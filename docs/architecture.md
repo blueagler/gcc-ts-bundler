@@ -12,17 +12,18 @@ Runtime data crossing filesystem, native-addon, compiler-package, or generated-m
 
 ## Package boundaries
 
-| Area                 | Responsibility                                                                            |
-| -------------------- | ----------------------------------------------------------------------------------------- |
-| `src/api`            | Public API, build result types, extern generation                                         |
-| `src/pipeline`       | Option normalization, graph resolution orchestration, cache keys, stage coordination      |
-| `src/stages/native`  | TypeScript preflight and Closure IR metadata before native transpilation                  |
-| `src/stages/closure` | Closure job execution, job caching, postprocessing, output publication                    |
-| `src/vite`           | Vite graph capture, materialization, dependency prebundling, CSS/HTML integration         |
-| `src/native`         | Platform binding loader and typed JavaScript wrappers around N-API                        |
-| `native/src`         | Rust graph resolver, chunk planner, SWC transforms, extern emission, Closure job planning |
-| `closure-externs`    | Extra browser, CommonJS, worker, Closure, and tslib externs                               |
-| `closure-lib`        | Closure support library shipped with the package                                          |
+| Area                  | Responsibility                                                                            |
+| --------------------- | ----------------------------------------------------------------------------------------- |
+| `src/api`             | Public API surface and build result types                                                 |
+| `src/externs`         | Extern generation                                                                         |
+| `src/build`           | Option normalization, graph resolution, cache keys, stage coordination                    |
+| `src/build/transpile` | TypeScript preflight, Closure IR metadata, native transpilation stage                     |
+| `src/build/closure`   | Closure job execution, job caching, postprocessing, output publication                    |
+| `src/vite`            | Vite graph capture, materialization, dependency prebundling, CSS/HTML integration         |
+| `src/native`          | Platform binding loader and typed JavaScript wrappers around N-API                        |
+| `native/src`          | Rust graph resolver, chunk planner, SWC transforms, extern emission, Closure job planning |
+| `closure-externs`     | Extra browser, CommonJS, worker, Closure, and tslib externs                               |
+| `closure-lib`         | Closure support library shipped with the package                                          |
 
 ## Core build flow
 
