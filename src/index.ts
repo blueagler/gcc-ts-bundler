@@ -19,7 +19,4 @@ export type {
   PackageOptions,
   ResolvedBuildOptions,
 } from "./api/types";
-export type {
-  GenerateExternsOptions,
-  GenerateExternsResult,
-} from "./api/externs";
+export type { GenerateExternsOptions, GenerateExternsResult } from "./externs";

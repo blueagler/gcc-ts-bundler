@@ -1,8 +1,8 @@
 import { parseArgs } from "node:util";
 
-import type { GenerateExternsOptions } from "../api/externs";
-import { EXTERN_MODES } from "../api/externs";
-import { parseChoice } from "../internal/validation";
+import type { GenerateExternsOptions } from "../externs";
+import { EXTERN_MODES } from "../externs";
+import { parseChoice } from "../shared/validation";
 
 export function parseExternsCliArgs(args: string[]) {
   const { values } = parseArgs({

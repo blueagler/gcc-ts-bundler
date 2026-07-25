@@ -10,8 +10,11 @@ import {
   LANGUAGE_OUTPUTS,
   PACKAGE_MODES,
 } from "../api/types";
-import type { CliParseResult } from "../internal/types";
-import { parseChoice } from "../internal/validation";
+export interface CliParseResult {
+  options: BuildOptions;
+  showHelp: boolean;
+}
+import { parseChoice } from "../shared/validation";
 
 export function parseCliArgs(args: string[]): CliParseResult {
   const { values } = parseArgs({

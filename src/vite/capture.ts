@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import ts from "typescript";
 import type { ResolvedConfig, transformWithEsbuild } from "vite";
 
-import { hashJson } from "../cache/hash";
+import { hashJson } from "../shared/hash";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type {
   CapturedModule,

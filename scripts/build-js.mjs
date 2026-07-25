@@ -17,7 +17,7 @@ await runCommandsInParallel([
       "./src/index.ts",
       "./src/vite/index.ts",
       "./src/native/index.ts",
-      "./src/internal/lifecycle-size.ts",
+      "./src/shared/lifecycle-size.ts",
       "--outdir",
       "./dist",
       "--format",
@@ -38,7 +38,7 @@ await runCommandsInParallel([
   {
     args: [
       "build",
-      "./src/entry/cli.ts",
+      "./src/cli/main.ts",
       "--outdir",
       "./bin",
       "--format",

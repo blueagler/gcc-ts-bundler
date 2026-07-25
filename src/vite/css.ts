@@ -8,7 +8,7 @@ import {
   isString,
   isUnknownArray,
   parseJson,
-} from "../internal/validation";
+} from "../shared/validation";
 import type {
   GccRuntimeManifest,
   MaterializedGraph,

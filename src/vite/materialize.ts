@@ -3,7 +3,7 @@ import path from "node:path";
 import ts from "typescript";
 import type { ResolvedConfig } from "vite";
 
-import { syncDirectoryEntries } from "../internal/files";
+import { syncDirectoryEntries } from "../shared/files";
 import {
   getCapturedModuleAnalysis,
   isAuthoredModuleId,

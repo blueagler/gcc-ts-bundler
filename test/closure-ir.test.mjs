@@ -2,7 +2,7 @@ import path from "node:path";
 import ts from "typescript";
 import { expect, test } from "bun:test";
 
-import { scanClosureIrFiles, collectClosureIrFiles } from "../src/stages/native/closure-ir/metadata.ts";
+import { scanClosureIrFiles, collectClosureIrFiles } from "../src/build/transpile/closure-ir/metadata/index.ts";
 import { createFixture } from "./helpers.mjs";
 
 function createProgram(fileNames, rootDir) {

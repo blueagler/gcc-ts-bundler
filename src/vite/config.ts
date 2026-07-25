@@ -2,8 +2,8 @@ import type { ResolvedConfig, UserConfig } from "vite";
 
 import { DEFAULT_BUILD_OPTIONS } from "../api/types";
 import type { BuildOptions, LanguageOut } from "../api/types";
-import { isRecord } from "../internal/validation";
-import { normalizeChunkLoader } from "../pipeline/resolve-build/options";
+import { isRecord } from "../shared/validation";
+import { normalizeChunkLoader } from "../build/resolve/options";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type { ManifestFileSettings } from "./internal-types";
 

@@ -1,11 +1,11 @@
 import type { BuildOptions, BuildResult, CleanCacheOptions } from "./types";
-import { generateExterns } from "./externs";
+import { generateExterns } from "../externs";
 import { usage } from "../cli/usage";
 import { parseCliArgs } from "../cli/parse-options";
 import { parseExternsCliArgs } from "../cli/parse-externs-options";
 
 async function loadBuildPipeline() {
-  return import("../pipeline/build-pipeline");
+  return import("../build/pipeline");
 }
 
 export async function cleanCache(

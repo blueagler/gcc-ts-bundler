@@ -1,5 +1,5 @@
-import { toRecord } from "../internal/records";
-import { isRecord } from "../internal/validation";
+import { toRecord } from "../shared/records";
+import { isRecord } from "../shared/validation";
 import nativeBinding from "./index";
 
 interface NativeEntryExportMetadata {

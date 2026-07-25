@@ -5,9 +5,9 @@ import { performance } from "node:perf_hooks";
 import type { Plugin, ResolvedConfig, UserConfig } from "vite";
 
 import { build } from "../api/build";
-import { withEnvironment } from "../internal/environment";
-import { collectOutputChunkStats } from "../internal/lifecycle-size";
-import { logInternalDetail, logInternalTiming } from "../internal/timing";
+import { withEnvironment } from "../shared/environment";
+import { collectOutputChunkStats } from "../shared/lifecycle-size";
+import { logInternalDetail, logInternalTiming } from "../shared/timing";
 import {
   normalizeRetainedCapturedModules,
   shouldCaptureModule,

@@ -3,7 +3,7 @@ import path from "node:path";
 
 import type { ResolvedConfig } from "vite";
 
-import { syncDirectoryEntries } from "../internal/files";
+import { syncDirectoryEntries } from "../shared/files";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type {
   CompiledCoreOutputSet,

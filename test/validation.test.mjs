@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 
-import { isResolveMetadata } from "../src/pipeline/resolve-build/cache.ts";
-import { isObjectOf, isNumber, isString } from "../src/internal/validation.ts";
+import { isResolveMetadata } from "../src/build/resolve/cache.ts";
+import { isObjectOf, isNumber, isString } from "../src/shared/validation.ts";
 
 const isPoint = isObjectOf({ x: isNumber, y: isNumber });
 

@@ -1,4 +1,4 @@
-import { defineValues } from "../internal/validation";
+import { defineValues } from "../shared/validation";
 
 export const COMPILATION_LEVELS = defineValues(
   "WHITESPACE_ONLY",

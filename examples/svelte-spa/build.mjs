@@ -11,7 +11,7 @@ import { build, generateExterns } from "../../dist/index.mjs";
 import {
   collectJsGraphStats,
   collectOutputChunkStats,
-} from "../../dist/internal/lifecycle-size.mjs";
+} from "../../dist/shared/lifecycle-size.mjs";
 
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.join(projectRoot, "src");

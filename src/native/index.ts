@@ -5,8 +5,8 @@ import path from "node:path";
 import {
   createBundleRequire,
   getPackageRootFromBundle,
-} from "../internal/bundle-location";
-import { getErrorMessage, isRecord } from "../internal/validation";
+} from "../shared/bundle-location";
+import { getErrorMessage, isRecord } from "../shared/validation";
 
 const require = createBundleRequire();
 

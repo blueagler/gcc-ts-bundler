@@ -5,22 +5,22 @@ import ts from "typescript";
 
 import { DEFAULT_BUILD_OPTIONS } from "../api/types";
 import { generateExterns } from "../api/build";
-import { analyzeRuntimeUsage } from "../api/externs/runtime-analysis";
+import { analyzeRuntimeUsage } from "../externs/runtime-analysis";
 import {
   getStringLiteralMemberName,
   isRuntimeExternPropertyName,
   renderStructuralExternLine,
-} from "../api/externs/shared";
+} from "../externs/shared";
 import {
   getDefaultPersistentCacheRoot,
   readJsonIfExists,
   writeJson,
-} from "../cache/store";
-import { hashJson } from "../cache/hash";
-import { hashFileInput, writeFileIfChanged } from "../internal/files";
-import { logInternalDetail } from "../internal/timing";
-import { isObjectOf, isStringArray } from "../internal/validation";
-import { getPackageSignature } from "../pipeline/resolve-build/signatures";
+} from "../shared/cache-store";
+import { hashJson } from "../shared/hash";
+import { hashFileInput, writeFileIfChanged } from "../shared/files";
+import { logInternalDetail } from "../shared/timing";
+import { isObjectOf, isStringArray } from "../shared/validation";
+import { getPackageSignature } from "../build/resolve/signatures";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type { MaterializedGraph } from "./internal-types";
 

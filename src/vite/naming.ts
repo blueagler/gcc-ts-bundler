@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import { readJsonIfExists } from "../cache/store";
-import { firstOrUndefined } from "../internal/arrays";
-import { isRecordOf, isString } from "../internal/validation";
+import { readJsonIfExists } from "../shared/cache-store";
+import { firstOrUndefined } from "../shared/arrays";
+import { isRecordOf, isString } from "../shared/validation";
 import type {
   GccRuntimeManifest,
   MaterializedGraph,

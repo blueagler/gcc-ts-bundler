@@ -1,4 +1,4 @@
-import { collectJsGraphStats } from "../internal/lifecycle-size";
+import { collectJsGraphStats } from "../shared/lifecycle-size";
 import { classifyModuleId, getCapturedModuleAnalysis } from "./capture";
 import type { CapturedModule, MaterializedGraph } from "./internal-types";
 

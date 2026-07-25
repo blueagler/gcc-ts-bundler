@@ -7,9 +7,9 @@ import { pathToFileURL } from "node:url";
 import type { build as esbuildBuild } from "esbuild";
 import ts from "typescript";
 
-import { firstOrUndefined } from "../internal/arrays";
-import { syncDirectoryEntries } from "../internal/files";
-import { isRecord } from "../internal/validation";
+import { firstOrUndefined } from "../shared/arrays";
+import { syncDirectoryEntries } from "../shared/files";
+import { isRecord } from "../shared/validation";
 import { toRelativeImportSpecifier } from "./capture";
 import type {
   CapturedRuntimeModule,

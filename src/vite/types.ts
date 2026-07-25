@@ -1,4 +1,4 @@
-import type { GenerateExternsMode } from "../api/externs";
+import type { GenerateExternsMode } from "../externs";
 import type { BuildOptions, ChunkLoader } from "../api/types";
 
 export interface GccTsBundlerGeneratedExternsOptions {
