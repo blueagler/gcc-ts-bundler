@@ -7,5 +7,10 @@
     "outDir": "./dist",
     "rootDir": "./src"
   },
-  "include": ["src/index.ts", "src/native/index.ts", "src/vite/index.ts"]
+  "include": [
+    "src/index.ts",
+    "src/native/index.ts",
+    "src/vite/index.ts",
+    "src/types/**/*.d.ts"
+  ]
 }

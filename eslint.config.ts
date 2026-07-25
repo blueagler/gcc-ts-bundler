@@ -7,10 +7,31 @@ export default tseslint.config([
   tseslint.configs.recommended,
   {
     files: ["**/*.ts", "**/*.tsx"],
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
     plugins: {
       perfectionist: perfectionistPlugin,
     },
     rules: {
+      "@typescript-eslint/consistent-type-assertions": [
+        "error",
+        { assertionStyle: "never" },
+      ],
+      "@typescript-eslint/consistent-type-imports": [
+        "error",
+        { fixStyle: "separate-type-imports" },
+      ],
+      "@typescript-eslint/no-explicit-any": "error",
+      "@typescript-eslint/no-non-null-assertion": "error",
+      "@typescript-eslint/no-unsafe-argument": "error",
+      "@typescript-eslint/no-unsafe-assignment": "error",
+      "@typescript-eslint/no-unsafe-call": "error",
+      "@typescript-eslint/no-unsafe-member-access": "error",
+      "@typescript-eslint/no-unsafe-return": "error",
       "perfectionist/sort-array-includes": [
         "error",
         { order: "asc", type: "natural" },
