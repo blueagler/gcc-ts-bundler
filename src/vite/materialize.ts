@@ -4,6 +4,7 @@ import ts from "typescript";
 import type { ResolvedConfig } from "vite";
 
 import { syncDirectoryEntries } from "../shared/files";
+import { applyTextEdits } from "../shared/text-edits";
 import {
   getCapturedModuleAnalysis,
   isAuthoredModuleId,
@@ -264,12 +265,7 @@ async function rewriteModuleImports(
     return input.code;
   }
 
-  let rewritten = input.code;
-  for (const edit of edits.sort((left, right) => right.start - left.start)) {
-    rewritten =
-      rewritten.slice(0, edit.start) + edit.text + rewritten.slice(edit.end);
-  }
-  return rewritten;
+  return applyTextEdits(input.code, edits);
 }
 
 function shouldOmitPrunedImport(

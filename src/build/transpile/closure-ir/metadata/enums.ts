@@ -1,7 +1,7 @@
 import ts from "typescript";
 
 import type { ClosureIrEnumDeclaration } from "../types";
-import { hasExportModifier } from "./modifiers";
+import { getPropertyNameText, hasExportModifier } from "./modifiers";
 
 export function collectUnsafeEnumSymbols(
   sourceFiles: Iterable<ts.SourceFile>,
@@ -142,22 +142,6 @@ function hasConstModifier(node: ts.EnumDeclaration) {
   return (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Const) !== 0;
 }
 
-function getPropertyNameText(
-  name: ts.PropertyName | ts.BindingName | undefined,
-) {
-  if (!name) {
-    return null;
-  }
-  if (
-    ts.isIdentifier(name) ||
-    ts.isStringLiteral(name) ||
-    ts.isNumericLiteral(name) ||
-    ts.isPrivateIdentifier(name)
-  ) {
-    return name.text;
-  }
-  return null;
-}
 
 function literalValueFromExpression(
   expression: ts.Expression,

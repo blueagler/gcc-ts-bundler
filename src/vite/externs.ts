@@ -5,11 +5,12 @@ import ts from "typescript";
 
 import { DEFAULT_BUILD_OPTIONS } from "../api/types";
 import { generateExterns } from "../api/build";
+import { collectRuntimeUsageExternLines } from "../externs/render";
+import { classifyModuleId, stripQuery } from "./capture";
 import { analyzeRuntimeUsage } from "../externs/runtime-analysis";
 import {
   getStringLiteralMemberName,
   isRuntimeExternPropertyName,
-  renderStructuralExternLine,
 } from "../externs/shared";
 import {
   getDefaultPersistentCacheRoot,
@@ -152,18 +153,10 @@ async function generateViteRuntimeAwareExterns(input: {
   );
 
   const runtimeUsage = mergeRuntimeHazards(appRuntimeUsage, ...packageHazards);
-  const emittedLines = new Set<string>();
-  for (const member of runtimeUsage.protocolMembers) {
-    emittedLines.add(renderStructuralExternLine(member));
-  }
-  for (const member of runtimeUsage.definedMembers) {
-    if (
-      runtimeUsage.accessedMembers.has(member) ||
-      appUsageMembers.has(member)
-    ) {
-      emittedLines.add(renderStructuralExternLine(member));
-    }
-  }
+  const emittedLines = collectRuntimeUsageExternLines(
+    runtimeUsage,
+    appUsageMembers,
+  );
 
   logInternalDetail(
     "vite:extern-package-cache",
@@ -327,21 +320,6 @@ function resolvePackageExternCacheRoot(input: {
   return path.join(input.captureRoot, "vite-extern-package-facts");
 }
 
-function classifyModuleId(moduleId: string) {
-  const cleanId = stripQuery(moduleId).replace(/\\/g, "/");
-  const nodeModulesIndex = cleanId.lastIndexOf("/node_modules/");
-  if (nodeModulesIndex < 0) {
-    return "app";
-  }
-
-  const packagePath = cleanId.slice(nodeModulesIndex + "/node_modules/".length);
-  const segments = packagePath.split("/");
-  if (segments[0]?.startsWith("@")) {
-    return segments.slice(0, 2).join("/");
-  }
-  return segments[0] || "app";
-}
-
 function isDependencyModuleId(moduleId: string) {
   return stripQuery(moduleId).includes(`${path.sep}node_modules${path.sep}`);
 }
@@ -351,8 +329,4 @@ function isDependencyRuntimeModule(sourceModuleIds: string[]) {
     sourceModuleIds.length > 0 &&
     sourceModuleIds.every((moduleId) => isDependencyModuleId(moduleId))
   );
-}
-
-function stripQuery(id: string) {
-  return id.replace(/[?#].*$/u, "");
 }

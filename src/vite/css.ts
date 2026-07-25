@@ -17,7 +17,7 @@ import type {
   OutputChunk,
   ViteCssOwnership,
 } from "./internal-types";
-import { joinPublicPath, readAssetText } from "./output";
+import { joinPublicPath, readAssetText, stripPublicPathPrefix } from "./output";
 import {
   extractRuntimeInitManifest,
   parseGccRuntimeManifest,
@@ -363,16 +363,6 @@ function getImportedCss(chunk: OutputChunk) {
   return [...importedCss].filter(
     (fileName): fileName is string => typeof fileName === "string",
   );
-}
-
-function stripPublicPathPrefix(url: string, publicPath: string) {
-  if (publicPath === "./") {
-    return url.startsWith("./") ? url.slice(2) : url;
-  }
-  if (url.startsWith(publicPath)) {
-    return url.slice(publicPath.length);
-  }
-  return url.replace(/^\/+/u, "");
 }
 
 function arraysEqual(left: string[], right: string[]) {

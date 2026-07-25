@@ -1,6 +1,7 @@
 import ts from "typescript";
 
 import { containsDecorators } from "../decorators";
+import { containsExplicitTypeSignal } from "../diagnostics";
 import { classifyClosureIrDocEligibility } from "./doc-eligibility";
 
 export interface ClosureIrFileFeatures {
@@ -121,22 +122,3 @@ function classifyClosureIrFile(
   return classifyClosureIrSourceFile(sourceFile);
 }
 
-function containsExplicitTypeSignal(node: ts.Node): boolean {
-  if (
-    ts.isAsExpression(node) ||
-    ts.isEnumDeclaration(node) ||
-    ts.isInterfaceDeclaration(node) ||
-    ts.isSatisfiesExpression(node) ||
-    ts.isTypeAliasDeclaration(node) ||
-    ts.isTypeAssertionExpression(node) ||
-    ts.isTypeParameterDeclaration(node)
-  ) {
-    return true;
-  }
-
-  if ("type" in node && node.type) {
-    return true;
-  }
-
-  return ts.forEachChild(node, containsExplicitTypeSignal) ?? false;
-}

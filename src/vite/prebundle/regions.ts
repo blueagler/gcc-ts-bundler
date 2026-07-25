@@ -1,14 +1,10 @@
 import path from "node:path";
 
-import { toRelativeImportSpecifier } from "../capture";
+import { classifyModuleId, toRelativeImportSpecifier } from "../capture";
 import type { CapturedRuntimeModule } from "../internal-types";
 import type { EsbuildBuild } from "./esbuild";
 import type { ParsedMaterializedModule } from "./shared";
-import {
-  classifyPackageName,
-  EAGER_REGION_LABEL,
-  normalizePath,
-} from "./shared";
+import { EAGER_REGION_LABEL, normalizePath } from "./shared";
 
 export interface RegionBundleRequest {
   exportedNames: string[];
@@ -135,7 +131,7 @@ export function groupBundleRequests(requests: RegionBundleRequest[]) {
   for (const request of requests) {
     const packageKey =
       request.sourceModuleIds[0] !== undefined
-        ? classifyPackageName(request.sourceModuleIds[0])
+        ? classifyModuleId(request.sourceModuleIds[0], "bundle")
         : "bundle";
     const bucketKey = `${request.regionKey}\u0000${packageKey}`;
     const bucket = requestsByRegionAndPackage.get(bucketKey);
@@ -265,10 +261,10 @@ export function sanitizeEntryName(request: GroupedRegionBundleRequest) {
       .replace(/[^\w.-]+/gu, "-");
   }
 
-  return classifyPackageName(request.sourceModuleIds[0] ?? "bundle").replace(
-    /[^\w.-]+/gu,
-    "-",
-  );
+  return classifyModuleId(
+    request.sourceModuleIds[0] ?? "bundle",
+    "bundle",
+  ).replace(/[^\w.-]+/gu, "-");
 }
 
 export function sanitizeRegionKey(regionKey: string) {

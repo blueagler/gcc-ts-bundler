@@ -267,11 +267,11 @@ export function isNonMaterializedRetainedModuleId(moduleId: string) {
   return /\.(?:css|less|sass|scss|styl|stylus|pcss|postcss)$/u.test(cleanId);
 }
 
-export function classifyModuleId(moduleId: string) {
+export function classifyModuleId(moduleId: string, fallback = "app") {
   const cleanId = stripQuery(moduleId).replace(/\\/g, "/");
   const nodeModulesIndex = cleanId.lastIndexOf("/node_modules/");
   if (nodeModulesIndex < 0) {
-    return "app";
+    return fallback;
   }
 
   const packagePath = cleanId.slice(nodeModulesIndex + "/node_modules/".length);
@@ -279,7 +279,7 @@ export function classifyModuleId(moduleId: string) {
   if (segments[0]?.startsWith("@")) {
     return segments.slice(0, 2).join("/");
   }
-  return segments[0] || "app";
+  return segments[0] || fallback;
 }
 
 export function stripQuery(id: string) {

@@ -32,20 +32,3 @@ export interface ParsedMaterializedModule {
   hasDefaultExport: boolean;
   staticAuthoredImports: string[];
 }
-
-export function classifyPackageName(moduleId: string) {
-  const normalized = moduleId.replace(/\\/g, "/");
-  const nodeModulesIndex = normalized.lastIndexOf("/node_modules/");
-  if (nodeModulesIndex < 0) {
-    return "bundle";
-  }
-
-  const packagePath = normalized.slice(
-    nodeModulesIndex + "/node_modules/".length,
-  );
-  const segments = packagePath.split("/");
-  if (segments[0]?.startsWith("@")) {
-    return segments.slice(0, 2).join("/");
-  }
-  return segments[0] || "bundle";
-}

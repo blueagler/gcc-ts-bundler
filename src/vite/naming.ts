@@ -12,7 +12,7 @@ import type {
   OutputChunk,
   PreRenderedChunk,
 } from "./internal-types";
-import { joinPublicPath } from "./output";
+import { joinPublicPath, stripPublicPathPrefix } from "./output";
 import {
   extractRuntimeInitManifest,
   parseGccRuntimeManifest,
@@ -564,16 +564,6 @@ async function applyFileRenames(
 
 function sanitizeName(value: string) {
   return value.replace(/[^\w-]/gu, "-").replace(/^-+|-+$/gu, "") || "chunk";
-}
-
-function stripPublicPathPrefix(url: string, publicPath: string) {
-  if (publicPath === "./") {
-    return url.startsWith("./") ? url.slice(2) : url;
-  }
-  if (url.startsWith(publicPath)) {
-    return url.slice(publicPath.length);
-  }
-  return url.replace(/^\/+/u, "");
 }
 
 function normalizePath(value: string) {

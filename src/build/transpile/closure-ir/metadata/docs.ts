@@ -8,7 +8,7 @@ import {
   sanitizeClosureName,
   stripUndefinedFromClosureType,
 } from "./closure-type-strings";
-import { hasExportModifier } from "./modifiers";
+import { getPropertyNameText, hasExportModifier } from "./modifiers";
 import {
   buildRecordForObjectType,
   collectSignatureParamInfos,
@@ -689,22 +689,6 @@ function hasRestElement(pattern: ts.ObjectBindingPattern) {
 }
 
 
-function getPropertyNameText(
-  name: ts.PropertyName | ts.BindingName | undefined,
-) {
-  if (!name) {
-    return null;
-  }
-  if (
-    ts.isIdentifier(name) ||
-    ts.isStringLiteral(name) ||
-    ts.isNumericLiteral(name) ||
-    ts.isPrivateIdentifier(name)
-  ) {
-    return name.text;
-  }
-  return null;
-}
 
 
 export function getClassMemberName(member: ts.ClassElement) {

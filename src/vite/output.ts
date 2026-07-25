@@ -123,6 +123,16 @@ export function joinPublicPath(base: string, fileName: string) {
   return `${base}${fileName}`;
 }
 
+export function stripPublicPathPrefix(url: string, publicPath: string) {
+  if (publicPath === "./") {
+    return url.startsWith("./") ? url.slice(2) : url;
+  }
+  if (url.startsWith(publicPath)) {
+    return url.slice(publicPath.length);
+  }
+  return url.replace(/^\/+/u, "");
+}
+
 export function readAssetText(asset: OutputAsset) {
   return typeof asset.source === "string"
     ? asset.source

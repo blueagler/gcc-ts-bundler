@@ -1,3 +1,4 @@
+import { readAssetText } from "./output";
 import {
   classifyModuleId,
   getCapturedModuleAnalysis,
@@ -259,10 +260,4 @@ function hasFacadeModuleId(
   chunk: OutputChunk,
 ): chunk is OutputChunk & { facadeModuleId: string } {
   return typeof chunk.facadeModuleId === "string";
-}
-
-function readAssetText(asset: { source: string | Uint8Array }) {
-  return typeof asset.source === "string"
-    ? asset.source
-    : Buffer.from(asset.source).toString("utf8");
 }

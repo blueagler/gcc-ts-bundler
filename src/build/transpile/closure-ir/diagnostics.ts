@@ -92,7 +92,7 @@ function fileHasExplicitTypeSignals(sourceFile: ts.SourceFile) {
   return hasSignal;
 }
 
-function containsExplicitTypeSignal(node: ts.Node): boolean {
+export function containsExplicitTypeSignal(node: ts.Node): boolean {
   if (
     ts.isEnumDeclaration(node) ||
     ts.isInterfaceDeclaration(node) ||

@@ -5,6 +5,7 @@ import ts from "typescript";
 
 import { firstOrUndefined } from "../../shared/arrays";
 import { syncDirectoryEntries } from "../../shared/files";
+import { applyTextEdits } from "../../shared/text-edits";
 import { toRelativeImportSpecifier } from "../capture";
 import type {
   CapturedRuntimeModule,
@@ -109,17 +110,11 @@ export async function rewriteAuthoredModules(input: {
         });
       }
 
-      let rewritten = sourceText;
-      for (const edit of edits.sort(
-        (left, right) => right.start - left.start,
-      )) {
-        rewritten =
-          rewritten.slice(0, edit.start) +
-          edit.text +
-          rewritten.slice(edit.end);
-      }
       return {
-        content: dedupeAuthoredImportStatements(outputFilePath, rewritten),
+        content: dedupeAuthoredImportStatements(
+          outputFilePath,
+          applyTextEdits(sourceText, edits),
+        ),
         relativePath: path
           .relative(input.runtimeSrcDir, outputFilePath)
           .replace(/\\/g, "/"),

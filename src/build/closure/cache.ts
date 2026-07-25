@@ -14,6 +14,22 @@ export interface ClosureJobCacheMetadata {
 
 export const CLOSURE_JOB_CACHE_VERSION = 2;
 
+export interface ClosureCompileJobConfig {
+  assumeFunctionWrapper: boolean;
+  chunk?: string[] | null;
+  compilationLevel: string;
+  dependencyMode?: string | null;
+  entryPoint?: string[] | null;
+  externs: string[];
+  js: string[];
+  jsOutputFile?: string | null;
+  languageIn: string;
+  languageOut: string;
+  propertyRenamingReportPath?: string | null;
+  rewritePolyfills: boolean;
+  warningLevel: string;
+}
+
 export function getCompileJobOutputFiles(job: {
   chunkOutputPathPrefix?: string | null;
   chunk?: string[] | null;
@@ -52,21 +68,7 @@ export async function tryRestoreCachedClosureJob({
 }: {
   cacheDir: string;
   compilerVersion: string;
-  job: {
-    assumeFunctionWrapper: boolean;
-    chunk?: string[] | null;
-    compilationLevel: string;
-    dependencyMode?: string | null;
-    entryPoint?: string[] | null;
-    externs: string[];
-    js: string[];
-    jsOutputFile?: string | null;
-    languageIn: string;
-    languageOut: string;
-    propertyRenamingReportPath?: string | null;
-    rewritePolyfills: boolean;
-    warningLevel: string;
-  };
+  job: ClosureCompileJobConfig;
   artifactFiles: string[];
 }) {
   const jobCacheDir = await getClosureJobCacheDir(
@@ -126,21 +128,7 @@ export async function persistCachedClosureJob({
   artifactFiles,
 }: {
   cacheDir: string;
-  job: {
-    assumeFunctionWrapper: boolean;
-    chunk?: string[] | null;
-    compilationLevel: string;
-    dependencyMode?: string | null;
-    entryPoint?: string[] | null;
-    externs: string[];
-    js: string[];
-    jsOutputFile?: string | null;
-    languageIn: string;
-    languageOut: string;
-    propertyRenamingReportPath?: string | null;
-    rewritePolyfills: boolean;
-    warningLevel: string;
-  };
+  job: ClosureCompileJobConfig;
   artifactFiles: string[];
   compilerVersion: string;
 }) {
@@ -171,21 +159,7 @@ export async function persistCachedClosureJob({
 
 async function getClosureJobCacheDir(
   cacheDir: string,
-  job: {
-    assumeFunctionWrapper: boolean;
-    chunk?: string[] | null;
-    compilationLevel: string;
-    dependencyMode?: string | null;
-    entryPoint?: string[] | null;
-    externs: string[];
-    js: string[];
-    jsOutputFile?: string | null;
-    languageIn: string;
-    languageOut: string;
-    propertyRenamingReportPath?: string | null;
-    rewritePolyfills: boolean;
-    warningLevel: string;
-  },
+  job: ClosureCompileJobConfig,
   compilerVersion: string,
 ) {
   const outputFiles = getCompileJobOutputFiles(job);

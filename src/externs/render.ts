@@ -7,6 +7,30 @@ import {
 } from "./contracts";
 import { renderStructuralExternLine } from "./shared";
 
+/** Extern lines for runtime protocol members plus used defined members. */
+export function collectRuntimeUsageExternLines(
+  runtimeUsage: {
+    accessedMembers: ReadonlySet<string>;
+    definedMembers: Iterable<string>;
+    protocolMembers: Iterable<string>;
+  },
+  appUsageMembers: ReadonlySet<string>,
+): Set<string> {
+  const emittedLines = new Set<string>();
+  for (const member of runtimeUsage.protocolMembers) {
+    emittedLines.add(renderStructuralExternLine(member));
+  }
+  for (const member of runtimeUsage.definedMembers) {
+    if (
+      runtimeUsage.accessedMembers.has(member) ||
+      appUsageMembers.has(member)
+    ) {
+      emittedLines.add(renderStructuralExternLine(member));
+    }
+  }
+  return emittedLines;
+}
+
 type GenerateExternsMode = "boundary-aware" | "candidates" | "runtime-aware";
 
 export function renderCandidateExterns({
@@ -53,18 +77,10 @@ export async function renderRuntimeAwareExterns({
       ? collectBoundaryAwareUsageMemberNames(analysis)
       : new Set<string>();
   const runtimeUsage = await analyzeRuntimeUsage(runtimeEntryFiles);
-  const emittedLines = new Set<string>();
-  for (const member of runtimeUsage.protocolMembers) {
-    emittedLines.add(renderStructuralExternLine(member));
-  }
-  for (const member of runtimeUsage.definedMembers) {
-    if (
-      runtimeUsage.accessedMembers.has(member) ||
-      appUsageMembers.has(member)
-    ) {
-      emittedLines.add(renderStructuralExternLine(member));
-    }
-  }
+  const emittedLines = collectRuntimeUsageExternLines(
+    runtimeUsage,
+    appUsageMembers,
+  );
 
   return renderExternText({
     emittedLines,
