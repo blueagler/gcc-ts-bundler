@@ -1,16 +1,8 @@
-import type { BuildOptions } from "../api/types";
+import type { BuildOptions, ResolvedBuildOptions } from "../api/types";
 import { defineValues } from "./validation";
+
+export type { ResolvedBuildOptions } from "../api/types";
 import type { FileStateSnapshot } from "./file-state";
-
-type DeepRequired<Value> = Value extends readonly (infer Item)[]
-  ? Item[]
-  : Value extends object
-    ? {
-        [Key in keyof Value]-?: DeepRequired<Exclude<Value[Key], undefined>>;
-      }
-    : Exclude<Value, undefined>;
-
-export type NormalizedBuildOptions = DeepRequired<BuildOptions>;
 
 export interface CliParseResult {
   options: BuildOptions;
@@ -52,7 +44,7 @@ export interface LazyImport {
 }
 
 export interface BuildContext {
-  options: NormalizedBuildOptions;
+  options: ResolvedBuildOptions;
   optionsSignature: string;
   packageRoot: string;
   packageSignature: string;

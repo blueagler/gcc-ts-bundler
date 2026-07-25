@@ -9,7 +9,7 @@ import {
 import { logInternalDetail, withInternalTiming } from "../../internal/timing";
 import type {
   ChunkPlanChunk,
-  NormalizedBuildOptions,
+  ResolvedBuildOptions,
 } from "../../internal/types";
 import { prepareClosureJobs } from "../../native/load";
 import {
@@ -51,7 +51,7 @@ export async function runClosureStage({
   finalCacheDir: string;
   generatedExternPaths: string[];
   nativeExternPath: string;
-  options: NormalizedBuildOptions;
+  options: ResolvedBuildOptions;
   outDir: string;
   projectCacheDir: string;
   supportFiles: string[];

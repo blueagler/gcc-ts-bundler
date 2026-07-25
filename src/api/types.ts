@@ -78,38 +78,50 @@ export interface CleanCacheOptions {
   projectRoot?: string | undefined;
 }
 
-export interface BuildResult {
+export interface BuildDiagnostic {
+  file?: string | undefined;
+  line?: number | undefined;
+  message: string;
+}
+
+export interface BuildSuccess {
   cacheHit: boolean;
-  diagnostics: readonly unknown[];
-  emitSkipped: boolean;
-  exitCode: number;
+  ok: true;
   outputFiles: readonly string[];
 }
 
-interface BuildDefaults {
-  readonly cache: { readonly dir: string; readonly mode: CacheMode };
-  readonly chunks: {
-    readonly baseChunkName: string;
-    readonly loader: ChunkLoader;
-    readonly manifestFile: string;
-    readonly mode: ChunkMode;
-    readonly publicPath: string;
+export interface BuildFailure {
+  diagnostics: readonly BuildDiagnostic[];
+  ok: false;
+}
+
+export type BuildResult = BuildFailure | BuildSuccess;
+
+/** `BuildOptions` after defaulting and path resolution: every field present. */
+export interface ResolvedBuildOptions {
+  cache: { dir: string; mode: CacheMode };
+  chunks: {
+    baseChunkName: string;
+    loader: ChunkLoader;
+    manifestFile: string;
+    mode: ChunkMode;
+    publicPath: string;
   };
-  readonly compilationLevel: CompilationLevel;
-  readonly diagnostics: {
-    readonly fatalWarnings: boolean;
-    readonly preflight: DiagnosticsPreflight;
-    readonly verbose: boolean;
+  compilationLevel: CompilationLevel;
+  diagnostics: {
+    fatalWarnings: boolean;
+    preflight: DiagnosticsPreflight;
+    verbose: boolean;
   };
-  readonly entries: readonly string[];
-  readonly externs: readonly string[];
-  readonly js: readonly string[];
-  readonly languageOut: LanguageOut;
-  readonly outDir: string;
-  readonly outputNames: readonly string[];
-  readonly packages: { readonly mode: PackageMode };
-  readonly projectRoot: string;
-  readonly srcDir: string;
+  entries: string[];
+  externs: string[];
+  js: string[];
+  languageOut: LanguageOut;
+  outDir: string;
+  outputNames: string[];
+  packages: { mode: PackageMode };
+  projectRoot: string;
+  srcDir: string;
 }
 
 export const DEFAULT_BUILD_OPTIONS = Object.freeze({
@@ -141,4 +153,4 @@ export const DEFAULT_BUILD_OPTIONS = Object.freeze({
   },
   projectRoot: "",
   srcDir: "",
-} satisfies BuildDefaults);
+} satisfies ResolvedBuildOptions);

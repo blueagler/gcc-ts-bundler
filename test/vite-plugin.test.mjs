@@ -16,7 +16,11 @@ import {
   resolveViteLanguageOut,
   VITE_LANGUAGE_OUT_ERROR,
 } from "../src/vite/config.ts";
-import { createFixture, execFileAsync, listDirectoryNames } from "./helpers.mjs";
+import {
+  createFixture,
+  execFileAsync,
+  listDirectoryNames,
+} from "./helpers.mjs";
 
 async function listFiles(rootDir, currentDir = rootDir) {
   const entries = await fs.readdir(currentDir, { withFileTypes: true });
@@ -37,7 +41,13 @@ async function buildViteFixture(fixture, overrides = {}) {
   const pluginUrl = pathToFileURL(
     path.join(process.cwd(), "dist/vite/index.mjs"),
   ).href;
-  const viteBin = path.join(process.cwd(), "node_modules", "vite", "bin", "vite.js");
+  const viteBin = path.join(
+    process.cwd(),
+    "node_modules",
+    "vite",
+    "bin",
+    "vite.js",
+  );
   await fixture.write(
     "vite.config.mjs",
     [
@@ -48,7 +58,7 @@ async function buildViteFixture(fixture, overrides = {}) {
       '    outDir: "dist",',
       '    target: "es2018",',
       ...(overrides.build?.cssCodeSplit === false
-        ? ['    cssCodeSplit: false,']
+        ? ["    cssCodeSplit: false,"]
         : []),
       ...(overrides.buildLines ?? []),
       "  },",
@@ -94,7 +104,7 @@ async function writeViteCssFixture(fixture) {
   await fixture.write(
     "index.html",
     [
-      '<!doctype html>',
+      "<!doctype html>",
       '<html lang="en">',
       "  <head>",
       '    <meta charset="utf-8" />',
@@ -132,21 +142,11 @@ async function writeViteCssFixture(fixture) {
   );
   await fixture.write(
     "src/base.css",
-    [
-      "body {",
-      "  background: rgb(250, 250, 252);",
-      "}",
-      "",
-    ].join("\n"),
+    ["body {", "  background: rgb(250, 250, 252);", "}", ""].join("\n"),
   );
   await fixture.write(
     "src/feature.css",
-    [
-      ".feature-panel {",
-      "  color: rgb(120, 40, 180);",
-      "}",
-      "",
-    ].join("\n"),
+    [".feature-panel {", "  color: rgb(120, 40, 180);", "}", ""].join("\n"),
   );
 }
 
@@ -221,15 +221,16 @@ test.serial(
       capturedModules,
       moduleIds: [entryId],
     });
-    const additionalBridgeModuleIds = await resolveNormalizedBridgeModuleIds.call(
-      createCapturePluginContext(),
-      {
-        capturedModules,
-        normalizedCapturedModules,
-        resolutionCache: new Map(),
-        retainedModuleIds: [entryId],
-      },
-    );
+    const additionalBridgeModuleIds =
+      await resolveNormalizedBridgeModuleIds.call(
+        createCapturePluginContext(),
+        {
+          capturedModules,
+          normalizedCapturedModules,
+          resolutionCache: new Map(),
+          retainedModuleIds: [entryId],
+        },
+      );
 
     expect(normalizedCapturedModules.get(entryId)?.code).toContain(
       'from "./dep.js"',
@@ -354,7 +355,9 @@ test.serial(
       prebundled.modules.some((module) => module.filePath === depIndex),
     ).toBe(false);
     expect(
-      prebundled.modules.some((module) => module.relativePath.startsWith("__dep-bundles/")),
+      prebundled.modules.some((module) =>
+        module.relativePath.startsWith("__dep-bundles/"),
+      ),
     ).toBe(true);
     expect(
       prebundled.modules.some(
@@ -559,8 +562,12 @@ test.serial(
 
     const rewrittenLazyA = await fs.readFile(authoredLazyA, "utf8");
     const rewrittenLazyB = await fs.readFile(authoredLazyB, "utf8");
-    const sharedImportA = rewrittenLazyA.match(/__dep-bundles\/shared\/[^"']+\.js/u);
-    const sharedImportB = rewrittenLazyB.match(/__dep-bundles\/shared\/[^"']+\.js/u);
+    const sharedImportA = rewrittenLazyA.match(
+      /__dep-bundles\/shared\/[^"']+\.js/u,
+    );
+    const sharedImportB = rewrittenLazyB.match(
+      /__dep-bundles\/shared\/[^"']+\.js/u,
+    );
     expect(sharedImportA).toBeTruthy();
     expect(sharedImportB).toBeTruthy();
     expect(sharedImportA?.[0]).toBe(sharedImportB?.[0]);
@@ -729,7 +736,9 @@ test.serial(
     const lazyCss = cssFiles.find((fileName) => !html.includes(fileName));
     expect(lazyCss).toBeTruthy();
 
-    const mainJs = await fixture.read(path.join("dist", toDistRelativeFile(entryScript)));
+    const mainJs = await fixture.read(
+      path.join("dist", toDistRelativeFile(entryScript)),
+    );
     expect(mainJs).toContain(lazyCss);
     expect(mainJs).toContain("globalThis.__g");
   },
@@ -754,7 +763,9 @@ test.serial(
 
     const html = await fixture.read("dist/index.html");
     const entryScript = readRewrittenEntryScript(html);
-    const mainJs = await fixture.read(path.join("dist", toDistRelativeFile(entryScript)));
+    const mainJs = await fixture.read(
+      path.join("dist", toDistRelativeFile(entryScript)),
+    );
     expect(mainJs).not.toContain(cssFiles[0]);
   },
 );
@@ -767,7 +778,7 @@ test.serial(
     await fixture.write(
       "index.html",
       [
-        '<!doctype html>',
+        "<!doctype html>",
         '<html lang="en">',
         "  <body>",
         '    <script type="module" src="/src/main.js"></script>',
@@ -780,7 +791,7 @@ test.serial(
       "src/main.js",
       [
         'import { alive } from "./entry.js";',
-        'document.body.textContent = alive;',
+        "document.body.textContent = alive;",
         "",
       ].join("\n"),
     );
@@ -794,10 +805,7 @@ test.serial(
     );
     await fixture.write(
       "src/alive.js",
-      [
-        'export const alive = "alive";',
-        "",
-      ].join("\n"),
+      ['export const alive = "alive";', ""].join("\n"),
     );
     await fixture.write(
       "src/dead.js",
@@ -824,7 +832,9 @@ test.serial(
 
     const html = await fixture.read("dist/index.html");
     const entryScript = readRewrittenEntryScript(html);
-    const mainJs = await fixture.read(path.join("dist", toDistRelativeFile(entryScript)));
+    const mainJs = await fixture.read(
+      path.join("dist", toDistRelativeFile(entryScript)),
+    );
     expect(mainJs).not.toContain("tree-shaken");
   },
 );
@@ -854,7 +864,9 @@ test.serial(
 
     expect(entryScript).toMatch(/^\/entry\/.+\.js$/u);
     expect(files).toContain(toDistRelativeFile(entryScript));
-    expect(jsFiles.some((filePath) => filePath.startsWith("chunks/"))).toBe(true);
+    expect(jsFiles.some((filePath) => filePath.startsWith("chunks/"))).toBe(
+      true,
+    );
     expect(jsFiles).not.toContain("main.js");
   },
 );
@@ -862,77 +874,84 @@ test.serial(
 test.serial(
   "materializeCapturedGraph preserves pruning boundaries for empty, dynamic, and CSS side-effect stubs",
   async () => {
-  const fixture = await createFixture();
-  const srcDir = path.join(fixture.projectRoot, ".gcc-debug", "src");
-  const mainId = path.join(fixture.projectRoot, "src", "main.js");
-  const emptyId = path.join(fixture.projectRoot, "src", "empty.ts");
-  const lazyId = path.join(fixture.projectRoot, "src", "lazy.js");
-  const styleId = path.join(fixture.projectRoot, "src", "style.js");
-  const capturedModules = new Map([
-    [
-      mainId,
+    const fixture = await createFixture();
+    const srcDir = path.join(fixture.projectRoot, ".gcc-debug", "src");
+    const mainId = path.join(fixture.projectRoot, "src", "main.js");
+    const emptyId = path.join(fixture.projectRoot, "src", "empty.ts");
+    const lazyId = path.join(fixture.projectRoot, "src", "lazy.js");
+    const styleId = path.join(fixture.projectRoot, "src", "style.js");
+    const capturedModules = new Map([
+      [
+        mainId,
+        {
+          code: [
+            'import "./empty.ts";',
+            'export const loadLazy = () => import("./lazy.js");',
+            'import "./style.js";',
+            "",
+          ].join("\n"),
+          id: mainId,
+        },
+      ],
+      [
+        emptyId,
+        {
+          code: "export {};\n",
+          id: emptyId,
+        },
+      ],
+      [
+        lazyId,
+        {
+          code: "export {};\n",
+          id: lazyId,
+        },
+      ],
+      [
+        styleId,
+        {
+          code: 'import "./style.css";\nexport {};\n',
+          id: styleId,
+        },
+      ],
+    ]);
+
+    const materialized = await materializeCapturedGraph.call(
+      createCapturePluginContext(),
       {
-        code: [
-          'import "./empty.ts";',
-          'export const loadLazy = () => import("./lazy.js");',
-          'import "./style.js";',
-          "",
-        ].join("\n"),
-        id: mainId,
+        capturedModules,
+        config: { root: fixture.projectRoot },
+        dynamicRootModuleIds: [lazyId],
+        entryModuleIds: [mainId],
+        resolutionCache: new Map(),
+        moduleIds: [mainId, emptyId, lazyId, styleId],
+        srcDir,
       },
-    ],
-    [
+    );
+
+    expect(materialized.retainedEmptyModuleIds).toContain(emptyId);
+    expect(materialized.retainedEmptyModuleIds).toContain(lazyId);
+    expect(materialized.retainedEmptyModuleIds).not.toContain(styleId);
+    expect(materialized.prunedEmptyModuleIds).toContain(emptyId);
+    expect(materialized.prunedEmptyModuleIds).not.toContain(lazyId);
+    expect(materialized.prunedEmptyModuleIds).not.toContain(styleId);
+    expect(materialized.modules.map((module) => module.id)).not.toContain(
       emptyId,
-      {
-        code: "export {};\n",
-        id: emptyId,
-      },
-    ],
-    [
-      lazyId,
-      {
-        code: "export {};\n",
-        id: lazyId,
-      },
-    ],
-    [
-      styleId,
-      {
-        code: 'import "./style.css";\nexport {};\n',
-        id: styleId,
-      },
-    ],
-  ]);
+    );
+    expect(materialized.modules.map((module) => module.id)).toEqual(
+      expect.arrayContaining([lazyId, styleId]),
+    );
+    expect(materialized.runtimeEntries.join("\n")).not.toContain("empty");
 
-  const materialized = await materializeCapturedGraph.call(
-    createCapturePluginContext(),
-    {
-      capturedModules,
-      config: { root: fixture.projectRoot },
-      dynamicRootModuleIds: [lazyId],
-      entryModuleIds: [mainId],
-      resolutionCache: new Map(),
-      moduleIds: [mainId, emptyId, lazyId, styleId],
-      srcDir,
-    },
-  );
-
-  expect(materialized.retainedEmptyModuleIds).toContain(emptyId);
-  expect(materialized.retainedEmptyModuleIds).toContain(lazyId);
-  expect(materialized.retainedEmptyModuleIds).not.toContain(styleId);
-  expect(materialized.prunedEmptyModuleIds).toContain(emptyId);
-  expect(materialized.prunedEmptyModuleIds).not.toContain(lazyId);
-  expect(materialized.prunedEmptyModuleIds).not.toContain(styleId);
-  expect(materialized.modules.map((module) => module.id)).not.toContain(emptyId);
-  expect(materialized.modules.map((module) => module.id)).toEqual(expect.arrayContaining([lazyId, styleId]));
-  expect(materialized.runtimeEntries.join("\n")).not.toContain("empty");
-
-  const rewrittenMain = await fixture.read(
-    path.relative(fixture.projectRoot, materialized.modules.find((module) => module.id === mainId).filePath),
-  );
-  expect(rewrittenMain).not.toContain("empty.ts");
-  expect(rewrittenMain).toContain('import("./lazy.js")');
-  expect(rewrittenMain).toContain('import "./style.js"');
+    const rewrittenMain = await fixture.read(
+      path.relative(
+        fixture.projectRoot,
+        materialized.modules.find((module) => module.id === mainId).filePath,
+      ),
+    );
+    expect(rewrittenMain).not.toContain("empty.ts");
+    expect(rewrittenMain).toContain('import("./lazy.js")');
+    expect(rewrittenMain).toContain('import "./style.js"');
   },
 );
 
@@ -1060,7 +1079,9 @@ test.serial(
         path.join(fixture.projectRoot, ".gcc-ts-bundler-vite"),
       ),
     ).toHaveLength(1);
-    expect(first.stderr).toContain("[gcc-ts-bundler timing] cache:final-fast: miss");
+    expect(first.stderr).toContain(
+      "[gcc-ts-bundler timing] cache:final-fast: miss",
+    );
     expect(first.stderr).toContain(
       "[gcc-ts-bundler timing] cache:final-metadata: miss",
     );
@@ -1073,8 +1094,12 @@ test.serial(
     expect(second.stderr).not.toContain(
       "[gcc-ts-bundler timing] cache:final-metadata:",
     );
-    expect(second.stderr).not.toContain("[gcc-ts-bundler timing] closure:compile:");
-    expect(second.stderr).not.toContain("[gcc-ts-bundler timing] native-emit:transpile:");
+    expect(second.stderr).not.toContain(
+      "[gcc-ts-bundler timing] closure:compile:",
+    );
+    expect(second.stderr).not.toContain(
+      "[gcc-ts-bundler timing] native-emit:transpile:",
+    );
   },
 );
 
@@ -1131,7 +1156,13 @@ test.serial(
     const pluginUrl = pathToFileURL(
       path.join(process.cwd(), "dist/vite/index.mjs"),
     ).href;
-    const viteBin = path.join(process.cwd(), "node_modules", "vite", "bin", "vite.js");
+    const viteBin = path.join(
+      process.cwd(),
+      "node_modules",
+      "vite",
+      "bin",
+      "vite.js",
+    );
     await fixture.write(
       "index.html",
       [
@@ -1180,7 +1211,13 @@ test.serial(
     const pluginUrl = pathToFileURL(
       path.join(process.cwd(), "dist/vite/index.mjs"),
     ).href;
-    const viteBin = path.join(process.cwd(), "node_modules", "vite", "bin", "vite.js");
+    const viteBin = path.join(
+      process.cwd(),
+      "node_modules",
+      "vite",
+      "bin",
+      "vite.js",
+    );
     await fixture.write(
       "index.html",
       [
@@ -1217,9 +1254,7 @@ test.serial(
         cwd: fixture.projectRoot,
       }),
     ).rejects.toMatchObject({
-      stderr: expect.stringContaining(
-        "chunks.loader must be one of: script",
-      ),
+      stderr: expect.stringContaining("chunks.loader must be one of: script"),
     });
   },
 );

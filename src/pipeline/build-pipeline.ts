@@ -1,6 +1,8 @@
 import path from "path";
 
 import type {
+  BuildDiagnostic,
+  BuildFailure,
   BuildOptions,
   BuildResult,
   CleanCacheOptions,
@@ -32,6 +34,7 @@ import {
   createBuildDiagnostic,
   publishOutputs,
   removeProjectCacheDir,
+  toBuildDiagnostics,
   toImportPath,
   toPublishedOutputPaths,
 } from "./build-helpers";
@@ -97,7 +100,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       workspaceDir: resolved.workspaceDir,
     });
     if (nativeEmitResult.emitSkipped || nativeEmitResult.diagnostics.length) {
-      return failedBuild(nativeEmitResult.diagnostics);
+      return failedBuild(toBuildDiagnostics(nativeEmitResult.diagnostics));
     }
 
     const closureResult = await runClosureStage({
@@ -114,7 +117,11 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       supportFiles: nativeEmitResult.supportFiles,
     });
     if (closureResult.exitCode !== 0) {
-      return failedBuild([], closureResult.exitCode);
+      return failedBuild([
+        createBuildDiagnostic(
+          `Closure compilation failed with exit code ${closureResult.exitCode}.`,
+        ),
+      ]);
     }
 
     await persistFinalCache(context, resolved, cachePaths, closureResult);
@@ -209,7 +216,7 @@ async function restoreFinalMetadata(
 function validateBuildShape(
   context: BuildContext,
   resolved: ResolvedBuild,
-): BuildResult | null {
+): BuildFailure | null {
   if (
     context.options.chunks.mode !== "off" &&
     resolved.entryFiles.some(
@@ -284,26 +291,11 @@ function successfulBuild(
   outputFiles: readonly string[],
   cacheHit: boolean,
 ): BuildResult {
-  return {
-    cacheHit,
-    diagnostics: [],
-    emitSkipped: false,
-    exitCode: 0,
-    outputFiles,
-  };
+  return { cacheHit, ok: true, outputFiles };
 }
 
-function failedBuild(
-  diagnostics: readonly unknown[],
-  exitCode = 1,
-): BuildResult {
-  return {
-    cacheHit: false,
-    diagnostics,
-    emitSkipped: true,
-    exitCode,
-    outputFiles: [],
-  };
+function failedBuild(diagnostics: readonly BuildDiagnostic[]): BuildFailure {
+  return { diagnostics, ok: false };
 }
 
 const isFinalCacheMetadata = isObjectOf<FinalCacheMetadata>({

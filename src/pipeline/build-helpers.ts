@@ -1,6 +1,9 @@
 import fs from "fs";
 import path from "path";
 
+import ts from "typescript";
+
+import type { BuildDiagnostic } from "../api/types";
 import { publishFilesToDirectory } from "../internal/files";
 import { publishedOutputsMatch } from "../internal/file-state";
 
@@ -24,17 +27,33 @@ export function toPublishedOutputPaths(
   return publishedOutputs.map(({ name }) => path.join(outDir, name));
 }
 
-export function createBuildDiagnostic(error: unknown) {
+export function createBuildDiagnostic(error: unknown): BuildDiagnostic {
   return {
-    category: 1,
-    code: 0,
-    messageText:
+    message:
       error instanceof Error
         ? error.message
         : typeof error === "string"
           ? error
           : "Build failed.",
   };
+}
+
+export function toBuildDiagnostics(
+  diagnostics: readonly ts.Diagnostic[],
+): BuildDiagnostic[] {
+  return diagnostics.map((diagnostic) => {
+    const message = ts.flattenDiagnosticMessageText(
+      diagnostic.messageText,
+      "\n",
+    );
+    if (!diagnostic.file || diagnostic.start === undefined) {
+      return { message };
+    }
+    const { line } = diagnostic.file.getLineAndCharacterOfPosition(
+      diagnostic.start,
+    );
+    return { file: diagnostic.file.fileName, line: line + 1, message };
+  });
 }
 
 export async function removeProjectCacheDir(projectCacheDir: string) {

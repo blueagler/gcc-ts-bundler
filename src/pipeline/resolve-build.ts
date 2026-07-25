@@ -13,7 +13,7 @@ import { collectTrackedFiles, trackedFilesMatch } from "../internal/file-state";
 import type {
   BuildContext,
   BuildEntry,
-  NormalizedBuildOptions,
+  ResolvedBuildOptions,
   ResolvedBuild,
 } from "../internal/types";
 import { planChunks, resolveGraph } from "../native/load";
@@ -57,7 +57,7 @@ export {
 } from "./resolve-build/signatures";
 
 export async function createBuildContext(
-  options: NormalizedBuildOptions,
+  options: ResolvedBuildOptions,
 ): Promise<BuildContext> {
   const packageRoot = getPackageRoot();
   const usesPersistentCache = options.cache.mode === "persistent";

@@ -1,5 +1,5 @@
 import { toRecord } from "../internal/records";
-import { defineValues, isRecord } from "../internal/validation";
+import { isRecord } from "../internal/validation";
 import nativeBinding from "./index";
 
 interface NativeEntryExportMetadata {
@@ -216,21 +216,26 @@ interface NativeBinding {
 
 let cachedBinding: NativeBinding | null = null;
 
-const NATIVE_BINDING_METHODS = defineValues(
-  "collectFileStates",
-  "collectPublishedOutputStats",
-  "matchFileStates",
-  "planChunks",
-  "prepareClosureJobs",
-  "publishedOutputSnapshotMatches",
-  "publishedOutputsMatch",
-  "resolveGraph",
-  "rewriteBundlerRuntimeEs5Helpers",
-  "rewriteDecoratorMetadata",
-  "rewriteGccExports",
-  "transpileSources",
-  "writeEntryShims",
-);
+// Record<keyof NativeBinding, true> makes this exhaustive: adding a method
+// to NativeBinding without listing it here is a compile error, so a stale
+// addon can never validate as complete.
+const NATIVE_BINDING_METHOD_FLAGS: Record<keyof NativeBinding, true> = {
+  collectFileStates: true,
+  collectPublishedOutputStats: true,
+  matchFileStates: true,
+  planChunks: true,
+  prepareClosureJobs: true,
+  publishedOutputSnapshotMatches: true,
+  publishedOutputsMatch: true,
+  resolveGraph: true,
+  rewriteBundlerRuntimeEs5Helpers: true,
+  rewriteDecoratorMetadata: true,
+  rewriteGccExports: true,
+  transpileSources: true,
+  writeEntryShims: true,
+};
+
+const NATIVE_BINDING_METHODS = Object.keys(NATIVE_BINDING_METHOD_FLAGS);
 
 function loadBinding(): NativeBinding {
   if (cachedBinding) {

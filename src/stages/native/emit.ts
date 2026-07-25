@@ -16,7 +16,7 @@ import {
 } from "../../internal/validation";
 import type {
   LazyImport,
-  NormalizedBuildOptions,
+  ResolvedBuildOptions,
   PackageAlias,
 } from "../../internal/types";
 import { collectFileStates, transpileSources } from "../../native/load";
@@ -77,7 +77,7 @@ export async function emitNativeStage({
   fileNames: string[];
   lazyImports: LazyImport[];
   metadataPath: string;
-  options: NormalizedBuildOptions;
+  options: ResolvedBuildOptions;
   packageAliases: PackageAlias[];
   packageJsonFiles: string[];
   tsxRuntimeSourceFiles: string[];
@@ -220,7 +220,7 @@ async function collectNativeAnalysis({
   workspaceDir,
 }: {
   fileNames: string[];
-  options: NormalizedBuildOptions;
+  options: ResolvedBuildOptions;
   tsConfigPath: string;
   workspaceDir: string;
 }) {

@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import ts from "typescript";
 
-import type { NormalizedBuildOptions } from "../../internal/types";
+import type { ResolvedBuildOptions } from "../../internal/types";
 import { hasErrorCode } from "../../internal/validation";
 
 export async function ensureDirectorySymlink(
@@ -31,7 +31,7 @@ export async function ensureDirectorySymlink(
 
 export async function ensureWorkspaceNodeModules(
   workspaceDir: string,
-  options: NormalizedBuildOptions,
+  options: ResolvedBuildOptions,
 ) {
   const linkPath = path.join(workspaceDir, "node_modules");
   if (options.packages.mode === "off") {

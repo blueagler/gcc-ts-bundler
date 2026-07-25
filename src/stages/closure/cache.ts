@@ -5,7 +5,7 @@ import { hashJson } from "../../cache/hash";
 import { readJsonIfExists, writeJson } from "../../cache/store";
 import { zipExact } from "../../internal/arrays";
 import { ensureDirectory, hashFilesInOrder } from "../../internal/files";
-import { isNumber, isRecord, isStringArray } from "../../internal/validation";
+import { isNumber, isObjectOf, isStringArray } from "../../internal/validation";
 
 export interface ClosureJobCacheMetadata {
   artifactFiles: string[];
@@ -114,15 +114,10 @@ export async function tryRestoreCachedClosureJob({
   return true;
 }
 
-function isClosureJobCacheMetadata(
-  value: unknown,
-): value is ClosureJobCacheMetadata {
-  return (
-    isRecord(value) &&
-    isStringArray(value.artifactFiles) &&
-    isNumber(value.version)
-  );
-}
+const isClosureJobCacheMetadata = isObjectOf<ClosureJobCacheMetadata>({
+  artifactFiles: isStringArray,
+  version: isNumber,
+});
 
 export async function persistCachedClosureJob({
   cacheDir,

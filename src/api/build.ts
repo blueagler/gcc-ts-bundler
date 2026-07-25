@@ -64,9 +64,15 @@ export async function runCli(args: string[]): Promise<number> {
   }
 
   const result = await build(options);
-  return result.exitCode;
-}
-
-export async function main(args: string[]): Promise<number> {
-  return runCli(args);
+  if (result.ok) {
+    return 0;
+  }
+  for (const diagnostic of result.diagnostics) {
+    const location =
+      diagnostic.file === undefined
+        ? ""
+        : `${diagnostic.file}${diagnostic.line === undefined ? "" : `:${diagnostic.line}`}: `;
+    console.error(`${location}${diagnostic.message}`);
+  }
+  return 1;
 }

@@ -3,7 +3,7 @@ import path from "path";
 
 import { hashContent, hashJson } from "../../cache/hash";
 import { getPackageRootFromBundle } from "../../internal/bundle-location";
-import type { NormalizedBuildOptions } from "../../internal/types";
+import type { ResolvedBuildOptions } from "../../internal/types";
 
 export async function hashTsConfig(configPath: string): Promise<string> {
   return hashContent(await fs.promises.readFile(configPath, "utf-8"));
@@ -57,7 +57,7 @@ export async function getPackageSignature(packageRoot = getPackageRoot()) {
   return packageSignaturePromise;
 }
 
-export function getOptionsSignature(options: NormalizedBuildOptions) {
+export function getOptionsSignature(options: ResolvedBuildOptions) {
   return hashJson({
     compilationLevel: options.compilationLevel,
     chunks: options.chunks,

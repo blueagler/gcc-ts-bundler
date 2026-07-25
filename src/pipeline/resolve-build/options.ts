@@ -11,12 +11,12 @@ import {
   PACKAGE_MODES,
 } from "../../api/types";
 import type { BuildOptions, ChunkLoader } from "../../api/types";
-import type { NormalizedBuildOptions } from "../../internal/types";
+import type { ResolvedBuildOptions } from "../../internal/types";
 import { requireChoice } from "../../internal/validation";
 
 export function normalizeBuildOptions(
   options: BuildOptions,
-): NormalizedBuildOptions {
+): ResolvedBuildOptions {
   const projectRoot = path.resolve(options.projectRoot ?? process.cwd());
   const srcDir = path.resolve(
     projectRoot,

@@ -8,7 +8,6 @@ import { build } from "../api/build";
 import { withEnvironment } from "../internal/environment";
 import { collectOutputChunkStats } from "../internal/lifecycle-size";
 import { logInternalDetail, logInternalTiming } from "../internal/timing";
-import { isRecord } from "../internal/validation";
 import {
   normalizeRetainedCapturedModules,
   shouldCaptureModule,
@@ -462,10 +461,9 @@ async function compileViteGraph(
     },
     () => build(compilerOptions),
   );
-  if (result.exitCode !== 0 || result.emitSkipped) {
-    const message = result.diagnostics.map(formatDiagnosticMessage).join("\n");
+  if (!result.ok) {
     this.error(
-      message ||
+      result.diagnostics.map((diagnostic) => diagnostic.message).join("\n") ||
         "gccTsBundler() failed while compiling the captured Vite graph.",
     );
   }
@@ -693,11 +691,4 @@ function logViteTimings(timings: ViteTimingTotals) {
       logInternalTiming(label, durationMs);
     }
   }
-}
-
-function formatDiagnosticMessage(diagnostic: unknown) {
-  if (isRecord(diagnostic) && typeof diagnostic.messageText === "string") {
-    return diagnostic.messageText;
-  }
-  return JSON.stringify(diagnostic);
 }

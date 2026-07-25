@@ -19,7 +19,7 @@ import {
 import { hashJson } from "../cache/hash";
 import { hashFileInput, writeFileIfChanged } from "../internal/files";
 import { logInternalDetail } from "../internal/timing";
-import { isRecord, isStringArray } from "../internal/validation";
+import { isObjectOf, isStringArray } from "../internal/validation";
 import { getPackageSignature } from "../pipeline/resolve-build/signatures";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type { MaterializedGraph } from "./internal-types";
@@ -279,14 +279,11 @@ function mergeRuntimeHazards(
   return merged;
 }
 
-function isCachedRuntimeHazards(value: unknown): value is CachedRuntimeHazards {
-  return (
-    isRecord(value) &&
-    isStringArray(value.accessedMembers) &&
-    isStringArray(value.definedMembers) &&
-    isStringArray(value.protocolMembers)
-  );
-}
+const isCachedRuntimeHazards = isObjectOf<CachedRuntimeHazards>({
+  accessedMembers: isStringArray,
+  definedMembers: isStringArray,
+  protocolMembers: isStringArray,
+});
 
 function serializeRuntimeHazards(
   hazards: Awaited<ReturnType<typeof analyzeRuntimeUsage>>,
