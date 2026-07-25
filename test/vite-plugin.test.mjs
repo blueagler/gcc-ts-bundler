@@ -11,7 +11,7 @@ import {
 } from "../src/vite/capture.ts";
 import { resolveNormalizedBridgeModuleIds } from "../src/vite/graph.ts";
 import { materializeCapturedGraph } from "../src/vite/materialize.ts";
-import { prebundleMaterializedDependencies } from "../src/vite/prebundle.ts";
+import { prebundleMaterializedDependencies } from "../src/vite/prebundle/index.ts";
 import {
   resolveViteLanguageOut,
   VITE_LANGUAGE_OUT_ERROR,
