@@ -22,6 +22,13 @@ The npm package uses a JS loader plus platform-specific optional native packages
 bun install gcc-ts-bundler
 ```
 
+## Documentation
+
+- [Architecture](docs/architecture.md)
+- [Programmatic API](docs/api.md)
+- [Vite integration](docs/vite.md)
+- [Development](docs/development.md)
+
 ## Native Closure-Core API
 
 The package now exposes a native-accelerated programmatic API while keeping Closure Compiler as the final optimizer.
@@ -49,9 +56,12 @@ You can also generate Closure externs from package TypeScript hints:
 import { generateExterns } from "gcc-ts-bundler";
 
 const result = await generateExterns({
+  appEntryFiles: ["./main.ts"],
+  mode: "boundary-aware",
   modules: ["lit", "@lit-labs/router", "@lit-labs/motion"],
   outputFile: "./closure-externs/lit.generated.js",
   projectRoot: process.cwd(),
+  srcDir: "./src",
 });
 
 console.log(result.scannedFiles);
@@ -105,7 +115,7 @@ Use subcommands:
 ```sh
 gcc-ts-bundler build --project-root=. --src-dir=./src --entry=./index.ts --out-dir=./dist
 gcc-ts-bundler clean-cache --project-root=.
-gcc-ts-bundler externs --project-root=. --module=lit --module=@lit-labs/router --output-file=./closure-externs/lit.generated.js
+gcc-ts-bundler externs --project-root=. --src-dir=./src --entry=./main.ts --module=lit --module=@lit-labs/router --output-file=./closure-externs/lit.generated.js
 ```
 
 ### Build Flags
@@ -117,7 +127,10 @@ gcc-ts-bundler externs --project-root=. --module=lit --module=@lit-labs/router -
 - `--language-out`: ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT
 - `--compilation-level`: WHITESPACE_ONLY | SIMPLE | ADVANCED
 - `--packages`: `off | esm-only`
+- `--extern`: Closure extern file. May be repeated
+- `--js`: Additional Closure JavaScript input. May be repeated
 - `--chunks`: `off | bundler-runtime`
+- `--chunk-loader`: `script`
 - `--chunk-public-path`: public URL prefix used to load chunk files
 - `--chunk-base-name`: base chunk output name
 - `--chunk-manifest`: output filename for the generated chunk manifest
@@ -128,12 +141,16 @@ gcc-ts-bundler externs --project-root=. --module=lit --module=@lit-labs/router -
 - `--verbose`: Print diagnostics to the console.
 - `-h, --help`: Show this help message.
 
-Only the documented dashed CLI flags are supported. Deprecated underscore and camelCase aliases are not recognized.
+Only the documented dashed CLI flags are supported. Unknown flags and deprecated underscore or camelCase aliases fail fast.
 
 ### Extern Generation Flags
 
 - `--project-root`: Project root used to resolve `node_modules` and `tsconfig.json`
+- `--src-dir`: Source directory used to resolve application and runtime entries
+- `--entry`: Application entry for boundary-aware usage analysis. May be repeated
+- `--runtime-entry`: Runtime JS entry for runtime-aware analysis. May be repeated
 - `--module`: Package or package subpath to scan. May be repeated
+- `--mode`: `boundary-aware | candidates | runtime-aware`
 - `--output-file`: Write generated externs to a file instead of stdout
 - `--include-dependencies`: Follow imported declaration files across dependent packages
 - `--tsconfig`: Explicit tsconfig path relative to `--project-root`
