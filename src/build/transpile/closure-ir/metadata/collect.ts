@@ -11,11 +11,11 @@ import {
   buildObjectMemberDoc,
   buildTypeAliasDeclarationSnippet,
   buildVariableJsDoc,
-  createClosureDocRenderContext,
   getClassMemberName,
   getObjectPropertyName,
   hasStaticModifier,
 } from "./docs";
+import { createClosureDocRenderContext } from "./type-render";
 import { buildEnumDeclarationMetadata } from "./enums";
 import type {
   ClosureIrEnumDeclaration,
