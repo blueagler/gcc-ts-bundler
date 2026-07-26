@@ -1,5 +1,5 @@
 use super::*;
-use swc_core::ecma::ast::{KeyValueProp, Prop};
+use swc_core::ecma::ast::{KeyValueProp, Prop, PropOrSpread};
 
 pub(crate) fn collect_class_static_assignments(source_text: &str) -> Vec<(String, String)> {
     let class_binding_regex = match regex::Regex::new(
@@ -37,6 +37,81 @@ pub(crate) fn collect_class_static_assignments(source_text: &str) -> Vec<(String
     }
 
     assignments
+}
+
+/// Quotes object-literal keys passed to configured runtime calls (for
+/// example a framework's class-map helper) so Closure never renames keys
+/// that must match CSS class names at runtime. The call list comes from
+/// build options; framework presets supply their runtime's helpers.
+pub(crate) struct ClassMapCallCompatVisitor {
+    calls: HashMap<String, Vec<usize>>,
+}
+
+impl ClassMapCallCompatVisitor {
+    pub(crate) fn new(calls: &[ClassMapCallInput]) -> Self {
+        let mut grouped: HashMap<String, Vec<usize>> = HashMap::new();
+        for call in calls {
+            grouped
+                .entry(call.callee.clone())
+                .or_default()
+                .push(call.argIndex as usize);
+        }
+        Self { calls: grouped }
+    }
+}
+
+impl VisitMut for ClassMapCallCompatVisitor {
+    fn visit_mut_call_expr(&mut self, call: &mut CallExpr) {
+        call.visit_mut_children_with(self);
+
+        let Callee::Expr(callee) = &call.callee else {
+            return;
+        };
+        let Expr::Ident(callee) = callee.as_ref() else {
+            return;
+        };
+        let Some(arg_indexes) = self.calls.get(callee.sym.as_ref()) else {
+            return;
+        };
+        for arg_index in arg_indexes {
+            let Some(class_map) = call.args.get_mut(*arg_index) else {
+                continue;
+            };
+            let Expr::Object(class_map) = class_map.expr.as_mut() else {
+                continue;
+            };
+            quote_object_literal_keys(class_map);
+        }
+    }
+}
+
+fn quote_object_literal_keys(class_map: &mut swc_core::ecma::ast::ObjectLit) {
+    for property in &mut class_map.props {
+        let PropOrSpread::Prop(property) = property else {
+            continue;
+        };
+        match property.as_mut() {
+            Prop::Shorthand(ident) => {
+                *property = Box::new(Prop::KeyValue(KeyValueProp {
+                    key: quote_prop_name(PropName::Ident(ident.clone().into())),
+                    value: Box::new(Expr::Ident(ident.clone())),
+                }));
+            }
+            Prop::KeyValue(property) => {
+                property.key = quote_prop_name(property.key.clone());
+            }
+            Prop::Getter(property) => {
+                property.key = quote_prop_name(property.key.clone());
+            }
+            Prop::Setter(property) => {
+                property.key = quote_prop_name(property.key.clone());
+            }
+            Prop::Method(property) => {
+                property.key = quote_prop_name(property.key.clone());
+            }
+            Prop::Assign(_) => {}
+        }
+    }
 }
 
 pub(crate) struct PreservedPropertyCompatVisitor {

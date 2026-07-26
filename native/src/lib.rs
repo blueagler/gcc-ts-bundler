@@ -86,6 +86,8 @@ pub fn transpile_sources(
     package_aliases: Vec<transpile::PackageAliasInput>,
     package_json_files: Vec<String>,
     lazy_imports: Vec<transpile::LazyImportInput>,
+    chunk_graph: Vec<transpile::TranspileChunkInput>,
+    class_map_calls: Vec<transpile::ClassMapCallInput>,
 ) -> Result<transpile::TranspileOutput> {
     into_napi(transpile::transpile_sources(
         file_names,
@@ -99,6 +101,8 @@ pub fn transpile_sources(
         package_aliases,
         package_json_files,
         lazy_imports,
+        chunk_graph,
+        class_map_calls,
     ))
 }
 

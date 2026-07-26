@@ -59,6 +59,7 @@ export async function getPackageSignature(packageRoot = getPackageRoot()) {
 
 export function getOptionsSignature(options: ResolvedBuildOptions) {
   return hashJson({
+    compat: options.compat,
     compilationLevel: options.compilationLevel,
     chunks: options.chunks,
     diagnostics: options.diagnostics,

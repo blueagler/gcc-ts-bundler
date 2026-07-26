@@ -54,9 +54,24 @@ export type BuildEntryOption =
   | string
   | { file: string; name?: string | undefined };
 
+/**
+ * A runtime call whose object-literal argument keys must survive property
+ * renaming (for example a framework's CSS class-map helper). Framework
+ * presets supply these; the core stays framework-agnostic.
+ */
+export interface CompatClassMapCall {
+  argIndex: number;
+  callee: string;
+}
+
+export interface CompatOptions {
+  classMapCalls?: readonly CompatClassMapCall[] | undefined;
+}
+
 export interface BuildOptions {
   cache?: CacheOptions | undefined;
   chunks?: ChunkOptions | undefined;
+  compat?: CompatOptions | undefined;
   compilationLevel?: CompilationLevel | undefined;
   diagnostics?: DiagnosticsOptions | undefined;
   entries: readonly BuildEntryOption[];
@@ -102,6 +117,7 @@ export interface ResolvedBuildOptions {
     mode: ChunkMode;
     publicPath: string;
   };
+  compat: { classMapCalls: CompatClassMapCall[] };
   compilationLevel: CompilationLevel;
   diagnostics: {
     fatalWarnings: boolean;
@@ -130,6 +146,7 @@ export const DEFAULT_BUILD_OPTIONS = Object.freeze({
     mode: "off",
     publicPath: "./",
   },
+  compat: { classMapCalls: [] },
   compilationLevel: "ADVANCED",
   diagnostics: {
     fatalWarnings: false,

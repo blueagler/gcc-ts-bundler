@@ -66,17 +66,25 @@ export function renderBoundaryAwareExterns({
 export async function renderRuntimeAwareExterns({
   analysis,
   modules,
+  protocolHelpers,
   runtimeEntryFiles,
 }: {
   analysis: ExternAnalysisContext;
   modules: string[];
+  protocolHelpers: {
+    keyExclusionListCallees: string[];
+    keyReadCallees: string[];
+  };
   runtimeEntryFiles: string[];
 }) {
   const appUsageMembers =
     analysis.appEntryFiles.length > 0
       ? collectBoundaryAwareUsageMemberNames(analysis)
       : new Set<string>();
-  const runtimeUsage = await analyzeRuntimeUsage(runtimeEntryFiles);
+  const runtimeUsage = await analyzeRuntimeUsage(
+    runtimeEntryFiles,
+    protocolHelpers,
+  );
   const emittedLines = collectRuntimeUsageExternLines(
     runtimeUsage,
     appUsageMembers,

@@ -5,10 +5,12 @@ mod compat;
 mod context;
 mod emit;
 mod emit_goog;
+mod emit_hoist;
 mod emit_runtime;
 mod enums;
 mod externs;
 mod global_this;
+mod hoist;
 mod imports_exports;
 mod js_compat;
 mod namespace;
@@ -48,10 +50,12 @@ pub(crate) use self::context::ChunkMode;
 use self::context::*;
 use self::emit::*;
 use self::emit_goog::*;
+use self::emit_hoist::*;
 use self::emit_runtime::*;
 use self::enums::*;
 use self::externs::*;
 use self::global_this::*;
+use self::hoist::*;
 use self::imports_exports::*;
 use self::js_compat::*;
 use self::namespace::*;
@@ -86,6 +90,24 @@ pub struct LazyImportInput {
     pub targetPath: String,
 }
 
+#[allow(non_snake_case)]
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct TranspileChunkInput {
+    pub files: Vec<String>,
+    pub name: String,
+}
+
+/// A runtime call whose object-literal argument keys must survive property
+/// renaming (framework class-map helpers). Supplied by framework presets.
+#[allow(non_snake_case)]
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct ClassMapCallInput {
+    pub argIndex: u32,
+    pub callee: String,
+}
+
 pub fn transpile_sources(
     file_names: Vec<String>,
     explicit_extern_paths: Vec<String>,
@@ -98,6 +120,8 @@ pub fn transpile_sources(
     package_aliases: Vec<PackageAliasInput>,
     package_json_files: Vec<String>,
     lazy_imports: Vec<LazyImportInput>,
+    chunk_graph: Vec<TranspileChunkInput>,
+    class_map_calls: Vec<ClassMapCallInput>,
 ) -> std::result::Result<TranspileOutput, String> {
     fs::create_dir_all(&out_dir).map_err(|error| error.to_string())?;
     if let Some(parent) = PathBuf::from(&externs_path).parent() {
@@ -116,6 +140,19 @@ pub fn transpile_sources(
         .map(|module_id| (to_bundler_runtime_module_id(module_id), module_id.clone()))
         .collect::<HashMap<_, _>>();
     let file_metadata = load_closure_metadata(&metadata_path)?;
+    let hoist_disabled = matches!(std::env::var("GCC_DISABLE_HOIST").as_deref(), Ok("1"));
+    let hoist_plan = if chunk_mode == ChunkMode::BundlerRuntime && !hoist_disabled {
+        build_hoist_plan(
+            &file_names,
+            &workspace_dir,
+            &package_aliases,
+            &chunk_graph,
+            &lazy_imports,
+            &file_metadata,
+        )?
+    } else {
+        None
+    };
     let ExternPropertyAnalysis {
         explicit_extern_property_names,
         preserved_property_names,
@@ -125,10 +162,12 @@ pub fn transpile_sources(
         bundler_module_slots,
         bundler_runtime_logical_ids,
         chunk_mode,
+        class_map_calls,
         commonjs_specifiers: collect_commonjs_specifiers(&package_aliases)?
             .into_iter()
             .collect(),
         file_metadata,
+        hoist_plan: hoist_plan.map(std::sync::Arc::new),
         lazy_imports_by_file: group_lazy_imports_by_file(lazy_imports),
         package_aliases,
         preserved_property_names,

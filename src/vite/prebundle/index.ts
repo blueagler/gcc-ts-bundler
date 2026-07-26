@@ -6,6 +6,7 @@ import type {
   CapturedRuntimeModule,
   MaterializedGraph,
 } from "../internal-types";
+import { createBarrelFlattener } from "./barrels";
 import {
   canonicalizeDuplicateLazyEntryOutputs,
   collectCollapsibleBundleEntryOutputs,
@@ -243,6 +244,9 @@ async function buildDependencyBundles(
 
   const inputDir = path.join(materialized.srcDir, DEP_BUNDLE_INPUT_DIR);
   const outputDir = path.join(runtimeSrcDir, DEP_BUNDLE_OUTPUT_DIR);
+  const barrelFlattener = createBarrelFlattener({
+    moduleFilePaths: new Set(context.moduleByFilePath.keys()),
+  });
 
   const writtenRequests: WrittenRegionBundleRequest[] = [];
   const inputEntries: Array<{ content: string; relativePath: string }> = [];
@@ -257,9 +261,11 @@ async function buildDependencyBundles(
       groupedRequest.requestKey,
     ).slice(0, 8)}.js`;
     const entryPoint = path.join(regionDir, fileName);
-    const renderedEntry = renderBundleEntrySource({
+    const renderedEntry = await renderBundleEntrySource({
       entryPoint,
       requests: groupedRequest.requests,
+      resolveDeepExport: (targetFilePath, exportName) =>
+        barrelFlattener.resolveDeepExport(targetFilePath, exportName),
     });
     inputEntries.push({
       content: renderedEntry,
@@ -289,7 +295,10 @@ async function buildDependencyBundles(
     outbase: DEP_BUNDLE_INPUT_DIR,
     platform: "browser",
     splitting: true,
-    target: "esnext",
+    // Closure does not support private class elements or static blocks;
+    // lowering here (instead of per captured module) keeps one shared set of
+    // esbuild helpers across all dependency bundles.
+    target: "es2021",
     treeShaking: true,
     write: false,
   });

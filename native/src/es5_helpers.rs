@@ -83,7 +83,10 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_shared_closure_support_references() {
+    fn leaves_closure_support_references_to_the_prefix_namespace() {
+        // Closure-generated support references (`ta`/`qa`/`ha` style) are
+        // shared through `$gcc` cross-chunk now and must not be rewritten by
+        // bare-name matching.
         let code = r#"
           M("m0", function(a){
             var tpl = ta(["x"]);
@@ -94,18 +97,10 @@ mod tests {
           });
         "#;
         let rewritten = rewrite_bundler_runtime_es5_helpers(code.to_string()).unwrap();
-        assert!(rewritten.code.contains("var G=globalThis.__g,_=G._;"));
-        assert!(rewritten
-            .helper_keys
-            .contains(&"closure-template-object".to_string()));
-        assert!(rewritten
-            .helper_keys
-            .contains(&"closure-inherits".to_string()));
-        assert!(!rewritten.code.contains("ta(["));
-        assert!(!rewritten.code.contains("qa(Child,Parent)"));
-        assert!(rewritten
-            .code
-            .contains("globalThis.Object.defineProperties"));
+        assert!(rewritten.helper_keys.is_empty());
+        assert!(rewritten.code.contains("ta(["));
+        assert!(rewritten.code.contains("qa(Child, Parent)"));
+        assert!(rewritten.code.contains("ha.Object.defineProperties"));
     }
 
     #[test]
@@ -124,24 +119,6 @@ mod tests {
         assert!(rewritten.code.contains("x(ta, qa, ha)"));
         assert!(!rewritten.code.contains("_[5]"));
         assert!(!rewritten.code.contains("_[6]"));
-    }
-
-    #[test]
-    fn rewrites_top_level_closure_global_without_helper_slot() {
-        let code = r#"
-          M("m0", function(a){
-            function Child() {}
-            ha.Object.defineProperties(Child.prototype, {});
-          });
-        "#;
-        let rewritten = rewrite_bundler_runtime_es5_helpers(code.to_string()).unwrap();
-        assert!(!rewritten
-            .helper_keys
-            .contains(&"closure-global".to_string()));
-        assert!(rewritten
-            .code
-            .contains("globalThis.Object.defineProperties"));
-        assert!(!rewritten.code.contains("ha.Object.defineProperties"));
     }
 
     #[test]

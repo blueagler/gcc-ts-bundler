@@ -164,6 +164,16 @@ interface NativeTranspilePackageAlias {
   targetPath: string;
 }
 
+interface NativeTranspileChunkInput {
+  files: string[];
+  name: string;
+}
+
+interface NativeClassMapCallInput {
+  argIndex: number;
+  callee: string;
+}
+
 interface NativeBinding {
   collectFileStates(filePaths: string[]): NativeFileStateEntry[];
   collectPublishedOutputStats(
@@ -211,6 +221,8 @@ interface NativeBinding {
     packageAliases: NativeTranspilePackageAlias[],
     packageJsonFiles: string[],
     lazyImports: NativeLazyImportInput[],
+    chunkGraph: NativeTranspileChunkInput[],
+    classMapCalls: NativeClassMapCallInput[],
   ): NativeTranspileOutput;
   writeEntryShims(entries: NativeShimEntry[]): string[];
 }
@@ -325,7 +337,9 @@ export function rewriteDecoratorMetadata(
 }
 
 export function transpileSources(input: {
+  chunkGraph: NativeTranspileChunkInput[];
   chunkMode: string;
+  classMapCalls: NativeClassMapCallInput[];
   explicitExternPaths: string[];
   externsPath: string;
   fileNames: string[];
@@ -349,6 +363,8 @@ export function transpileSources(input: {
     input.packageAliases,
     input.packageJsonFiles,
     input.lazyImports,
+    input.chunkGraph,
+    input.classMapCalls,
   );
 }
 

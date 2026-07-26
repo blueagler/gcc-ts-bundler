@@ -348,7 +348,9 @@ fn slot_mode_for_export_decl(
     }
 }
 
-fn collect_local_export_modes(module: &Module) -> HashMap<String, BundlerExportSlotMode> {
+pub(super) fn collect_local_export_modes(
+    module: &Module,
+) -> HashMap<String, BundlerExportSlotMode> {
     let mut binding_candidates = HashMap::<Id, (String, BundlerExportSlotMode)>::new();
     for item in &module.body {
         match item {
@@ -438,7 +440,7 @@ fn collect_decl_export_candidates(
     }
 }
 
-fn export_binding_names_with_ids(pattern: &Pat) -> Vec<(Id, String)> {
+pub(super) fn export_binding_names_with_ids(pattern: &Pat) -> Vec<(Id, String)> {
     match pattern {
         Pat::Ident(ident) => vec![(ident.to_id(), ident.id.sym.to_string())],
         Pat::Array(array) => array

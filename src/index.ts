@@ -11,6 +11,8 @@ export type {
   ChunkMode,
   ChunkOptions,
   CleanCacheOptions,
+  CompatClassMapCall,
+  CompatOptions,
   CompilationLevel,
   DiagnosticsOptions,
   DiagnosticsPreflight,
@@ -18,4 +20,8 @@ export type {
   PackageMode,
   ResolvedBuildOptions,
 } from "./api/types";
-export type { GenerateExternsOptions, GenerateExternsResult } from "./externs";
+export type {
+  ExternsProtocolHelpers,
+  GenerateExternsOptions,
+  GenerateExternsResult,
+} from "./externs";

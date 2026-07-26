@@ -53,6 +53,12 @@ export async function resolveCompilerExterns(input: {
       path.join(input.captureRoot, "generated.externs.js"),
   );
 
+  const protocolHelpers = {
+    keyExclusionListCallees: [
+      ...(generateOptions.protocolHelpers?.keyExclusionListCallees ?? []),
+    ],
+    keyReadCallees: [...(generateOptions.protocolHelpers?.keyReadCallees ?? [])],
+  };
   if ((generateOptions.mode ?? "runtime-aware") === "runtime-aware") {
     await generateViteRuntimeAwareExterns({
       captureRoot: input.captureRoot,
@@ -62,6 +68,7 @@ export async function resolveCompilerExterns(input: {
       modules: [...generateOptions.modules],
       options: input.options,
       projectRoot: input.projectRoot,
+      protocolHelpers,
     });
   } else {
     await generateExterns({
@@ -71,6 +78,7 @@ export async function resolveCompilerExterns(input: {
       modules: [...generateOptions.modules],
       outputFile: generatedExternFile,
       projectRoot: input.projectRoot,
+      protocolHelpers,
       runtimeEntryFiles: input.materialized.runtimeEntries,
       srcDir: input.materialized.srcDir,
     });
@@ -94,6 +102,10 @@ async function generateViteRuntimeAwareExterns(input: {
   modules: string[];
   options: GccTsBundlerVitePluginOptions;
   projectRoot: string;
+  protocolHelpers: {
+    keyExclusionListCallees: string[];
+    keyReadCallees: string[];
+  };
 }) {
   const packageSignature = await getPackageSignature();
   const cacheRoot = resolvePackageExternCacheRoot({
@@ -127,7 +139,10 @@ async function generateViteRuntimeAwareExterns(input: {
   const appUsageMembers = await analyzeJsUsageMembers(
     input.materialized.authoredFiles,
   );
-  const appRuntimeUsage = await analyzeRuntimeUsage(appRuntimeFiles);
+  const appRuntimeUsage = await analyzeRuntimeUsage(
+    appRuntimeFiles,
+    input.protocolHelpers,
+  );
   const cacheStats = {
     hits: 0,
     misses: 0,
@@ -141,6 +156,7 @@ async function generateViteRuntimeAwareExterns(input: {
           includeDependencies: input.includeDependencies ?? true,
           packageName,
           packageSignature,
+          protocolHelpers: input.protocolHelpers,
         });
         if (hazards.cacheHit) {
           cacheStats.hits += 1;
@@ -184,6 +200,10 @@ async function loadCachedPackageRuntimeHazards(input: {
   includeDependencies: boolean;
   packageName: string;
   packageSignature: string;
+  protocolHelpers: {
+    keyExclusionListCallees: string[];
+    keyReadCallees: string[];
+  };
 }) {
   const fileHashes = await Promise.all(
     [...input.filePaths]
@@ -197,6 +217,7 @@ async function loadCachedPackageRuntimeHazards(input: {
     mode: "runtime-aware",
     packageName: input.packageName,
     packageSignature: input.packageSignature,
+    protocolHelpers: input.protocolHelpers,
   });
   const cacheFile = path.join(input.cacheRoot, `${cacheKey}.json`);
   const cached = await readJsonIfExists(cacheFile, isCachedRuntimeHazards);
@@ -207,7 +228,10 @@ async function loadCachedPackageRuntimeHazards(input: {
     };
   }
 
-  const analyzed = await analyzeRuntimeUsage(input.filePaths);
+  const analyzed = await analyzeRuntimeUsage(
+    input.filePaths,
+    input.protocolHelpers,
+  );
   const serialized = serializeRuntimeHazards(analyzed);
   await writeJson(cacheFile, serialized);
   return {

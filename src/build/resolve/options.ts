@@ -55,6 +55,11 @@ export function normalizeBuildOptions(
       ),
       publicPath: chunkPublicPath,
     },
+    compat: {
+      classMapCalls: [...(options.compat?.classMapCalls ?? [])].map(
+        (call) => ({ argIndex: call.argIndex, callee: call.callee }),
+      ),
+    },
     compilationLevel: requireChoice(
       options.compilationLevel ?? DEFAULT_BUILD_OPTIONS.compilationLevel,
       COMPILATION_LEVELS,

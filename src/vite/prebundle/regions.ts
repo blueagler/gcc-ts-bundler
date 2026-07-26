@@ -76,9 +76,13 @@ export async function assignRegionLabels(input: {
   );
 }
 
-export function renderBundleEntrySource(input: {
+export async function renderBundleEntrySource(input: {
   entryPoint: string;
   requests: RegionBundleRequest[];
+  resolveDeepExport?: (
+    targetFilePath: string,
+    exportName: string,
+  ) => Promise<{ imported: string; targetFilePath: string } | null>;
 }) {
   const lines: string[] = [];
 
@@ -111,11 +115,46 @@ export function renderBundleEntrySource(input: {
       exportSpecifiers.add(namedExport);
     }
 
-    if (exportSpecifiers.size > 0) {
+    // Resolve names through pure barrel modules to their defining modules so
+    // esbuild splitting can place per-region code into per-region bundles.
+    const passthroughSpecifiers: string[] = [];
+    const deepSpecifiersByTarget = new Map<string, string[]>();
+    for (const exportName of [...exportSpecifiers].sort((left, right) =>
+      left.localeCompare(right),
+    )) {
+      const resolved = input.resolveDeepExport
+        ? await input.resolveDeepExport(request.targetFilePath, exportName)
+        : null;
+      if (!resolved) {
+        passthroughSpecifiers.push(exportName);
+        continue;
+      }
+      const deepImportPath = toRelativeImportSpecifier(
+        input.entryPoint,
+        resolved.targetFilePath,
+      );
+      const specifier =
+        resolved.imported === exportName
+          ? exportName
+          : `${resolved.imported} as ${exportName}`;
+      const bucket = deepSpecifiersByTarget.get(deepImportPath);
+      if (bucket) {
+        bucket.push(specifier);
+      } else {
+        deepSpecifiersByTarget.set(deepImportPath, [specifier]);
+      }
+    }
+
+    if (passthroughSpecifiers.length > 0) {
       lines.push(
-        `export { ${[...exportSpecifiers]
-          .sort((left, right) => left.localeCompare(right))
-          .join(", ")} } from ${JSON.stringify(importPath)};`,
+        `export { ${passthroughSpecifiers.join(", ")} } from ${JSON.stringify(importPath)};`,
+      );
+    }
+    for (const [deepImportPath, specifiers] of [
+      ...deepSpecifiersByTarget.entries(),
+    ].sort(([left], [right]) => left.localeCompare(right))) {
+      lines.push(
+        `export { ${specifiers.join(", ")} } from ${JSON.stringify(deepImportPath)};`,
       );
     }
   }

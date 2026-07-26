@@ -33,6 +33,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
     let mut manifest_chunks = BTreeMap::new();
     let mut module_text_by_chunk = BTreeMap::new();
     let mut runtime_module_ids = Vec::new();
+    let mut registered_runtime_ids = std::collections::BTreeSet::new();
     let chunk_index_by_name = resolved_chunks
         .iter()
         .enumerate()
@@ -55,10 +56,13 @@ pub(crate) fn prepare_bundler_runtime_jobs(
             .ok_or_else(|| format!("Missing runtime chunk id for {}", chunk.name))?;
         for file_path in &chunk.files {
             let source_text = fs::read_to_string(file_path).map_err(|error| error.to_string())?;
-            module_sources.push(source_text);
             let module_id =
                 to_goog_module_id(Path::new(file_path), Path::new(&input.emittedOutDir));
             let runtime_module_id = to_bundler_runtime_module_id(&module_id);
+            if source_text.contains("__register(") {
+                registered_runtime_ids.insert(runtime_module_id.clone());
+            }
+            module_sources.push(source_text);
             runtime_module_ids.push(runtime_module_id.clone());
             manifest_modules.push(runtime_module_id.clone());
             module_map.insert(runtime_module_id.clone(), runtime_chunk_id.clone());
@@ -196,24 +200,23 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         published_outputs.push(manifest_path.to_string_lossy().to_string());
     }
 
+    // Hoisted entry modules execute inline when the chunk body runs; only
+    // registry-form entries still need an explicit `r.n` kick.
+    let registry_entry_runtime_ids = base_chunk
+        .entry_points
+        .iter()
+        .map(|module_id| to_bundler_runtime_module_id(module_id))
+        .filter(|runtime_module_id| registered_runtime_ids.contains(runtime_module_id))
+        .collect::<Vec<_>>();
     let base_entry_points_json = if runtime_debug {
-        serde_json::to_string(
-            &base_chunk
-                .entry_points
-                .iter()
-                .map(|module_id| to_bundler_runtime_module_id(module_id))
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|error| error.to_string())?
+        serde_json::to_string(&registry_entry_runtime_ids).map_err(|error| error.to_string())?
     } else {
         serde_json::to_string(
-            &base_chunk
-                .entry_points
+            &registry_entry_runtime_ids
                 .iter()
-                .map(|module_id| {
-                    let runtime_module_id = to_bundler_runtime_module_id(module_id);
+                .map(|runtime_module_id| {
                     runtime_module_index_by_id
-                        .get(&runtime_module_id)
+                        .get(runtime_module_id)
                         .copied()
                         .ok_or_else(|| format!("Missing module index for {}", runtime_module_id))
                 })
@@ -348,7 +351,12 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         languageIn: "UNSTABLE".to_string(),
         languageOut: input.languageOut.clone(),
         propertyRenamingReportPath: property_renaming_report_path.clone(),
-        renamePrefixNamespace: None,
+        // Hoisted module code lives inside per-chunk wrapper functions, so
+        // only true top-level declarations (polyfills, transpile helpers,
+        // cross-chunk moved code) receive the prefix. This keeps cross-chunk
+        // references working through one shared global object even though
+        // every chunk file is wrapped in an IIFE.
+        renamePrefixNamespace: Some(BUNDLER_RUNTIME_PREFIX_NAMESPACE.to_string()),
         rewritePolyfills: false,
         warningLevel: warning_level.to_string(),
     });

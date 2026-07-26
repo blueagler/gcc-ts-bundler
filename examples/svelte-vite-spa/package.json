@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
+    "build:pure": "vite build --config vite.pure.config.ts",
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {

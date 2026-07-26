@@ -154,4 +154,5 @@ fn validate_candidate(
 
 fn is_package_source_file(file_path: &Path, context: &ResolveContext) -> bool {
     file_path.starts_with(context.workspace_dir.join("node_modules"))
+        || file_path.starts_with(context.src_dir.join("node_modules"))
 }

@@ -18,7 +18,15 @@ export interface RuntimeRenameHazards {
   protocolMembers: Set<string>;
 }
 
-export async function analyzeRuntimeUsage(runtimeEntryFiles: string[]) {
+export interface RuntimeProtocolHelpers {
+  keyExclusionListCallees: string[];
+  keyReadCallees: string[];
+}
+
+export async function analyzeRuntimeUsage(
+  runtimeEntryFiles: string[],
+  protocolHelpers: RuntimeProtocolHelpers,
+) {
   const hazards: RuntimeRenameHazards = {
     accessedMembers: new Set(),
     definedMembers: new Set(),
@@ -49,7 +57,7 @@ export async function analyzeRuntimeUsage(runtimeEntryFiles: string[]) {
       ) {
         collectRuntimeAssignmentMembers(node.left, knownConstructors, hazards);
       } else if (ts.isCallExpression(node)) {
-        collectProtocolHelperMembers(node, hazards);
+        collectProtocolHelperMembers(node, hazards, protocolHelpers);
         collectRuntimeCallMembers(node, knownConstructors, hazards);
       }
 
@@ -65,8 +73,9 @@ export async function analyzeRuntimeUsage(runtimeEntryFiles: string[]) {
 function collectProtocolHelperMembers(
   node: ts.CallExpression,
   hazards: RuntimeRenameHazards,
+  protocolHelpers: RuntimeProtocolHelpers,
 ) {
-  const signature = getProtocolHelperCallSignature(node);
+  const signature = getProtocolHelperCallSignature(node, protocolHelpers);
   if (!signature) {
     return;
   }
@@ -106,6 +115,7 @@ type ProtocolHelperCallSignature =
 
 function getProtocolHelperCallSignature(
   node: ts.CallExpression,
+  protocolHelpers: RuntimeProtocolHelpers,
 ): ProtocolHelperCallSignature | null {
   if (node.arguments.length < 2) {
     return null;
@@ -116,15 +126,13 @@ function getProtocolHelperCallSignature(
     return null;
   }
 
-  switch (calleeName) {
-    case "prop":
-      return { kind: "direct-key-read" };
-    case "rest_props":
-    case "legacy_rest_props":
-      return { kind: "key-exclusion-list" };
-    default:
-      return null;
+  if (protocolHelpers.keyReadCallees.includes(calleeName)) {
+    return { kind: "direct-key-read" };
   }
+  if (protocolHelpers.keyExclusionListCallees.includes(calleeName)) {
+    return { kind: "key-exclusion-list" };
+  }
+  return null;
 }
 
 function getProtocolHelperCalleeName(expression: ts.Expression): string | null {

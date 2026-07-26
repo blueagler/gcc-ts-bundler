@@ -24,14 +24,6 @@ pub(super) fn helper_slot_expr(helper_alias: &str, slot: usize) -> Expr {
     })
 }
 
-pub(super) fn global_this_expr() -> Expr {
-    Expr::Ident(Ident::new(
-        "globalThis".into(),
-        Default::default(),
-        Default::default(),
-    ))
-}
-
 pub(super) fn helper_alias_decl(runtime_alias: &str, helper_alias: &str) -> Stmt {
     Stmt::Decl(Decl::Var(Box::new(VarDecl {
         span: Default::default(),

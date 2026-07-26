@@ -9,7 +9,8 @@ pub(super) use self::commonjs::{
 };
 pub(super) use self::object_patterns::ObjectPatternParamVisitor;
 pub(super) use self::properties::{
-    collect_class_static_assignments, quote_prop_name, PreservedPropertyCompatVisitor,
+    collect_class_static_assignments, quote_prop_name, ClassMapCallCompatVisitor,
+    PreservedPropertyCompatVisitor,
 };
 
 pub(super) fn apply_program_compat_transforms(program: &mut Program, context: &TranspileContext) {
@@ -22,6 +23,11 @@ pub(super) fn apply_program_compat_transforms(program: &mut Program, context: &T
     if !commonjs_namespace_bindings.is_empty() {
         program.visit_mut_with(&mut CommonJsNamespaceAccessVisitor::new(
             commonjs_namespace_bindings,
+        ));
+    }
+    if !context.class_map_calls.is_empty() {
+        program.visit_mut_with(&mut ClassMapCallCompatVisitor::new(
+            &context.class_map_calls,
         ));
     }
     if !context.preserved_property_names.is_empty() {

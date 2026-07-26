@@ -22,6 +22,7 @@ use self::jobs::*;
 use self::runtime::*;
 
 const BUNDLER_RUNTIME_GLOBAL: &str = "__g";
+pub(crate) const BUNDLER_RUNTIME_PREFIX_NAMESPACE: &str = "$gcc";
 
 #[allow(non_snake_case)]
 #[napi(object)]

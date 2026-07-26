@@ -1,12 +1,12 @@
 import fs from "fs/promises";
 
 import { ensureParentDirectory } from "../../../shared/files";
-import { rewriteDecoratorMetadata, rewriteGccExports } from "../../../native/load";
-import type { prepareClosureJobs } from "../../../native/load";
 import {
-  applyEs5HelperRewrite,
-  createEs5HelperRewriteContext,
-} from "./es5";
+  rewriteDecoratorMetadata,
+  rewriteGccExports,
+} from "../../../native/load";
+import type { prepareClosureJobs } from "../../../native/load";
+import { applyEs5HelperRewrite, createEs5HelperRewriteContext } from "./es5";
 import { readCachedText, readPropertyRenamingReport } from "./io";
 import {
   canonicalizeBundlerRuntimeRootAccess,

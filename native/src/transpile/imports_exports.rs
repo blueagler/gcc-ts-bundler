@@ -10,8 +10,9 @@ pub(super) use self::bindings::{
 };
 use self::bindings::{
     bind_import_specifiers, collect_named_export_bindings, plan_bundler_import_specifiers,
-    reject_namespace_export_specifiers, ImportBindingRewrite, ImportBindingSlotAlias,
+    reject_namespace_export_specifiers,
 };
+pub(super) use self::bindings::{ImportBindingRewrite, ImportBindingSlotAlias};
 pub(super) use self::resolve::resolve_module_id_for_specifier;
 
 pub(super) struct BundlerImportPlan {

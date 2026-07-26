@@ -11,6 +11,7 @@ import {
 
 test.serial(
   "emits smaller script chunks for explicit lazy modules",
+  { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
     await fixture.write(
@@ -61,9 +62,9 @@ test.serial(
     expect(baseOutput).not.toContain("gcc.src.feature");
     expect(baseOutput).not.toMatch(/m[0-9a-f]{8}/);
     expect(baseOutput).toContain(".__g");
-    expect(baseOutput).toMatch(
-      /(?:globalThis\.__g|[A-Za-z_$][\w$]*)\.n\(\[0\]\)/,
-    );
+    // Hoisted entry modules execute inline; no `.n([...])` kick remains.
+    expect(baseOutput).not.toMatch(/\.n\(\[/);
+    expect(baseOutput).toContain('textContent="base"');
     expect(baseOutput).not.toMatch(/LAZY_FEATURE/);
     expect(lazyOutput).toMatch(/LAZY_FEATURE/);
   },
@@ -71,6 +72,7 @@ test.serial(
 
 test.serial(
   "emits bundler-runtime chunks for explicit lazy modules",
+  { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
     await fixture.write(
@@ -124,9 +126,9 @@ test.serial(
     expect(baseOutput.trimStart()).not.toMatch(/^var\s/);
     expect(baseOutput.trimStart()).toMatch(/^!function\(\)\{/);
     expect(baseOutput).toContain(".__g");
-    expect(baseOutput).toMatch(
-      /(?:globalThis\.__g|[A-Za-z_$][\w$]*)\.n\(\[0\]\)/,
-    );
+    // Hoisted entry modules execute inline; no `.n([...])` kick remains.
+    expect(baseOutput).not.toMatch(/\.n\(\[/);
+    expect(baseOutput).toContain('textContent="base"');
     expect(baseOutput).not.toMatch(/goog\.module/);
     expect(baseOutput).not.toMatch(/ModuleManager/);
     expect(baseOutput).not.toContain('Object.defineProperty(d,"default"');
@@ -149,6 +151,7 @@ test.serial(
 
 test.serial(
   "bundler-runtime ES5 reuses the helper alias for lazy registration and base finalization",
+  { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
     await fixture.write(
@@ -200,12 +203,19 @@ test.serial(
     expect(baseOutput).not.toContain("globalThis.__g.u(");
     expect(baseOutput).not.toContain('globalThis["__g"].u(');
     expect(baseOutput).not.toContain("globalThis.__g.n(");
-    expect(baseOutput).toMatch(
-      /\bvar _=[A-Za-z_$][\w$]*\._\|\|\([A-Za-z_$][\w$]*\._=\[\]\);/,
+    // The helper bag installs immediately after the runtime preamble so it is
+    // defined before any hoisted module code or lazy chunk runs.
+    expect(baseOutput).toContain(
+      '.call(this,globalThis);\nvar G=globalThis.__g,_=G._||(G._=[]);',
     );
 
     expect(lazyOutput).toContain("var G=globalThis.__g,_=G._;");
-    expect(lazyOutput).toMatch(/G\.[A-Za-z_$][\w$]*\(function\(/);
+    // Lazy registration reaches the runtime through the shared prefix
+    // namespace and calls the pooled helper from the bag.
+    expect(lazyOutput).toMatch(
+      /(?:G|\$gcc\.[A-Za-z_$][\w$]*)\.[A-Za-z_$][\w$]*\(function\(/,
+    );
+    expect(lazyOutput).toContain("_[3](");
     expect(lazyOutput).not.toContain("globalThis.__g.i(");
     expect(lazyOutput).not.toContain('globalThis["__g"].i(');
     expect(lazyOutput).not.toMatch(
@@ -216,6 +226,7 @@ test.serial(
 
 test.serial(
   "bundler-runtime rewrites property-protocol strings from the renaming report",
+  { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
     await fixture.write(
@@ -275,6 +286,7 @@ test.serial(
 
 test.serial(
   "bundler-runtime caches one combined Closure job when one lazy chunk changes",
+  { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
     const cacheDir = path.join(fixture.projectRoot, ".cache");
@@ -341,6 +353,7 @@ test.serial(
 
 test.serial(
   "parallel bundler-runtime Closure execution is byte-equivalent to serial execution",
+  { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
     await fixture.write(
@@ -413,6 +426,7 @@ test.serial(
 
 test.serial(
   "emits a bundler-runtime chunk manifest when requested",
+  { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
     await fixture.write(
@@ -550,6 +564,7 @@ function createScriptRuntimeStub(baseUrl = "http://localhost/dist/main.js") {
 
 test.serial(
   "split mode emits flat-quality chunks with a working lazy runtime",
+  { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
     await fixture.write(

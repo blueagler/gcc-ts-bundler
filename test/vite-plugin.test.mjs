@@ -359,27 +359,36 @@ test.serial(
         module.relativePath.startsWith("__dep-bundles/"),
       ),
     ).toBe(true);
-    expect(
-      prebundled.modules.some(
-        (module) =>
-          module.relativePath.startsWith("__dep-bundles/") &&
-          !module.relativePath.startsWith("__dep-bundles/chunks/"),
-      ),
-    ).toBe(false);
 
+    // Barrel flattening resolves entry->foo and lazy->bar to their defining
+    // modules, so each region keeps its own bundle while the code shared by
+    // both regions splits into a chunks/ bundle.
+    const bundleSources = await Promise.all(
+      prebundled.modules
+        .filter((module) => module.relativePath.startsWith("__dep-bundles/"))
+        .map((module) => fs.readFile(module.filePath, "utf8")),
+    );
     const rewrittenEntry = await fs.readFile(authoredEntry, "utf8");
     const rewrittenLazy = await fs.readFile(authoredLazy, "utf8");
-    expect(rewrittenEntry).toContain("__dep-bundles/chunks/");
-    expect(rewrittenLazy).toContain("__dep-bundles/chunks/");
-    expect(rewrittenEntry).not.toContain("__dep-bundles/eager/");
-    expect(rewrittenLazy).not.toContain("__dep-bundles/lazy/");
-    expect(
-      prebundled.runtimeEntries.every(
-        (entry) =>
-          !entry.startsWith("./__dep-bundles/") ||
-          entry.startsWith("./__dep-bundles/chunks/"),
-      ),
-    ).toBe(true);
+    expect(rewrittenEntry).toContain("__dep-bundles/");
+    expect(rewrittenLazy).toContain("__dep-bundles/");
+    const entryBundlePath = rewrittenEntry.match(/__dep-bundles\/[\w./-]+/)?.[0];
+    const lazyBundlePath = rewrittenLazy.match(/__dep-bundles\/[\w./-]+/)?.[0];
+    expect(entryBundlePath).toBeTruthy();
+    expect(lazyBundlePath).toBeTruthy();
+    expect(entryBundlePath).not.toBe(lazyBundlePath);
+    const entryBundle = await fs.readFile(
+      path.join(srcDir, entryBundlePath),
+      "utf8",
+    );
+    const lazyBundle = await fs.readFile(
+      path.join(srcDir, lazyBundlePath),
+      "utf8",
+    );
+    // foo stays out of the lazy region and bar stays out of the eager region.
+    expect(entryBundle).not.toContain("shared - helper");
+    expect(lazyBundle).not.toContain("shared + helper");
+    expect(bundleSources.length).toBeGreaterThan(0);
   },
 );
 
@@ -1100,6 +1109,42 @@ test.serial(
     expect(second.stderr).not.toContain(
       "[gcc-ts-bundler timing] native-emit:transpile:",
     );
+  },
+);
+
+test.serial(
+  "gccTsBundler recreates the runtime source map when the capture root is deleted",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    await writeViteCssFixture(fixture);
+    const options = {
+      cache: { dir: ".cache", mode: "persistent" },
+      env: { GCC_BUILD_TIMINGS: "1" },
+    };
+
+    await buildViteFixture(fixture, options);
+    await fs.rm(path.join(fixture.projectRoot, ".gcc-ts-bundler-vite"), {
+      force: true,
+      recursive: true,
+    });
+    const rebuilt = await buildViteFixture(fixture, options);
+
+    expect(rebuilt.stderr).toContain(
+      "[gcc-ts-bundler timing] cache:native-emit: miss",
+    );
+    const [captureRootId] = await listDirectoryNames(
+      path.join(fixture.projectRoot, ".gcc-ts-bundler-vite"),
+    );
+    expect(
+      await fixture.read(
+        path.join(
+          ".gcc-ts-bundler-vite",
+          captureRootId,
+          ".gcc-ts-bundler-vite-runtime-module-sources.json",
+        ),
+      ),
+    ).toContain("{");
   },
 );
 

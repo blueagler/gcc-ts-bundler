@@ -5,6 +5,35 @@ pub(crate) fn rewrite_bundler_runtime_namespace_usage(
     file_path: &Path,
     context: &TranspileContext,
 ) -> std::result::Result<(), String> {
+    rewrite_namespace_usage_with_hoist(module, file_path, context, None)
+}
+
+pub(crate) fn rewrite_hoisted_namespace_usage(
+    module: &mut Module,
+    file_path: &Path,
+    context: &TranspileContext,
+    plan: &HoistPlan,
+    consumer_module_id: &str,
+    direct_namespace_ids: &HashSet<Id>,
+) -> std::result::Result<(), String> {
+    rewrite_namespace_usage_with_hoist(
+        module,
+        file_path,
+        context,
+        Some(HoistNamespaceInfo {
+            consumer_module_id: consumer_module_id.to_string(),
+            direct_namespace_ids,
+            plan,
+        }),
+    )
+}
+
+fn rewrite_namespace_usage_with_hoist(
+    module: &mut Module,
+    file_path: &Path,
+    context: &TranspileContext,
+    hoist: Option<HoistNamespaceInfo<'_>>,
+) -> std::result::Result<(), String> {
     let dynamic_import_wrappers = collect_dynamic_import_wrappers(module);
     let object_carriers = collect_dynamic_import_object_carriers(module, &dynamic_import_wrappers);
     let promise_carriers =
@@ -16,6 +45,7 @@ pub(crate) fn rewrite_bundler_runtime_namespace_usage(
         object_carriers,
         promise_carriers,
     );
+    visitor.hoist = hoist;
     module.visit_mut_with(&mut visitor);
     if visitor.errors.is_empty() {
         Ok(())
@@ -24,11 +54,19 @@ pub(crate) fn rewrite_bundler_runtime_namespace_usage(
     }
 }
 
+pub(crate) struct HoistNamespaceInfo<'a> {
+    pub(crate) consumer_module_id: String,
+    pub(crate) direct_namespace_ids: &'a HashSet<Id>,
+    pub(crate) plan: &'a HoistPlan,
+}
+
 struct BundlerRuntimeNamespaceVisitor<'a> {
     context: &'a TranspileContext,
+    direct_namespace_targets: HashMap<Id, String>,
     dynamic_import_wrappers: DynamicImportWrappers,
     errors: Vec<String>,
     file_path: String,
+    hoist: Option<HoistNamespaceInfo<'a>>,
     namespace_bindings: HashMap<Id, BTreeSet<String>>,
     object_carriers: HashMap<Id, DynamicImportObjectWrapper>,
     promise_carriers: HashMap<Id, BTreeSet<String>>,
@@ -44,9 +82,11 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a> {
     ) -> Self {
         Self {
             context,
+            direct_namespace_targets: HashMap::new(),
             dynamic_import_wrappers,
             errors: Vec::new(),
             file_path: file_path.display().to_string(),
+            hoist: None,
             namespace_bindings: HashMap::new(),
             object_carriers,
             promise_carriers,
@@ -291,7 +331,100 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a> {
     }
 }
 
+impl BundlerRuntimeNamespaceVisitor<'_> {
+    fn try_rewrite_direct_namespace_member(&mut self, expr: &mut Expr) -> bool {
+        let Expr::Member(member) = expr else {
+            return false;
+        };
+        let Expr::Ident(object_ident) = &*member.obj else {
+            return false;
+        };
+        let Some(target_module_id) = self
+            .direct_namespace_targets
+            .get(&object_ident.to_id())
+            .cloned()
+        else {
+            return false;
+        };
+        let Some(hoist) = self.hoist.as_ref() else {
+            return false;
+        };
+        let Some(export_name) = member_prop_name(&member.prop) else {
+            self.push_error("bundler-runtime does not support computed namespace property access");
+            return true;
+        };
+        let Some(binding) = hoist.plan.resolve_export(&target_module_id, &export_name) else {
+            self.push_error(format!(
+                "bundler-runtime cannot rewrite namespace access for export {export_name:?} from {target_module_id}"
+            ));
+            return true;
+        };
+        if hoist
+            .plan
+            .is_direct_binding(&hoist.consumer_module_id, binding)
+        {
+            if let Some(direct_name) = hoist.plan.direct_binding_name(binding) {
+                *expr = Expr::Ident(create_ident(&direct_name));
+                return true;
+            }
+        }
+        let Some(owner_slots) = self
+            .context
+            .bundler_module_slots
+            .get(&binding.owner_module_id)
+        else {
+            self.push_error(format!(
+                "Missing bundler-runtime export slot metadata for {}",
+                binding.owner_module_id
+            ));
+            return true;
+        };
+        let Some(owner_slot) = owner_slots.slot_for(&binding.owner_export_name) else {
+            self.push_error(format!(
+                "bundler-runtime cannot rewrite namespace access for export {:?} from {}",
+                binding.owner_export_name, binding.owner_module_id
+            ));
+            return true;
+        };
+        let owner_runtime_id = to_bundler_runtime_module_id(&binding.owner_module_id);
+        let require_call = Expr::Call(CallExpr {
+            span: Default::default(),
+            ctxt: Default::default(),
+            callee: Callee::Expr(Box::new(Expr::Ident(create_ident("__require")))),
+            args: vec![swc_core::ecma::ast::ExprOrSpread {
+                spread: None,
+                expr: Box::new(Expr::Lit(Lit::Str(Str {
+                    raw: None,
+                    span: Default::default(),
+                    value: owner_runtime_id.into(),
+                }))),
+            }],
+            type_args: None,
+        });
+        *expr = Expr::Member(MemberExpr {
+            span: Default::default(),
+            obj: Box::new(require_call),
+            prop: MemberProp::Computed(swc_core::ecma::ast::ComputedPropName {
+                span: Default::default(),
+                expr: Box::new(Expr::Lit(Lit::Num(swc_core::ecma::ast::Number {
+                    span: Default::default(),
+                    value: owner_slot as f64,
+                    raw: None,
+                }))),
+            }),
+        });
+        true
+    }
+}
+
 impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        if self.try_rewrite_direct_namespace_member(expr) {
+            return;
+        }
+        expr.visit_mut_children_with(self);
+    }
+
     fn visit_mut_module_item(&mut self, item: &mut ModuleItem) {
         if let ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import_decl)) = item {
             let module_id = resolve_module_id_for_specifier(
@@ -302,10 +435,19 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
             if let Ok(module_id) = module_id {
                 for specifier in &import_decl.specifiers {
                     if let ImportSpecifier::Namespace(namespace_specifier) = specifier {
-                        self.namespace_bindings.insert(
-                            namespace_specifier.local.to_id(),
-                            BTreeSet::from([module_id.clone()]),
-                        );
+                        let binding_id = namespace_specifier.local.to_id();
+                        if self
+                            .hoist
+                            .as_ref()
+                            .map(|hoist| hoist.direct_namespace_ids.contains(&binding_id))
+                            .unwrap_or(false)
+                        {
+                            self.direct_namespace_targets
+                                .insert(binding_id, module_id.clone());
+                            continue;
+                        }
+                        self.namespace_bindings
+                            .insert(binding_id, BTreeSet::from([module_id.clone()]));
                     }
                 }
             }

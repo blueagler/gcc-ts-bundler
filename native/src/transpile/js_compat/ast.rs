@@ -49,7 +49,7 @@ pub(crate) fn normalize_commonjs_module(
     let mut normalized_body = Vec::new();
     normalized_body.extend(import_items);
     normalized_body.extend(parse_module_items("var module = { exports: {} };")?);
-    normalized_body.extend(module.body.drain(..));
+    normalized_body.extend(wrap_commonjs_body(module.body.drain(..).collect())?);
     normalized_body.extend(parse_module_items("var __cjsExports = module.exports;")?);
 
     let mut program = Program::Module(Module {
@@ -70,7 +70,47 @@ pub(crate) fn normalize_commonjs_module(
     )
 }
 
-fn to_emitted_commonjs_specifier(specifier: &str) -> String {
+fn wrap_commonjs_body(items: Vec<ModuleItem>) -> std::result::Result<Vec<ModuleItem>, String> {
+    let statements = items
+        .into_iter()
+        .map(|item| match item {
+            ModuleItem::Stmt(statement) => Ok(statement),
+            ModuleItem::ModuleDecl(_) => {
+                Err("CommonJS normalization received ESM syntax.".to_string())
+            }
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut wrapper = parse_module_items("(function () {}).call(module.exports);")?;
+    let mut injector = CommonJsBodyInjector {
+        statements: Some(statements),
+    };
+    for item in &mut wrapper {
+        item.visit_mut_with(&mut injector);
+    }
+    if injector.statements.is_some() {
+        return Err("Unable to create the CommonJS function wrapper.".to_string());
+    }
+    Ok(wrapper)
+}
+
+struct CommonJsBodyInjector {
+    statements: Option<Vec<Stmt>>,
+}
+
+impl VisitMut for CommonJsBodyInjector {
+    fn visit_mut_fn_expr(&mut self, function: &mut swc_core::ecma::ast::FnExpr) {
+        let Some(statements) = self.statements.take() else {
+            return;
+        };
+        let Some(body) = &mut function.function.body else {
+            self.statements = Some(statements);
+            return;
+        };
+        body.stmts = statements;
+    }
+}
+
+pub(crate) fn to_emitted_commonjs_specifier(specifier: &str) -> String {
     if specifier.starts_with('.') {
         return specifier.replace(".cjs", ".js").replace(".cts", ".js");
     }

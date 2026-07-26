@@ -66,11 +66,15 @@ pub(super) fn render_bundler_runtime_base_chunk(
     }
     parts.extend([
         format!("var __runtime={runtime_global},__register=__runtime.r;"),
-        module_text.to_string(),
         format!("__runtime.l({chunk_id:?});"),
-        format!("__runtime.n({entry_points_json});"),
-        String::new(),
+        "(function(__require,__dynamicImport,__preloadDynamicImport){".to_string(),
+        module_text.to_string(),
+        "})(__runtime.q,__runtime.j,__runtime.x);".to_string(),
     ]);
+    if entry_points_json != "[]" {
+        parts.push(format!("__runtime.n({entry_points_json});"));
+    }
+    parts.push(String::new());
     Ok(parts.join("\n"))
 }
 
@@ -80,16 +84,18 @@ pub(super) fn render_bundler_runtime_lazy_chunk(
     debug_runtime: bool,
 ) -> String {
     let runtime_global = runtime_global_ref("globalThis");
+    let runtime_aliases =
+        "var __require=__runtime.q,__dynamicImport=__runtime.j,__preloadDynamicImport=__runtime.x;";
     if debug_runtime {
         let fallback_error = "\"base chunk missing\"";
         format!(
-            "var __runtime={runtime_global};(__runtime||{{h:function(){{throw Error({fallback_error});}}}}).h(function(__register){{\n{}\n}},{chunk_id:?});\n",
+            "var __runtime={runtime_global};(__runtime||{{h:function(){{throw Error({fallback_error});}}}}).h(function(__register){{\n  {runtime_aliases}\n{}\n}},{chunk_id:?});\n",
             indent_block(module_text),
             fallback_error = fallback_error,
         )
     } else {
         format!(
-            "var __runtime={runtime_global};__runtime.h(function(__register){{\n{}\n}},{chunk_id:?});\n",
+            "var __runtime={runtime_global};__runtime.h(function(__register){{\n  {runtime_aliases}\n{}\n}},{chunk_id:?});\n",
             indent_block(module_text),
         )
     }
@@ -316,7 +322,26 @@ mod tests {
 
         assert!(rendered.contains("var __runtime=globalThis[\"__g\"],__register=__runtime.r;"));
         assert!(rendered.contains("__runtime.l(0);"));
+        assert!(rendered.contains("(function(__require,__dynamicImport,__preloadDynamicImport){"));
+        assert!(rendered.contains("})(__runtime.q,__runtime.j,__runtime.x);"));
         assert!(rendered.contains("__runtime.n([0]);"));
+    }
+
+    #[test]
+    fn base_chunk_skips_entry_execution_when_no_registry_entries_remain() {
+        let rendered = render_bundler_runtime_base_chunk(
+            0,
+            "[]",
+            "script",
+            "[0,[],[],\"./\"]",
+            true,
+            "var hoisted$$0 = 1;",
+            false,
+            false,
+        )
+        .expect("render base chunk");
+
+        assert!(!rendered.contains("__runtime.n("));
     }
 
     #[test]
@@ -325,7 +350,7 @@ mod tests {
         assert_eq!(
             rendered,
             "var __runtime=globalThis[\"__g\"];\
-__runtime.h(function(__register){\n  __register(1,function(){});\n},3);\n"
+__runtime.h(function(__register){\n  var __require=__runtime.q,__dynamicImport=__runtime.j,__preloadDynamicImport=__runtime.x;\n  __register(1,function(){});\n},3);\n"
         );
     }
 

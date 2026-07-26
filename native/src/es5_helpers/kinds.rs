@@ -1,3 +1,5 @@
+/// Closure-generated `ta`/`qa`/`ha` support references now travel through the
+/// `$gcc` prefix namespace, so only tslib-style helper bodies are pooled.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum SharedEs5HelperKind {
     ClassPrivateFieldSet,
@@ -5,8 +7,6 @@ pub(super) enum SharedEs5HelperKind {
     SetFunctionName,
     RunInitializers,
     EsDecorate,
-    ClosureTemplateObject,
-    ClosureInherits,
 }
 
 impl SharedEs5HelperKind {
@@ -17,8 +17,6 @@ impl SharedEs5HelperKind {
             Self::SetFunctionName => "set-function-name",
             Self::RunInitializers => "run-initializers",
             Self::EsDecorate => "es-decorate",
-            Self::ClosureTemplateObject => "closure-template-object",
-            Self::ClosureInherits => "closure-inherits",
         }
     }
 
@@ -29,8 +27,6 @@ impl SharedEs5HelperKind {
             Self::SetFunctionName => 2,
             Self::RunInitializers => 3,
             Self::EsDecorate => 4,
-            Self::ClosureTemplateObject => 5,
-            Self::ClosureInherits => 6,
         }
     }
 }

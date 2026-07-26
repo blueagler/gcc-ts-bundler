@@ -71,6 +71,33 @@ There are two output models:
 
 Dynamic import specifiers must be string literals. Dynamic imports are rejected when chunk mode is off.
 
+#### Bundler-runtime hoisted linking
+
+Bundler-runtime modules are scope-hoisted per chunk: each module's top-level
+bindings are renamed with a per-module ordinal suffix (`name$$12`) and
+emitted as plain statements inside the chunk wrapper, so same-chunk imports
+become direct identifier references that Closure can rename, inline, and
+tree-shake across module boundaries. Only three things still go through the
+`__register`/`__require` registry:
+
+- cross-chunk imports (via small export facades pruned to the slots that are
+  actually consumed anywhere in the program);
+- dynamic-import targets (full facades, since namespaces are read
+  member-by-member through the target slot table);
+- registry-form modules that opt out of hoisting (typed metadata such as
+  enums/typedefs, CommonJS modules with dependencies, or unresolvable
+  graphs).
+
+Cross-chunk top-level symbols created by Closure itself (polyfills, ES5
+transpile helpers, cross-chunk code motion) are made safe under the per-file
+IIFE wrappers with `--rename_prefix_namespace=$gcc`; every chunk declares
+`var $gcc=globalThis.$gcc=globalThis.$gcc||{}` inside its wrapper. Hoisted
+module code lives inside the chunk wrapper function, so it never pays the
+`$gcc.` prefix.
+
+Set `GCC_DISABLE_HOIST=1` to fall back to pure registry emission when
+debugging.
+
 ### 4. Analyze types and transpile
 
 The JavaScript layer uses the TypeScript compiler API for diagnostics and for Closure metadata that needs semantic information, including type declarations, JSDoc, enums, and decorators. Plain JavaScript files can take a faster scan path when no semantic work is needed.

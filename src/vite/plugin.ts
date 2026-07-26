@@ -97,9 +97,9 @@ interface CompiledViteGraph extends PreparedViteGraph {
 
 const REWRITE_ENTRY_SCRIPTS_DEFAULT = true;
 
-export function gccTsBundler(
-  options: GccTsBundlerVitePluginOptions = {},
-): Plugin {
+export function gccTsBundler(options: GccTsBundlerVitePluginOptions = {}): {
+  name: string;
+} {
   const capturedModules = new Map<string, CapturedModule>();
   const resolutionCache: CapturedModuleResolutionCache = new Map();
   const buildMetrics = createBuildMetrics();
@@ -107,7 +107,7 @@ export function gccTsBundler(
   let resolvedConfig: ResolvedConfig | null = null;
   let workerImportDetected = false;
 
-  return {
+  const plugin: Plugin = {
     name: "gcc-ts-bundler:vite",
     apply: "build",
     enforce: "post",
@@ -164,6 +164,7 @@ export function gccTsBundler(
       logViteTimings(timingTotals);
     },
   };
+  return plugin;
 }
 
 async function prepareViteGraph(

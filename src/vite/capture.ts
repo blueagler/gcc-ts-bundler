@@ -126,6 +126,10 @@ export function getCapturedModuleAnalysis(
   return analysis;
 }
 
+function isDependencyModuleId(id: string) {
+  return stripQuery(id).includes("/node_modules/");
+}
+
 export async function normalizeCapturedCode(
   id: string,
   code: string,
@@ -134,13 +138,20 @@ export async function normalizeCapturedCode(
   let nextCode = code;
   const moduleAnalysis = analysis ?? analyzeModuleCode(id, code);
 
-  if (moduleAnalysis.needsClosureCompatibilityDownlevel) {
+  // Dependency modules flow through the region prebundle, which lowers
+  // Closure-unsupported syntax once per bundle with esbuild code splitting.
+  // Lowering them here instead would duplicate esbuild's private-field
+  // helpers into every module that uses them.
+  if (
+    moduleAnalysis.needsClosureCompatibilityDownlevel &&
+    !isDependencyModuleId(id)
+  ) {
     const transformWithEsbuild = await loadViteEsbuildTransform();
     const result = await transformWithEsbuild(nextCode, stripQuery(id), {
       format: "esm",
       loader: resolveEsbuildLoader(id),
       sourcemap: false,
-      target: "es2018",
+      target: "es2021",
     });
     nextCode = result.code;
   }

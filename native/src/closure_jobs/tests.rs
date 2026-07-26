@@ -25,12 +25,18 @@ fn prepares_bundler_runtime_jobs_with_runtime_assets() {
     fs::create_dir_all(package_root.join("closure-lib")).unwrap();
     fs::write(
         emitted_out_dir.join("src/main.js"),
-        "__exports[\"boot\"]=boot;\n",
+        format!(
+            "__register({:?}, function(__require, __exports) {{ __exports[0]=boot; }});\n",
+            to_bundler_runtime_module_id("gcc.src.main")
+        ),
     )
     .unwrap();
     fs::write(
         emitted_out_dir.join("src/feature.js"),
-        "__exports[\"renderMessage\"]=renderMessage;\n",
+        format!(
+            "__register({:?}, function(__require, __exports) {{ __exports[0]=renderMessage; }});\n",
+            to_bundler_runtime_module_id("gcc.src.feature")
+        ),
     )
     .unwrap();
     fs::write(
