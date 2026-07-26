@@ -8,7 +8,7 @@
   "dependencies": {
     "esbuild": "0.28.0",
     "gcc-ts-bundler": "file:../..",
-    "svelte": "5.55.2"
+    "svelte": "5.55.7"
   },
   "devDependencies": {
     "m3-svelte": "^7.1.2",
