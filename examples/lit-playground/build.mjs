@@ -20,18 +20,14 @@ const result = await build({
   languageOut: "ECMASCRIPT5",
 });
 
-if (result.exitCode !== 0) {
+if (!result.ok) {
   for (const diagnostic of result.diagnostics) {
-    const message =
-      typeof diagnostic?.messageText === "string"
-        ? diagnostic.messageText
-        : ts.flattenDiagnosticMessageText(
-            diagnostic?.messageText ?? diagnostic,
-            "\n",
-          );
-    console.error(message);
+    const where = diagnostic.file
+      ? `${diagnostic.file}${diagnostic.line === undefined ? "" : `:${diagnostic.line}`}: `
+      : "";
+    console.error(`${where}${diagnostic.message}`);
   }
-  process.exit(result.exitCode);
+  process.exit(1);
 }
 
 console.log(

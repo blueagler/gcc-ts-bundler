@@ -1,5 +1,4 @@
 import path from "node:path";
-import ts from "typescript";
 import { fileURLToPath } from "node:url";
 
 import { build, generateExterns } from "../../dist/index.mjs";
@@ -29,18 +28,14 @@ const result = await build({
   srcDir: ".",
 });
 
-if (result.exitCode !== 0) {
+if (!result.ok) {
   for (const diagnostic of result.diagnostics) {
-    const message =
-      typeof diagnostic?.messageText === "string"
-        ? diagnostic.messageText
-        : ts.flattenDiagnosticMessageText(
-            diagnostic?.messageText ?? diagnostic,
-            "\n",
-          );
-    console.error(message);
+    const where = diagnostic.file
+      ? `${diagnostic.file}${diagnostic.line === undefined ? "" : `:${diagnostic.line}`}: `
+      : "";
+    console.error(`${where}${diagnostic.message}`);
   }
-  process.exit(result.exitCode);
+  process.exit(1);
 }
 
 console.log(

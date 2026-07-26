@@ -100,7 +100,12 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
       workspaceDir: resolved.workspaceDir,
     });
     if (nativeEmitResult.emitSkipped || nativeEmitResult.diagnostics.length) {
-      return failedBuild(toBuildDiagnostics(nativeEmitResult.diagnostics));
+      return failedBuild(
+        toBuildDiagnostics(
+          nativeEmitResult.diagnostics,
+          createAuthoredPathMapper(context, resolved),
+        ),
+      );
     }
 
     const closureResult = await runClosureStage({
@@ -131,6 +136,21 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   } finally {
     await resolved?.cleanup();
   }
+}
+
+/**
+ * Diagnostics reference the workspace overlay (workspace/src/...), which
+ * mirrors srcDir. Map them back so callers see paths they can open.
+ */
+function createAuthoredPathMapper(
+  context: BuildContext,
+  resolved: ResolvedBuild,
+) {
+  const sourceRoot = path.join(resolved.workspaceDir, "src");
+  return (filePath: string) =>
+    filePath.startsWith(sourceRoot)
+      ? path.join(context.options.srcDir, path.relative(sourceRoot, filePath))
+      : filePath;
 }
 
 function getFinalCachePaths(

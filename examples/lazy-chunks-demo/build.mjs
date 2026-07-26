@@ -14,7 +14,12 @@ const result = await build({
   srcDir: root,
 });
 
-if (result.exitCode !== 0) {
-  console.error(result.diagnostics);
-  process.exit(result.exitCode);
+if (!result.ok) {
+  for (const diagnostic of result.diagnostics) {
+    const where = diagnostic.file
+      ? `${diagnostic.file}${diagnostic.line === undefined ? "" : `:${diagnostic.line}`}: `
+      : "";
+    console.error(`${where}${diagnostic.message}`);
+  }
+  process.exit(1);
 }

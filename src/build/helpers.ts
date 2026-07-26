@@ -40,6 +40,7 @@ export function createBuildDiagnostic(error: unknown): BuildDiagnostic {
 
 export function toBuildDiagnostics(
   diagnostics: readonly ts.Diagnostic[],
+  toAuthoredPath: (filePath: string) => string = (filePath) => filePath,
 ): BuildDiagnostic[] {
   return diagnostics.map((diagnostic) => {
     const message = ts.flattenDiagnosticMessageText(
@@ -52,7 +53,11 @@ export function toBuildDiagnostics(
     const { line } = diagnostic.file.getLineAndCharacterOfPosition(
       diagnostic.start,
     );
-    return { file: diagnostic.file.fileName, line: line + 1, message };
+    return {
+      file: toAuthoredPath(diagnostic.file.fileName),
+      line: line + 1,
+      message,
+    };
   });
 }
 
