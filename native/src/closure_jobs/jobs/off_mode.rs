@@ -6,6 +6,7 @@ pub(crate) fn prepare_off_mode_jobs(
     resolved_chunks: &[ResolvedClosureChunk],
     raw_dir: &Path,
     warning_level: &str,
+    rename_prefix_namespace: Option<String>,
 ) -> std::result::Result<PrepareClosureJobsOutput, String> {
     let mut generated_assets = Vec::new();
     let closure_lib_files = select_closure_lib_files(
@@ -86,6 +87,7 @@ pub(crate) fn prepare_off_mode_jobs(
             languageIn: "UNSTABLE".to_string(),
             languageOut: input.languageOut.clone(),
             propertyRenamingReportPath: property_renaming_report_path.clone(),
+            renamePrefixNamespace: rename_prefix_namespace.clone(),
             rewritePolyfills: false,
             warningLevel: warning_level.to_string(),
         }]
@@ -148,6 +150,7 @@ pub(crate) fn prepare_off_mode_jobs(
             languageIn: "UNSTABLE".to_string(),
             languageOut: input.languageOut.clone(),
             propertyRenamingReportPath: property_renaming_report_path.clone(),
+            renamePrefixNamespace: rename_prefix_namespace.clone(),
             rewritePolyfills: false,
             warningLevel: warning_level.to_string(),
         }]

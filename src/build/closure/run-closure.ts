@@ -258,6 +258,9 @@ async function runPreparedClosureJob({
   if (job.propertyRenamingReportPath) {
     closureOptions["propertyRenamingReport"] = job.propertyRenamingReportPath;
   }
+  if (job.renamePrefixNamespace) {
+    closureOptions["renamePrefixNamespace"] = job.renamePrefixNamespace;
+  }
   configureClosureCompilerOptions(closureOptions);
   const exitCode = await runClosureCompiler(closureOptions);
   if (exitCode !== 0) {

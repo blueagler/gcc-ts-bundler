@@ -259,6 +259,17 @@ function validateBuildShape(
   }
 
   if (
+    context.options.chunks.mode === "split" &&
+    context.options.languageOut === "ECMASCRIPT5"
+  ) {
+    return failedBuild([
+      createBuildDiagnostic(
+        'chunks.mode = "split" does not support languageOut = "ECMASCRIPT5" yet: ES5 class downleveling breaks custom-element construction without the adapter wiring that "bundler-runtime" applies. Use chunks.mode = "bundler-runtime" for ES5 output.',
+      ),
+    ]);
+  }
+
+  if (
     context.options.chunks.mode === "off" &&
     resolved.lazyImports.length > 0
   ) {

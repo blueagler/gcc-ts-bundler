@@ -82,6 +82,7 @@ pub struct ClosureCompileJob {
     pub languageIn: String,
     pub languageOut: String,
     pub propertyRenamingReportPath: Option<String>,
+    pub renamePrefixNamespace: Option<String>,
     pub rewritePolyfills: bool,
     pub warningLevel: String,
 }
@@ -137,9 +138,19 @@ pub fn prepare_closure_jobs(
             &runtime_asset_dir,
             &warning_level,
         ),
-        ChunkMode::Off | ChunkMode::Split => {
-            prepare_off_mode_jobs(&input, &resolved_chunks, &raw_dir, &warning_level)
+        // Split confines globals to one namespace object so plain-script
+        // chunks cannot collide with renamed globalThis.* properties; the
+        // split prelude declares the namespace before any chunk runs.
+        ChunkMode::Off => {
+            prepare_off_mode_jobs(&input, &resolved_chunks, &raw_dir, &warning_level, None)
         }
+        ChunkMode::Split => prepare_off_mode_jobs(
+            &input,
+            &resolved_chunks,
+            &raw_dir,
+            &warning_level,
+            Some("$gcc".to_string()),
+        ),
     }
 }
 

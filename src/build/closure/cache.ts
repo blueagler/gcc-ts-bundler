@@ -26,6 +26,7 @@ export interface ClosureCompileJobConfig {
   languageIn: string;
   languageOut: string;
   propertyRenamingReportPath?: string | null;
+  renamePrefixNamespace?: string | null;
   rewritePolyfills: boolean;
   warningLevel: string;
 }

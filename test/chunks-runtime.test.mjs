@@ -532,10 +532,12 @@ test.serial("rejects dynamic import when chunk mode is off", async () => {
   );
 });
 
-function createScriptRuntimeStub() {
+function createScriptRuntimeStub(baseUrl = "http://localhost/dist/main.js") {
   const pendingScripts = [];
   const documentStub = {
     body: { textContent: "" },
+    // The prelude resolves chunk URLs against the base chunk's own URL.
+    currentScript: { src: baseUrl },
     createElement: () => ({}),
     head: {
       appendChild(element) {
@@ -543,7 +545,7 @@ function createScriptRuntimeStub() {
       },
     },
   };
-  return { documentStub, pendingScripts };
+  return { documentStub, locationStub: { href: baseUrl }, pendingScripts };
 }
 
 test.serial(
@@ -600,10 +602,13 @@ test.serial(
 
     // Execute base + lazy chunk with a script-loader stub and verify the
     // compiled consumer resolves renamed exports across the chunk boundary.
-    const { documentStub, pendingScripts } = createScriptRuntimeStub();
+    const { documentStub, locationStub, pendingScripts } =
+      createScriptRuntimeStub();
     const previousDocument = globalThis.document;
+    const previousLocation = globalThis.location;
     try {
       globalThis.document = documentStub;
+      globalThis.location = locationStub;
       const runFile = async (filePath) =>
         (0, eval)(await fs.readFile(filePath, "utf8"));
       await runFile(result.outputFiles.find((f) => f.endsWith("main.js")));
@@ -618,6 +623,7 @@ test.serial(
       expect(documentStub.body.textContent).toBe("LAZY_FEATURE!");
     } finally {
       globalThis.document = previousDocument;
+      globalThis.location = previousLocation;
       delete globalThis["__loadFeature"];
     }
   },

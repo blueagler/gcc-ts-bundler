@@ -46,6 +46,7 @@ interface NativeClosureCompileJob {
   languageIn: string;
   languageOut: string;
   propertyRenamingReportPath?: string;
+  renamePrefixNamespace?: string;
   rewritePolyfills: boolean;
   warningLevel: string;
 }

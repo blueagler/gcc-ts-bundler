@@ -98,17 +98,46 @@ export function writeSplitLazyShims(input: {
  * appended with async=false, which fetches in parallel but preserves
  * execution order; resolution happens on registration, not on script onload.
  */
+/**
+ * Closure emits references to this namespace under
+ * --rename_prefix_namespace but never declares it, so the base chunk must,
+ * before any chunk body runs. Confining globals to one object is what keeps
+ * plain-script chunks from colliding with renamed globalThis.* properties.
+ */
+// Assigned on globalThis rather than declared with `var`: an entry loaded as
+// <script type="module"> has module-scoped top-level declarations, so a bare
+// `var` would be invisible to lazy chunks injected as classic scripts.
+const NAMESPACE_DECLARATION = "globalThis.$gcc=globalThis.$gcc||{};";
+
+/**
+ * Chunks ship as plain scripts, so a chunk's own top-level declarations would
+ * become globals and can collide with renamed globalThis.* properties (Closure
+ * renames the two from independent name pools). Wrapping each chunk body keeps
+ * its locals local; cross-chunk symbols travel through $gcc instead.
+ */
+function wrapChunkBody(compiled: string) {
+  return `(function(){${compiled}\n}).call(this);\n`;
+}
+
 function renderSplitPrelude(manifest: Record<string, string[]>) {
   const manifestJson = JSON.stringify(manifest);
   return (
-    "var gccRegisterLazy,gccImportLazy;(function(){" +
+    `${NAMESPACE_DECLARATION}` +
+    "(function(){" +
     `var m=${manifestJson},r={},w={},l={};` +
-    'function s(u){return l[u]||(l[u]=new Promise(function(a,b){var e=document.createElement("script");' +
+    // Resolve chunk URLs against this script's own URL, not the document's.
+    // A relative publicPath like "./" must mean "next to the base chunk",
+    // which is often a subdirectory of the page that loaded it.
+    "var B=document.currentScript&&document.currentScript.src||location.href;" +
+    'function s(u){u=new URL(u,B).toString();return l[u]||(l[u]=new Promise(function(a,b){var e=document.createElement("script");' +
     "e.src=u;e.async=!1;e.onload=a;" +
     'e.onerror=function(){delete l[u];b(new Error("gcc chunk failed: "+u))};' +
     "document.head.appendChild(e)}))}" +
-    "gccRegisterLazy=function(k,n){r[k]=n;var q=w[k];q&&q[1](n)};" +
-    "gccImportLazy=function(k){if(k in r)return Promise.resolve(r[k]);" +
+    // Assigned on globalThis, not declared: the base chunk may be loaded as a
+    // module, whose top-level bindings are invisible to the classic scripts
+    // used for lazy chunks.
+    "globalThis.gccRegisterLazy=function(k,n){r[k]=n;var q=w[k];q&&q[1](n)};" +
+    "globalThis.gccImportLazy=function(k){if(k in r)return Promise.resolve(r[k]);" +
     "var q=w[k];if(!q){var f,j,p=new Promise(function(a,b){f=a;j=b});q=w[k]=[p,f,j];" +
     "Promise.all((m[k]||[]).map(s)).catch(function(e){delete w[k];j(e)})}" +
     "return q[0]};})();\n"
@@ -133,14 +162,16 @@ export async function finalizeSplitChunks(input: {
     fileNameByChunk.set(chunk.name, `${chunk.name}.js`);
   }
 
-  // Content-hash every non-base, non-entry chunk output.
+  // Content-hash every non-base, non-entry chunk output, wrapping first so
+  // the hash covers the shipped bytes.
   for (const chunk of input.chunkPlan) {
     if (chunk.kind !== "lazy" && chunk.kind !== "shared") {
       continue;
     }
     const currentPath = path.join(input.outDir, `${chunk.name}.js`);
-    const content = await fs.readFile(currentPath, "utf8");
-    const hashedName = `${chunk.name}.${hashContent(content).slice(0, 8)}.js`;
+    const wrapped = wrapChunkBody(await fs.readFile(currentPath, "utf8"));
+    const hashedName = `${chunk.name}.${hashContent(wrapped).slice(0, 8)}.js`;
+    await fs.writeFile(currentPath, wrapped);
     await fs.rename(currentPath, path.join(input.outDir, hashedName));
     fileNameByChunk.set(chunk.name, hashedName);
   }
@@ -165,15 +196,19 @@ export async function finalizeSplitChunks(input: {
     }
   }
 
-  // Base chunk gets the prelude only when there is something to load or an
-  // eagerly-registered lazy target to resolve.
-  if (Object.keys(manifest).length > 0) {
-    const baseChunk = input.chunkPlan.find((chunk) => chunk.kind === "base");
-    if (baseChunk) {
-      const basePath = path.join(input.outDir, `${baseChunk.name}.js`);
-      const compiled = await fs.readFile(basePath, "utf8");
-      await fs.writeFile(basePath, renderSplitPrelude(manifest) + compiled);
-    }
+  // The base chunk always declares the rename-prefix namespace; the lazy
+  // loader is added only when there is something to load.
+  const baseChunk =
+    input.chunkPlan.find((chunk) => chunk.kind === "base") ??
+    input.chunkPlan[0];
+  if (baseChunk) {
+    const basePath = path.join(input.outDir, `${baseChunk.name}.js`);
+    const compiled = await fs.readFile(basePath, "utf8");
+    const prefix =
+      Object.keys(manifest).length > 0
+        ? renderSplitPrelude(manifest)
+        : `${NAMESPACE_DECLARATION}\n`;
+    await fs.writeFile(basePath, prefix + wrapChunkBody(compiled));
   }
 
   if (input.manifestFile) {

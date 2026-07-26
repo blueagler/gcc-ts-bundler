@@ -348,6 +348,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         languageIn: "UNSTABLE".to_string(),
         languageOut: input.languageOut.clone(),
         propertyRenamingReportPath: property_renaming_report_path.clone(),
+        renamePrefixNamespace: None,
         rewritePolyfills: false,
         warningLevel: warning_level.to_string(),
     });
