@@ -7,17 +7,17 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-napi = { version = "2.16.13", default-features = false, features = ["napi8"] }
-napi-derive = "2.16.13"
+napi = { version = "3", default-features = false, features = ["napi8"] }
+napi-derive = "3"
 rayon = "1.11.0"
 regex = "1.12.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.10"
-swc_core = { version = "59.0.1", features = ["common", "ecma_ast", "ecma_codegen", "ecma_parser", "ecma_visit"] }
-swc_ecma_transforms_base = "39.0.0"
-swc_ecma_transforms_react = "43.0.0"
-swc_ecma_transforms_typescript = "43.0.0"
+sha2 = "0.11"
+swc_core = { version = "74.0.2", features = ["common", "ecma_ast", "ecma_codegen", "ecma_parser", "ecma_visit"] }
+swc_ecma_transforms_base = "46.0.1"
+swc_ecma_transforms_react = "52.0.0"
+swc_ecma_transforms_typescript = "52.0.0"
 
 [build-dependencies]
-napi-build = "2.1.5"
+napi-build = "2.3.2"
