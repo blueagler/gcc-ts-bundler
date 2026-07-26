@@ -242,18 +242,19 @@ function deriveBaseOutputSeed(input: {
     };
   }
 
+  const entryFacadeModuleId = input.entryModuleIds[0];
   return {
     info: {
+      ...(entryFacadeModuleId === undefined
+        ? {}
+        : { facadeModuleId: entryFacadeModuleId }),
       exports: [],
-      facadeModuleId: input.entryModuleIds[0] ?? null,
       isDynamicEntry: false,
       isEntry: true,
-      isImplicitEntry: false,
       moduleIds: [...input.entryModuleIds].sort((left, right) =>
         left.localeCompare(right),
       ),
       name: sanitizeName(input.baseChunkName),
-      type: "chunk",
     },
     preferredName: null,
   };
@@ -318,31 +319,29 @@ function createFallbackChunkInfo(input: {
     ? sanitizeName(path.basename(dynamicRoot).replace(/\.[^/.]+$/u, ""))
     : sanitizeName(`shared-${input.chunkId.slice(0, 8)}`);
   return {
+    ...(dynamicRoot === undefined ? {} : { facadeModuleId: dynamicRoot }),
     exports: [],
-    facadeModuleId: dynamicRoot ?? null,
     isDynamicEntry: Boolean(dynamicRoot),
     isEntry: false,
-    isImplicitEntry: false,
     moduleIds: [...input.moduleIds].sort((left, right) =>
       left.localeCompare(right),
     ),
     name,
-    type: "chunk",
   };
 }
 
 function toRenderableChunkInfo(chunk: OutputChunk): RenderableChunkInfo {
   return {
+    ...(chunk.facadeModuleId === undefined || chunk.facadeModuleId === null
+      ? {}
+      : { facadeModuleId: chunk.facadeModuleId }),
     exports: [...chunk.exports],
-    facadeModuleId: chunk.facadeModuleId ?? null,
     isDynamicEntry: chunk.isDynamicEntry,
     isEntry: chunk.isEntry,
-    isImplicitEntry: chunk.isImplicitEntry,
     moduleIds: Object.keys(chunk.modules).sort((left, right) =>
       left.localeCompare(right),
     ),
     name: sanitizeName(chunk.name),
-    type: "chunk",
   };
 }
 
