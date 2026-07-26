@@ -15,7 +15,7 @@ pub(super) fn emit_module_program(
             file_metadata,
             commonjs_export_name,
         ),
-        ChunkMode::Off => emit_goog_module_program(
+        ChunkMode::Off | ChunkMode::Split => emit_goog_module_program(
             file_path,
             program,
             context,

@@ -20,13 +20,27 @@ fn lazy_lookup_key(importer_file_path: &str, specifier: &str) -> String {
     format!("{importer_file_path}\0{specifier}")
 }
 
+/// How rewritten `import()` calls address the lazy module at runtime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DynamicImportTarget {
+    /// `__dynamicImport("<bundler runtime id>")` (registry-per-module model).
+    BundlerRuntime,
+    /// `gccImportLazy("<goog module id>")` (split-chunk registry model).
+    SplitRegistry,
+}
+
 pub(crate) struct DynamicImportRewriteVisitor {
     importer_file_path: String,
     lazy_imports: HashMap<String, LazyImportInput>,
+    target: DynamicImportTarget,
 }
 
 impl DynamicImportRewriteVisitor {
-    pub(crate) fn new(file_path: &Path, lazy_imports: &[LazyImportInput]) -> Self {
+    pub(crate) fn new(
+        file_path: &Path,
+        lazy_imports: &[LazyImportInput],
+        target: DynamicImportTarget,
+    ) -> Self {
         Self {
             importer_file_path: file_path.to_string_lossy().to_string(),
             lazy_imports: lazy_imports
@@ -39,6 +53,7 @@ impl DynamicImportRewriteVisitor {
                     )
                 })
                 .collect(),
+            target,
         }
     }
 }
@@ -67,16 +82,25 @@ impl VisitMut for DynamicImportRewriteVisitor {
         let Some(lazy_import) = self.lazy_imports.get(&key) else {
             return;
         };
+        let (callee_name, module_key) = match self.target {
+            DynamicImportTarget::BundlerRuntime => (
+                "__dynamicImport",
+                to_bundler_runtime_module_id(&lazy_import.moduleId),
+            ),
+            DynamicImportTarget::SplitRegistry => {
+                ("gccImportLazy", lazy_import.moduleId.clone())
+            }
+        };
         *expr = Expr::Call(CallExpr {
             span: Default::default(),
             ctxt: Default::default(),
-            callee: Callee::Expr(Box::new(Expr::Ident(create_ident("__dynamicImport")))),
+            callee: Callee::Expr(Box::new(Expr::Ident(create_ident(callee_name)))),
             args: vec![swc_core::ecma::ast::ExprOrSpread {
                 spread: None,
                 expr: Box::new(Expr::Lit(Lit::Str(Str {
                     raw: None,
                     span: Default::default(),
-                    value: to_bundler_runtime_module_id(&lazy_import.moduleId).into(),
+                    value: module_key.into(),
                 }))),
             }],
             type_args: None,

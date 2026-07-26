@@ -111,6 +111,7 @@ pub struct PrepareClosureJobsOutput {
 enum ChunkMode {
     BundlerRuntime,
     Off,
+    Split,
 }
 
 pub fn prepare_closure_jobs(
@@ -136,12 +137,15 @@ pub fn prepare_closure_jobs(
             &runtime_asset_dir,
             &warning_level,
         ),
-        ChunkMode::Off => prepare_off_mode_jobs(&input, &resolved_chunks, &raw_dir, &warning_level),
+        ChunkMode::Off | ChunkMode::Split => {
+            prepare_off_mode_jobs(&input, &resolved_chunks, &raw_dir, &warning_level)
+        }
     }
 }
 
 fn parse_chunk_mode(value: &str) -> std::result::Result<ChunkMode, String> {
     match value {
+        "split" => Ok(ChunkMode::Split),
         "bundler-runtime" => Ok(ChunkMode::BundlerRuntime),
         "off" => Ok(ChunkMode::Off),
         _ => Err(format!("Unsupported chunk mode: {value}")),

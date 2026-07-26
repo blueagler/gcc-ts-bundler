@@ -7,7 +7,7 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 
 const result = await build({
   cache: { mode: "off" },
-  chunks: { mode: "bundler-runtime", publicPath: "./" },
+  chunks: { mode: "split", publicPath: "./" },
   entries: ["./main.ts"],
   outDir: path.join(root, "dist"),
   projectRoot: root,

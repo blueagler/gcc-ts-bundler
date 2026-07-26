@@ -4,6 +4,7 @@ pub(super) fn parse_chunk_mode(value: &str) -> std::result::Result<ChunkMode, St
     match value {
         "off" => Ok(ChunkMode::Off),
         "bundler-runtime" => Ok(ChunkMode::BundlerRuntime),
+        "split" => Ok(ChunkMode::Split),
         _ => Err(format!("Unsupported chunk mode: {value}")),
     }
 }
@@ -64,6 +65,9 @@ pub(super) struct RawBundlerExportInfo {
 pub(crate) enum ChunkMode {
     Off,
     BundlerRuntime,
+    /// Split: goog.module emission compiled as one Closure program with
+    /// --chunk, plus a lazy-namespace registry for dynamic import.
+    Split,
 }
 
 pub(super) fn collect_bundler_module_slots(

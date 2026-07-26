@@ -528,9 +528,100 @@ test.serial("rejects dynamic import when chunk mode is off", async () => {
 
   expect(result.ok).toBe(false);
   expect(String(result.diagnostics[0]?.message ?? "")).toMatch(
-    /chunks\.mode = "bundler-runtime"/,
+    /chunks\.mode = "split" or "bundler-runtime"/,
   );
 });
+
+function createScriptRuntimeStub() {
+  const pendingScripts = [];
+  const documentStub = {
+    body: { textContent: "" },
+    createElement: () => ({}),
+    head: {
+      appendChild(element) {
+        pendingScripts.push(element);
+      },
+    },
+  };
+  return { documentStub, pendingScripts };
+}
+
+test.serial(
+  "split mode emits flat-quality chunks with a working lazy runtime",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/main.ts",
+      [
+        'const load = () => import("./feature");',
+        '(globalThis as Record<string, unknown>)["__loadFeature"] = () =>',
+        "  load().then((m) => {",
+        "    document.body.textContent = m.shout();",
+        "    return m;",
+        "  });",
+        'document.body.textContent = "base";',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/feature.ts",
+      [
+        'export const marker = "LAZY_FEATURE";',
+        "export function shout() {",
+        '  return marker + "!";',
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await build({
+      cache: { mode: "off" },
+      chunks: { mode: "split", publicPath: "./" },
+      entries: ["./main.ts"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+
+    expect(result.ok).toBe(true);
+    const names = result.outputFiles.map((file) => path.basename(file));
+    expect(names).toContain("main.js");
+    expect(names.some((name) => /-lazy\.[0-9a-f]{8}\.js$/.test(name))).toBe(
+      true,
+    );
+
+    const baseSource = await fs.readFile(
+      result.outputFiles.find((file) => file.endsWith("main.js")),
+      "utf8",
+    );
+    // No per-module registration wrappers: modules are scope-hoisted.
+    expect(baseSource).not.toMatch(/__register\(/);
+    expect(baseSource).toMatch(/gccImportLazy\(/);
+
+    // Execute base + lazy chunk with a script-loader stub and verify the
+    // compiled consumer resolves renamed exports across the chunk boundary.
+    const { documentStub, pendingScripts } = createScriptRuntimeStub();
+    const previousDocument = globalThis.document;
+    try {
+      globalThis.document = documentStub;
+      const runFile = async (filePath) =>
+        (0, eval)(await fs.readFile(filePath, "utf8"));
+      await runFile(result.outputFiles.find((f) => f.endsWith("main.js")));
+      const lazyPromise = globalThis["__loadFeature"]();
+      for (const element of pendingScripts) {
+        await runFile(
+          path.join(fixture.outDir, path.basename(String(element.src))),
+        );
+        element.onload?.();
+      }
+      await lazyPromise;
+      expect(documentStub.body.textContent).toBe("LAZY_FEATURE!");
+    } finally {
+      globalThis.document = previousDocument;
+      delete globalThis["__loadFeature"];
+    }
+  },
+);
 
 test.serial("rejects the removed runtime helper API", async () => {
   const fixture = await createFixture();

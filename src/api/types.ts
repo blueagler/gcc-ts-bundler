@@ -28,7 +28,7 @@ export type DiagnosticsPreflight = (typeof DIAGNOSTICS_PREFLIGHT_MODES)[number];
 export const PACKAGE_MODES = defineValues("off", "esm-only");
 export type PackageMode = (typeof PACKAGE_MODES)[number];
 
-export const CHUNK_MODES = defineValues("off", "bundler-runtime");
+export const CHUNK_MODES = defineValues("off", "bundler-runtime", "split");
 export type ChunkMode = (typeof CHUNK_MODES)[number];
 
 export interface CacheOptions {

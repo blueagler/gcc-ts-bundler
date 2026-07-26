@@ -12,6 +12,7 @@ import type {
   ResolvedBuildOptions,
 } from "../types";
 import { prepareClosureJobs } from "../../native/load";
+import { finalizeSplitChunks } from "../split-chunks";
 import {
   configureClosureCompilerOptions,
   resolveClosureCompilerVersionTag,
@@ -105,17 +106,28 @@ export async function runClosureStage({
     }),
   );
 
+  const publishedOutputs =
+    options.chunks.mode === "split"
+      ? await finalizeSplitChunks({
+          chunkPlan,
+          manifestFile: options.chunks.manifestFile,
+          outDir,
+          publicPath: options.chunks.publicPath,
+          publishedOutputs: prepared.publishedOutputs,
+        })
+      : prepared.publishedOutputs;
+
   await withInternalTiming("closure:publish", () =>
-    publishPreparedClosureOutputs(prepared.publishedOutputs, cacheOutputDir),
+    publishPreparedClosureOutputs(publishedOutputs, cacheOutputDir),
   );
-  const cacheOutputFiles = prepared.publishedOutputs.map((outputFile) =>
+  const cacheOutputFiles = publishedOutputs.map((outputFile) =>
     path.join(cacheOutputDir, path.relative(outDir, outputFile)),
   );
 
   return {
     cacheOutputFiles,
     exitCode: 0,
-    outputFiles: prepared.publishedOutputs,
+    outputFiles: publishedOutputs,
   };
 }
 

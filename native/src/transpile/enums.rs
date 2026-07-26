@@ -161,7 +161,16 @@ pub(crate) fn resolve_relative_module(file_path: &Path, specifier: &str) -> Opti
                 base.with_extension("ts"),
                 base.with_extension("cts"),
             ],
-            _ => vec![base],
+            // Unknown extensions (for example compiled SFCs imported as
+            // "./Panel.vue") resolve to files with an appended JS/TS
+            // extension, matching the graph resolver's behavior.
+            _ => vec![
+                base.clone(),
+                append_extension(&base, "ts"),
+                append_extension(&base, "tsx"),
+                append_extension(&base, "js"),
+                append_extension(&base, "jsx"),
+            ],
         }
     } else {
         vec![
@@ -186,6 +195,13 @@ pub(crate) fn resolve_relative_module(file_path: &Path, specifier: &str) -> Opti
     candidates
         .into_iter()
         .find(|candidate: &PathBuf| candidate.exists())
+}
+
+fn append_extension(base: &Path, extension: &str) -> PathBuf {
+    let mut appended = base.as_os_str().to_owned();
+    appended.push(".");
+    appended.push(extension);
+    PathBuf::from(appended)
 }
 
 fn enum_literal_value_from_expr(expr: &Expr) -> Option<EnumLiteralValue> {

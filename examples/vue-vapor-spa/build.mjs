@@ -34,7 +34,7 @@ await augmentGeneratedExterns(compiledDir, externsFile);
 
 const result = await build({
   cache: { mode: "off" },
-  chunks: { mode: "bundler-runtime", publicPath: "./dist/" },
+  chunks: { mode: "split", publicPath: "./dist/" },
   diagnostics: { preflight: "full" },
   entries: ["./main.js"],
   // externs: ["./vue.generated.externs.js"],

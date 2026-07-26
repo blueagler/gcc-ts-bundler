@@ -24,6 +24,7 @@ import type {
   ResolvedBuild,
   ResolvedBuildOptions,
 } from "../types";
+import { patchSplitChunkPlan } from "../split-chunks";
 import type { ResolveMetadata, ResolveSnapshot } from "./cache";
 import { isResolveMetadata, isResolveSnapshot, readChunkPlan } from "./cache";
 import {
@@ -290,8 +291,7 @@ function createResolveMetadata(
   );
   const shimDir = path.join(env.cacheStore.workspaceDir, "entries");
   const shimFiles = toShimFiles(entryFiles, shimDir);
-  return {
-    chunkPlan: planChunks({
+  const chunkPlan = planChunks({
       baseChunkName: options.chunks.baseChunkName,
       chunkMode: options.chunks.mode,
       entryFiles: entryFiles.map((entry) => ({
@@ -318,7 +318,12 @@ function createResolveMetadata(
       lazyImports: fresh.graphResult.lazyImports,
       shimFiles,
       workspaceDir: env.cacheStore.workspaceDir,
-    }),
+  });
+  return {
+    chunkPlan:
+      options.chunks.mode === "split"
+        ? patchSplitChunkPlan(chunkPlan)
+        : chunkPlan,
     entryFiles: entryFiles.map((entry) => ({
       chunkName: entry.chunkName,
       exportNames: entry.exportNames,

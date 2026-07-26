@@ -87,19 +87,30 @@ diagnostics: {
 
 ```ts
 chunks: {
-  mode: "off",              // "off" | "bundler-runtime"
+  mode: "off",              // "off" | "split" | "bundler-runtime"
   publicPath: "./",
   baseChunkName: "main",
   manifestFile: "",
 }
 ```
 
-`bundler-runtime` is for browser applications:
+Both chunked modes are for browser applications:
 
 - entries must not export values;
 - lazy boundaries use native `import("./literal")` syntax;
 - chunks are loaded by appending script tags using `publicPath`;
 - `manifestFile`, when non-empty, is emitted in `outDir`.
+
+`split` (recommended) compiles every module as one Closure program with
+`--chunk`, so eager code keeps flat-build optimization quality: modules are
+scope-hoisted, renamed and moved across chunks by the compiler. Dynamic
+import is served by a small (~0.6 KB) loader prelude prepended to the base
+chunk, and the prelude is omitted entirely when no dynamic import exists.
+
+`bundler-runtime` wraps every module in a runtime registration closure so
+chunks can be compiled as separate Closure jobs (parallel, per-chunk
+incremental caching) at a significant size cost: expect roughly 20% larger
+compressed output than `split` plus a fixed ~2.6 KB runtime.
 
 Off mode emits importable entry bundles and can produce a shared chunk for common code.
 

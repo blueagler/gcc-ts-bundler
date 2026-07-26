@@ -29,7 +29,7 @@ pub(super) fn apply_program_compat_transforms(program: &mut Program, context: &T
             context.preserved_property_names.clone(),
         ));
     }
-    if context.chunk_mode == ChunkMode::Off {
+    if context.chunk_mode != ChunkMode::BundlerRuntime {
         program.visit_mut_with(&mut GoogModuleThrowRewriteVisitor);
     }
     program.visit_mut_with(&mut ObjectPatternParamVisitor::default());
@@ -41,7 +41,12 @@ pub(super) fn apply_file_compat_transforms(
     context: &TranspileContext,
 ) {
     apply_program_compat_transforms(program, context);
-    if context.chunk_mode == ChunkMode::BundlerRuntime {
+    let dynamic_import_target = match context.chunk_mode {
+        ChunkMode::BundlerRuntime => Some(DynamicImportTarget::BundlerRuntime),
+        ChunkMode::Split => Some(DynamicImportTarget::SplitRegistry),
+        ChunkMode::Off => None,
+    };
+    if let Some(target) = dynamic_import_target {
         if let Some(lazy_imports) = context
             .lazy_imports_by_file
             .get(&file_path.to_string_lossy().to_string())
@@ -49,6 +54,7 @@ pub(super) fn apply_file_compat_transforms(
             program.visit_mut_with(&mut DynamicImportRewriteVisitor::new(
                 file_path,
                 lazy_imports,
+                target,
             ));
         }
     }

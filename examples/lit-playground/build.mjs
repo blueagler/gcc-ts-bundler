@@ -12,7 +12,7 @@ await compileLitProject();
 
 const result = await build({
   cache: { mode: "off" },
-  chunks: { mode: "bundler-runtime" },
+  chunks: { mode: "split", publicPath: "./" },
   entries: ["./main.ts"],
   outDir: "./dist",
   projectRoot,

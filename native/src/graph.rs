@@ -118,6 +118,7 @@ enum PackageMode {
 enum ChunkMode {
     BundlerRuntime,
     Off,
+    Split,
 }
 
 struct ResolveContext<'a> {
@@ -151,6 +152,7 @@ impl ChunkMode {
         match value {
             "bundler-runtime" => Ok(Self::BundlerRuntime),
             "off" => Ok(Self::Off),
+            "split" => Ok(Self::Split),
             _ => Err(format!("Unsupported chunk mode: {value}")),
         }
     }
@@ -173,7 +175,7 @@ pub fn plan_chunks(
         .collect::<HashMap<_, _>>();
 
     Ok(match chunk_mode {
-        ChunkMode::BundlerRuntime => build_bundler_chunk_plan(
+        ChunkMode::BundlerRuntime | ChunkMode::Split => build_bundler_chunk_plan(
             &sanitize_chunk_name(&base_chunk_name),
             &entry_files,
             &graph,

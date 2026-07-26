@@ -28,6 +28,7 @@ import {
   isStringArray,
 } from "../shared/validation";
 import { writeEntryShims } from "../native/load";
+import { writeSplitLazyShims } from "./split-chunks";
 import { runClosureStage } from "./closure/run-closure";
 import { emitNativeStage } from "./transpile/emit";
 import {
@@ -84,12 +85,19 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     }
 
     writeBuildEntryShims(context, resolved);
+    const splitShimFiles =
+      context.options.chunks.mode === "split"
+        ? writeSplitLazyShims({
+            lazyImports: resolved.lazyImports,
+            shimDir: resolved.shimDir,
+          })
+        : [];
     const nativeEmitResult = await emitNativeStage({
       cacheDir: resolved.nativeEmitCacheDir,
       fileNames:
         context.options.chunks.mode === "off"
           ? [...resolved.sourceFiles, ...resolved.shimFiles]
-          : resolved.sourceFiles,
+          : [...resolved.sourceFiles, ...splitShimFiles],
       lazyImports: resolved.lazyImports,
       metadataPath: path.join(resolved.nativeEmitCacheDir, "meta.json"),
       options: context.options,
@@ -256,7 +264,7 @@ function validateBuildShape(
   ) {
     return failedBuild([
       createBuildDiagnostic(
-        'Dynamic import() requires chunks.mode = "bundler-runtime".',
+        'Dynamic import() requires chunks.mode = "split" or "bundler-runtime".',
       ),
     ]);
   }
