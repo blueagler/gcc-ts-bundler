@@ -1,0 +1,4 @@
+node_modules
+dist
+.gcc-ts-bundler-vite
+bun.lock

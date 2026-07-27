@@ -3,7 +3,7 @@ import path from "node:path";
 import ts from "typescript";
 import { fileURLToPath } from "node:url";
 
-import { compile } from "svelte/compiler";
+import { compile, preprocess } from "svelte/compiler";
 import { build as bundleWithEsbuild } from "esbuild";
 import { functionsMixins } from "vite-plugin-functions-mixins";
 
@@ -204,13 +204,11 @@ async function compileSvelteDirectory(sourceDir, outDir, transformSourceCode) {
 
     const source = await fs.readFile(sourcePath, "utf8");
     const compiledOutputFile = `${outputPath}.js`;
-    const transformedSource = transformSourceCode(source, sourcePath);
-    const result = compile(transformedSource, {
-      css: "injected",
-      filename: compiledOutputFile,
-      generate: "dom",
-      dev: false,
-    });
+    const result = await compileSvelteSource(
+      transformSourceCode(source, sourcePath),
+      sourcePath,
+      compiledOutputFile,
+    );
     await fs.writeFile(
       compiledOutputFile,
       rewriteSvelteSpecifiers(result.js.code),
@@ -236,13 +234,11 @@ async function prepareM3SveltePackage(sourceDir, outDir, transformSourceCode) {
     if (entry.name.endsWith(".svelte")) {
       const source = await fs.readFile(sourcePath, "utf8");
       const compiledOutputFile = `${outputPath}.js`;
-      const transformedSource = transformSourceCode(source, sourcePath);
-      const result = compile(transformedSource, {
-        css: "injected",
-        filename: compiledOutputFile,
-        generate: "dom",
-        dev: false,
-      });
+      const result = await compileSvelteSource(
+        transformSourceCode(source, sourcePath),
+        sourcePath,
+        compiledOutputFile,
+      );
       await fs.writeFile(
         compiledOutputFile,
         rewriteSvelteSpecifiers(result.js.code),
@@ -261,6 +257,52 @@ async function prepareM3SveltePackage(sourceDir, outDir, transformSourceCode) {
       await fs.writeFile(outputPath, rewrittenSource, "utf8");
     }
   }
+}
+
+async function compileSvelteSource(source, sourcePath, outputFile) {
+  const preprocessed = await preprocess(
+    source,
+    {
+      name: "typescript",
+      script({ attributes, content }) {
+        if (attributes.lang !== "ts" && attributes.lang !== "typescript") {
+          return;
+        }
+
+        const result = ts.transpileModule(content, {
+          compilerOptions: {
+            module: ts.ModuleKind.ESNext,
+            target: ts.ScriptTarget.ESNext,
+            verbatimModuleSyntax: true,
+          },
+          fileName: `${sourcePath}.ts`,
+          reportDiagnostics: true,
+        });
+        const errors = (result.diagnostics ?? []).filter(
+          (diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error,
+        );
+        if (errors.length > 0) {
+          throw new Error(
+            ts.formatDiagnosticsWithColorAndContext(errors, {
+              getCanonicalFileName: (fileName) => fileName,
+              getCurrentDirectory: () => projectRoot,
+              getNewLine: () => "\n",
+            }),
+          );
+        }
+
+        return { code: result.outputText };
+      },
+    },
+    { filename: sourcePath },
+  );
+
+  return compile(preprocessed.code, {
+    css: "injected",
+    filename: outputFile,
+    generate: "dom",
+    dev: false,
+  });
 }
 
 async function collectRuntimeEntries(directory) {
