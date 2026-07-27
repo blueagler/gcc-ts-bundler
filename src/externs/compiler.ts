@@ -170,6 +170,33 @@ export async function collectReachableTypeFiles({
 
       queue.push(normalizedDependency);
     }
+
+    // Declaration packages built from triple-slash directives
+    // (`@types/jquery` is nothing but `/// <reference path=...>` lines)
+    // reference no modules at all, so the import walk above never leaves
+    // their entry file.
+    for (const reference of sourceFile.referencedFiles) {
+      queue.push(path.resolve(path.dirname(resolvedFile), reference.fileName));
+    }
+    for (const reference of sourceFile.typeReferenceDirectives) {
+      const resolved = ts.resolveTypeReferenceDirective(
+        reference.fileName,
+        resolvedFile,
+        compilerOptions,
+        ts.sys,
+      ).resolvedTypeReferenceDirective;
+      const resolvedFileName = resolved?.resolvedFileName;
+      if (!resolvedFileName || isTypescriptLibFile(resolvedFileName)) {
+        continue;
+      }
+      if (!includeDependencies) {
+        const referencePackageDir = findPackageDir(resolvedFileName);
+        if (referencePackageDir && !rootPackageDirs.has(referencePackageDir)) {
+          continue;
+        }
+      }
+      queue.push(resolvedFileName);
+    }
   }
 
   return [...seen].sort((left, right) => left.localeCompare(right));

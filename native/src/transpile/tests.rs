@@ -813,6 +813,31 @@ fn preserves_configured_class_map_call_keys() {
 }
 
 #[test]
+fn quotes_member_access_on_default_only_commonjs_imports() {
+    let source = [
+        "import React from \"react\";",
+        "export const Link = React.forwardRef(() => null);",
+        "",
+    ]
+    .join("\n");
+    let mut context = empty_context();
+    context.commonjs_specifiers.insert("react".to_string());
+    let transformed = transform_js_pass_through_module(
+        parse_module(std::path::Path::new("fixture.js"), &source).expect("module"),
+        source,
+        std::path::Path::new("fixture.js"),
+        &context,
+    )
+    .expect("transform");
+
+    // CommonJS namespaces carry literal keys, so the read must be quoted.
+    assert!(
+        transformed.contains("React[\"forwardRef\"]"),
+        "{transformed}"
+    );
+}
+
+#[test]
 fn quoted_valueless_class_fields_gain_explicit_undefined() {
     // `["id"];` (computed valueless class field) is an internal compiler
     // error in Closure's ConvertToDottedProperties; preserved-property

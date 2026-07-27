@@ -55,7 +55,23 @@ function collectContract(
   statement: ts.Statement,
   context: ContractCollectionContext,
 ) {
-  if (!isExportedDeclaration(statement)) {
+  // Declaration packages built as ambient namespaces (`declare namespace
+  // JQuery { interface Deferred { ... } }`, `declare global`) publish their
+  // contracts without export keywords and nest them in module blocks.
+  if (
+    ts.isModuleDeclaration(statement) &&
+    statement.body &&
+    ts.isModuleBlock(statement.body)
+  ) {
+    for (const inner of statement.body.statements) {
+      collectContract(inner, context);
+    }
+    return;
+  }
+  if (
+    !isExportedDeclaration(statement) &&
+    !statement.getSourceFile().isDeclarationFile
+  ) {
     return;
   }
   if (ts.isInterfaceDeclaration(statement)) {

@@ -155,7 +155,14 @@ fn rewrite_commonjs_import_decl(
     }
 
     if namespace_local.is_none() && named_bindings.is_empty() {
-        return (Vec::new(), HashSet::new());
+        // Default-only import (`import React from "react"`): the declaration
+        // needs no rewrite, but the binding must still join the quoted set —
+        // CommonJS namespace properties are literal keys, so a renamable
+        // `React.forwardRef` read would miss them (the react-spa breakage).
+        return (
+            Vec::new(),
+            default_local.into_iter().collect::<HashSet<_>>(),
+        );
     }
 
     let helper_name = default_local.clone().unwrap_or_else(|| {

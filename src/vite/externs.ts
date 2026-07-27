@@ -10,10 +10,10 @@ import type { AppUsageMembers } from "../externs/render";
 import { classifyModuleId, stripQuery } from "./capture";
 import {
   analyzeRuntimeUsage,
-  mergeRuntimeHazards,
-  RUNTIME_HAZARD_KEYS,
+  mergeRuntimeHazards
 } from "../externs/runtime-analysis";
-import type { RuntimeRenameHazards } from "../externs/runtime-analysis";
+import type { RuntimeRenameHazards ,
+  RUNTIME_HAZARD_KEYS} from "../externs/runtime-analysis";
 import {
   getStringLiteralMemberName,
   isRuntimeExternPropertyName,
@@ -326,27 +326,36 @@ async function analyzeJsUsageMembers(
   return { dotAccessed, stringLiteralRead };
 }
 
-const isCachedRuntimeHazards = isObjectOf<CachedRuntimeHazards>(
-  Object.fromEntries(
-    RUNTIME_HAZARD_KEYS.map((key) => [key, isStringArray]),
-  ) as Record<(typeof RUNTIME_HAZARD_KEYS)[number], typeof isStringArray>,
-);
+const isCachedRuntimeHazards = isObjectOf<CachedRuntimeHazards>({
+  dotAccessed: isStringArray,
+  dotDefined: isStringArray,
+  protocolMembers: isStringArray,
+  stringDefined: isStringArray,
+  stringLiteralRead: isStringArray,
+});
 
 function serializeRuntimeHazards(
   hazards: RuntimeRenameHazards,
 ): CachedRuntimeHazards {
-  return Object.fromEntries(
-    RUNTIME_HAZARD_KEYS.map((key) => [
-      key,
-      [...hazards[key]].sort((left, right) => left.localeCompare(right)),
-    ]),
-  ) as CachedRuntimeHazards;
+  const sorted = (values: ReadonlySet<string>) =>
+    [...values].sort((left, right) => left.localeCompare(right));
+  return {
+    dotAccessed: sorted(hazards.dotAccessed),
+    dotDefined: sorted(hazards.dotDefined),
+    protocolMembers: sorted(hazards.protocolMembers),
+    stringDefined: sorted(hazards.stringDefined),
+    stringLiteralRead: sorted(hazards.stringLiteralRead),
+  };
 }
 
 function toRuntimeHazards(hazards: CachedRuntimeHazards): RuntimeRenameHazards {
-  return Object.fromEntries(
-    RUNTIME_HAZARD_KEYS.map((key) => [key, new Set(hazards[key])]),
-  ) as unknown as RuntimeRenameHazards;
+  return {
+    dotAccessed: new Set(hazards.dotAccessed),
+    dotDefined: new Set(hazards.dotDefined),
+    protocolMembers: new Set(hazards.protocolMembers),
+    stringDefined: new Set(hazards.stringDefined),
+    stringLiteralRead: new Set(hazards.stringLiteralRead),
+  };
 }
 
 function resolvePackageExternCacheRoot(input: {
