@@ -18,6 +18,53 @@ export default defineConfig({
 
 Place framework and source-transform plugins before `gccTsBundler()`. The plugin has `enforce: "post"` and only applies to `vite build`; Vite's development server remains unchanged.
 
+## Framework presets
+
+The core compiler is framework-agnostic. Framework runtimes that dispatch on
+property keys reflectively need a preset, which bundles the required compat
+and externs configuration:
+
+```ts
+// Svelte
+import { svelte } from "@sveltejs/vite-plugin-svelte";
+import { gccTsBundler } from "gcc-ts-bundler/vite";
+import { sveltePreset } from "gcc-ts-bundler/presets/svelte";
+
+export default defineConfig({
+  build: { target: "esnext" },
+  plugins: [svelte(), gccTsBundler(sveltePreset())],
+});
+```
+
+```ts
+// Vue
+import vue from "@vitejs/plugin-vue";
+import { gccTsBundler } from "gcc-ts-bundler/vite";
+import { vuePreset } from "gcc-ts-bundler/presets/vue";
+
+export default defineConfig({
+  build: { target: "esnext" },
+  plugins: [vue(), gccTsBundler(vuePreset())],
+});
+```
+
+Presets accept every plugin option plus `externModules` for UI kits whose
+public API crosses the compiled boundary:
+
+```ts
+gccTsBundler(sveltePreset({ externModules: ["m3-svelte"] }));
+```
+
+Presets are plain option builders on top of two generic core mechanisms:
+
+- `compiler.compat.classMapCalls` — calls whose object-literal argument keys
+  must survive property renaming (optionally limited by a `keyPattern`
+  regex);
+- `externs.generate.protocolHelpers` — helper callees that read or exclude
+  property keys by string at runtime.
+
+Apps without a preset (Lit, vanilla TS) use `gccTsBundler()` directly.
+
 ## How it integrates
 
 The plugin captures transformed modules during Vite's transform phase. At `generateBundle`, it uses Rollup's final chunk graph to keep only retained modules, materializes that graph, prebundles dependency regions, and invokes the core compiler with:
@@ -28,6 +75,24 @@ The plugin captures transformed modules during Vite's transform phase. At `gener
 - `languageOut` derived from `build.target`.
 
 It then removes Rollup JavaScript chunks, emits the compiled files through Rollup, carries CSS ownership into lazy chunk loading, follows Rollup entry/chunk naming patterns, and rewrites HTML entry scripts by default.
+
+## Build speed
+
+By default the compiler runs Closure with `platformExterns: "minimal"`: a
+generated flat externs file covering only the platform globals and
+properties the program references, instead of Closure's full browser
+externs. This roughly halves Closure compile time; the build automatically
+retries with the full externs if the minimal set misses a name. Set
+`compiler: { platformExterns: "full" }` to opt out.
+
+Warm builds reuse the persistent cache in `~/.cache/gcc-ts-bundler` and skip
+Closure entirely; persist that directory in CI.
+
+With the persistent cache, renaming maps from the previous build are fed
+back into Closure (`--property_map_input_file`/`--variable_map_input_file`),
+so unchanged chunks stay byte-identical across builds — an edit to one lazy
+chunk no longer invalidates the browser cache for every other chunk.
+`clean-cache` resets the maps.
 
 ## Plugin options
 
@@ -75,6 +140,64 @@ Do not set `compiler.languageOut`; use Vite `build.target`. The plugin maps:
 
 For a target array, the oldest mapped output level wins. Browser-specific targets such as `chrome120` are rejected because they do not map to a Closure language level.
 
+### `compiler.chunks.outputType`
+
+Selects the shape Closure gives the emitted chunks.
+
+| Value      | Emitted chunks                                                       | Entry tag                                 |
+| ---------- | -------------------------------------------------------------------- | ----------------------------------------- |
+| `"script"` | Classic scripts sharing one renamed global namespace                   | `<script defer src="...">`                |
+| `"esm"`    | Native modules; cross-chunk edges are `import`/`export`                | `<script type="module" crossorigin src="...">` |
+| `"auto"`   | Default. `esm` when the resolved language level and chunk mode allow it | follows the resolved value                |
+
+ES module output is roughly 7% smaller raw and 3% smaller gzipped on the
+reference app, and drops the renamed-namespace prefix, the per-chunk function
+wrapper, and the `document.currentScript` base-URL probe. The full measurement
+and risk analysis is in [`research/es-modules-output.md`](./research/es-modules-output.md).
+
+Request counts and waterfall depth are unchanged: lazy chunks are still fetched
+through the runtime manifest, which issues a chunk and all of its dependencies
+in one parallel round. Because of that the plugin deliberately emits **no**
+`<link rel="modulepreload">` — the entry chunk has no static imports to preload,
+and preloading lazy chunks would defeat the point of loading them lazily.
+
+Module scripts are always fetched in CORS mode. A cross-origin `publicPath`
+must send `Access-Control-Allow-Origin` under `"esm"`, which a classic `defer`
+script never required.
+
+#### When a build fails with `JSC_IMPORT_ASSIGN`
+
+ES module import bindings are immutable in the importing module, and Closure
+enforces this as a hard error:
+
+```
+ERROR - [JSC_IMPORT_ASSIGN] Imported symbol "a" in chunk "panel.js"
+cannot be assigned (defined in "main.js")
+```
+
+It means a lazily loaded chunk writes to module-level state that lives in
+another chunk — a store, a cache, a mutable singleton — which the shared global
+namespace of `"script"` output allows and native modules do not. Note that
+ADVANCED cross-chunk code motion can also *move* a function into a lazy chunk
+and create this situation from source that never crossed a chunk boundary
+itself, so the reported location is the definition, not the offending write.
+
+Two fixes, in order of preference:
+
+1. Stop writing the shared binding from the lazy chunk. Export a setter that
+   stays in the eager chunk, or move the state behind an object property
+   (`state.value = x` instead of `value = x`).
+2. Set the escape hatch and keep script output for that build:
+
+   ```ts
+   gccTsBundler({
+     compiler: { chunks: { outputType: "script" } },
+   });
+   ```
+
+`"script"` remains fully supported; it is the only option for `es3`/`es5`
+targets and for output loaded by anything other than a module script.
+
 ### `runtime`
 
 - `publicPath` defaults to Vite's resolved `base` and is normalized with a trailing slash.
@@ -96,6 +219,38 @@ externs: {
 `runtime-aware` is the Vite default when generation is enabled. Package runtime facts are cached separately in persistent cache mode. `boundary-aware` and `candidates` delegate to the root `generateExterns()` API.
 
 `appendLines` adds explicit extern statements after generated content. Use it only for contracts that cannot be discovered from declarations, runtime code, or application usage.
+
+#### What gets externed, and the multi-entry trade
+
+A member only earns an extern when its definition and its reads cannot rename
+together:
+
+```
+extern = protocolMembers
+       ∪ (stringDefined ∩ dotAccessed)
+       ∪ (dotDefined    ∩ stringLiteralRead)
+```
+
+`stringDefined` covers `__publicField(this, "x")`, `Object.defineProperty`,
+`this["x"] = v` and quoted class fields — the string survives renaming while a
+`o.x` read does not. `stringLiteralRead` covers `o["x"]` and `"x" in o`. A
+member that is dot-defined *and* dot-accessed renames consistently within a
+single Closure invocation, so it is deliberately **not** externed: externing it
+would also force the native emitter to quote it, which is what previously
+suppressed optimisation on ordinary application fields. Dependency hazards are
+read from the post-prebundle graph, because esbuild's class-field lowering is
+what creates the string-keyed definitions in the first place.
+
+The rule assumes every side of a member pair is renamed by the **same** Closure
+invocation, which is true for `chunks.mode: "bundler-runtime"` (the Vite
+default — one compile job covering every chunk). It does not hold for a
+multi-entry `off`-mode build that compiles each entry as a separate job and
+passes objects between the resulting bundles: two jobs can rename the same
+member differently, and the older, broader rule used to hide that by externing
+any defined-and-accessed member. If you exchange structured objects across
+separately compiled entry bundles, name that contract explicitly with
+`externs.generate.appendLines` (or a hand-written externs file) rather than
+relying on incidental preservation.
 
 ### HTML and debug options
 
@@ -127,7 +282,7 @@ The plugin targets browser application builds. It rejects:
 - Vite sourcemaps;
 - worker entry graphs.
 
-It also disables Vite module preload because the emitted runtime owns script dependency loading.
+It also disables Vite module preload because the emitted runtime owns script and module dependency loading, under both chunk output types.
 
 Framework compilation must finish before this plugin. Resource imports that survive as non-JavaScript modules must be lowered by Vite or another plugin before capture.
 

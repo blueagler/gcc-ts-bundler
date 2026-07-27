@@ -85,6 +85,20 @@ Set `GCC_BUILD_TIMINGS=1` to print internal cache and stage timings during build
 
 See [Architecture](architecture.md) for the runtime flow across these directories.
 
+`GCC_DISABLE_BARRELS=1` disables prebundle barrel flattening, for comparing
+module placement against Closure's own cross-chunk code motion.
+
+`GCC_CLOSURE_EXTRA_FLAGS="--flag[=value] ..."` appends verbatim flags to
+every Closure invocation — useful for measuring candidate compiler flags
+without a rebuild. Do not override pipeline-managed flags (reports, chunk
+paths) with it.
+
+Examples depend on the repo via `"gcc-ts-bundler": "link:gcc-ts-bundler"`.
+Run `bun link` once at the repo root before installing an example; the
+install then symlinks the repo instead of copying it (a `file:` dependency
+would copy the whole repo — including `examples/*/node_modules` —
+recursively into every example, exhausting inodes).
+
 ## Test coverage map
 
 - `test/build.test.mjs` covers package graphs, entry exports, diagnostics, decorators, extern preservation, and final cache restoration.

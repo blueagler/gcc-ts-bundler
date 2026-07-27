@@ -105,7 +105,7 @@ const loadFeature = () => import("./feature");
 
 The specifier must be a string literal. In chunk mode the bundler rewrites lazy imports to its internal chunk-loader runtime. No manifest file is emitted unless `chunks.manifestFile` or `--chunk-manifest` is explicitly set.
 
-Compatibility stays generic and syntax-driven. The bundler preserves runtime contracts that are discoverable from emitted JavaScript patterns, but it does not expose framework-specific helper APIs or package-name-based special cases.
+Compatibility stays generic and syntax-driven. The bundler preserves runtime contracts that are discoverable from emitted JavaScript patterns, and the core has no framework-specific special cases. Framework runtime knowledge lives in opt-in presets (`gcc-ts-bundler/presets/svelte`, `gcc-ts-bundler/presets/vue`) that configure two generic mechanisms: `compat.classMapCalls` (object-literal keys that must survive renaming at specific calls) and externs `protocolHelpers` (helpers that read or exclude property keys by string). See `docs/vite.md`.
 There is no separate lazy-loading helper package surface; chunked lazy loading is `import()`-driven.
 
 ## CLI
@@ -127,6 +127,7 @@ gcc-ts-bundler externs --project-root=. --src-dir=./src --entry=./main.ts --modu
 - `--language-out`: ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT
 - `--compilation-level`: WHITESPACE_ONLY | SIMPLE | ADVANCED
 - `--packages`: `off | esm-only`
+- `--platform-externs`: `minimal | full`. Default `minimal` compiles with a generated flat externs file covering only referenced platform names instead of Closure's full browser externs (roughly halves Closure time; automatically falls back to `full` on compile errors)
 - `--extern`: Closure extern file. May be repeated
 - `--js`: Additional Closure JavaScript input. May be repeated
 - `--chunks`: `off | bundler-runtime`
