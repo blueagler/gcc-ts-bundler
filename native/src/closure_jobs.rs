@@ -22,6 +22,7 @@ use self::jobs::*;
 use self::runtime::*;
 
 const BUNDLER_RUNTIME_GLOBAL: &str = "__g";
+pub(crate) const BUNDLER_RUNTIME_PREFIX_NAMESPACE: &str = "$gcc";
 
 #[allow(non_snake_case)]
 #[napi(object)]
@@ -41,6 +42,8 @@ pub struct ClosureJobChunkPlanChunkInput {
 pub struct PrepareClosureJobsInput {
     pub chunkMode: String,
     pub chunkLoader: String,
+    /// Resolved chunk output shape: `"script"` or `"esm"`, never `"auto"`.
+    pub chunkOutputType: String,
     pub chunkPlan: Vec<ClosureJobChunkPlanChunkInput>,
     pub compilationLevel: String,
     pub diagnosticsVerbose: bool,
@@ -73,6 +76,9 @@ pub struct ClosureCompileJob {
     pub assumeFunctionWrapper: bool,
     pub chunk: Option<Vec<String>>,
     pub chunkOutputPathPrefix: Option<String>,
+    /// Closure `--chunk_output_type`. `None` leaves the compiler default
+    /// (`GLOBAL_NAMESPACE`) in place, so script-mode jobs stay unchanged.
+    pub chunkOutputType: Option<String>,
     pub compilationLevel: String,
     pub dependencyMode: Option<String>,
     pub entryPoint: Option<Vec<String>>,
@@ -115,10 +121,29 @@ enum ChunkMode {
     Split,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChunkOutputType {
+    Esm,
+    Script,
+}
+
+impl ChunkOutputType {
+    pub(crate) fn is_esm(self) -> bool {
+        matches!(self, ChunkOutputType::Esm)
+    }
+}
+
 pub fn prepare_closure_jobs(
     input: PrepareClosureJobsInput,
 ) -> std::result::Result<PrepareClosureJobsOutput, String> {
     let chunk_mode = parse_chunk_mode(&input.chunkMode)?;
+    let chunk_output_type = parse_chunk_output_type(&input.chunkOutputType)?;
+    if chunk_output_type.is_esm() && chunk_mode != ChunkMode::BundlerRuntime {
+        return Err(format!(
+            "chunks.outputType \"esm\" requires chunks.mode \"bundler-runtime\", got {:?}.",
+            input.chunkMode
+        ));
+    }
     let emitted_out_dir = PathBuf::from(&input.emittedOutDir);
     let final_cache_dir = PathBuf::from(&input.finalCacheDir);
     let raw_dir = final_cache_dir.join("raw");
@@ -137,6 +162,7 @@ pub fn prepare_closure_jobs(
             &raw_dir,
             &runtime_asset_dir,
             &warning_level,
+            chunk_output_type,
         ),
         // Split confines globals to one namespace object so plain-script
         // chunks cannot collide with renamed globalThis.* properties; the
@@ -151,6 +177,14 @@ pub fn prepare_closure_jobs(
             &warning_level,
             Some("$gcc".to_string()),
         ),
+    }
+}
+
+fn parse_chunk_output_type(value: &str) -> std::result::Result<ChunkOutputType, String> {
+    match value {
+        "esm" => Ok(ChunkOutputType::Esm),
+        "script" => Ok(ChunkOutputType::Script),
+        _ => Err(format!("Unsupported chunk output type: {value}")),
     }
 }
 

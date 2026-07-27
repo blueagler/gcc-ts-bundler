@@ -8,13 +8,27 @@ pub(super) fn emit_module_program(
     commonjs_export_name: Option<&str>,
 ) -> std::result::Result<String, String> {
     match context.chunk_mode {
-        ChunkMode::BundlerRuntime => emit_bundler_runtime_module_program(
-            file_path,
-            program,
-            context,
-            file_metadata,
-            commonjs_export_name,
-        ),
+        ChunkMode::BundlerRuntime => {
+            if let Some(plan) = context.hoist_plan.clone() {
+                let module_id = to_goog_module_id(file_path, &context.workspace_dir);
+                if plan.is_hoisted(&module_id) {
+                    return emit_hoisted_module_program(
+                        file_path,
+                        program,
+                        context,
+                        &plan,
+                        commonjs_export_name,
+                    );
+                }
+            }
+            emit_bundler_runtime_module_program(
+                file_path,
+                program,
+                context,
+                file_metadata,
+                commonjs_export_name,
+            )
+        }
         ChunkMode::Off | ChunkMode::Split => emit_goog_module_program(
             file_path,
             program,

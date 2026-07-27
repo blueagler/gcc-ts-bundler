@@ -11,6 +11,9 @@ use super::utils::{
 
 pub(super) struct PropertyProtocolRewriter<'a> {
     pub(super) changed: bool,
+    /// Variables observed as `name.includes(propertyKey)` carriers; their
+    /// array-literal initializers are rewritten in a follow-up pass.
+    pub(super) pending_key_list_variables: HashSet<String>,
     property_key_scopes: Vec<PropertyKeyScope>,
     renames: &'a HashMap<String, String>,
 }
@@ -25,6 +28,7 @@ impl<'a> PropertyProtocolRewriter<'a> {
     pub(super) fn new(renames: &'a HashMap<String, String>) -> Self {
         Self {
             changed: false,
+            pending_key_list_variables: HashSet::new(),
             property_key_scopes: vec![PropertyKeyScope::default()],
             renames,
         }
@@ -109,38 +113,7 @@ impl<'a> PropertyProtocolRewriter<'a> {
     }
 
     fn maybe_rewrite_property_name_array(&mut self, array: &mut ArrayLit) -> bool {
-        let Some(elements) = array
-            .elems
-            .iter()
-            .map(|element| {
-                element.as_ref().and_then(|item| match &*item.expr {
-                    Expr::Lit(Lit::Str(value)) => Some(value.value.to_string_lossy().to_string()),
-                    _ => None,
-                })
-            })
-            .collect::<Option<Vec<_>>>()
-        else {
-            return false;
-        };
-
-        if !elements
-            .iter()
-            .any(|element| self.renames.contains_key(element))
-            || !elements
-                .iter()
-                .all(|element| looks_like_property_name(element))
-        {
-            return false;
-        }
-
-        let mut changed = false;
-        for element in array.elems.iter_mut().flatten() {
-            let Expr::Lit(Lit::Str(value)) = &mut *element.expr else {
-                continue;
-            };
-            changed |= self.maybe_rewrite_string_literal(value);
-        }
-        changed
+        rewrite_property_name_array(array, self.renames)
     }
 
     fn maybe_rewrite_string_literal_expr(&mut self, expr: &mut Expr) -> bool {
@@ -248,6 +221,21 @@ impl VisitMut for PropertyProtocolRewriter<'_> {
     fn visit_mut_call_expr(&mut self, call_expr: &mut CallExpr) {
         call_expr.visit_mut_children_with(self);
 
+        if let Callee::Expr(callee_expr) = &call_expr.callee {
+            if let Expr::Member(member) = &**callee_expr {
+                if matches!(
+                    &member.prop,
+                    MemberProp::Ident(ident) if ident.sym == *"includes" || ident.sym == *"indexOf"
+                ) && call_expr.args.len() == 1
+                    && self.is_property_key_expr(&call_expr.args[0].expr)
+                {
+                    if let Expr::Ident(object_ident) = &*member.obj {
+                        self.pending_key_list_variables
+                            .insert(object_ident.sym.to_string());
+                    }
+                }
+            }
+        }
         if let Callee::Expr(callee_expr) = &mut call_expr.callee {
             if let Some(key_list_param_indexes) = collect_key_list_param_indexes(callee_expr) {
                 for index in key_list_param_indexes {
@@ -358,6 +346,72 @@ impl VisitMut for PropertyProtocolRewriter<'_> {
         self.push_property_key_scope(binding_names);
         for_in_stmt.body.visit_mut_with(self);
         self.pop_property_key_scope();
+    }
+}
+
+fn rewrite_property_name_array(array: &mut ArrayLit, renames: &HashMap<String, String>) -> bool {
+    let Some(elements) = array
+        .elems
+        .iter()
+        .map(|element| {
+            element.as_ref().and_then(|item| match &*item.expr {
+                Expr::Lit(Lit::Str(value)) => Some(value.value.to_string_lossy().to_string()),
+                _ => None,
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+
+    if !elements.iter().any(|element| renames.contains_key(element))
+        || !elements
+            .iter()
+            .all(|element| looks_like_property_name(element))
+    {
+        return false;
+    }
+
+    let mut changed = false;
+    for element in array.elems.iter_mut().flatten() {
+        let Expr::Lit(Lit::Str(value)) = &mut *element.expr else {
+            continue;
+        };
+        let original_name = value.value.to_string_lossy();
+        let Some(renamed_name) = renames.get(original_name.as_ref()) else {
+            continue;
+        };
+        if renamed_name == original_name.as_ref() {
+            continue;
+        }
+        value.value = renamed_name.as_str().into();
+        changed = true;
+    }
+    changed
+}
+
+/// Rewrites array-literal initializers of variables that were observed being
+/// used as `name.includes(propertyKey)` key lists.
+pub(super) struct KeyListVariableRewriter<'a> {
+    pub(super) changed: bool,
+    pub(super) names: &'a HashSet<String>,
+    pub(super) renames: &'a HashMap<String, String>,
+}
+
+impl VisitMut for KeyListVariableRewriter<'_> {
+    fn visit_mut_var_declarator(&mut self, declarator: &mut VarDeclarator) {
+        declarator.visit_mut_children_with(self);
+
+        let Pat::Ident(binding) = &declarator.name else {
+            return;
+        };
+        if !self.names.contains(binding.id.sym.as_ref()) {
+            return;
+        }
+        let Some(Expr::Array(array)) = declarator.init.as_deref_mut() else {
+            return;
+        };
+        self.changed |= rewrite_property_name_array(array, self.renames);
     }
 }
 

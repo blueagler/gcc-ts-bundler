@@ -87,9 +87,7 @@ impl VisitMut for DynamicImportRewriteVisitor {
                 "__dynamicImport",
                 to_bundler_runtime_module_id(&lazy_import.moduleId),
             ),
-            DynamicImportTarget::SplitRegistry => {
-                ("gccImportLazy", lazy_import.moduleId.clone())
-            }
+            DynamicImportTarget::SplitRegistry => ("gccImportLazy", lazy_import.moduleId.clone()),
         };
         *expr = Expr::Call(CallExpr {
             span: Default::default(),

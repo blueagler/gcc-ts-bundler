@@ -8,8 +8,9 @@ pub(super) use self::commonjs::{
     CommonJsNamespaceAccessVisitor, GoogModuleThrowRewriteVisitor,
 };
 pub(super) use self::object_patterns::ObjectPatternParamVisitor;
-pub(super) use self::properties::{
-    collect_class_static_assignments, quote_prop_name, PreservedPropertyCompatVisitor,
+pub(crate) use self::properties::{
+    collect_class_static_assignments, collect_import_alias_names, quote_prop_name,
+    ClassMapCallCompatVisitor, PreservedPropertyCompatVisitor,
 };
 
 pub(super) fn apply_program_compat_transforms(program: &mut Program, context: &TranspileContext) {
@@ -22,6 +23,16 @@ pub(super) fn apply_program_compat_transforms(program: &mut Program, context: &T
     if !commonjs_namespace_bindings.is_empty() {
         program.visit_mut_with(&mut CommonJsNamespaceAccessVisitor::new(
             commonjs_namespace_bindings,
+        ));
+    }
+    if !context.class_map_calls.is_empty() {
+        let import_aliases = match &*program {
+            Program::Module(module) => collect_import_alias_names(module),
+            _ => HashMap::new(),
+        };
+        program.visit_mut_with(&mut ClassMapCallCompatVisitor::new(
+            &context.class_map_calls,
+            import_aliases,
         ));
     }
     if !context.preserved_property_names.is_empty() {

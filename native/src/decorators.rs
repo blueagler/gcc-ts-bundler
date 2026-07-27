@@ -9,7 +9,7 @@ use swc_core::ecma::visit::VisitMutWith;
 use crate::module_cache::parse_module;
 
 use self::report::parse_property_renaming_report;
-use self::rewrite::PropertyProtocolRewriter;
+use self::rewrite::{KeyListVariableRewriter, PropertyProtocolRewriter};
 use self::utils::print_module_minified;
 
 pub fn rewrite_decorator_metadata(
@@ -28,7 +28,17 @@ pub fn rewrite_decorator_metadata(
     let mut module = parse_module(&PathBuf::from("property-protocol-bundle.js"), &code)?;
     let mut rewriter = PropertyProtocolRewriter::new(&renames);
     module.visit_mut_with(&mut rewriter);
-    if !rewriter.changed {
+    let mut changed = rewriter.changed;
+    if !rewriter.pending_key_list_variables.is_empty() {
+        let mut key_list_rewriter = KeyListVariableRewriter {
+            changed: false,
+            names: &rewriter.pending_key_list_variables,
+            renames: &renames,
+        };
+        module.visit_mut_with(&mut key_list_rewriter);
+        changed |= key_list_rewriter.changed;
+    }
+    if !changed {
         return Ok(code);
     }
 
@@ -108,6 +118,16 @@ mod tests {
         .expect("rewrite");
 
         assert!(output.contains("[\"i\",\"j\",\"k\",\"l\"]"), "{output}");
+    }
+
+    #[test]
+    fn rewrites_array_literal_key_list_variables_checked_with_includes() {
+        let rewritten = rewrite_decorator_metadata(
+            "var n={m:{}},t=[\"$$slots\",\"$$events\",\"variant\"],u={};for(var f in n)t.includes(f)||(u[f]=n[f]);".to_string(),
+            "$$slots:m\n$$events:e\nvariant:v\n".to_string(),
+        )
+        .unwrap();
+        assert!(rewritten.contains("[\"m\",\"e\",\"v\"]"), "{rewritten}");
     }
 
     #[test]

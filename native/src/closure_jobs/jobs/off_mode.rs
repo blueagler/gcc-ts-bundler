@@ -64,6 +64,7 @@ pub(crate) fn prepare_off_mode_jobs(
             assumeFunctionWrapper: true,
             chunk: None,
             chunkOutputPathPrefix: None,
+            chunkOutputType: None,
             compilationLevel: input.compilationLevel.clone(),
             dependencyMode: Some("PRUNE".to_string()),
             entryPoint: (!entry_chunk.entry_points.is_empty())
@@ -132,6 +133,7 @@ pub(crate) fn prepare_off_mode_jobs(
                 raw_dir.to_string_lossy(),
                 std::path::MAIN_SEPARATOR
             )),
+            chunkOutputType: None,
             compilationLevel: input.compilationLevel.clone(),
             dependencyMode: Some("PRUNE".to_string()),
             entryPoint: (!entry_points.is_empty()).then_some(entry_points),

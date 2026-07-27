@@ -244,6 +244,36 @@ fn tracks_package_json_hash_changes() {
 }
 
 #[test]
+fn resolves_commonjs_package_below_source_root() {
+    let temp_dir = TestDir::new();
+    temp_dir.write(
+        "src/index.ts",
+        "import pkg from \"demo-pkg\";\nexport default pkg;\n",
+    );
+    temp_dir.write(
+        "src/node_modules/demo-pkg/package.json",
+        r#"{"name":"demo-pkg","main":"./index.js"}"#,
+    );
+    temp_dir.write(
+        "src/node_modules/demo-pkg/index.js",
+        "module.exports = 1;\n",
+    );
+
+    let result = resolve_graph(
+        vec![temp_dir.join("src/index.ts").to_string_lossy().to_string()],
+        temp_dir.join("src").to_string_lossy().to_string(),
+        temp_dir.path.to_string_lossy().to_string(),
+        "esm-only".to_string(),
+    )
+    .unwrap();
+
+    assert!(result
+        .sourceFiles
+        .iter()
+        .any(|path| path.ends_with("src/node_modules/demo-pkg/index.js")));
+}
+
+#[test]
 fn rejects_unsupported_commonjs_package_patterns() {
     let temp_dir = TestDir::new();
     temp_dir.write(

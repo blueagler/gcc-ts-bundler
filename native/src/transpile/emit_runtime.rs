@@ -265,6 +265,15 @@ pub(super) fn emit_bundler_runtime_module_program(
         output.push(render_live_export_slot(default_slot, export_name));
     }
 
+    // Host libraries unwrap dynamic-import namespaces via
+    // `.default`/`.__esModule`; see the hoisted facade emission for details.
+    if context.lazy_target_module_ids.contains(&module_id)
+        && current_slots.slot_for("default") == Some(0)
+    {
+        output.push("__exports.__esModule = true;".to_string());
+        output.push("__exports.default = __exports[0];".to_string());
+    }
+
     let body = rewrite_bundler_exports(
         &output
             .into_iter()
@@ -348,7 +357,9 @@ fn slot_mode_for_export_decl(
     }
 }
 
-fn collect_local_export_modes(module: &Module) -> HashMap<String, BundlerExportSlotMode> {
+pub(super) fn collect_local_export_modes(
+    module: &Module,
+) -> HashMap<String, BundlerExportSlotMode> {
     let mut binding_candidates = HashMap::<Id, (String, BundlerExportSlotMode)>::new();
     for item in &module.body {
         match item {
@@ -438,7 +449,7 @@ fn collect_decl_export_candidates(
     }
 }
 
-fn export_binding_names_with_ids(pattern: &Pat) -> Vec<(Id, String)> {
+pub(super) fn export_binding_names_with_ids(pattern: &Pat) -> Vec<(Id, String)> {
     match pattern {
         Pat::Ident(ident) => vec![(ident.to_id(), ident.id.sym.to_string())],
         Pat::Array(array) => array

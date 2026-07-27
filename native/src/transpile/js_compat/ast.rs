@@ -49,7 +49,7 @@ pub(crate) fn normalize_commonjs_module(
     let mut normalized_body = Vec::new();
     normalized_body.extend(import_items);
     normalized_body.extend(parse_module_items("var module = { exports: {} };")?);
-    normalized_body.extend(module.body.drain(..));
+    normalized_body.extend(wrap_commonjs_body(module.body.drain(..).collect())?);
     normalized_body.extend(parse_module_items("var __cjsExports = module.exports;")?);
 
     let mut program = Program::Module(Module {
@@ -70,7 +70,47 @@ pub(crate) fn normalize_commonjs_module(
     )
 }
 
-fn to_emitted_commonjs_specifier(specifier: &str) -> String {
+fn wrap_commonjs_body(items: Vec<ModuleItem>) -> std::result::Result<Vec<ModuleItem>, String> {
+    let statements = items
+        .into_iter()
+        .map(|item| match item {
+            ModuleItem::Stmt(statement) => Ok(statement),
+            ModuleItem::ModuleDecl(_) => {
+                Err("CommonJS normalization received ESM syntax.".to_string())
+            }
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut wrapper = parse_module_items("(function () {}).call(module.exports);")?;
+    let mut injector = CommonJsBodyInjector {
+        statements: Some(statements),
+    };
+    for item in &mut wrapper {
+        item.visit_mut_with(&mut injector);
+    }
+    if injector.statements.is_some() {
+        return Err("Unable to create the CommonJS function wrapper.".to_string());
+    }
+    Ok(wrapper)
+}
+
+struct CommonJsBodyInjector {
+    statements: Option<Vec<Stmt>>,
+}
+
+impl VisitMut for CommonJsBodyInjector {
+    fn visit_mut_fn_expr(&mut self, function: &mut swc_core::ecma::ast::FnExpr) {
+        let Some(statements) = self.statements.take() else {
+            return;
+        };
+        let Some(body) = &mut function.function.body else {
+            self.statements = Some(statements);
+            return;
+        };
+        body.stmts = statements;
+    }
+}
+
+pub(crate) fn to_emitted_commonjs_specifier(specifier: &str) -> String {
     if specifier.starts_with('.') {
         return specifier.replace(".cjs", ".js").replace(".cts", ".js");
     }
@@ -155,12 +195,55 @@ impl JsCompatAstVisitor {
 }
 
 impl VisitMut for JsCompatAstVisitor {
+    /// Bundler-time `define` replacement leaves dead branches whose callees
+    /// were tree-shaken away (`else if (false) warn(...)`). Closure reports
+    /// undeclared variables even inside dead code, so literal-condition
+    /// branches are folded here.
+    fn visit_mut_stmt(&mut self, stmt: &mut Stmt) {
+        stmt.visit_mut_children_with(self);
+
+        let Stmt::If(if_stmt) = stmt else {
+            return;
+        };
+        let Some(test_value) = crate::commonjs::evaluate_boolean_expr(&if_stmt.test) else {
+            return;
+        };
+        // `var`/function declarations hoist out of the branch; dropping them
+        // would create the very undeclared-variable errors this fold fixes.
+        let dropped_branch: Option<&Stmt> = if test_value {
+            if_stmt.alt.as_deref()
+        } else {
+            Some(&if_stmt.cons)
+        };
+        if dropped_branch.is_some_and(branch_declares_hoisted_bindings) {
+            return;
+        }
+        if test_value {
+            let consequent = mem::replace(
+                &mut if_stmt.cons,
+                Box::new(Stmt::Empty(EmptyStmt {
+                    span: Default::default(),
+                })),
+            );
+            *stmt = *consequent;
+            return;
+        }
+        match if_stmt.alt.take() {
+            Some(alternative) => *stmt = *alternative,
+            None => {
+                *stmt = Stmt::Empty(EmptyStmt {
+                    span: Default::default(),
+                })
+            }
+        }
+    }
+
     fn visit_mut_expr(&mut self, expr: &mut Expr) {
         expr.visit_mut_children_with(self);
 
         if let Expr::Cond(conditional) = expr {
-            if let Expr::Lit(Lit::Bool(Bool { value, .. })) = &*conditional.test {
-                let replacement = if *value {
+            if let Some(test_value) = crate::commonjs::evaluate_boolean_expr(&conditional.test) {
+                let replacement = if test_value {
                     mem::replace(
                         &mut conditional.cons,
                         Box::new(Expr::Invalid(Default::default())),
@@ -173,6 +256,46 @@ impl VisitMut for JsCompatAstVisitor {
                 };
                 *expr = *replacement;
                 return;
+            }
+        }
+
+        if let Expr::Bin(binary) = expr {
+            if let Some(left_value) = crate::commonjs::evaluate_boolean_expr(&binary.left) {
+                match binary.op {
+                    swc_core::ecma::ast::BinaryOp::LogicalAnd => {
+                        if left_value {
+                            let right = mem::replace(
+                                &mut binary.right,
+                                Box::new(Expr::Invalid(Default::default())),
+                            );
+                            *expr = *right;
+                        } else {
+                            let left = mem::replace(
+                                &mut binary.left,
+                                Box::new(Expr::Invalid(Default::default())),
+                            );
+                            *expr = *left;
+                        }
+                        return;
+                    }
+                    swc_core::ecma::ast::BinaryOp::LogicalOr => {
+                        if left_value {
+                            let left = mem::replace(
+                                &mut binary.left,
+                                Box::new(Expr::Invalid(Default::default())),
+                            );
+                            *expr = *left;
+                        } else {
+                            let right = mem::replace(
+                                &mut binary.right,
+                                Box::new(Expr::Invalid(Default::default())),
+                            );
+                            *expr = *right;
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -199,6 +322,29 @@ impl VisitMut for JsCompatAstVisitor {
             arg: Box::new(Expr::Lit(Lit::Num(0f64.into()))),
         }));
     }
+}
+
+fn branch_declares_hoisted_bindings(stmt: &Stmt) -> bool {
+    struct HoistedBindingScanner {
+        found: bool,
+    }
+    impl swc_core::ecma::visit::Visit for HoistedBindingScanner {
+        fn visit_var_decl(&mut self, var_decl: &VarDecl) {
+            if matches!(var_decl.kind, VarDeclKind::Var) {
+                self.found = true;
+            }
+            var_decl.visit_children_with(self);
+        }
+        fn visit_fn_decl(&mut self, _: &swc_core::ecma::ast::FnDecl) {
+            self.found = true;
+        }
+        // `var` inside nested functions does not hoist past them.
+        fn visit_function(&mut self, _: &swc_core::ecma::ast::Function) {}
+        fn visit_arrow_expr(&mut self, _: &ArrowExpr) {}
+    }
+    let mut scanner = HoistedBindingScanner { found: false };
+    stmt.visit_with(&mut scanner);
+    scanner.found
 }
 
 pub(crate) fn parse_module_items(source: &str) -> std::result::Result<Vec<ModuleItem>, String> {

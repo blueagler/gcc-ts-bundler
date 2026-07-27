@@ -14,12 +14,24 @@ pub(super) struct TranspileContext {
     pub(super) bundler_module_slots: HashMap<String, BundlerModuleSlots>,
     pub(super) bundler_runtime_logical_ids: HashMap<String, String>,
     pub(super) chunk_mode: ChunkMode,
+    pub(super) class_map_calls: Vec<ClassMapCallInput>,
+    /// Callees whose results are pure; declarations initialized by them stay
+    /// movable across chunks. Supplied by framework presets.
+    pub(super) pure_callees: HashSet<String>,
     pub(super) commonjs_specifiers: HashSet<String>,
     pub(super) file_metadata: HashMap<String, ClosureFileMetadata>,
+    pub(super) hoist_plan: Option<std::sync::Arc<HoistPlan>>,
     pub(super) lazy_imports_by_file: HashMap<String, Vec<LazyImportInput>>,
+    /// Logical module ids that are dynamic-import targets; their facades
+    /// expose ESM interop markers for host-library namespace unwrapping.
+    pub(super) lazy_target_module_ids: HashSet<String>,
     pub(super) package_aliases: Vec<PackageAliasInput>,
     pub(super) preserved_property_names: HashSet<String>,
     pub(super) static_property_names: HashSet<String>,
+    /// Checker-derived JSDoc per source file, keyed by
+    /// `typed_annotations::annotation_key`. Consumed by hoisted emission
+    /// only; `Off`/`Split` carry their JSDoc through `closure-ir` metadata.
+    pub(super) typed_annotations: HashMap<String, TypedAnnotationsByName>,
     pub(super) workspace_dir: PathBuf,
 }
 
@@ -79,12 +91,17 @@ pub(super) fn collect_bundler_module_slots(
         bundler_module_slots: HashMap::new(),
         bundler_runtime_logical_ids: HashMap::new(),
         chunk_mode: ChunkMode::BundlerRuntime,
+        class_map_calls: Vec::new(),
+        pure_callees: HashSet::new(),
         commonjs_specifiers: HashSet::new(),
         file_metadata: HashMap::new(),
+        hoist_plan: None,
         lazy_imports_by_file: HashMap::new(),
+        lazy_target_module_ids: HashSet::new(),
         package_aliases: package_aliases.to_vec(),
         preserved_property_names: HashSet::new(),
         static_property_names: HashSet::new(),
+        typed_annotations: HashMap::new(),
         workspace_dir: workspace_dir.to_path_buf(),
     };
 

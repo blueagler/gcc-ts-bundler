@@ -6,8 +6,7 @@ use swc_core::ecma::visit::{VisitMut, VisitMutWith};
 use super::kinds::SharedEs5HelperKind;
 use super::utils::{
     collect_binding_names_from_pat, collect_function_scope_names, collect_module_scope_names,
-    global_this_expr, helper_alias_decl, helper_slot_expr, next_available_alias,
-    print_function_decl_minified,
+    helper_alias_decl, helper_slot_expr, next_available_alias, print_function_decl_minified,
 };
 
 pub(super) struct Es5HelperChunkRewriter {
@@ -76,31 +75,25 @@ impl Es5HelperChunkRewriter {
             .filter_map(|(index, stmt)| (!removed_indices.contains(&index)).then_some(stmt.clone()))
             .collect();
 
+        // Cross-chunk helper references travel through the shared
+        // `$gcc` prefix namespace; only locally-defined helper copies are
+        // classified (by body) and rewritten into the shared helper bag.
         let mut current_scope_names = names.clone();
         let mut helper_name_to_kind = HashMap::new();
         for (_, helper_name, kind) in &helper_bindings {
             current_scope_names.remove(helper_name);
             helper_name_to_kind.insert(helper_name.clone(), *kind);
         }
-        if !current_scope_names.contains("ta") {
-            helper_name_to_kind
-                .insert("ta".to_string(), SharedEs5HelperKind::ClosureTemplateObject);
-        }
-        if !current_scope_names.contains("qa") {
-            helper_name_to_kind.insert("qa".to_string(), SharedEs5HelperKind::ClosureInherits);
-        }
         let mut rewriter = HelperReferenceRewriter {
             helper_alias,
             helper_name_to_kind,
             scope_stack: Vec::new(),
             rewritten_helper_kinds: BTreeSet::new(),
-            rewrite_closure_global: !current_scope_names.contains("ha"),
-            rewrote_closure_global: false,
         };
         rewriter.scope_stack.push(current_scope_names);
         block.visit_mut_with(&mut rewriter);
         rewriter.scope_stack.pop();
-        if rewriter.rewritten_helper_kinds.is_empty() && !rewriter.rewrote_closure_global {
+        if rewriter.rewritten_helper_kinds.is_empty() {
             return;
         }
 
@@ -152,31 +145,16 @@ impl Es5HelperChunkRewriter {
             .filter_map(|(index, item)| (!removed_indices.contains(&index)).then_some(item.clone()))
             .collect();
 
-        let mut module_scope_names = HashSet::new();
-        collect_module_scope_names(module, &mut module_scope_names);
-
         let mut helper_name_to_kind = HashMap::new();
         for (_, helper_name, kind) in helper_bindings {
             helper_name_to_kind.insert(helper_name, kind);
-        }
-        if !module_scope_names.contains("ta") {
-            helper_name_to_kind
-                .insert("ta".to_string(), SharedEs5HelperKind::ClosureTemplateObject);
-        }
-        if !module_scope_names.contains("qa") {
-            helper_name_to_kind.insert("qa".to_string(), SharedEs5HelperKind::ClosureInherits);
         }
         let mut rewriter = TopLevelHelperReferenceRewriter {
             helper_alias: helper_alias.to_string(),
             helper_name_to_kind,
             rewritten_helper_kinds: BTreeSet::new(),
-            rewrite_closure_global: !module_scope_names.contains("ha"),
-            rewrote_closure_global: false,
         };
         module.visit_mut_with(&mut rewriter);
-        if rewriter.rewrote_closure_global {
-            self.changed = true;
-        }
         rewriter.rewritten_helper_kinds
     }
 }
@@ -232,8 +210,6 @@ struct HelperReferenceRewriter {
     helper_name_to_kind: HashMap<String, SharedEs5HelperKind>,
     rewritten_helper_kinds: BTreeSet<SharedEs5HelperKind>,
     scope_stack: Vec<HashSet<String>>,
-    rewrite_closure_global: bool,
-    rewrote_closure_global: bool,
 }
 
 impl HelperReferenceRewriter {
@@ -249,8 +225,6 @@ struct TopLevelHelperReferenceRewriter {
     helper_alias: String,
     helper_name_to_kind: HashMap<String, SharedEs5HelperKind>,
     rewritten_helper_kinds: BTreeSet<SharedEs5HelperKind>,
-    rewrite_closure_global: bool,
-    rewrote_closure_global: bool,
 }
 
 impl VisitMut for TopLevelHelperReferenceRewriter {
@@ -271,11 +245,6 @@ impl VisitMut for TopLevelHelperReferenceRewriter {
             return;
         };
         let helper_name = ident.sym.to_string();
-        if self.rewrite_closure_global && helper_name == "ha" {
-            self.rewrote_closure_global = true;
-            *expr = global_this_expr();
-            return;
-        }
         let Some(kind) = self.helper_name_to_kind.get(&helper_name).copied() else {
             return;
         };
@@ -307,11 +276,6 @@ impl VisitMut for HelperReferenceRewriter {
             return;
         };
         let helper_name = ident.sym.to_string();
-        if self.rewrite_closure_global && helper_name == "ha" && !self.is_shadowed(&helper_name) {
-            self.rewrote_closure_global = true;
-            *expr = global_this_expr();
-            return;
-        }
         let Some(kind) = self.helper_name_to_kind.get(&helper_name).copied() else {
             return;
         };

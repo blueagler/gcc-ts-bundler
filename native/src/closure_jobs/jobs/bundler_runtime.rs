@@ -16,6 +16,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
     raw_dir: &Path,
     runtime_asset_dir: &Path,
     warning_level: &str,
+    chunk_output_type: ChunkOutputType,
 ) -> std::result::Result<PrepareClosureJobsOutput, String> {
     let base_chunk = resolved_chunks
         .iter()
@@ -28,11 +29,15 @@ pub(crate) fn prepare_bundler_runtime_jobs(
     let mut postprocess_actions = Vec::new();
     let mut published_outputs = Vec::new();
     let runtime_debug = bundler_runtime_ids_are_readable();
+    // Mirrors the transpile-side switch: GCC_DISABLE_HOIST=1 falls back to the
+    // old registry/h() chunk format, which the loader still supports.
+    let hoisted = !matches!(std::env::var("GCC_DISABLE_HOIST").as_deref(), Ok("1"));
     let mut module_map = BTreeMap::new();
     let mut runtime_module_map = BTreeMap::new();
     let mut manifest_chunks = BTreeMap::new();
     let mut module_text_by_chunk = BTreeMap::new();
     let mut runtime_module_ids = Vec::new();
+    let mut registered_runtime_ids = std::collections::BTreeSet::new();
     let chunk_index_by_name = resolved_chunks
         .iter()
         .enumerate()
@@ -55,10 +60,13 @@ pub(crate) fn prepare_bundler_runtime_jobs(
             .ok_or_else(|| format!("Missing runtime chunk id for {}", chunk.name))?;
         for file_path in &chunk.files {
             let source_text = fs::read_to_string(file_path).map_err(|error| error.to_string())?;
-            module_sources.push(source_text);
             let module_id =
                 to_goog_module_id(Path::new(file_path), Path::new(&input.emittedOutDir));
             let runtime_module_id = to_bundler_runtime_module_id(&module_id);
+            if source_text.contains("__register(") {
+                registered_runtime_ids.insert(runtime_module_id.clone());
+            }
+            module_sources.push(source_text);
             runtime_module_ids.push(runtime_module_id.clone());
             manifest_modules.push(runtime_module_id.clone());
             module_map.insert(runtime_module_id.clone(), runtime_chunk_id.clone());
@@ -124,7 +132,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
                 if chunk.name == base_chunk.name {
                     String::new()
                 } else {
-                    bundler_runtime_output_file_name(
+                    let file_name = bundler_runtime_output_file_name(
                         &chunk.name,
                         runtime_chunk_id_by_name
                             .get(&chunk.name)
@@ -133,7 +141,15 @@ pub(crate) fn prepare_bundler_runtime_jobs(
                                 format!("Missing runtime chunk id for {}", chunk.name)
                             })?,
                         &base_chunk.name,
-                    )
+                    );
+                    if chunk_output_type.is_esm() {
+                        // A relative specifier resolves against the importing
+                        // chunk's own URL, which removes the need for a public
+                        // path (and the `document.currentScript` hack) for JS.
+                        format!("./{file_name}")
+                    } else {
+                        file_name
+                    }
                 },
                 vec![],
             ))
@@ -196,24 +212,23 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         published_outputs.push(manifest_path.to_string_lossy().to_string());
     }
 
+    // Hoisted entry modules execute inline when the chunk body runs; only
+    // registry-form entries still need an explicit `r.n` kick.
+    let registry_entry_runtime_ids = base_chunk
+        .entry_points
+        .iter()
+        .map(|module_id| to_bundler_runtime_module_id(module_id))
+        .filter(|runtime_module_id| registered_runtime_ids.contains(runtime_module_id))
+        .collect::<Vec<_>>();
     let base_entry_points_json = if runtime_debug {
-        serde_json::to_string(
-            &base_chunk
-                .entry_points
-                .iter()
-                .map(|module_id| to_bundler_runtime_module_id(module_id))
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|error| error.to_string())?
+        serde_json::to_string(&registry_entry_runtime_ids).map_err(|error| error.to_string())?
     } else {
         serde_json::to_string(
-            &base_chunk
-                .entry_points
+            &registry_entry_runtime_ids
                 .iter()
-                .map(|module_id| {
-                    let runtime_module_id = to_bundler_runtime_module_id(module_id);
+                .map(|runtime_module_id| {
                     runtime_module_index_by_id
-                        .get(&runtime_module_id)
+                        .get(runtime_module_id)
                         .copied()
                         .ok_or_else(|| format!("Missing module index for {}", runtime_module_id))
                 })
@@ -234,10 +249,20 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         let module_text = module_text_by_chunk
             .get(&chunk.name)
             .ok_or_else(|| format!("Missing linked chunk source for {}", chunk.name))?;
+        let chunk_index = *chunk_index_by_name
+            .get(&chunk.name)
+            .ok_or_else(|| format!("Missing chunk index for {}", chunk.name))?;
         let rewritten_module_text = (!runtime_debug)
             .then(|| rewrite_runtime_module_ids(module_text, &runtime_module_index_by_id))
             .transpose()?;
         let module_text = rewritten_module_text.as_deref().unwrap_or(module_text);
+        // Must run after the module-id rewrite, which matches on the unsuffixed
+        // callee names.
+        let suffixed_module_text = rename_runtime_aliases(
+            module_text,
+            &runtime_alias_suffix(chunk_index, chunk_output_type),
+        )?;
+        let module_text = suffixed_module_text.as_deref().unwrap_or(module_text);
         let source_text = if chunk.name == base_chunk.name {
             render_bundler_runtime_base_chunk(
                 base_chunk_index,
@@ -248,14 +273,16 @@ pub(crate) fn prepare_bundler_runtime_jobs(
                 module_text,
                 include_custom_elements_es5_adapter,
                 runtime_debug,
+                hoisted,
+                chunk_output_type,
             )?
         } else {
             render_bundler_runtime_lazy_chunk(
-                *chunk_index_by_name
-                    .get(&chunk.name)
-                    .ok_or_else(|| format!("Missing chunk index for {}", chunk.name))?,
+                chunk_index,
                 module_text,
                 runtime_debug,
+                hoisted,
+                chunk_output_type,
             )
         };
         let source_path = runtime_asset_dir.join(format!("{}.linked.js", chunk.name));
@@ -325,8 +352,12 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         .map(|(_, source_path)| source_path.to_string_lossy().to_string())
         .collect::<Vec<_>>();
     compile_jobs.push(ClosureCompileJob {
+        // ES_MODULES already implies `setAssumeGlobalScopeIsIsolated(true)`
+        // inside the compiler; passing the flag as well is a no-op there and
+        // keeps script mode unchanged, so there is one value for both modes.
         assumeFunctionWrapper: true,
         chunk: Some(chunk_specs),
+        chunkOutputType: chunk_output_type.is_esm().then(|| "ES_MODULES".to_string()),
         chunkOutputPathPrefix: Some(format!(
             "{}{}",
             raw_dir.to_string_lossy(),
@@ -348,7 +379,14 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         languageIn: "UNSTABLE".to_string(),
         languageOut: input.languageOut.clone(),
         propertyRenamingReportPath: property_renaming_report_path.clone(),
-        renamePrefixNamespace: None,
+        // Hoisted module code is top level, so Closure prefixes every
+        // cross-chunk survivor onto $gcc. Postprocess wraps each output chunk
+        // in an IIFE that redeclares $gcc from globalThis, so direct
+        // cross-chunk identifier references resolve through one shared object.
+        // ES_MODULES gets real `import`/`export` edges instead, and Closure
+        // rejects the flag outright in that mode.
+        renamePrefixNamespace: (!chunk_output_type.is_esm())
+            .then(|| BUNDLER_RUNTIME_PREFIX_NAMESPACE.to_string()),
         rewritePolyfills: false,
         warningLevel: warning_level.to_string(),
     });
@@ -385,6 +423,35 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         postprocessActions: postprocess_actions,
         publishedOutputs: published_outputs,
     })
+}
+
+const RUNTIME_ALIAS_NAMES: [&str; 4] = [
+    "__register",
+    "__require",
+    "__dynamicImport",
+    "__preloadDynamicImport",
+];
+
+/// Renames the loader alias identifiers a chunk's module code references, to
+/// match the per-chunk-unique declarations emitted by the alias line. Both the
+/// declaration and every reference live in this one chunk's text, so a
+/// whole-text rename stays scope-consistent (registry-form modules take these
+/// names as function parameters, which rename with their uses).
+fn rename_runtime_aliases(
+    source_text: &str,
+    suffix: &str,
+) -> std::result::Result<Option<String>, String> {
+    if suffix.is_empty() {
+        return Ok(None);
+    }
+    let mut current = source_text.to_string();
+    for name in RUNTIME_ALIAS_NAMES {
+        let regex = Regex::new(&format!(r"\b{name}\b")).map_err(|error| error.to_string())?;
+        current = regex
+            .replace_all(&current, format!("{name}{suffix}"))
+            .into_owned();
+    }
+    Ok(Some(current))
 }
 
 fn rewrite_runtime_module_ids(

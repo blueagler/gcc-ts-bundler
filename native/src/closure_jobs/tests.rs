@@ -25,12 +25,18 @@ fn prepares_bundler_runtime_jobs_with_runtime_assets() {
     fs::create_dir_all(package_root.join("closure-lib")).unwrap();
     fs::write(
         emitted_out_dir.join("src/main.js"),
-        "__exports[\"boot\"]=boot;\n",
+        format!(
+            "__register({:?}, function(__require, __exports) {{ __exports[0]=boot; }});\n",
+            to_bundler_runtime_module_id("gcc.src.main")
+        ),
     )
     .unwrap();
     fs::write(
         emitted_out_dir.join("src/feature.js"),
-        "__exports[\"renderMessage\"]=renderMessage;\n",
+        format!(
+            "__register({:?}, function(__require, __exports) {{ __exports[0]=renderMessage; }});\n",
+            to_bundler_runtime_module_id("gcc.src.feature")
+        ),
     )
     .unwrap();
     fs::write(
@@ -50,6 +56,7 @@ fn prepares_bundler_runtime_jobs_with_runtime_assets() {
     let output = prepare_closure_jobs(PrepareClosureJobsInput {
         chunkMode: "bundler-runtime".to_string(),
         chunkLoader: "script".to_string(),
+        chunkOutputType: "script".to_string(),
         chunkPlan: vec![
             ClosureJobChunkPlanChunkInput {
                 dependencies: vec![],
@@ -101,14 +108,28 @@ fn prepares_bundler_runtime_jobs_with_runtime_assets() {
         asset.path.ends_with("main.linked.js")
             && !asset.text.contains("__gcc_runtime__")
             && !asset.text.contains("initialized")
-            && asset
+            && asset.text.contains(
+                "var __runtime=globalThis[\"__g\"],__register=__runtime.r,__require=__runtime.q,__dynamicImport=__runtime.j,__preloadDynamicImport=__runtime.x;",
+            )
+            && !asset
                 .text
-                .contains("var __runtime=globalThis[\"__g\"],__register=__runtime.r;")
+                .contains("(function(__require,__dynamicImport,__preloadDynamicImport){")
             && asset.text.contains("__runtime.l(")
             && asset.text.contains("__runtime.n(")
             && !asset.text.contains("global.fetch(")
             && !asset.text.contains("__register(\"m")
     }));
+    let lazy_asset = output
+        .generatedAssets
+        .iter()
+        .find(|asset| asset.path.ends_with("src-feature-lazy.linked.js"))
+        .expect("lazy linked chunk");
+    assert!(!lazy_asset.text.contains("__runtime.h("), "{lazy_asset:?}");
+    assert!(
+        lazy_asset.text.trim_end().ends_with("__runtime.l(1);"),
+        "{lazy_asset:?}"
+    );
+
     assert!(output.compileJobs[0].chunk.is_some());
     assert!(output.compileJobs[0]
         .propertyRenamingReportPath
@@ -150,6 +171,7 @@ fn skips_es5_custom_elements_adapter_when_no_native_dom_subclasses_exist() {
     let output = prepare_closure_jobs(PrepareClosureJobsInput {
         chunkMode: "off".to_string(),
         chunkLoader: "script".to_string(),
+        chunkOutputType: "script".to_string(),
         chunkPlan: vec![ClosureJobChunkPlanChunkInput {
             dependencies: vec![],
             entryFiles: Some(vec!["src/entry.ts".to_string()]),
@@ -225,6 +247,7 @@ fn prepares_off_mode_jobs_and_filters_empty_externs() {
     let output = prepare_closure_jobs(PrepareClosureJobsInput {
         chunkMode: "off".to_string(),
         chunkLoader: "script".to_string(),
+        chunkOutputType: "script".to_string(),
         chunkPlan: vec![
             ClosureJobChunkPlanChunkInput {
                 dependencies: vec![],
@@ -294,4 +317,150 @@ fn prepares_off_mode_jobs_and_filters_empty_externs() {
         .propertyRenamingReportPath
         .as_deref()
         .is_some_and(|path| path.ends_with("property-renaming-report.txt"))));
+}
+
+#[test]
+fn prepares_esm_bundler_runtime_jobs() {
+    let root = make_temp_dir("bundler-runtime-esm-jobs");
+    let emitted_out_dir = root.join("native-out");
+    let out_dir = root.join("dist");
+    let final_cache_dir = root.join("cache/final");
+    let package_root = root.join("pkg");
+    fs::create_dir_all(emitted_out_dir.join("src")).unwrap();
+    fs::create_dir_all(&out_dir).unwrap();
+    fs::create_dir_all(package_root.join("closure-lib")).unwrap();
+    fs::write(
+        emitted_out_dir.join("src/main.js"),
+        format!(
+            "__register({:?}, function(__require, __exports) {{ __exports[0]=__dynamicImport({:?}); }});\n",
+            to_bundler_runtime_module_id("gcc.src.main"),
+            to_bundler_runtime_module_id("gcc.src.feature"),
+        ),
+    )
+    .unwrap();
+    fs::write(
+        emitted_out_dir.join("src/feature.js"),
+        format!(
+            "__register({:?}, function(__require, __exports) {{ __exports[0]=1; }});\n",
+            to_bundler_runtime_module_id("gcc.src.feature")
+        ),
+    )
+    .unwrap();
+    fs::write(package_root.join("closure-lib/base.js"), "").unwrap();
+    let native_extern = root.join("native.externs.js");
+    fs::write(&native_extern, "/** @externs */\n").unwrap();
+
+    let output = prepare_closure_jobs(PrepareClosureJobsInput {
+        chunkMode: "bundler-runtime".to_string(),
+        chunkLoader: "script".to_string(),
+        chunkOutputType: "esm".to_string(),
+        chunkPlan: vec![
+            ClosureJobChunkPlanChunkInput {
+                dependencies: vec![],
+                entryFiles: Some(vec!["src/main.ts".to_string()]),
+                files: vec!["src/main.ts".to_string()],
+                kind: Some("base".to_string()),
+                lazyModuleIds: None,
+                name: "main".to_string(),
+            },
+            ClosureJobChunkPlanChunkInput {
+                dependencies: vec!["main".to_string()],
+                entryFiles: None,
+                files: vec!["src/feature.ts".to_string()],
+                kind: Some("lazy".to_string()),
+                lazyModuleIds: Some(vec!["gcc.src.feature".to_string()]),
+                name: "src-feature-lazy".to_string(),
+            },
+        ],
+        compilationLevel: "ADVANCED".to_string(),
+        diagnosticsVerbose: false,
+        emittedOutDir: emitted_out_dir.to_string_lossy().to_string(),
+        explicitExternPaths: vec![],
+        explicitJsInputs: vec![],
+        finalCacheDir: final_cache_dir.to_string_lossy().to_string(),
+        generatedExternPaths: vec![],
+        languageOut: "ECMASCRIPT_NEXT".to_string(),
+        manifestFile: String::new(),
+        nativeExternPath: native_extern.to_string_lossy().to_string(),
+        outDir: out_dir.to_string_lossy().to_string(),
+        packageRoot: package_root.to_string_lossy().to_string(),
+        publicPath: "./".to_string(),
+        supportFiles: vec![],
+    })
+    .unwrap();
+
+    let job = &output.compileJobs[0];
+    assert_eq!(job.chunkOutputType.as_deref(), Some("ES_MODULES"));
+    // Closure rejects --rename_prefix_namespace outright under ES_MODULES.
+    assert_eq!(job.renamePrefixNamespace, None);
+
+    let base = output
+        .generatedAssets
+        .iter()
+        .find(|asset| asset.path.ends_with("main.linked.js"))
+        .expect("base linked chunk");
+    let lazy = output
+        .generatedAssets
+        .iter()
+        .find(|asset| asset.path.ends_with("src-feature-lazy.linked.js"))
+        .expect("lazy linked chunk");
+
+    // Per-chunk-unique aliases, declarations and references together.
+    assert!(
+        base.text
+            .contains("var __runtime_0=globalThis[\"__g\"],__register_0=__runtime_0.r,"),
+        "{base:?}"
+    );
+    assert!(base.text.contains("__register_0("), "{base:?}");
+    assert!(base.text.contains("__dynamicImport_0("), "{base:?}");
+    assert!(
+        lazy.text
+            .contains("var __runtime_1=globalThis[\"__g\"],__register_1=__runtime_1.r,"),
+        "{lazy:?}"
+    );
+    assert!(lazy.text.contains("__register_1("), "{lazy:?}");
+    assert!(
+        lazy.text.trim_end().ends_with("__runtime_1.l(1);"),
+        "{lazy:?}"
+    );
+    // No chunk may declare another chunk's alias: that is JSC_IMPORT_ASSIGN.
+    assert!(!lazy.text.contains("__register_0"), "{lazy:?}");
+    assert!(!base.text.contains("__register_1"), "{base:?}");
+
+    // Loader: relative specifier + native import(), no script injection.
+    assert!(base.text.contains("import(b[1])"), "{base:?}");
+    assert!(!base.text.contains("createElement(\"script\")"), "{base:?}");
+    assert!(!base.text.contains("currentScript"), "{base:?}");
+    let lazy_specifier = format!(
+        "\"./{}.js\"",
+        to_bundler_runtime_chunk_id("src-feature-lazy")
+    );
+    assert!(base.text.contains(&lazy_specifier), "{base:?}");
+}
+
+#[test]
+fn rejects_esm_output_outside_bundler_runtime_mode() {
+    let root = make_temp_dir("esm-mode-guard");
+    let error = prepare_closure_jobs(PrepareClosureJobsInput {
+        chunkMode: "off".to_string(),
+        chunkLoader: "script".to_string(),
+        chunkOutputType: "esm".to_string(),
+        chunkPlan: vec![],
+        compilationLevel: "ADVANCED".to_string(),
+        diagnosticsVerbose: false,
+        emittedOutDir: root.to_string_lossy().to_string(),
+        explicitExternPaths: vec![],
+        explicitJsInputs: vec![],
+        finalCacheDir: root.join("cache").to_string_lossy().to_string(),
+        generatedExternPaths: vec![],
+        languageOut: "ECMASCRIPT_NEXT".to_string(),
+        manifestFile: String::new(),
+        nativeExternPath: root.join("n.js").to_string_lossy().to_string(),
+        outDir: root.join("dist").to_string_lossy().to_string(),
+        packageRoot: root.to_string_lossy().to_string(),
+        publicPath: "./".to_string(),
+        supportFiles: vec![],
+    })
+    .expect_err("esm requires bundler-runtime");
+    assert!(error.contains("bundler-runtime"), "{error}");
 }

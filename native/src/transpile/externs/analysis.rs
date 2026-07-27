@@ -40,9 +40,16 @@ pub(crate) struct ExternPropertyAnalysis {
 #[derive(Default)]
 struct ParsedExternFileAnalysis {
     accessed_hazard_names: HashSet<String>,
+    /// Property names read through `<expr>.constructor.<name>`. Closure's
+    /// property collapsing rewrites static assignments (`Klass.x = ...`)
+    /// into variables it cannot connect to such dynamic reads, so these
+    /// names must stay real (quoted) properties when also assigned
+    /// statically anywhere.
+    constructor_read_names: HashSet<String>,
     defined_hazard_names: HashSet<String>,
     platform_callback_names: HashSet<String>,
     reflective_property_names: HashSet<String>,
+    static_assigned_names: HashSet<String>,
     static_property_names: HashSet<String>,
 }
 
@@ -77,6 +84,12 @@ pub(crate) fn collect_extern_property_names_with_externs(
                     analysis
                         .defined_hazard_names
                         .intersection(&analysis.accessed_hazard_names)
+                        .cloned(),
+                );
+                preserved_property_names.extend(
+                    analysis
+                        .constructor_read_names
+                        .intersection(&analysis.static_assigned_names)
                         .cloned(),
                 );
             }
@@ -169,9 +182,11 @@ pub(crate) fn prop_name_to_string(prop_name: &PropName) -> Option<String> {
 struct ExternPropertyCollector {
     accessed_hazard_names: HashSet<String>,
     class_name_stack: Vec<Option<String>>,
+    constructor_read_names: HashSet<String>,
     defined_hazard_names: HashSet<String>,
     platform_callback_names: HashSet<String>,
     reflective_property_names: HashSet<String>,
+    static_assigned_names: HashSet<String>,
     static_context_depth: usize,
     static_property_names: HashSet<String>,
 }
@@ -180,9 +195,11 @@ impl ExternPropertyCollector {
     fn finish(self) -> ParsedExternFileAnalysis {
         ParsedExternFileAnalysis {
             accessed_hazard_names: self.accessed_hazard_names,
+            constructor_read_names: self.constructor_read_names,
             defined_hazard_names: self.defined_hazard_names,
             platform_callback_names: self.platform_callback_names,
             reflective_property_names: self.reflective_property_names,
+            static_assigned_names: self.static_assigned_names,
             static_property_names: self.static_property_names,
         }
     }
@@ -255,13 +272,35 @@ impl Visit for ExternPropertyCollector {
         self.class_name_stack.pop();
     }
 
+    fn visit_assign_expr(&mut self, assign_expr: &swc_core::ecma::ast::AssignExpr) {
+        if let swc_core::ecma::ast::AssignTarget::Simple(
+            swc_core::ecma::ast::SimpleAssignTarget::Member(member),
+        ) = &assign_expr.left
+        {
+            if member.obj.is_ident() {
+                if let MemberProp::Ident(prop_ident) = &member.prop {
+                    if is_valid_js_identifier(prop_ident.sym.as_ref()) {
+                        self.static_assigned_names
+                            .insert(prop_ident.sym.to_string());
+                    }
+                }
+            }
+        }
+        assign_expr.visit_children_with(self);
+    }
+
     fn visit_class_member(&mut self, member: &ClassMember) {
         match member {
             ClassMember::ClassProp(prop) => {
                 let prop_name = prop_name_to_string(&prop.key);
                 self.insert_platform_callback_name(prop_name.clone());
                 if prop.is_static {
-                    self.insert_static_name(prop_name);
+                    self.insert_static_name(prop_name.clone());
+                    if let Some(prop_name) = prop_name {
+                        if is_valid_js_identifier(&prop_name) {
+                            self.static_assigned_names.insert(prop_name);
+                        }
+                    }
                 }
                 prop.visit_children_with(self);
             }
@@ -292,6 +331,16 @@ impl Visit for ExternPropertyCollector {
                 let property_name = prop_ident.sym.as_ref();
                 self.insert_platform_callback_name(Some(property_name.to_string()));
                 self.insert_accessed_hazard_name(property_name);
+                if let Expr::Member(object_member) = &*member_expr.obj {
+                    if matches!(
+                        &object_member.prop,
+                        MemberProp::Ident(object_prop) if object_prop.sym.as_ref() == "constructor"
+                    ) && is_valid_js_identifier(property_name)
+                    {
+                        self.constructor_read_names
+                            .insert(property_name.to_string());
+                    }
+                }
             }
             MemberProp::Computed(computed) => {
                 if let Expr::Lit(swc_core::ecma::ast::Lit::Str(value)) = &*computed.expr {

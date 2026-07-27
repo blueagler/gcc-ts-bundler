@@ -1,18 +1,22 @@
 #![allow(non_snake_case)]
 
 mod commonjs;
-mod compat;
+pub(crate) mod compat;
 mod context;
 mod emit;
 mod emit_goog;
+mod emit_hoist;
 mod emit_runtime;
 mod enums;
 mod externs;
 mod global_this;
+mod hoist;
 mod imports_exports;
 mod js_compat;
 mod namespace;
 mod print;
+mod pure_calls;
+mod typed_annotations;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -48,14 +52,17 @@ pub(crate) use self::context::ChunkMode;
 use self::context::*;
 use self::emit::*;
 use self::emit_goog::*;
+use self::emit_hoist::*;
 use self::emit_runtime::*;
 use self::enums::*;
 use self::externs::*;
 use self::global_this::*;
+use self::hoist::*;
 use self::imports_exports::*;
 use self::js_compat::*;
 use self::namespace::*;
 use self::print::*;
+use self::typed_annotations::*;
 
 #[allow(non_snake_case)]
 #[napi(object)]
@@ -86,6 +93,61 @@ pub struct LazyImportInput {
     pub targetPath: String,
 }
 
+#[allow(non_snake_case)]
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct TranspileChunkInput {
+    pub files: Vec<String>,
+    pub name: String,
+}
+
+/// A runtime call whose object-literal argument keys must survive property
+/// renaming (framework class-map/vnode helpers). Supplied by framework
+/// presets. When `keyPattern` is set, only matching keys are quoted.
+#[allow(non_snake_case)]
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct ClassMapCallInput {
+    pub argIndex: u32,
+    pub callee: String,
+    pub keyPattern: Option<String>,
+}
+
+/// One top-level binding's Closure JSDoc, rendered by the TypeScript-checker
+/// driven emitter in the JS layer. `name` is the pre-hoist binding name (no
+/// `$$<ordinal>` suffix); `jsdoc` is a complete block ending in a newline.
+#[allow(non_snake_case)]
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct TypedAnnotationBindingInput {
+    pub jsdoc: String,
+    /// Per-member JSDoc when this binding is a class: rendered immediately
+    /// before the matching class-body member, or before the matching
+    /// `this.<name> = ...` assignment. Empty/absent for non-classes.
+    pub members: Option<Vec<TypedAnnotationMemberInput>>,
+    pub name: String,
+}
+
+/// One class member's Closure JSDoc. `name` is the member key as authored;
+/// computed and quoted keys are never matched.
+#[allow(non_snake_case)]
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct TypedAnnotationMemberInput {
+    pub jsdoc: String,
+    pub name: String,
+}
+
+/// Typed JSDoc for one materialized module fed to native emit. See
+/// `transpile::typed_annotations` and docs/research/typed-input.md.
+#[allow(non_snake_case)]
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct TypedAnnotationFileInput {
+    pub bindings: Vec<TypedAnnotationBindingInput>,
+    pub filePath: String,
+}
+
 pub fn transpile_sources(
     file_names: Vec<String>,
     explicit_extern_paths: Vec<String>,
@@ -98,6 +160,10 @@ pub fn transpile_sources(
     package_aliases: Vec<PackageAliasInput>,
     package_json_files: Vec<String>,
     lazy_imports: Vec<LazyImportInput>,
+    chunk_graph: Vec<TranspileChunkInput>,
+    class_map_calls: Vec<ClassMapCallInput>,
+    pure_callees: Vec<String>,
+    typed_annotations: Vec<TypedAnnotationFileInput>,
 ) -> std::result::Result<TranspileOutput, String> {
     fs::create_dir_all(&out_dir).map_err(|error| error.to_string())?;
     if let Some(parent) = PathBuf::from(&externs_path).parent() {
@@ -116,23 +182,45 @@ pub fn transpile_sources(
         .map(|module_id| (to_bundler_runtime_module_id(module_id), module_id.clone()))
         .collect::<HashMap<_, _>>();
     let file_metadata = load_closure_metadata(&metadata_path)?;
+    let hoist_disabled = matches!(std::env::var("GCC_DISABLE_HOIST").as_deref(), Ok("1"));
+    let hoist_plan = if chunk_mode == ChunkMode::BundlerRuntime && !hoist_disabled {
+        build_hoist_plan(
+            &file_names,
+            &workspace_dir,
+            &package_aliases,
+            &chunk_graph,
+            &lazy_imports,
+            &file_metadata,
+        )?
+    } else {
+        None
+    };
     let ExternPropertyAnalysis {
         explicit_extern_property_names,
         preserved_property_names,
         static_property_names,
     } = collect_extern_property_names_with_externs(&file_names, &explicit_extern_paths)?;
+    let lazy_target_module_ids = lazy_imports
+        .iter()
+        .map(|lazy_import| lazy_import.moduleId.clone())
+        .collect::<HashSet<_>>();
     let context = TranspileContext {
         bundler_module_slots,
         bundler_runtime_logical_ids,
         chunk_mode,
+        class_map_calls,
+        pure_callees: pure_callees.into_iter().collect(),
         commonjs_specifiers: collect_commonjs_specifiers(&package_aliases)?
             .into_iter()
             .collect(),
         file_metadata,
+        hoist_plan: hoist_plan.map(std::sync::Arc::new),
         lazy_imports_by_file: group_lazy_imports_by_file(lazy_imports),
+        lazy_target_module_ids,
         package_aliases,
         preserved_property_names,
         static_property_names,
+        typed_annotations: index_typed_annotations(typed_annotations),
         workspace_dir: workspace_dir.clone(),
     };
     let emitted_outputs = file_names
