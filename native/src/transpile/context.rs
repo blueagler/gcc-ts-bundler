@@ -32,6 +32,9 @@ pub(super) struct TranspileContext {
     /// `typed_annotations::annotation_key`. Consumed by hoisted emission
     /// only; `Off`/`Split` carry their JSDoc through `closure-ir` metadata.
     pub(super) typed_annotations: HashMap<String, TypedAnnotationsByName>,
+    /// Module ids that the chunk plan placed in the vendor chunk. Empty
+    /// unless `chunks.vendorChunk` produced one; see `transpile::assigners`.
+    pub(super) vendor_module_ids: HashSet<String>,
     pub(super) workspace_dir: PathBuf,
 }
 
@@ -102,6 +105,7 @@ pub(super) fn collect_bundler_module_slots(
         preserved_property_names: HashSet::new(),
         static_property_names: HashSet::new(),
         typed_annotations: HashMap::new(),
+        vendor_module_ids: HashSet::new(),
         workspace_dir: workspace_dir.to_path_buf(),
     };
 

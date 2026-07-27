@@ -329,19 +329,19 @@ fn identifier_prefix(text: &str) -> Option<&str> {
 /// concatenated — they are merged into one block by splicing the pure tag in
 /// after the opening `/**`, which is valid for both the single-line
 /// (`/** @constructor */`) and multi-line rendered forms.
-pub(crate) fn compose_annotations(pure: &str, typed: Option<&str>) -> String {
-    match (pure.is_empty(), typed.filter(|block| !block.is_empty())) {
+pub(crate) fn compose_annotations(tags: &[&str], typed: Option<&str>) -> String {
+    match (tags.is_empty(), typed.filter(|block| !block.is_empty())) {
         (true, None) => String::new(),
         (true, Some(typed)) => typed.to_string(),
-        (false, None) => pure.to_string(),
-        (false, Some(typed)) => splice_pure_tag(typed),
+        (false, None) => format!("/** {} */\n", tags.join(" ")),
+        (false, Some(typed)) => splice_tags(tags, typed),
     }
 }
 
-/// Inserts `@pureOrBreakMyCode` as the first tag of an existing JSDoc block.
-/// Falls back to the typed block alone if it is not a recognizable block, so
-/// a malformed annotation can never corrupt the emitted statement.
-fn splice_pure_tag(typed: &str) -> String {
+/// Inserts `tags` as the leading tags of an existing JSDoc block. Falls back
+/// to the typed block alone if it is not a recognizable block, so a malformed
+/// annotation can never corrupt the emitted statement.
+fn splice_tags(tags: &[&str], typed: &str) -> String {
     const OPENING: &str = "/**";
     let Some(rest) = typed.strip_prefix(OPENING) else {
         // Not a block we can splice: prefer the typed annotation, since
@@ -349,7 +349,7 @@ fn splice_pure_tag(typed: &str) -> String {
         // change behaviour.
         return typed.to_string();
     };
-    format!("{OPENING} {PURE_TAG}{rest}")
+    format!("{OPENING} {}{rest}", tags.join(" "))
 }
 
 /// The single tag carried by `pure_calls::PURE_JSDOC`, spliced into typed

@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 
+pub(crate) mod assigners;
 mod commonjs;
 pub(crate) mod compat;
 mod context;
@@ -43,7 +44,9 @@ use crate::closure_metadata::{
 };
 use crate::commonjs::{analyze_commonjs_module, evaluate_boolean_expr};
 use crate::module_cache::{get_or_parse_cached_module, parse_module};
-use crate::pathing::{normalize_path, to_bundler_runtime_module_id, to_goog_module_id};
+use crate::pathing::{
+    is_vendor_chunk_name, normalize_path, to_bundler_runtime_module_id, to_goog_module_id,
+};
 use crate::support_files::{collect_commonjs_specifiers, emit_package_support_files};
 
 use self::commonjs::*;
@@ -221,6 +224,7 @@ pub fn transpile_sources(
         preserved_property_names,
         static_property_names,
         typed_annotations: index_typed_annotations(typed_annotations),
+        vendor_module_ids: collect_vendor_module_ids(&chunk_graph, &workspace_dir),
         workspace_dir: workspace_dir.clone(),
     };
     let emitted_outputs = file_names
@@ -293,6 +297,23 @@ pub fn transpile_sources(
         preservedPropertyCount: context.preserved_property_names.len() as u32,
         supportFiles: support_files,
     })
+}
+
+/// Module ids the chunk plan placed in the vendor chunk.
+///
+/// Only the chunk name and its file list cross the napi boundary, so the name
+/// is how a vendor chunk is recognised here; `pathing::VENDOR_CHUNK_NAME_SUFFIX`
+/// is shared with the planner that mints it so the two cannot drift.
+fn collect_vendor_module_ids(
+    chunk_graph: &[TranspileChunkInput],
+    workspace_dir: &Path,
+) -> HashSet<String> {
+    chunk_graph
+        .iter()
+        .filter(|chunk| is_vendor_chunk_name(&chunk.name))
+        .flat_map(|chunk| chunk.files.iter())
+        .map(|relative_file| to_goog_module_id(&workspace_dir.join(relative_file), workspace_dir))
+        .collect()
 }
 
 fn transform_source_file(

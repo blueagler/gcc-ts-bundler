@@ -142,6 +142,7 @@ pub(super) fn build_hoist_plan(
         preserved_property_names: HashSet::new(),
         static_property_names: HashSet::new(),
         typed_annotations: HashMap::new(),
+        vendor_module_ids: HashSet::new(),
         workspace_dir: workspace_dir.to_path_buf(),
     };
 

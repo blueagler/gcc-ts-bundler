@@ -198,6 +198,57 @@ Two fixes, in order of preference:
 `"script"` remains fully supported; it is the only option for `es3`/`es5`
 targets and for output loaded by anything other than a module script.
 
+### `compiler.chunks.vendorChunk`
+
+Moves eagerly reachable dependency modules (`node_modules`, prebundled
+dependency chunks, virtual modules) out of the entry chunk into a separate
+`<baseChunkName>-vendor` chunk.
+
+Under module output the entry chunk's hashed file name is embedded in every
+sibling chunk's `import` statement, so editing app code re-hashes the entry and
+that new name propagates outward. Splitting the dependency half off gives it its
+own chunk with no reference to the entry, so its file name — and its browser
+cache entry — survives app edits. On a typical app dependencies are the large
+majority of the compiled input, so this is the bulk of the caching win.
+
+**This is opt-in, and it is a real trade.** Splitting costs first-load bytes:
+the two halves no longer optimise against each other, so cross-chunk inlining,
+dead-property removal and property renaming all get less to work with.
+Measured on the Svelte example, gzipped total across every emitted chunk:
+
+| | raw | gzip |
+|---|---|---|
+| unsplit (default) | 68,145 | **27,570** |
+| `vendorChunk: true` | 71,078 | **29,796** |
+
+So a cold visitor downloads about **2.2 KB gzip more**. What they buy is that
+the roughly **12.5 KB gzip** vendor chunk keeps its file name across every
+deploy that only touches app code, so returning visitors re-download the entry
+chunk alone instead of the whole bundle.
+
+Opt in when your users come back more often than they arrive cold — an
+internal tool, a dashboard, anything behind a login, or any app you deploy
+several times a day. Leave it off for a landing page or anything whose traffic
+is mostly first-time visitors, where the 2.2 KB is paid by everyone and the
+cache entry is used by nobody.
+
+```ts
+gccTsBundler({
+  compiler: { chunks: { vendorChunk: true } },
+});
+```
+
+`"auto"` (the default) resolves to `false`. Even an explicit `true` is gated to
+where the split can work at all: `bundler-runtime` chunks whose resolved
+`outputType` is `"esm"`. Script output addresses chunks through the runtime
+manifest rather than by embedded name, so there is nothing to stabilise and the
+extra chunk would only cost a request; `off` and `split` have no chunk graph.
+
+Lazy chunks are not stabilised by this: they import symbols directly from the
+entry, so their bytes contain its hashed name and they necessarily re-hash with
+it — making them stable too would require import-map indirection, which is not
+implemented.
+
 ### `runtime`
 
 - `publicPath` defaults to Vite's resolved `base` and is normalized with a trailing slash.

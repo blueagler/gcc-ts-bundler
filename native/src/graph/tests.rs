@@ -371,6 +371,7 @@ fn plans_bundler_runtime_chunks_in_native_graph_layer() {
             targetPath: "/workspace/src/feature.ts".to_string(),
         }],
         vec![],
+        false,
     )
     .unwrap();
 
@@ -433,6 +434,7 @@ fn plans_off_mode_chunks_in_native_graph_layer() {
             "/workspace/entries/first.ts".to_string(),
             "/workspace/entries/second.ts".to_string(),
         ],
+        false,
     )
     .unwrap();
 
@@ -440,4 +442,242 @@ fn plans_off_mode_chunks_in_native_graph_layer() {
     assert_eq!(result[0].name, "shared");
     assert_eq!(result[1].dependencies, vec!["shared"]);
     assert_eq!(result[2].dependencies, vec!["shared"]);
+}
+
+// --- vendor chunk partition ---------------------------------------------
+
+/// Entry -> two app modules and three dependency-originated ones, one per
+/// vendor directory shape.
+fn vendor_graph() -> (Vec<ChunkPlanEntryInput>, Vec<DependencyGraphEntry>) {
+    let entries = vec![ChunkPlanEntryInput {
+        chunkName: "main".to_string(),
+        outputName: "main.js".to_string(),
+        sourcePath: "/workspace/src/main.ts".to_string(),
+    }];
+    let graph = vec![
+        DependencyGraphEntry {
+            filePath: "/workspace/src/main.ts".to_string(),
+            dependencies: vec![
+                "/workspace/src/app.ts".to_string(),
+                "/workspace/node_modules/lib/index.js".to_string(),
+                "/workspace/.vite/__dep-bundles/dep.js".to_string(),
+                "/workspace/__virtual__/style.js".to_string(),
+            ],
+        },
+        DependencyGraphEntry {
+            filePath: "/workspace/src/app.ts".to_string(),
+            dependencies: vec![],
+        },
+        DependencyGraphEntry {
+            filePath: "/workspace/node_modules/lib/index.js".to_string(),
+            dependencies: vec![],
+        },
+        DependencyGraphEntry {
+            filePath: "/workspace/.vite/__dep-bundles/dep.js".to_string(),
+            dependencies: vec![],
+        },
+        DependencyGraphEntry {
+            filePath: "/workspace/__virtual__/style.js".to_string(),
+            dependencies: vec![],
+        },
+    ];
+    (entries, graph)
+}
+
+fn plan_vendor(vendor_chunk: bool, chunk_mode: &str) -> Vec<ChunkPlanChunkOutput> {
+    let (entries, graph) = vendor_graph();
+    plan_chunks(
+        chunk_mode.to_string(),
+        "main.js".to_string(),
+        "/workspace".to_string(),
+        entries,
+        graph,
+        vec![],
+        vec![],
+        vendor_chunk,
+    )
+    .unwrap()
+}
+
+#[test]
+fn vendor_chunk_partitions_dependency_originated_files_and_leads_the_plan() {
+    let plan = plan_vendor(true, "bundler-runtime");
+
+    assert_eq!(plan.len(), 2);
+    // Vendor is first so it is also the first Closure chunk spec, which is
+    // what makes base's generated import edge execute it at startup.
+    assert_eq!(plan[0].name, "main-vendor");
+    assert_eq!(plan[0].kind.as_deref(), Some("vendor"));
+    assert!(plan[0].dependencies.is_empty());
+    assert_eq!(plan[0].entryFiles, None);
+    assert_eq!(plan[0].lazyModuleIds, None);
+    assert_eq!(
+        plan[0].files.iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            &".vite/__dep-bundles/dep.js".to_string(),
+            &"__virtual__/style.js".to_string(),
+            &"node_modules/lib/index.js".to_string(),
+        ])
+    );
+
+    assert_eq!(plan[1].name, "main");
+    assert_eq!(plan[1].kind.as_deref(), Some("base"));
+    assert_eq!(plan[1].dependencies, vec!["main-vendor"]);
+    assert_eq!(plan[1].files, vec!["src/app.ts", "src/main.ts"]);
+}
+
+#[test]
+fn vendor_chunk_never_claims_an_entry_file() {
+    // A project whose entry itself sits under a vendor-looking path still
+    // owns that file: it is app code by definition, and moving it would put
+    // the thing every edit touches into the chunk meant to stay stable.
+    let plan = plan_chunks(
+        "bundler-runtime".to_string(),
+        "main.js".to_string(),
+        "/workspace".to_string(),
+        vec![ChunkPlanEntryInput {
+            chunkName: "main".to_string(),
+            outputName: "main.js".to_string(),
+            sourcePath: "/workspace/__virtual__/entry.ts".to_string(),
+        }],
+        vec![
+            DependencyGraphEntry {
+                filePath: "/workspace/__virtual__/entry.ts".to_string(),
+                dependencies: vec!["/workspace/node_modules/lib/index.js".to_string()],
+            },
+            DependencyGraphEntry {
+                filePath: "/workspace/node_modules/lib/index.js".to_string(),
+                dependencies: vec![],
+            },
+        ],
+        vec![],
+        vec![],
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(plan[0].kind.as_deref(), Some("vendor"));
+    assert_eq!(plan[0].files, vec!["node_modules/lib/index.js"]);
+    assert_eq!(plan[1].files, vec!["__virtual__/entry.ts"]);
+}
+
+#[test]
+fn empty_vendor_partition_emits_no_vendor_chunk() {
+    let plan = plan_chunks(
+        "bundler-runtime".to_string(),
+        "main.js".to_string(),
+        "/workspace".to_string(),
+        vec![ChunkPlanEntryInput {
+            chunkName: "main".to_string(),
+            outputName: "main.js".to_string(),
+            sourcePath: "/workspace/src/main.ts".to_string(),
+        }],
+        vec![DependencyGraphEntry {
+            filePath: "/workspace/src/main.ts".to_string(),
+            dependencies: vec![],
+        }],
+        vec![],
+        vec![],
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0].kind.as_deref(), Some("base"));
+    assert!(plan[0].dependencies.is_empty());
+}
+
+#[test]
+fn vendor_chunk_flag_off_leaves_the_plan_byte_identical() {
+    let off = plan_vendor(false, "bundler-runtime");
+
+    // Same shape as before the feature existed: one base chunk owning every
+    // eagerly reachable file, no dependencies, no vendor kind anywhere.
+    assert_eq!(off.len(), 1);
+    assert_eq!(off[0].name, "main");
+    assert_eq!(off[0].kind.as_deref(), Some("base"));
+    assert!(off[0].dependencies.is_empty());
+    assert_eq!(off[0].files.len(), 5);
+    assert!(!off
+        .iter()
+        .any(|chunk| chunk.kind.as_deref() == Some("vendor")));
+
+    // And the flag is inert once there is nothing to move, so the two agree
+    // whenever the partition is empty.
+    let plan_plain = |vendor_chunk: bool| {
+        format!(
+            "{:?}",
+            plan_chunks(
+                "bundler-runtime".to_string(),
+                "main.js".to_string(),
+                "/workspace".to_string(),
+                vec![ChunkPlanEntryInput {
+                    chunkName: "main".to_string(),
+                    outputName: "main.js".to_string(),
+                    sourcePath: "/workspace/src/main.ts".to_string(),
+                }],
+                vec![DependencyGraphEntry {
+                    filePath: "/workspace/src/main.ts".to_string(),
+                    dependencies: vec![],
+                }],
+                vec![],
+                vec![],
+                vendor_chunk,
+            )
+            .unwrap()
+        )
+    };
+    assert_eq!(plan_plain(false), plan_plain(true));
+}
+
+#[test]
+fn split_mode_ignores_the_vendor_chunk_flag() {
+    // Split emits plain scripts with no import edge to order vendor before
+    // base, so the partition would produce a chunk nothing loads first.
+    assert_eq!(
+        format!("{:?}", plan_vendor(true, "split")),
+        format!("{:?}", plan_vendor(false, "split")),
+    );
+}
+
+#[test]
+fn vendor_chunk_coexists_with_shared_and_lazy_chunks() {
+    let (entries, mut graph) = vendor_graph();
+    graph.push(DependencyGraphEntry {
+        filePath: "/workspace/src/panel.ts".to_string(),
+        dependencies: vec!["/workspace/src/panel-only.ts".to_string()],
+    });
+    graph.push(DependencyGraphEntry {
+        filePath: "/workspace/src/panel-only.ts".to_string(),
+        dependencies: vec![],
+    });
+    let plan = plan_chunks(
+        "bundler-runtime".to_string(),
+        "main.js".to_string(),
+        "/workspace".to_string(),
+        entries,
+        graph,
+        vec![LazyImportEntry {
+            importerFilePath: "/workspace/src/main.ts".to_string(),
+            moduleId: "gcc.src.panel".to_string(),
+            specifier: "./panel".to_string(),
+            targetPath: "/workspace/src/panel.ts".to_string(),
+        }],
+        vec![],
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(plan[0].kind.as_deref(), Some("vendor"));
+    assert_eq!(plan[1].kind.as_deref(), Some("base"));
+    assert_eq!(plan[1].dependencies, vec!["main-vendor"]);
+    let lazy = plan
+        .iter()
+        .find(|chunk| chunk.kind.as_deref() == Some("lazy"))
+        .expect("lazy chunk");
+    // Lazy chunks keep their existing dependency lists: Closure chunk deps
+    // are transitive, and a panel reaches vendor through base. Verified
+    // against the real compiler - a panel referencing a vendor symbol with
+    // only a base dependency compiles clean and inlines correctly.
+    assert_eq!(lazy.dependencies, vec!["main"]);
 }

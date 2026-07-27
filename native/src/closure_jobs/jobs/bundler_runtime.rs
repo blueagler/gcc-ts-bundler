@@ -1,5 +1,6 @@
 use super::super::*;
 use super::shared::property_renaming_report_path;
+use crate::transpile::assigners::collect_annotated_assigner_names;
 use regex::Regex;
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -244,6 +245,31 @@ pub(crate) fn prepare_bundler_runtime_jobs(
     let include_custom_elements_es5_adapter =
         needs_custom_elements_es5_adapter(&input.languageOut, &all_module_contents);
 
+    // The plan puts a vendor chunk first precisely so base's generated
+    // `import "./<vendor>.js"` edge executes it at startup. That inverts the
+    // usual order: vendor runs before base's preamble would have created the
+    // runtime object, so the guarded core travels with whichever chunk is
+    // first and base keeps only `r.a(<manifest>)`. Vendor stays free of the
+    // manifest by design - the manifest holds chunk URLs that change on every
+    // app edit, and vendor keeping its filename across app edits is the whole
+    // point of the feature.
+    let runtime_core_chunk_name = resolved_chunks
+        .first()
+        .filter(|chunk| chunk.name != base_chunk.name)
+        .map(|chunk| chunk.name.clone());
+    let runtime_core = runtime_core_chunk_name
+        .as_ref()
+        .map(|_| {
+            render_bundler_runtime_preamble_part(
+                &runtime_manifest_json,
+                !runtime_debug,
+                runtime_debug,
+                chunk_output_type,
+                RuntimePreamblePart::Core,
+            )
+        })
+        .transpose()?;
+
     let mut linked_chunk_paths = Vec::new();
     for chunk in resolved_chunks {
         let module_text = module_text_by_chunk
@@ -263,6 +289,14 @@ pub(crate) fn prepare_bundler_runtime_jobs(
             &runtime_alias_suffix(chunk_index, chunk_output_type),
         )?;
         let module_text = suffixed_module_text.as_deref().unwrap_or(module_text);
+        // The transpiler annotated these; reading the marker back out of the
+        // assembled text is what carries the list across the per-module file
+        // boundary, and keeps the pin exactly in step with what was annotated.
+        let assigner_names = if chunk.kind.as_deref() == Some("vendor") {
+            collect_annotated_assigner_names(module_text)
+        } else {
+            Vec::new()
+        };
         let source_text = if chunk.name == base_chunk.name {
             render_bundler_runtime_base_chunk(
                 base_chunk_index,
@@ -275,6 +309,11 @@ pub(crate) fn prepare_bundler_runtime_jobs(
                 runtime_debug,
                 hoisted,
                 chunk_output_type,
+                if runtime_core.is_some() {
+                    RuntimePreamblePart::ManifestOnly
+                } else {
+                    RuntimePreamblePart::All
+                },
             )?
         } else {
             render_bundler_runtime_lazy_chunk(
@@ -283,6 +322,11 @@ pub(crate) fn prepare_bundler_runtime_jobs(
                 runtime_debug,
                 hoisted,
                 chunk_output_type,
+                runtime_core_chunk_name
+                    .as_deref()
+                    .filter(|name| *name == chunk.name)
+                    .and(runtime_core.as_deref()),
+                &assigner_names,
             )
         };
         let source_path = runtime_asset_dir.join(format!("{}.linked.js", chunk.name));

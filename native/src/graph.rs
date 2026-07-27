@@ -166,6 +166,7 @@ pub fn plan_chunks(
     graph_entries: Vec<DependencyGraphEntry>,
     lazy_imports: Vec<LazyImportEntry>,
     shim_files: Vec<String>,
+    vendor_chunk: bool,
 ) -> std::result::Result<Vec<ChunkPlanChunkOutput>, String> {
     let chunk_mode = ChunkMode::parse(&chunk_mode)?;
     let workspace_dir = PathBuf::from(workspace_dir);
@@ -181,6 +182,10 @@ pub fn plan_chunks(
             &graph,
             &lazy_imports,
             &workspace_dir,
+            // Split emits plain scripts with no import edge to order a vendor
+            // chunk against the base, so the partition is bundler-runtime
+            // only however the flag arrives.
+            vendor_chunk && chunk_mode == ChunkMode::BundlerRuntime,
         ),
         ChunkMode::Off => build_off_chunk_plan(&entry_files, &graph, &shim_files, &workspace_dir),
     })

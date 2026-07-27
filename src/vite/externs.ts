@@ -10,10 +10,12 @@ import type { AppUsageMembers } from "../externs/render";
 import { classifyModuleId, stripQuery } from "./capture";
 import {
   analyzeRuntimeUsage,
-  mergeRuntimeHazards
+  mergeRuntimeHazards,
 } from "../externs/runtime-analysis";
-import type { RuntimeRenameHazards ,
-  RUNTIME_HAZARD_KEYS} from "../externs/runtime-analysis";
+import type {
+  RuntimeRenameHazards,
+  RUNTIME_HAZARD_KEYS,
+} from "../externs/runtime-analysis";
 import {
   getStringLiteralMemberName,
   isRuntimeExternPropertyName,

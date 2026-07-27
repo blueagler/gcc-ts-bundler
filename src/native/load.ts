@@ -28,7 +28,7 @@ interface NativeChunkPlanChunkOutput {
   dependencies: string[];
   entryFiles?: string[];
   files: string[];
-  kind?: "base" | "entry" | "lazy" | "shared";
+  kind?: "base" | "entry" | "lazy" | "shared" | "vendor";
   lazyModuleIds?: string[];
   name: string;
 }
@@ -211,6 +211,7 @@ interface NativeBinding {
     graphEntries: NativeDependencyGraphEntry[],
     lazyImports: NativeLazyImportEntry[],
     shimFiles: string[],
+    vendorChunk: boolean,
   ): NativeChunkPlanChunkOutput[];
   resolveGraph(
     entries: string[],
@@ -329,6 +330,8 @@ export function planChunks(input: {
   graphEntries: NativeDependencyGraphEntry[];
   lazyImports: NativeLazyImportEntry[];
   shimFiles: string[];
+  /** Already gated by `resolveVendorChunk`; native ignores it off bundler-runtime. */
+  vendorChunk: boolean;
   workspaceDir: string;
 }) {
   return loadBinding().planChunks(
@@ -339,6 +342,7 @@ export function planChunks(input: {
     input.graphEntries,
     input.lazyImports,
     input.shimFiles,
+    input.vendorChunk,
   );
 }
 

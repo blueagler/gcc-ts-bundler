@@ -30,6 +30,7 @@ fn empty_context() -> super::TranspileContext {
         package_aliases: Vec::new(),
         static_property_names: HashSet::new(),
         typed_annotations: HashMap::new(),
+        vendor_module_ids: HashSet::new(),
         workspace_dir: PathBuf::from("/tmp"),
     }
 }
@@ -72,6 +73,7 @@ fn make_js_pass_through_fixture(label: &str, source_text: &str) -> JsPassThrough
             }],
             static_property_names: HashSet::new(),
             typed_annotations: HashMap::new(),
+            vendor_module_ids: HashSet::new(),
             workspace_dir,
         },
         file_path,
@@ -369,6 +371,7 @@ fn rewrites_commonjs_namespace_imports_in_native_stage() {
             package_aliases: Vec::new(),
             static_property_names: HashSet::new(),
             typed_annotations: HashMap::new(),
+            vendor_module_ids: HashSet::new(),
             workspace_dir: PathBuf::from("/tmp"),
         },
     )
@@ -462,6 +465,7 @@ fn preserves_commonjs_alias_member_reads() {
             .to_path_buf(),
         static_property_names: HashSet::new(),
         typed_annotations: HashMap::new(),
+        vendor_module_ids: HashSet::new(),
     };
     let output = GLOBALS
         .set(&Globals::new(), || {
@@ -669,6 +673,7 @@ fn rewrites_hard_static_interop_property_reads_to_bracket_access() {
                 "observedAttributes".to_string(),
             ]),
             typed_annotations: HashMap::new(),
+            vendor_module_ids: HashSet::new(),
             workspace_dir: PathBuf::from("/tmp"),
         },
     )
@@ -1201,6 +1206,7 @@ fn bundler_runtime_rewrites_namespace_member_reads_to_numeric_slots() {
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
                     typed_annotations: HashMap::new(),
+                    vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
             )
@@ -1312,6 +1318,7 @@ fn bundler_runtime_rejects_reflective_namespace_usage() {
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
                     typed_annotations: HashMap::new(),
+                    vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
             )
@@ -1380,6 +1387,7 @@ fn bundler_runtime_keeps_namespace_import_bindings_before_top_level_destructures
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
                     typed_annotations: HashMap::new(),
+                    vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
             )
@@ -1448,6 +1456,7 @@ fn bundler_runtime_keeps_named_imports_live_instead_of_snapshotting_slots() {
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
                     typed_annotations: HashMap::new(),
+                    vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
             )
@@ -1505,6 +1514,7 @@ fn bundler_runtime_keeps_exported_let_bindings_live() {
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
                     typed_annotations: HashMap::new(),
+                    vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
             )
@@ -1573,6 +1583,7 @@ fn bundler_runtime_packs_named_reexports_from_single_dependency() {
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
                     typed_annotations: HashMap::new(),
+                    vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
             )
@@ -1645,6 +1656,7 @@ fn bundler_runtime_packs_export_all_from_single_dependency() {
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
                     typed_annotations: HashMap::new(),
+                    vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
             )
@@ -1741,6 +1753,7 @@ fn bundler_runtime_packs_imported_slot_alias_reexports_per_source() {
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
                     typed_annotations: HashMap::new(),
+                    vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
             )
@@ -1822,6 +1835,7 @@ fn bundler_runtime_rewrites_promise_consumer_callback_params_to_slots() {
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
                     typed_annotations: HashMap::new(),
+                    vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
             )
@@ -1895,6 +1909,7 @@ fn bundler_runtime_rewrites_wrapped_promise_consumer_callback_params_to_slots() 
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
                     typed_annotations: HashMap::new(),
+                    vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
             )
@@ -1975,6 +1990,7 @@ fn bundler_runtime_rewrites_nested_wrapped_promise_consumer_callback_params_to_s
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
                     typed_annotations: HashMap::new(),
+                    vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
             )
@@ -2050,6 +2066,7 @@ fn bundler_runtime_rewrites_realistic_helper_wrapped_consumer_callbacks_to_slots
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
                     typed_annotations: HashMap::new(),
+                    vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
             )
@@ -2223,6 +2240,7 @@ fn make_cross_chunk_fixture(label: &str, lazy_target: Option<&str>) -> CrossChun
         package_aliases: Vec::new(),
         static_property_names: HashSet::new(),
         typed_annotations: HashMap::new(),
+        vendor_module_ids: HashSet::new(),
         workspace_dir: root.clone(),
     };
 
@@ -2408,6 +2426,7 @@ fn make_typed_context(
         package_aliases: Vec::new(),
         static_property_names: HashSet::new(),
         typed_annotations: HashMap::new(),
+        vendor_module_ids: HashSet::new(),
         workspace_dir: root.to_path_buf(),
     }
 }
@@ -2728,6 +2747,7 @@ fn make_cross_module_typed_fixture_with(
         package_aliases: Vec::new(),
         static_property_names: HashSet::new(),
         typed_annotations: HashMap::new(),
+        vendor_module_ids: HashSet::new(),
         workspace_dir: root.clone(),
     };
     context
@@ -2848,4 +2868,161 @@ fn registry_slot_imports_are_not_expressible_as_type_names() {
     assert!(!transformed.contains("@param"), "{transformed}");
     assert!(!transformed.contains("Cash"), "{transformed}");
     assert!(transformed.contains("function total$$"), "{transformed}");
+}
+
+// --- vendor assigner detection (JSC_IMPORT_ASSIGN hardening) -------------
+
+fn assigner_names_of(source: &str, bindings: &[&str]) -> Vec<String> {
+    use super::assigners::assigner_function_name;
+    let module = parse_module(std::path::Path::new("fixture.js"), source).expect("module");
+    let bindings = bindings
+        .iter()
+        .map(|name| name.to_string())
+        .collect::<HashSet<_>>();
+    module
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            super::ModuleItem::Stmt(statement) => assigner_function_name(statement, &bindings),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn detects_functions_that_write_module_state_in_every_assignment_form() {
+    let source = concat!(
+        "function plain$$1() { state$$1 = 1; }\n",
+        "function compound$$1() { state$$1 += 1; }\n",
+        "function logical$$1() { state$$1 ??= 1; }\n",
+        "function increment$$1() { return ++state$$1; }\n",
+        "function decrement$$1() { state$$1--; }\n",
+        "function reads$$1() { return state$$1; }\n",
+    );
+
+    assert_eq!(
+        assigner_names_of(source, &["state$$1"]),
+        vec![
+            "plain$$1",
+            "compound$$1",
+            "logical$$1",
+            "increment$$1",
+            "decrement$$1",
+        ],
+    );
+}
+
+#[test]
+fn a_nested_write_to_outer_module_state_pins_the_enclosing_declaration() {
+    // Inlining hoists the closure into the caller along with its enclosing
+    // function, so the top-level declaration is what has to stay put.
+    let source = concat!(
+        "function outer$$1() {\n",
+        "  return function inner() { state$$1 = 1; };\n",
+        "}\n",
+        "function arrow$$1() {\n",
+        "  queue(() => { state$$1 += 1; });\n",
+        "}\n",
+    );
+
+    assert_eq!(
+        assigner_names_of(source, &["state$$1"]),
+        vec!["outer$$1", "arrow$$1"],
+    );
+}
+
+#[test]
+fn local_and_property_writes_are_not_module_state() {
+    let source = concat!(
+        // A local shadowing nothing: hoisting suffixes every top-level
+        // binding, so a local can never collide with one.
+        "function locals$$1() { var state = 1; state = 2; state++; }\n",
+        // Writing through an object mutates the object, not the binding, so
+        // it cannot produce JSC_IMPORT_ASSIGN.
+        "function members$$1() { state$$1.field = 1; state$$1.count++; }\n",
+        // Comparison is not assignment.
+        "function compares$$1() { return state$$1 === 1; }\n",
+        // A different module's binding is that module's problem.
+        "function other$$1() { other$$2 = 1; }\n",
+    );
+
+    assert!(assigner_names_of(source, &["state$$1"]).is_empty());
+}
+
+#[test]
+fn no_module_bindings_means_nothing_to_pin() {
+    // Non-vendor chunks pass an empty set: motion out of base and lazy
+    // chunks is legal and is how those chunks stay small.
+    assert!(assigner_names_of("function f$$1() { state$$1 = 1; }\n", &[]).is_empty());
+}
+
+#[test]
+fn the_noinline_tag_merges_into_one_block_with_pure_and_typed_tags() {
+    use super::assigners::NOINLINE_TAG;
+    use super::typed_annotations::{compose_annotations, PURE_TAG};
+
+    // Closure keeps only the JSDoc block nearest the declaration, so two
+    // adjacent blocks would silently drop the first.
+    assert_eq!(
+        compose_annotations(&[NOINLINE_TAG], None),
+        "/** @noinline */\n"
+    );
+    assert_eq!(
+        compose_annotations(&[PURE_TAG, NOINLINE_TAG], None),
+        "/** @pureOrBreakMyCode @noinline */\n",
+    );
+    assert_eq!(
+        compose_annotations(&[NOINLINE_TAG], Some("/** @type {number} */\n")),
+        "/** @noinline @type {number} */\n",
+    );
+    assert_eq!(
+        compose_annotations(
+            &[PURE_TAG, NOINLINE_TAG],
+            Some("/**\n * @param {number} a\n */\n"),
+        ),
+        "/** @pureOrBreakMyCode @noinline\n * @param {number} a\n */\n",
+    );
+    // Unchanged when nothing applies, and the pure-only form is exactly the
+    // block `pure_calls` owns.
+    assert_eq!(compose_annotations(&[], None), "");
+    assert_eq!(
+        compose_annotations(&[PURE_TAG], None),
+        super::pure_calls::PURE_JSDOC,
+    );
+}
+
+#[test]
+fn the_pin_lists_annotated_functions_against_the_chunks_own_alias() {
+    use super::assigners::{collect_annotated_assigner_names, render_assigner_pin};
+
+    let chunk_text = concat!(
+        "/** @noinline */\nfunction a$$1(){ s$$1=1; }\n",
+        "function skipped$$1(){}\n",
+        "/** @pureOrBreakMyCode @noinline */\nfunction b$$1(){ s$$1++; }\n",
+        "/**\n * @noinline\n * @param {number} x\n */\nfunction c$$1(x){ s$$1=x; }\n",
+    );
+    let names = collect_annotated_assigner_names(chunk_text);
+
+    assert_eq!(names, vec!["a$$1", "b$$1", "c$$1"]);
+    assert_eq!(
+        render_assigner_pin("__runtime_0", &names).as_deref(),
+        Some("__runtime_0.v=[a$$1,b$$1,c$$1];"),
+    );
+    // Nothing annotated, nothing pinned: a bare property write would still
+    // cost bytes in every chunk that has no mutating functions.
+    assert_eq!(render_assigner_pin("__runtime_0", &[]), None);
+    assert!(collect_annotated_assigner_names("function a$$1(){}\n").is_empty());
+}
+
+#[test]
+fn only_vendor_chunk_modules_are_pinned() {
+    use crate::pathing::{is_vendor_chunk_name, vendor_chunk_name};
+
+    // The chunk name is the only channel: nothing but `files` and `name`
+    // crosses the napi boundary into the transpiler.
+    assert_eq!(vendor_chunk_name("main"), "main-vendor");
+    assert!(is_vendor_chunk_name(&vendor_chunk_name("main")));
+    assert!(!is_vendor_chunk_name("main"));
+    assert!(!is_vendor_chunk_name("main-shared"));
+    assert!(!is_vendor_chunk_name("src-panel-lazy"));
 }

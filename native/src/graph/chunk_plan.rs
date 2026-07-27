@@ -92,36 +92,115 @@ pub(super) fn build_off_chunk_plan(
     chunks
 }
 
+/// Path segments that mark a file as dependency-originated rather than app
+/// code. `node_modules/` is the direct case; `__dep-bundles/` and
+/// `__virtual__/` are the Vite pre-bundle and virtual-module staging
+/// directories, whose contents are likewise not authored by the app.
+const VENDOR_PATH_SEGMENTS: [&str; 3] = ["node_modules", "__dep-bundles", "__virtual__"];
+
+/// Selects the eagerly reachable files that belong in the vendor chunk.
+///
+/// The point of the split is filename stability: an app-code edit must
+/// re-hash only the entry chunk, leaving vendor and the lazy panels byte- and
+/// name-identical (docs/research/es-modules-output.md §7, byte-stability
+/// finding). So the vendor set must contain nothing an app edit can change,
+/// and entry files are app code by definition however they are pathed.
+fn partition_vendor_files(
+    base_reachable: &BTreeSet<String>,
+    entry_files: &[ChunkPlanEntryInput],
+    workspace_dir: &Path,
+) -> BTreeSet<String> {
+    let entry_paths = entry_files
+        .iter()
+        .map(|entry| entry.sourcePath.clone())
+        .collect::<BTreeSet<_>>();
+    base_reachable
+        .iter()
+        .filter(|file_path| {
+            !entry_paths.contains(*file_path)
+                && is_vendor_path(&path_relative_to(Path::new(file_path), workspace_dir))
+        })
+        .cloned()
+        .collect()
+}
+
+fn is_vendor_path(relative_path: &str) -> bool {
+    relative_path
+        .split(['/', '\\'])
+        .any(|segment| VENDOR_PATH_SEGMENTS.contains(&segment))
+}
+
 pub(super) fn build_bundler_chunk_plan(
     base_chunk_name: &str,
     entry_files: &[ChunkPlanEntryInput],
     graph: &HashMap<String, Vec<String>>,
     lazy_imports: &[LazyImportEntry],
     workspace_dir: &Path,
+    vendor_chunk: bool,
 ) -> Vec<ChunkPlanChunkOutput> {
     let mut base_reachable = BTreeSet::new();
     for entry in entry_files {
         base_reachable.extend(walk_reachable_files(&entry.sourcePath, graph));
     }
 
+    let vendor_files = if vendor_chunk {
+        partition_vendor_files(&base_reachable, entry_files, workspace_dir)
+    } else {
+        BTreeSet::new()
+    };
+    // An empty vendor set leaves the plan exactly as it was: an empty chunk
+    // would still cost a request and a manifest row.
+    let vendor_chunk_name =
+        (!vendor_files.is_empty()).then(|| crate::pathing::vendor_chunk_name(base_chunk_name));
+    let base_files = base_reachable
+        .iter()
+        .filter(|file_path| !vendor_files.contains(*file_path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let base_dependencies = || {
+        vendor_chunk_name
+            .clone()
+            .map(|name| vec![name])
+            .unwrap_or_default()
+    };
+    // Vendor leads the plan, so it is also the first Closure chunk spec. That
+    // ordering is what lets base's generated `import "./<vendor>.js"` edge
+    // execute it at startup, and it is why vendor carries the runtime core
+    // (see `prepare_bundler_runtime_jobs`).
+    let vendor_chunks = || {
+        vendor_chunk_name
+            .iter()
+            .map(|name| ChunkPlanChunkOutput {
+                dependencies: Vec::new(),
+                entryFiles: None,
+                files: to_relative_files(
+                    &topological_sort(vendor_files.iter().cloned().collect(), graph),
+                    workspace_dir,
+                ),
+                kind: Some("vendor".to_string()),
+                lazyModuleIds: None,
+                name: name.clone(),
+            })
+            .collect::<Vec<_>>()
+    };
+
     let unique_lazy_imports = dedupe_lazy_imports(lazy_imports);
     if unique_lazy_imports.is_empty() {
-        return vec![ChunkPlanChunkOutput {
-            dependencies: Vec::new(),
+        let mut chunks = vendor_chunks();
+        chunks.push(ChunkPlanChunkOutput {
+            dependencies: base_dependencies(),
             entryFiles: Some(
                 entry_files
                     .iter()
                     .map(|entry| path_relative_to(Path::new(&entry.sourcePath), workspace_dir))
                     .collect(),
             ),
-            files: to_relative_files(
-                &topological_sort(base_reachable.iter().cloned().collect(), graph),
-                workspace_dir,
-            ),
+            files: to_relative_files(&topological_sort(base_files, graph), workspace_dir),
             kind: Some("base".to_string()),
             lazyModuleIds: None,
             name: base_chunk_name.to_string(),
-        }];
+        });
+        return chunks;
     }
 
     let lazy_root_targets = unique_lazy_imports
@@ -153,18 +232,16 @@ pub(super) fn build_bundler_chunk_plan(
         .filter_map(|(file_path, count)| (count > 1).then_some(file_path))
         .collect::<BTreeSet<_>>();
 
-    let mut chunks = vec![ChunkPlanChunkOutput {
-        dependencies: Vec::new(),
+    let mut chunks = vendor_chunks();
+    chunks.push(ChunkPlanChunkOutput {
+        dependencies: base_dependencies(),
         entryFiles: Some(
             entry_files
                 .iter()
                 .map(|entry| path_relative_to(Path::new(&entry.sourcePath), workspace_dir))
                 .collect(),
         ),
-        files: to_relative_files(
-            &topological_sort(base_reachable.iter().cloned().collect(), graph),
-            workspace_dir,
-        ),
+        files: to_relative_files(&topological_sort(base_files, graph), workspace_dir),
         kind: Some("base".to_string()),
         lazyModuleIds: Some(
             unique_lazy_imports
@@ -177,7 +254,7 @@ pub(super) fn build_bundler_chunk_plan(
                 .collect(),
         ),
         name: base_chunk_name.to_string(),
-    }];
+    });
 
     let shared_chunk_name = format!("{base_chunk_name}-shared");
     if !shared_lazy_files.is_empty() {

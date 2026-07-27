@@ -19,7 +19,13 @@ export interface PackageAlias {
   targetPath: string;
 }
 
-export const CHUNK_KINDS = defineValues("base", "entry", "lazy", "shared");
+export const CHUNK_KINDS = defineValues(
+  "base",
+  "entry",
+  "lazy",
+  "shared",
+  "vendor",
+);
 export type ChunkKind = (typeof CHUNK_KINDS)[number];
 
 export interface ChunkPlanChunk {

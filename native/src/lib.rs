@@ -47,6 +47,7 @@ pub fn plan_chunks(
     graph_entries: Vec<graph::DependencyGraphEntry>,
     lazy_imports: Vec<graph::LazyImportEntry>,
     shim_files: Vec<String>,
+    vendor_chunk: bool,
 ) -> Result<Vec<graph::ChunkPlanChunkOutput>> {
     with_globals(|| {
         graph::plan_chunks(
@@ -57,6 +58,7 @@ pub fn plan_chunks(
             graph_entries,
             lazy_imports,
             shim_files,
+            vendor_chunk,
         )
     })
 }

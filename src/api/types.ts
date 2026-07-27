@@ -73,6 +73,20 @@ export interface ChunkOptions {
   mode?: ChunkMode | undefined;
   outputType?: ChunkOutputType | undefined;
   publicPath?: string | undefined;
+  /**
+   * Move eagerly reachable dependency modules out of the base chunk into a
+   * separate `<baseChunkName>-vendor` chunk.
+   *
+   * Under ES module output the base chunk's name is embedded in every other
+   * chunk's `import` statement, so any edit to app code re-hashes the base
+   * chunk and cascades new file names through the whole graph. Splitting the
+   * dependency half out means an app edit only re-hashes the entry, and the
+   * vendor and lazy chunks keep their names (and their cache entries).
+   *
+   * `"auto"` (the default) enables it exactly where it works: `bundler-runtime`
+   * chunks whose resolved `outputType` is `"esm"`.
+   */
+  vendorChunk?: boolean | "auto" | undefined;
 }
 
 /** An entry file, optionally with an explicit output name. */
@@ -194,6 +208,8 @@ export interface ResolvedBuildOptions {
     /** Requested value; apply `resolveChunkOutputType` before use. */
     outputType: ChunkOutputType;
     publicPath: string;
+    /** Already gated: `"auto"` has been resolved against mode and output type. */
+    vendorChunk: boolean;
   };
   compat: { classMapCalls: CompatClassMapCall[]; pureCallees: string[] };
   compilationLevel: CompilationLevel;
@@ -226,6 +242,7 @@ export const DEFAULT_BUILD_OPTIONS = Object.freeze({
     mode: "off",
     outputType: "auto",
     publicPath: "./",
+    vendorChunk: false,
   },
   compat: { classMapCalls: [], pureCallees: [] },
   compilationLevel: "ADVANCED",

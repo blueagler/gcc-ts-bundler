@@ -83,14 +83,16 @@ pub(super) fn render_bundler_runtime_base_chunk(
     debug_runtime: bool,
     hoisted: bool,
     chunk_output_type: ChunkOutputType,
+    preamble_part: RuntimePreamblePart,
 ) -> std::result::Result<String, String> {
     let runtime_global = runtime_global_ref("globalThis");
     let suffix = runtime_alias_suffix(chunk_id, chunk_output_type);
-    let mut parts = vec![render_bundler_runtime_preamble(
+    let mut parts = vec![render_bundler_runtime_preamble_part(
         manifest_json,
         numeric_module_ids,
         debug_runtime,
         chunk_output_type,
+        preamble_part,
     )?];
     if include_custom_elements_es5_adapter {
         parts.push(render_custom_elements_es5_adapter());
@@ -125,14 +127,30 @@ pub(super) fn render_bundler_runtime_lazy_chunk(
     debug_runtime: bool,
     hoisted: bool,
     chunk_output_type: ChunkOutputType,
+    runtime_core: Option<&str>,
+    assigner_names: &[String],
 ) -> String {
     let runtime_global = runtime_global_ref("globalThis");
     let suffix = runtime_alias_suffix(chunk_id, chunk_output_type);
+    // A vendor chunk runs before base, so it brings the runtime core with it;
+    // every other non-base chunk finds the runtime already built.
+    let core = runtime_core.unwrap_or_default();
+    // Pinning the chunk's state-mutating functions to the loader object is the
+    // half of the vendor fix that survives `CrossChunkCodeMotion`; the
+    // `@noinline` half lives in `transpile::assigners`. It sits before the
+    // `l()` call so it is part of the chunk's own execution, and it uses this
+    // chunk's alias so it stays scoped like the alias line above it.
+    let pin = crate::transpile::assigners::render_assigner_pin(
+        &format!("__runtime{suffix}"),
+        assigner_names,
+    )
+    .map(|pin| format!("{pin}\n"))
+    .unwrap_or_default();
     if hoisted {
         // Hoisted chunks execute at top level on script load; the trailing
         // `l()` is what resolves the loader promise for this chunk.
         return format!(
-            "{}\n{module_text}\n__runtime{suffix}.l({chunk_id:?});\n",
+            "{core}{}\n{module_text}\n{pin}__runtime{suffix}.l({chunk_id:?});\n",
             render_runtime_alias_line(&suffix),
         );
     }
@@ -142,24 +160,79 @@ pub(super) fn render_bundler_runtime_lazy_chunk(
     if debug_runtime {
         let fallback_error = "\"base chunk missing\"";
         format!(
-            "var __runtime{suffix}={runtime_global};(__runtime{suffix}||{{h:function(){{throw Error({fallback_error});}}}}).h(function(__register){{\n  {runtime_aliases}\n{}\n}},{chunk_id:?});\n",
+            "{core}var __runtime{suffix}={runtime_global};(__runtime{suffix}||{{h:function(){{throw Error({fallback_error});}}}}).h(function(__register){{\n  {runtime_aliases}\n{}\n}},{chunk_id:?});\n",
             indent_block(module_text),
             fallback_error = fallback_error,
         )
     } else {
         format!(
-            "var __runtime{suffix}={runtime_global};__runtime{suffix}.h(function(__register){{\n  {runtime_aliases}\n{}\n}},{chunk_id:?});\n",
+            "{core}var __runtime{suffix}={runtime_global};__runtime{suffix}.h(function(__register){{\n  {runtime_aliases}\n{}\n}},{chunk_id:?});\n",
             indent_block(module_text),
         )
     }
 }
 
+/// Which half of the runtime preamble a chunk emits.
+///
+/// Normally one chunk emits both and the two are a single IIFE, byte-for-byte
+/// what we have always shipped. A vendor chunk changes that: base's generated
+/// `import "./<vendor>.js"` edge makes vendor execute *before* base, so the
+/// runtime object base used to create would not exist yet when vendor's alias
+/// line dereferences it (verified: `TypeError: Cannot read properties of
+/// undefined`). The guarded core therefore moves to whichever chunk runs
+/// first, and the manifest stays behind.
+///
+/// The split is along the app-independence line on purpose. The core is pure
+/// loader code that changes only when this file does; `r.a(<manifest>)`
+/// carries chunk URLs that change on every app edit. Keeping the manifest in
+/// base is what lets the vendor chunk keep its filename across app edits,
+/// which is the entire point of the vendor chunk.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RuntimePreamblePart {
+    /// Core and manifest together, as one IIFE.
+    All,
+    /// The guarded, app-independent core only.
+    Core,
+    /// `r.a(<manifest>)` only, for a chunk whose core ran earlier.
+    ManifestOnly,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn render_bundler_runtime_preamble(
     manifest_json: &str,
     numeric_module_ids: bool,
     debug_runtime: bool,
     chunk_output_type: ChunkOutputType,
 ) -> std::result::Result<String, String> {
+    render_bundler_runtime_preamble_part(
+        manifest_json,
+        numeric_module_ids,
+        debug_runtime,
+        chunk_output_type,
+        RuntimePreamblePart::All,
+    )
+}
+
+pub(super) fn render_bundler_runtime_preamble_part(
+    manifest_json: &str,
+    numeric_module_ids: bool,
+    debug_runtime: bool,
+    chunk_output_type: ChunkOutputType,
+    part: RuntimePreamblePart,
+) -> std::result::Result<String, String> {
+    if part == RuntimePreamblePart::ManifestOnly {
+        // `r.i` is set by the core, so this can only run after it. Reading the
+        // global rather than creating it keeps a missing core loud instead of
+        // silently half-initialising the runtime.
+        return Ok([
+            "(function(global){".to_string(),
+            format!("var r={};", runtime_global_ref("global")),
+            render_manifest_apply(manifest_json),
+            "}).call(this,globalThis);".to_string(),
+            String::new(),
+        ]
+        .join("\n"));
+    }
     let missing_chunk_error = if debug_runtime {
         "\"unknown chunk \"+a"
     } else {
@@ -246,10 +319,11 @@ pub(super) fn render_bundler_runtime_preamble(
         manifest_init,
         "r.i=1;".to_string(),
         "}".to_string(),
-        manifest_apply,
-        "}).call(this,globalThis);".to_string(),
-        String::new(),
     ]
+    .into_iter()
+    .chain((part == RuntimePreamblePart::All).then_some(manifest_apply))
+    .chain(["}).call(this,globalThis);".to_string(), String::new()])
+    .collect::<Vec<_>>()
     .join("\n"))
 }
 
@@ -416,6 +490,7 @@ mod tests {
             false,
             true,
             ChunkOutputType::Script,
+            RuntimePreamblePart::All,
         )
         .expect("render base chunk");
 
@@ -449,6 +524,7 @@ mod tests {
             false,
             false,
             ChunkOutputType::Script,
+            RuntimePreamblePart::All,
         )
         .expect("render base chunk");
 
@@ -472,6 +548,7 @@ mod tests {
             false,
             true,
             ChunkOutputType::Script,
+            RuntimePreamblePart::All,
         )
         .expect("render base chunk");
 
@@ -486,6 +563,8 @@ mod tests {
             false,
             true,
             ChunkOutputType::Script,
+            None,
+            &[],
         );
         assert_eq!(
             rendered,
@@ -502,6 +581,8 @@ mod tests {
             false,
             false,
             ChunkOutputType::Script,
+            None,
+            &[],
         );
         assert_eq!(
             rendered,
@@ -552,6 +633,7 @@ __runtime.h(function(__register){\n  var __require=__runtime.q,__dynamicImport=_
             false,
             true,
             ChunkOutputType::Esm,
+            RuntimePreamblePart::All,
         )
         .expect("render base chunk");
         assert!(base.contains("var __runtime_0=globalThis[\"__g\"],__register_0=__runtime_0.r,__require_0=__runtime_0.q,__dynamicImport_0=__runtime_0.j,__preloadDynamicImport_0=__runtime_0.x;"), "{base}");
@@ -563,11 +645,67 @@ __runtime.h(function(__register){\n  var __require=__runtime.q,__dynamicImport=_
             false,
             true,
             ChunkOutputType::Esm,
+            None,
+            &[],
         );
         assert_eq!(
             lazy,
             "var __runtime_3=globalThis[\"__g\"],__register_3=__runtime_3.r,__require_3=__runtime_3.q,__dynamicImport_3=__runtime_3.j,__preloadDynamicImport_3=__runtime_3.x;\n__register_3(1,function(){});\n__runtime_3.l(3);\n"
         );
+    }
+
+    #[test]
+    fn runtime_core_is_idempotent_and_the_manifest_half_stands_alone() {
+        // The core moves to whichever chunk runs first, so two chunks could
+        // end up carrying it after a future plan change. The `if(!r.i)` guard
+        // is what makes that a no-op instead of a reset that would clobber
+        // the chunk-state table an earlier `l()` already wrote.
+        let core = render_bundler_runtime_preamble_part(
+            "[0,[],[],\"./\"]",
+            true,
+            false,
+            ChunkOutputType::Esm,
+            RuntimePreamblePart::Core,
+        )
+        .expect("render core");
+        assert!(core.contains("if(!r.i){"), "{core}");
+        assert!(core.contains("r.i=1;"), "{core}");
+        // The core is app-independent: no manifest, so a vendor chunk keeps
+        // its bytes across app edits, which is the point of the split.
+        assert!(!core.contains("r.a("), "{core}");
+        assert!(
+            core.contains("var r=global[\"__g\"]||(global[\"__g\"]={});"),
+            "{core}"
+        );
+
+        let manifest_only = render_bundler_runtime_preamble_part(
+            "[0,[],[],\"./\"]",
+            true,
+            false,
+            ChunkOutputType::Esm,
+            RuntimePreamblePart::ManifestOnly,
+        )
+        .expect("render manifest half");
+        assert!(
+            manifest_only.contains("r.a([0,[],[],\"./\"]);"),
+            "{manifest_only}"
+        );
+        assert!(!manifest_only.contains("if(!r.i){"), "{manifest_only}");
+        // Reads the global rather than creating it: a missing core must fail
+        // loudly instead of half-initialising the runtime.
+        assert!(
+            manifest_only.contains("var r=global[\"__g\"];"),
+            "{manifest_only}"
+        );
+
+        // Split in half, joined back: same content as the combined form, so
+        // the two halves cannot drift from the single-preamble path.
+        let all =
+            render_bundler_runtime_preamble("[0,[],[],\"./\"]", true, false, ChunkOutputType::Esm)
+                .expect("render preamble");
+        assert!(all.contains("if(!r.i){"), "{all}");
+        assert!(all.contains("r.a([0,[],[],\"./\"]);"), "{all}");
+        assert_eq!(all.matches(").call(this,globalThis);").count(), 1, "{all}");
     }
 
     #[test]
@@ -630,6 +768,7 @@ __runtime.h(function(__register){\n  var __require=__runtime.q,__dynamicImport=_
             false,
             true,
             ChunkOutputType::Script,
+            RuntimePreamblePart::All,
         )
         .expect("render base chunk");
         assert!(base.contains(HOISTED_ALIAS_LINE), "{base}");

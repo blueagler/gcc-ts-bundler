@@ -1287,13 +1287,25 @@ async function createNamingWorkspace(input) {
 
   const baseChunkId = input.baseChunkId ?? "main";
   const manifestFilePath = path.join(outDir, "manifest.json");
+  // The vendor chunk is deliberately just another manifest row: the base
+  // chunk depends on it, it depends on nothing, and naming treats it like any
+  // other non-base chunk.
+  const hasVendor = input.vendorSource !== undefined;
   await fs.writeFile(
     manifestFilePath,
     JSON.stringify({
       baseChunk: baseChunkId,
       chunks: {
         lazy: { css: [], deps: [baseChunkId], modules: [], url: "/lazy.js" },
-        [baseChunkId]: { css: [], deps: [], modules: [], url: "/main.js" },
+        [baseChunkId]: {
+          css: [],
+          deps: hasVendor ? ["vendor"] : [],
+          modules: [],
+          url: "/main.js",
+        },
+        ...(hasVendor
+          ? { vendor: { css: [], deps: [], modules: [], url: "/vendor.js" } }
+          : {}),
       },
       loader: "script",
       modules: {},
@@ -1303,11 +1315,22 @@ async function createNamingWorkspace(input) {
   );
   await fs.writeFile(path.join(outDir, "main.js"), input.baseSource, "utf8");
   await fs.writeFile(path.join(outDir, "lazy.js"), input.lazySource, "utf8");
+  if (hasVendor) {
+    await fs.writeFile(
+      path.join(outDir, "vendor.js"),
+      input.vendorSource,
+      "utf8",
+    );
+  }
 
   return {
     manifestFilePath,
     outDir,
-    outputFiles: [path.join(outDir, "main.js"), path.join(outDir, "lazy.js")],
+    outputFiles: [
+      path.join(outDir, "main.js"),
+      path.join(outDir, "lazy.js"),
+      ...(hasVendor ? [path.join(outDir, "vendor.js")] : []),
+    ],
   };
 }
 
@@ -1416,6 +1439,73 @@ test("esm chunk naming rehashes dependents when a referenced chunk changes", asy
   // The lazy chunk's own bytes are unchanged, but it embeds the base chunk's
   // name: without folding the reference closure into the hash it would keep a
   // stale name while its shipped bytes changed.
+  expect(second.baseScriptFileName).not.toBe(first.baseScriptFileName);
+  expect(second.manifest.chunks.lazy.url).not.toBe(
+    first.manifest.chunks.lazy.url,
+  );
+});
+
+const ESM_VENDOR_SOURCE = "export var dep=1;\n";
+const ESM_BASE_WITH_VENDOR_SOURCE =
+  'import{dep}from"./vendor.js";var r=globalThis.__g;r.a([0,[[[],"",[]],[[0],"./vendor.js",[]],[[0],"./lazy.js",[]]],[0,1,2],"/assets/"]);export{r};\n';
+
+test("esm chunk naming gives base-dependency chunks the stable vendor name", async () => {
+  const workspace = await createNamingWorkspace({
+    baseSource: ESM_BASE_WITH_VENDOR_SOURCE,
+    lazySource: ESM_LAZY_SOURCE,
+    vendorSource: ESM_VENDOR_SOURCE,
+  });
+  const result = await runNamingPasses(workspace, "esm");
+
+  const vendorFileName = toDistRelativeFile(result.manifest.chunks.vendor.url);
+  const lazyFileName = toDistRelativeFile(result.manifest.chunks.lazy.url);
+  expect(vendorFileName).toMatch(/^assets\/vendor-[\w-]{8}\.js$/u);
+  expect(result.emitted.sort()).toEqual(
+    [result.baseScriptFileName, lazyFileName, vendorFileName].sort(),
+  );
+
+  // The base chunk's import of the vendor chunk is rewritten to the final
+  // hashed name, exactly like the manifest urls of the lazy chunks.
+  const baseSource = await result.read(result.baseScriptFileName);
+  expect(baseSource).toContain(
+    `"./${path.posix.basename(vendorFileName)}"`,
+  );
+  expect(baseSource).not.toContain('"./vendor.js"');
+});
+
+test("vendor chunk keeps its file name across an app-code edit", async () => {
+  // Only the base chunk body differs; vendor and lazy bytes are identical.
+  const first = await runNamingPasses(
+    await createNamingWorkspace({
+      baseSource: ESM_BASE_WITH_VENDOR_SOURCE,
+      lazySource: ESM_LAZY_SOURCE,
+      vendorSource: ESM_VENDOR_SOURCE,
+    }),
+    "esm",
+  );
+  const second = await runNamingPasses(
+    await createNamingWorkspace({
+      baseSource: ESM_BASE_WITH_VENDOR_SOURCE.replace(
+        "export{r}",
+        "console.log(1);export{r}",
+      ),
+      lazySource: ESM_LAZY_SOURCE,
+      vendorSource: ESM_VENDOR_SOURCE,
+    }),
+    "esm",
+  );
+
+  // The whole point of the vendor chunk: nothing it contains references the
+  // entry, so its reference closure is empty and an app edit cannot rename it.
+  // On this app that is the biggest chunk, so its cache entry survives.
+  expect(second.manifest.chunks.vendor.url).toBe(
+    first.manifest.chunks.vendor.url,
+  );
+
+  // Pinned limit, not an oversight: a lazy chunk's shipped bytes contain
+  // `import ... from "./<entry>-<hash>.js"`, so when the entry is renamed the
+  // lazy chunk's bytes really do change and it must be renamed too. Full lazy
+  // stability would need import-map indirection.
   expect(second.baseScriptFileName).not.toBe(first.baseScriptFileName);
   expect(second.manifest.chunks.lazy.url).not.toBe(
     first.manifest.chunks.lazy.url,

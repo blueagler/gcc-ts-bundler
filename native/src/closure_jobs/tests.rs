@@ -464,3 +464,275 @@ fn rejects_esm_output_outside_bundler_runtime_mode() {
     .expect_err("esm requires bundler-runtime");
     assert!(error.contains("bundler-runtime"), "{error}");
 }
+
+// --- vendor chunk assembly ----------------------------------------------
+
+/// vendor -> base -> panel, the shape the vendor plan produces: vendor leads,
+/// base depends on it, and the panel depends only on base.
+fn prepare_vendor_jobs(label: &str, vendor: bool) -> PrepareClosureJobsOutput {
+    let root = make_temp_dir(label);
+    let emitted_out_dir = root.join("native-out");
+    let out_dir = root.join("dist");
+    let final_cache_dir = root.join("cache/final");
+    let package_root = root.join("pkg");
+    fs::create_dir_all(emitted_out_dir.join("src")).unwrap();
+    fs::create_dir_all(emitted_out_dir.join("node_modules/lib")).unwrap();
+    fs::create_dir_all(&out_dir).unwrap();
+    fs::create_dir_all(package_root.join("closure-lib")).unwrap();
+    // A registry-form module in vendor: it calls __register at top level, so
+    // the aliases must already be usable when vendor executes.
+    fs::write(
+        emitted_out_dir.join("node_modules/lib/index.js"),
+        format!(
+            concat!(
+                "__register({:?}, function(__require, __exports) {{ __exports[0]=1; }});\n",
+                // Shaped like what hoisted emission writes for a vendor module
+                // that mutates its own state: the annotation is the channel the
+                // pin list is read back out of.
+                "/** @noinline */\nfunction set_version$$1(value) {{ version$$1 = value; }}\n",
+                "function pure_helper$$1() {{ return version$$1; }}\n",
+            ),
+            to_bundler_runtime_module_id("gcc.node_modules.lib.index"),
+        ),
+    )
+    .unwrap();
+    fs::write(
+        emitted_out_dir.join("src/main.js"),
+        format!(
+            "__register({:?}, function(__require, __exports) {{ __exports[0]=__require({:?}); }});\n",
+            to_bundler_runtime_module_id("gcc.src.main"),
+            to_bundler_runtime_module_id("gcc.node_modules.lib.index"),
+        ),
+    )
+    .unwrap();
+    fs::write(
+        emitted_out_dir.join("src/panel.js"),
+        format!(
+            "__register({:?}, function(__require, __exports) {{ __exports[0]=2; }});\n",
+            to_bundler_runtime_module_id("gcc.src.panel"),
+        ),
+    )
+    .unwrap();
+    fs::write(package_root.join("closure-lib/base.js"), "").unwrap();
+    let native_extern = root.join("native.externs.js");
+    fs::write(&native_extern, "/** @externs */\n").unwrap();
+
+    let vendor_chunk = ClosureJobChunkPlanChunkInput {
+        dependencies: vec![],
+        entryFiles: None,
+        files: vec!["node_modules/lib/index.ts".to_string()],
+        kind: Some("vendor".to_string()),
+        lazyModuleIds: None,
+        name: "main-vendor".to_string(),
+    };
+    let base_chunk = ClosureJobChunkPlanChunkInput {
+        dependencies: if vendor {
+            vec!["main-vendor".to_string()]
+        } else {
+            vec![]
+        },
+        entryFiles: Some(vec!["src/main.ts".to_string()]),
+        files: if vendor {
+            vec!["src/main.ts".to_string()]
+        } else {
+            vec![
+                "node_modules/lib/index.ts".to_string(),
+                "src/main.ts".to_string(),
+            ]
+        },
+        kind: Some("base".to_string()),
+        lazyModuleIds: None,
+        name: "main".to_string(),
+    };
+    let panel_chunk = ClosureJobChunkPlanChunkInput {
+        dependencies: vec!["main".to_string()],
+        entryFiles: None,
+        files: vec!["src/panel.ts".to_string()],
+        kind: Some("lazy".to_string()),
+        lazyModuleIds: Some(vec!["gcc.src.panel".to_string()]),
+        name: "src-panel-lazy".to_string(),
+    };
+
+    prepare_closure_jobs(PrepareClosureJobsInput {
+        chunkMode: "bundler-runtime".to_string(),
+        chunkLoader: "script".to_string(),
+        chunkOutputType: "esm".to_string(),
+        chunkPlan: if vendor {
+            vec![vendor_chunk, base_chunk, panel_chunk]
+        } else {
+            vec![base_chunk, panel_chunk]
+        },
+        compilationLevel: "ADVANCED".to_string(),
+        diagnosticsVerbose: false,
+        emittedOutDir: emitted_out_dir.to_string_lossy().to_string(),
+        explicitExternPaths: vec![],
+        explicitJsInputs: vec![],
+        finalCacheDir: final_cache_dir.to_string_lossy().to_string(),
+        generatedExternPaths: vec![],
+        languageOut: "ECMASCRIPT_NEXT".to_string(),
+        manifestFile: "manifest.json".to_string(),
+        nativeExternPath: native_extern.to_string_lossy().to_string(),
+        outDir: out_dir.to_string_lossy().to_string(),
+        packageRoot: package_root.to_string_lossy().to_string(),
+        publicPath: "./".to_string(),
+        supportFiles: vec![],
+    })
+    .unwrap()
+}
+
+fn linked_chunk_text<'a>(output: &'a PrepareClosureJobsOutput, chunk_name: &str) -> &'a str {
+    &output
+        .generatedAssets
+        .iter()
+        .find(|asset| asset.path.ends_with(&format!("{chunk_name}.linked.js")))
+        .unwrap_or_else(|| panic!("missing linked chunk {chunk_name}"))
+        .text
+}
+
+#[test]
+fn vendor_chunk_leads_the_specs_and_base_depends_on_it() {
+    let output = prepare_vendor_jobs("vendor-specs", true);
+    let specs = output.compileJobs[0].chunk.as_ref().expect("chunk specs");
+    let vendor_id = to_bundler_runtime_chunk_id("main-vendor");
+    let base_id = to_bundler_runtime_chunk_id("main");
+    let panel_id = to_bundler_runtime_chunk_id("src-panel-lazy");
+
+    // Vendor is spec 0, so it absorbs the leading js inputs and closure-lib
+    // files, and base names it as a dependency.
+    assert!(specs[0].starts_with(&format!("{vendor_id}:")), "{specs:?}");
+    // No dependency suffix: vendor depends on nothing, so exactly one colon.
+    assert_eq!(specs[0].matches(':').count(), 1, "{specs:?}");
+    assert_eq!(specs[1], format!("{base_id}:1:{vendor_id}"), "{specs:?}");
+    // The panel keeps its existing dependency list. Closure chunk deps are
+    // transitive, and this was verified against the real compiler: a panel
+    // referencing a vendor symbol through base alone compiles clean.
+    assert_eq!(specs[2], format!("{panel_id}:1:{base_id}"), "{specs:?}");
+}
+
+#[test]
+fn vendor_chunk_carries_the_runtime_core_and_base_keeps_the_manifest() {
+    let output = prepare_vendor_jobs("vendor-runtime-core", true);
+    let vendor = linked_chunk_text(&output, "main-vendor");
+    let base = linked_chunk_text(&output, "main");
+    let panel = linked_chunk_text(&output, "src-panel-lazy");
+
+    // Vendor executes first (base imports it), so it must build the runtime
+    // before its own alias line dereferences it.
+    assert!(vendor.contains("r.i=1;"), "{vendor}");
+    assert!(vendor.contains("if(!r.i){"), "{vendor}");
+    let alias_at = vendor
+        .find("var __runtime_0=globalThis[\"__g\"],__register_0=__runtime_0.r,")
+        .unwrap_or_else(|| panic!("{vendor}"));
+    assert!(vendor.find("r.i=1;").unwrap() < alias_at, "{vendor}");
+    assert!(vendor.trim_end().ends_with("__runtime_0.l(0);"), "{vendor}");
+    // Vendor must stay app-independent: the manifest holds chunk URLs that
+    // change on every app edit, and vendor keeping its filename across app
+    // edits is the whole point of the chunk.
+    assert!(!vendor.contains("r.a("), "{vendor}");
+
+    // Base runs second and only applies the manifest; re-running the core
+    // would be wasted bytes, and the `if(!r.i)` guard makes it a no-op.
+    assert!(base.contains("r.a("), "{base}");
+    assert!(!base.contains("r.i=1;"), "{base}");
+    assert!(!base.contains("if(!r.i){"), "{base}");
+    assert!(
+        base.contains("var __runtime_1=globalThis[\"__g\"]"),
+        "{base}"
+    );
+
+    // Ordinary non-base chunks are untouched: no core, no manifest.
+    assert!(!panel.contains("r.i=1;"), "{panel}");
+    assert!(!panel.contains("r.a("), "{panel}");
+    assert!(panel.trim_end().ends_with("__runtime_2.l(2);"), "{panel}");
+}
+
+#[test]
+fn vendor_chunk_gets_a_manifest_row_with_its_deps_and_no_css() {
+    let output = prepare_vendor_jobs("vendor-manifest", true);
+    let manifest = &output
+        .generatedAssets
+        .iter()
+        .find(|asset| asset.path.ends_with("manifest.json"))
+        .expect("manifest")
+        .text;
+    let parsed: serde_json::Value = serde_json::from_str(manifest).unwrap();
+    let vendor_id = to_bundler_runtime_chunk_id("main-vendor");
+    let base_id = to_bundler_runtime_chunk_id("main");
+    let vendor_row = &parsed["chunks"][&vendor_id];
+
+    assert_eq!(vendor_row["css"], serde_json::json!([]));
+    assert_eq!(vendor_row["deps"], serde_json::json!([]));
+    assert_eq!(
+        vendor_row["url"],
+        serde_json::json!(format!("./{vendor_id}.js"))
+    );
+    assert_eq!(vendor_row["modules"].as_array().unwrap().len(), 1);
+    // Base names vendor, which is the edge the loader relies on.
+    assert_eq!(
+        parsed["chunks"][&base_id]["deps"],
+        serde_json::json!([vendor_id])
+    );
+    assert_eq!(parsed["baseChunk"], serde_json::json!(base_id));
+    // Every module is placed, vendor's included.
+    assert_eq!(parsed["modules"].as_object().unwrap().len(), 3);
+}
+
+#[test]
+fn a_plan_without_a_vendor_chunk_keeps_the_single_combined_preamble() {
+    // Regression guard for the flag-off path: base still emits core and
+    // manifest as one IIFE, exactly as it always has.
+    let output = prepare_vendor_jobs("vendor-absent", false);
+    let base = linked_chunk_text(&output, "main");
+
+    assert!(base.contains("if(!r.i){"), "{base}");
+    assert!(base.contains("r.i=1;"), "{base}");
+    assert!(base.contains("r.a("), "{base}");
+    assert_eq!(
+        base.matches(").call(this,globalThis);").count(),
+        1,
+        "{base}"
+    );
+    let specs = output.compileJobs[0].chunk.as_ref().expect("chunk specs");
+    assert!(
+        specs[0].starts_with(&format!("{}:", to_bundler_runtime_chunk_id("main"))),
+        "{specs:?}"
+    );
+}
+
+#[test]
+fn vendor_chunk_pins_its_annotated_assigners_before_the_load_call() {
+    let output = prepare_vendor_jobs("vendor-pin", true);
+    let vendor = linked_chunk_text(&output, "main-vendor");
+
+    // Both halves are required: `@noinline` alone still loses to
+    // CrossChunkCodeMotion, the pin alone still loses to inlining. Measured
+    // on the real failing job, only the pair compiles.
+    assert!(vendor.contains("/** @noinline */"), "{vendor}");
+    let pin = "__runtime_0.v=[set_version$$1];";
+    assert!(vendor.contains(pin), "{vendor}");
+    // The pin uses this chunk's own alias and runs as part of the chunk, so
+    // it sits between the module text and the trailing `l()`.
+    assert!(
+        vendor.find(pin).unwrap() < vendor.find("__runtime_0.l(0);").unwrap(),
+        "{vendor}"
+    );
+    assert!(vendor.trim_end().ends_with("__runtime_0.l(0);"), "{vendor}");
+    // Only annotated functions are pinned.
+    assert!(!vendor.contains("pure_helper$$1]"), "{vendor}");
+    assert!(!vendor.contains(",pure_helper$$1"), "{vendor}");
+}
+
+#[test]
+fn non_vendor_chunks_are_never_pinned() {
+    // Motion out of base and lazy chunks is legal and is what keeps them
+    // small, so nothing there is pinned even if it carries the annotation.
+    let output = prepare_vendor_jobs("vendor-pin-absent", false);
+    for chunk_name in ["main", "src-panel-lazy"] {
+        let text = linked_chunk_text(&output, chunk_name);
+        assert!(!text.contains(".v=["), "{chunk_name}: {text}");
+    }
+
+    let split = prepare_vendor_jobs("vendor-pin-split", true);
+    let panel = linked_chunk_text(&split, "src-panel-lazy");
+    assert!(!panel.contains(".v=["), "{panel}");
+}

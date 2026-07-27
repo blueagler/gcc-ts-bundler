@@ -3,6 +3,24 @@ use std::path::Path;
 pub use crate::utils::normalize_path;
 use crate::utils::short_stable_id;
 
+/// Suffix the chunk planner appends to the base chunk name to name the
+/// vendor chunk.
+///
+/// It is a shared constant because two crates-worth of code recognise a
+/// vendor chunk by it: the planner mints the name, and hoisted emission has
+/// to know which modules land there so it can pin their mutable state
+/// (`transpile::assigners`). Only the chunk name and file list cross the napi
+/// boundary into the transpiler, so the name *is* the channel.
+pub const VENDOR_CHUNK_NAME_SUFFIX: &str = "-vendor";
+
+pub fn vendor_chunk_name(base_chunk_name: &str) -> String {
+    format!("{base_chunk_name}{VENDOR_CHUNK_NAME_SUFFIX}")
+}
+
+pub fn is_vendor_chunk_name(chunk_name: &str) -> bool {
+    chunk_name.ends_with(VENDOR_CHUNK_NAME_SUFFIX)
+}
+
 pub fn to_goog_module_id(file_path: &Path, root_dir: &Path) -> String {
     let normalized_path = normalize_path(file_path);
     let relative_path = normalized_path

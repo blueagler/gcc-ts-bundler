@@ -6,12 +6,13 @@
 //! facade modules append a small `__register` block exposing export slots.
 
 use super::*;
+use crate::transpile::assigners::{assigner_function_name, NOINLINE_TAG};
 use crate::transpile::pure_calls::{
     collect_pure_annotated_binding_names, pure_annotation_for_statement,
 };
 use crate::transpile::typed_annotations::{
     annotation_key, compose_annotations, insert_member_annotations, rewrite_type_names,
-    typed_annotation_for_statement, TypedAnnotationsByName,
+    typed_annotation_for_statement, TypedAnnotationsByName, PURE_TAG,
 };
 use swc_core::ecma::ast::{KeyValueProp, ObjectPatProp, Prop};
 
@@ -102,6 +103,15 @@ pub(super) fn emit_hoisted_module_program(
     // (`__gcc_req_0[2]`) are deliberately excluded — a slot access is not a
     // type name, so any annotation referencing one is dropped whole by
     // `rewrite_type_names`.
+    //
+    // Only a vendor chunk needs its mutating functions pinned in place; motion
+    // out of base and lazy chunks is legal and is how they stay small (see
+    // `transpile::assigners`). An empty set makes the detector a no-op.
+    let module_bindings: HashSet<String> = if context.vendor_module_ids.contains(&module_id) {
+        suffixed_type_names.values().cloned().collect()
+    } else {
+        HashSet::new()
+    };
     let mut jsdoc_type_names = suffixed_type_names;
     jsdoc_type_names.extend(
         all_rewrites
@@ -118,15 +128,24 @@ pub(super) fn emit_hoisted_module_program(
             .map(|annotation| annotation.jsdoc.as_str())
             .filter(|jsdoc| !jsdoc.is_empty())
             .and_then(|jsdoc| rewrite_type_names(jsdoc, &jsdoc_type_names));
-        let prefix = compose_annotations(
-            pure_annotation_for_statement(
-                statement,
-                &pure_names,
-                &context.pure_callees,
-                to_original_name,
-            ),
-            block.as_deref(),
-        );
+        // Every leading tag merges into the one JSDoc block: Closure keeps
+        // only the block nearest the declaration and silently drops earlier
+        // ones, so two adjacent blocks would lose the first.
+        let mut tags = Vec::new();
+        if !pure_annotation_for_statement(
+            statement,
+            &pure_names,
+            &context.pure_callees,
+            to_original_name,
+        )
+        .is_empty()
+        {
+            tags.push(PURE_TAG);
+        }
+        if assigner_function_name(statement, &module_bindings).is_some() {
+            tags.push(NOINLINE_TAG);
+        }
+        let prefix = compose_annotations(&tags, block.as_deref());
         let members = annotation
             .map(|annotation| {
                 annotation

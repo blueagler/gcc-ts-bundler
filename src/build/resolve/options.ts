@@ -40,6 +40,21 @@ export function normalizeBuildOptions(
   const chunkManifestFile = path.basename(
     options.chunks?.manifestFile ?? DEFAULT_BUILD_OPTIONS.chunks.manifestFile,
   );
+  const chunkMode = requireChoice(
+    options.chunks?.mode ?? DEFAULT_BUILD_OPTIONS.chunks.mode,
+    CHUNK_MODES,
+    "chunks.mode",
+  );
+  const chunkOutputType = requireChoice(
+    options.chunks?.outputType ?? DEFAULT_BUILD_OPTIONS.chunks.outputType,
+    CHUNK_OUTPUT_TYPES,
+    "chunks.outputType",
+  );
+  const languageOut = requireChoice(
+    options.languageOut ?? DEFAULT_BUILD_OPTIONS.languageOut,
+    LANGUAGE_OUTPUTS,
+    "languageOut",
+  );
 
   return {
     cache: {
@@ -57,17 +72,15 @@ export function normalizeBuildOptions(
         options.chunks?.baseChunkName ??
         DEFAULT_BUILD_OPTIONS.chunks.baseChunkName,
       manifestFile: chunkManifestFile,
-      mode: requireChoice(
-        options.chunks?.mode ?? DEFAULT_BUILD_OPTIONS.chunks.mode,
-        CHUNK_MODES,
-        "chunks.mode",
-      ),
-      outputType: requireChoice(
-        options.chunks?.outputType ?? DEFAULT_BUILD_OPTIONS.chunks.outputType,
-        CHUNK_OUTPUT_TYPES,
-        "chunks.outputType",
-      ),
+      mode: chunkMode,
+      outputType: chunkOutputType,
       publicPath: chunkPublicPath,
+      vendorChunk: resolveVendorChunk({
+        chunkMode,
+        languageOut,
+        outputType: chunkOutputType,
+        vendorChunk: options.chunks?.vendorChunk,
+      }),
     },
     compat: {
       classMapCalls: [...(options.compat?.classMapCalls ?? [])].map((call) => ({
@@ -109,11 +122,7 @@ export function normalizeBuildOptions(
         ? filePath
         : path.resolve(projectRoot, filePath),
     ),
-    languageOut: requireChoice(
-      options.languageOut ?? DEFAULT_BUILD_OPTIONS.languageOut,
-      LANGUAGE_OUTPUTS,
-      "languageOut",
-    ),
+    languageOut,
     outDir,
     packages: requireChoice(
       options.packages ?? DEFAULT_BUILD_OPTIONS.packages,
@@ -181,6 +190,49 @@ export function resolveChunkOutputType({
     return "script";
   }
   return outputType === "auto" ? AUTO_CHUNK_OUTPUT_TYPE : outputType;
+}
+
+/**
+ * Applies the gates for the vendor chunk.
+ *
+ * **Opt-in only.** `auto` resolves to `false`; nothing but an explicit
+ * `vendorChunk: true` turns the split on. The split trades first-load bytes
+ * for repeat-visit stability, and which side wins depends on traffic the
+ * bundler cannot see, so it is not a default we can pick for anyone. Measured
+ * on the Svelte example: 29,796 B gzip split versus 27,570 B unsplit, against
+ * a ~12.5 KB gzip vendor chunk that then survives every app-only deploy in
+ * the browser cache. See docs/vite.md.
+ *
+ * The gates below still apply on top of an explicit `true`: the split only
+ * works under ES module output, where the base chunk's file name is embedded
+ * in every sibling's `import` statement and an app edit therefore cascades
+ * new names through the whole graph. Script-mode chunks reference each other
+ * through the manifest instead, so there is nothing to stabilise and an extra
+ * chunk is pure overhead; `off`/`split` have no chunk graph at all.
+ */
+export function resolveVendorChunk({
+  chunkMode,
+  languageOut,
+  outputType,
+  vendorChunk = "auto",
+  worker = false,
+}: {
+  chunkMode: ChunkMode;
+  languageOut: LanguageOut;
+  outputType: ChunkOutputType;
+  vendorChunk?: boolean | "auto" | undefined;
+  worker?: boolean;
+}): boolean {
+  if (vendorChunk !== true) {
+    return false;
+  }
+  if (chunkMode !== "bundler-runtime") {
+    return false;
+  }
+  return (
+    resolveChunkOutputType({ chunkMode, languageOut, outputType, worker }) ===
+    "esm"
+  );
 }
 
 function normalizeEntry(entry: BuildEntryOption, srcDir: string) {

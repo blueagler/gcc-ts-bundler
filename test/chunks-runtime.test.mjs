@@ -3,7 +3,12 @@ import path from "node:path";
 import { expect, test } from "bun:test";
 
 import { build } from "../dist/index.mjs";
-import { resolveChunkOutputType } from "../src/build/resolve/options.ts";
+import {
+  normalizeBuildOptions,
+  resolveChunkOutputType,
+  resolveVendorChunk,
+} from "../src/build/resolve/options.ts";
+import { getOptionsSignature } from "../src/build/resolve/signatures.ts";
 import {
   createFixture,
   findFilesNamed,
@@ -946,5 +951,269 @@ test.serial(
     // Unresolvable names drop the block, never the code.
     expect(linked).not.toContain("Ghost");
     expect(linked).toMatch(/function total\$\$\d+/);
+  },
+);
+
+test("resolves the vendor chunk through the same gates as module output", () => {
+  const resolve = (overrides) =>
+    resolveVendorChunk({
+      chunkMode: "bundler-runtime",
+      languageOut: "ECMASCRIPT_NEXT",
+      outputType: "esm",
+      ...overrides,
+    });
+
+  // Opt-in only: the split trades ~2.2 KB gzip of first load for a vendor
+  // chunk that survives app-only deploys in the browser cache, and which side
+  // wins depends on traffic the bundler cannot see. See docs/vite.md.
+  expect(resolve({ vendorChunk: true })).toBe(true);
+  expect(resolve({})).toBe(false);
+  expect(resolve({ vendorChunk: "auto" })).toBe(false);
+
+  // The split only stabilises names under module output, where the entry's
+  // file name is embedded in its siblings. Script chunks find each other
+  // through the manifest, so an extra chunk would be pure overhead.
+  expect(resolve({ outputType: "script", vendorChunk: true })).toBe(false);
+  for (const chunkMode of ["off", "split"]) {
+    expect(resolve({ chunkMode, vendorChunk: true })).toBe(false);
+  }
+  for (const languageOut of ["ECMASCRIPT3", "ECMASCRIPT5"]) {
+    expect(resolve({ languageOut, vendorChunk: true })).toBe(false);
+  }
+  expect(resolve({ worker: true, vendorChunk: true })).toBe(false);
+
+  expect(resolve({ vendorChunk: false })).toBe(false);
+  // Explicit true never defeats a gate: a script consumer cannot be handed a
+  // chunk graph shape that only works for modules.
+  expect(resolve({ outputType: "script", vendorChunk: true })).toBe(false);
+
+  // The gates still track resolveChunkOutputType, so an explicit true follows
+  // the module-output default rather than needing a second decision.
+  expect(resolve({ outputType: "auto", vendorChunk: true })).toBe(
+    resolveChunkOutputType({
+      chunkMode: "bundler-runtime",
+      languageOut: "ECMASCRIPT_NEXT",
+      outputType: "auto",
+    }) === "esm",
+  );
+});
+
+test("chunks.vendorChunk participates in the options signature", () => {
+  const signature = (chunks) =>
+    getOptionsSignature(
+      normalizeBuildOptions({
+        chunks: { mode: "bundler-runtime", outputType: "esm", ...chunks },
+        entries: ["./main.ts"],
+        projectRoot: "/tmp/demo",
+        srcDir: "/tmp/demo/src",
+      }),
+    );
+
+  // Toggling it changes the chunk graph, so a cached build from the other
+  // setting must not be served.
+  expect(signature({ vendorChunk: false })).not.toBe(
+    signature({ vendorChunk: true }),
+  );
+  expect(signature({ vendorChunk: "auto" })).toBe(
+    signature({ vendorChunk: false }),
+  );
+});
+
+test("normalizeBuildOptions resolves chunks.vendorChunk to a boolean", () => {
+  const normalize = (chunks) =>
+    normalizeBuildOptions({
+      chunks,
+      entries: ["./main.ts"],
+      projectRoot: "/tmp/demo",
+      srcDir: "/tmp/demo/src",
+    }).chunks.vendorChunk;
+
+  expect(
+    normalize({ mode: "bundler-runtime", outputType: "esm", vendorChunk: true }),
+  ).toBe(true);
+  // Opt-in: the default resolves false however friendly the rest of the shape.
+  expect(normalize({ mode: "bundler-runtime", outputType: "esm" })).toBe(false);
+  expect(
+    normalize({
+      mode: "bundler-runtime",
+      outputType: "script",
+      vendorChunk: true,
+    }),
+  ).toBe(false);
+  expect(
+    normalize({ mode: "bundler-runtime", outputType: "esm", vendorChunk: false }),
+  ).toBe(false);
+  expect(normalize({ mode: "off" })).toBe(false);
+  expect(normalize(undefined)).toBe(false);
+});
+
+/**
+ * App entry + an eagerly imported node_modules dependency + a lazy chunk.
+ * The dependency is what the vendor chunk is meant to carry out of the entry.
+ */
+async function writeVendorChunkFixture(fixture, appMarker, { lazy = true } = {}) {
+  await fixture.write(
+    "node_modules/vendor-pkg/package.json",
+    '{"name":"vendor-pkg","module":"./index.js","exports":"./index.js"}\n',
+  );
+  await fixture.write(
+    "node_modules/vendor-pkg/index.js",
+    [
+      "export function greet(name) {",
+      '  return "vendor:" + name;',
+      "}",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "src/feature.ts",
+    'export const marker = "LAZY_FEATURE";\n',
+  );
+  await fixture.write(
+    "src/main.ts",
+    [
+      'import { greet } from "vendor-pkg";',
+      // `off` mode rejects dynamic imports outright, so that case gets an
+      // otherwise identical entry without one.
+      ...(lazy
+        ? [
+            'const load = () => import("./feature");',
+            '(globalThis as Record<string, unknown>)["__loadFeature"] = load;',
+          ]
+        : []),
+      `document.body.textContent = greet(${JSON.stringify(appMarker)});`,
+      "",
+    ].join("\n"),
+  );
+}
+
+function readVendorChunkLayout(manifest) {
+  const baseChunk = manifest.chunks[manifest.baseChunk];
+  const vendorChunkId = baseChunk?.deps?.[0];
+  const lazyChunkIds = Object.keys(manifest.chunks).filter(
+    (chunkId) => chunkId !== manifest.baseChunk && chunkId !== vendorChunkId,
+  );
+  return {
+    baseUrl: baseChunk?.url,
+    lazyUrls: lazyChunkIds
+      .map((chunkId) => manifest.chunks[chunkId]?.url)
+      .sort((left, right) => String(left).localeCompare(String(right))),
+    vendorUrl: vendorChunkId ? manifest.chunks[vendorChunkId]?.url : undefined,
+  };
+}
+
+// NEEDS THE INTEGRATION BUILD: exercises build() from dist plus the native
+// planChunks vendorChunk field, so it only becomes meaningful after
+// `bun run build:js` and `bun run build:native`.
+test.serial(
+  "vendor chunk keeps its output name when app code changes",
+  { timeout: 40000 },
+  async () => {
+    const fixture = await createFixture();
+    const cacheDir = path.join(fixture.projectRoot, ".cache");
+    const buildOnce = async () =>
+      build({
+        cache: { dir: cacheDir, mode: "persistent" },
+        chunks: {
+          manifestFile: "chunk-map.json",
+          mode: "bundler-runtime",
+          outputType: "esm",
+          publicPath: "./",
+          // Opt-in since the default flip: the split costs first-load bytes.
+          vendorChunk: true,
+        },
+        entries: ["./main.ts"],
+        outDir: fixture.outDir,
+        projectRoot: fixture.projectRoot,
+        srcDir: fixture.srcDir,
+      });
+
+    await writeVendorChunkFixture(fixture, "first");
+    expect((await buildOnce()).ok).toBe(true);
+    const first = readVendorChunkLayout(
+      JSON.parse(await fixture.read("dist/chunk-map.json")),
+    );
+    expect(first.vendorUrl).toBeDefined();
+    const firstVendorContent = await fixture.read(
+      `dist/${first.vendorUrl.replace(/^\.\//u, "")}`,
+    );
+    const firstBaseContent = await fixture.read("dist/main.js");
+
+    // Only app code changes; the dependency and the lazy module are untouched.
+    await writeVendorChunkFixture(fixture, "second");
+    expect((await buildOnce()).ok).toBe(true);
+    const second = readVendorChunkLayout(
+      JSON.parse(await fixture.read("dist/chunk-map.json")),
+    );
+    const secondVendorContent = await fixture.read(
+      `dist/${second.vendorUrl.replace(/^\.\//u, "")}`,
+    );
+    const secondBaseContent = await fixture.read("dist/main.js");
+
+    // The deliverable: the dependency half of the graph stops churning, so its
+    // cache entry survives an app edit. On a real app that is the biggest
+    // chunk by far.
+    expect(second.vendorUrl).toBe(first.vendorUrl);
+
+    // Standalone builds publish stable file names (`main.js`, internal chunk
+    // ids), so stability is asserted on content: the vendor chunk's bytes
+    // are identical across the app edit while the entry's changed. Hash
+    // churn semantics live in the vite naming tests. Pinned limit, not an
+    // oversight: a lazy chunk's shipped bytes contain `import ... from
+    // "./<entry>.js"`, so under vite naming it rehashes with the entry;
+    // full lazy stability would need import-map indirection.
+    expect(secondVendorContent).toBe(firstVendorContent);
+    expect(secondBaseContent).not.toBe(firstBaseContent);
+  },
+);
+
+// NEEDS THE INTEGRATION BUILD (see above).
+test.serial(
+  "no vendor chunk outside esm bundler-runtime output",
+  { timeout: 40000 },
+  async () => {
+    const cases = [
+      { chunks: { mode: "bundler-runtime", outputType: "script", vendorChunk: true }, label: "script output" },
+      { chunks: { mode: "bundler-runtime", outputType: "esm", vendorChunk: false }, label: "vendorChunk: false" },
+      // The default is now opt-in, so an untouched esm build has no vendor chunk.
+      { chunks: { mode: "bundler-runtime", outputType: "esm" }, label: "vendorChunk default" },
+      { chunks: { mode: "off" }, label: "off mode" },
+    ];
+
+    for (const testCase of cases) {
+      const fixture = await createFixture();
+      await writeVendorChunkFixture(fixture, "only", {
+        lazy: testCase.chunks.mode !== "off",
+      });
+      const result = await build({
+        cache: { mode: "off" },
+        chunks: {
+          manifestFile: "chunk-map.json",
+          publicPath: "./",
+          ...testCase.chunks,
+        },
+        entries: ["./main.ts"],
+        outDir: fixture.outDir,
+        projectRoot: fixture.projectRoot,
+        srcDir: fixture.srcDir,
+      });
+      expect(result.ok).toBe(true);
+
+      if (testCase.chunks.mode === "off") {
+        // No chunk graph at all, so nothing to partition.
+        expect(
+          result.outputFiles.filter((filePath) => filePath.endsWith(".js")),
+        ).toHaveLength(1);
+        continue;
+      }
+
+      const manifest = JSON.parse(await fixture.read("dist/chunk-map.json"));
+      // The base chunk depends on the vendor chunk and on nothing else, so an
+      // empty dependency list is exactly "no vendor chunk was emitted".
+      expect(
+        manifest.chunks[manifest.baseChunk].deps,
+        `${testCase.label}: base chunk must have no vendor dependency`,
+      ).toEqual([]);
+    }
   },
 );
