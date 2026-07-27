@@ -53,12 +53,6 @@ import {
 } from "./workspace";
 
 export { normalizeBuildOptions } from "./options";
-export {
-  getOptionsSignature,
-  getPackageRoot,
-  getPackageSignature,
-} from "./signatures";
-
 interface ResolveEnv {
   cacheStore: Awaited<ReturnType<typeof createCacheStore>>;
   compilerOptionsHash: string;
@@ -317,6 +311,7 @@ function createResolveMetadata(
     ],
     lazyImports: fresh.graphResult.lazyImports,
     shimFiles,
+    vendorChunk: options.chunks.vendorChunk,
     workspaceDir: env.cacheStore.workspaceDir,
   });
   return {
