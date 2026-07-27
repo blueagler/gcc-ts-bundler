@@ -3,11 +3,7 @@ import path from "path";
 import { readJsonIfExists } from "../../shared/cache-store";
 import type { collectTrackedFiles } from "../../shared/file-state";
 import { CHUNK_KINDS } from "../types";
-import type {
-  ChunkPlanChunk,
-  LazyImport,
-  PackageAlias,
-} from "../types";
+import type { ChunkPlanChunk, LazyImport, PackageAlias } from "../types";
 import {
   arrayOf,
   isBoolean,

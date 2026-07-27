@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import ts from "typescript";
@@ -15,6 +16,7 @@ import {
   parseJson,
 } from "../../shared/validation";
 import type {
+  ChunkPlanChunk,
   LazyImport,
   ResolvedBuildOptions,
   PackageAlias,
@@ -44,6 +46,7 @@ export interface NativeEmitStageResult {
 }
 
 interface NativeEmitMetadata {
+  chunkSignature: string;
   dependencyModules: string[];
   dependencyRuntimeFiles: string[];
   emittedFiles: string[];
@@ -53,7 +56,22 @@ interface NativeEmitMetadata {
   version: number;
 }
 
-const NATIVE_EMIT_METADATA_VERSION = 8;
+const NATIVE_EMIT_METADATA_VERSION = 10;
+
+/**
+ * Hoisted bundler-runtime emission depends on chunk membership, so the native
+ * emit cache must be invalidated when the chunk plan changes shape.
+ */
+function computeChunkSignature(chunkPlan: ChunkPlanChunk[]): string {
+  return crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify(
+        chunkPlan.map((chunk) => ({ files: chunk.files, name: chunk.name })),
+      ),
+    )
+    .digest("hex");
+}
 
 interface QuickScannedNativeFile {
   fileName: string;
@@ -63,6 +81,7 @@ interface QuickScannedNativeFile {
 
 export async function emitNativeStage({
   cacheDir,
+  chunkPlan,
   fileNames,
   lazyImports,
   metadataPath,
@@ -74,6 +93,7 @@ export async function emitNativeStage({
   workspaceDir,
 }: {
   cacheDir: string;
+  chunkPlan: ChunkPlanChunk[];
   fileNames: string[];
   lazyImports: LazyImport[];
   metadataPath: string;
@@ -85,6 +105,7 @@ export async function emitNativeStage({
   workspaceDir: string;
 }): Promise<NativeEmitStageResult> {
   const usesPersistentCache = options.cache.mode === "persistent";
+  const chunkSignature = computeChunkSignature(chunkPlan);
   const paths = createNativeEmitPaths({
     cacheDir,
     tsxRuntimeSourceFiles,
@@ -102,10 +123,13 @@ export async function emitNativeStage({
   });
 
   const cachedResult = await restoreCachedNativeEmitResult({
+    chunkSignature,
     dependencyModules,
     dependencyRuntimeFiles,
     metadataPath,
     outDir: paths.outDir,
+    runtimeModuleSourceMapFile:
+      process.env.GCC_VITE_RUNTIME_SOURCE_MAP_FILE || undefined,
     usesPersistentCache,
   });
   if (usesPersistentCache) {
@@ -168,6 +192,27 @@ export async function emitNativeStage({
     Promise.resolve(
       runNativeTranspile({
         chunkMode: options.chunks.mode,
+        chunkPlan,
+        classMapCalls: options.compat.classMapCalls,
+        pureCallees: options.compat.pureCallees,
+        // Annotations are keyed by authored srcDir paths, but native emit
+        // walks the workspace overlay that mirrors srcDir at
+        // `<workspaceDir>/src`; remap so the per-file lookup can hit.
+        // Annotations without type inference are a measured net regression
+        // (+76 B gz), so the inference escape hatch disables them too.
+        typedAnnotations: (process.env["GCC_DISABLE_TYPE_INFERENCE"] === "1"
+          ? []
+          : options.typedAnnotations
+        ).map((file) => ({
+          ...file,
+          filePath: file.filePath.startsWith(options.srcDir)
+            ? path.join(
+                workspaceDir,
+                "src",
+                path.relative(options.srcDir, file.filePath),
+              )
+            : file.filePath,
+        })),
         combinedFileNames,
         explicitExternPaths: options.externs,
         externsPath: paths.externsPath,
@@ -191,6 +236,7 @@ export async function emitNativeStage({
 
   if (usesPersistentCache) {
     await persistNativeEmitMetadata({
+      chunkSignature,
       dependencyModules,
       dependencyRuntimeFiles,
       emittedFiles: result.emittedFiles,
@@ -382,16 +428,20 @@ function createNativeEmitPaths({
 }
 
 async function restoreCachedNativeEmitResult({
+  chunkSignature,
   dependencyModules,
   dependencyRuntimeFiles,
   metadataPath,
   outDir,
+  runtimeModuleSourceMapFile,
   usesPersistentCache,
 }: {
+  chunkSignature: string;
   dependencyModules: string[];
   dependencyRuntimeFiles: string[];
   metadataPath: string;
   outDir: string;
+  runtimeModuleSourceMapFile: string | undefined;
   usesPersistentCache: boolean;
 }) {
   if (!usesPersistentCache) {
@@ -401,11 +451,13 @@ async function restoreCachedNativeEmitResult({
   const cachedMetadata = await readMetadata(metadataPath);
   if (
     !cachedMetadata ||
+    cachedMetadata.chunkSignature !== chunkSignature ||
     !(await filesExist([
       cachedMetadata.externsPath,
       cachedMetadata.metadataPath,
       ...cachedMetadata.emittedFiles,
       ...cachedMetadata.supportFiles,
+      ...(runtimeModuleSourceMapFile ? [runtimeModuleSourceMapFile] : []),
     ]))
   ) {
     return null;
@@ -436,6 +488,10 @@ async function resetNativeEmitOutDir(outDir: string) {
 
 function runNativeTranspile({
   chunkMode,
+  chunkPlan,
+  classMapCalls,
+  pureCallees,
+  typedAnnotations,
   combinedFileNames,
   explicitExternPaths,
   externsPath,
@@ -447,6 +503,17 @@ function runNativeTranspile({
   workspaceDir,
 }: {
   chunkMode: string;
+  chunkPlan: ChunkPlanChunk[];
+  classMapCalls: Array<{ argIndex: number; callee: string }>;
+  pureCallees: string[];
+  typedAnnotations: ReadonlyArray<{
+    bindings: ReadonlyArray<{
+      jsdoc: string;
+      members?: ReadonlyArray<{ jsdoc: string; name: string }> | undefined;
+      name: string;
+    }>;
+    filePath: string;
+  }>;
   combinedFileNames: string[];
   explicitExternPaths: string[];
   externsPath: string;
@@ -458,7 +525,24 @@ function runNativeTranspile({
   workspaceDir: string;
 }) {
   return transpileSources({
+    chunkGraph: chunkPlan.map((chunk) => ({
+      files: chunk.files,
+      name: chunk.name,
+    })),
     chunkMode,
+    classMapCalls,
+    pureCallees,
+    typedAnnotations: typedAnnotations.map((file) => ({
+      bindings: file.bindings.map((binding) => ({
+        jsdoc: binding.jsdoc,
+        members: (binding.members ?? []).map((member) => ({
+          jsdoc: member.jsdoc,
+          name: member.name,
+        })),
+        name: binding.name,
+      })),
+      filePath: file.filePath,
+    })),
     explicitExternPaths,
     metadataPath,
     externsPath,
@@ -474,6 +558,7 @@ function runNativeTranspile({
 }
 
 async function persistNativeEmitMetadata({
+  chunkSignature,
   dependencyModules,
   dependencyRuntimeFiles,
   emittedFiles,
@@ -482,6 +567,7 @@ async function persistNativeEmitMetadata({
   metadataPathForNative,
   supportFiles,
 }: {
+  chunkSignature: string;
   dependencyModules: string[];
   dependencyRuntimeFiles: string[];
   emittedFiles: string[];
@@ -494,6 +580,7 @@ async function persistNativeEmitMetadata({
     metadataPath,
     JSON.stringify(
       {
+        chunkSignature,
         dependencyModules,
         dependencyRuntimeFiles,
         emittedFiles,
@@ -661,6 +748,7 @@ function resolveScriptKind(fileName: string) {
 }
 
 const isNativeEmitMetadata = isObjectOf<NativeEmitMetadata>({
+  chunkSignature: isString,
   dependencyModules: isStringArray,
   dependencyRuntimeFiles: isStringArray,
   emittedFiles: isStringArray,

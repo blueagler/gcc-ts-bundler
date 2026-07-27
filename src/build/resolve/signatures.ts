@@ -59,6 +59,7 @@ export async function getPackageSignature(packageRoot = getPackageRoot()) {
 
 export function getOptionsSignature(options: ResolvedBuildOptions) {
   return hashJson({
+    compat: options.compat,
     compilationLevel: options.compilationLevel,
     chunks: options.chunks,
     diagnostics: options.diagnostics,
@@ -71,8 +72,30 @@ export function getOptionsSignature(options: ResolvedBuildOptions) {
     languageOut: options.languageOut,
     outDir: options.outDir,
     packages: options.packages,
+    platformExterns: options.platformExterns,
     projectRoot: options.projectRoot,
     srcDir: options.srcDir,
+    // Content-hashed: the annotations are derived from app types, so a type
+    // change with no source-text change still has to miss the cache.
+    typedAnnotations: hashJson(
+      [...options.typedAnnotations]
+        .map((file) => ({
+          bindings: [...file.bindings]
+            .map(
+              (binding) =>
+                [
+                  binding.name,
+                  binding.jsdoc,
+                  [...(binding.members ?? [])]
+                    .map((member) => [member.name, member.jsdoc] as const)
+                    .sort((left, right) => left[0].localeCompare(right[0])),
+                ] as const,
+            )
+            .sort((left, right) => left[0].localeCompare(right[0])),
+          filePath: path.relative(options.srcDir, file.filePath),
+        }))
+        .sort((left, right) => left.filePath.localeCompare(right.filePath)),
+    ),
   });
 }
 

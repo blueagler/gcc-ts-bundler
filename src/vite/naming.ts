@@ -11,6 +11,7 @@ import type {
   NormalizedOutputOptions,
   OutputChunk,
   PreRenderedChunk,
+  ViteChunkOutputType,
 } from "./internal-types";
 import { joinPublicPath, stripPublicPathPrefix } from "./output";
 import {
@@ -26,9 +27,22 @@ interface BaseOutputSeed {
   preferredName: string | null;
 }
 
+/**
+ * A non-base chunk whose final name has been deferred to the finalize pass.
+ * Under ES module output every chunk name is embedded in its siblings, so
+ * names cannot be assigned until every chunk's final bytes exist (see
+ * `finalizeEsmChunkNames`).
+ */
+interface DeferredChunkSeed {
+  chunkId: string;
+  info: RenderableChunkInfo;
+  preferredName: string | null;
+}
+
 export interface RenamedNonBaseOutputs {
   baseChunkFilePath: string;
   baseSeed: BaseOutputSeed;
+  deferredChunkSeeds: DeferredChunkSeed[];
   emittedOutputFiles: string[];
   manifest: GccRuntimeManifest;
   manifestFilePath: string;
@@ -36,6 +50,7 @@ export interface RenamedNonBaseOutputs {
 
 export async function renameCompiledNonBaseJsOutputs(input: {
   baseChunkName: string;
+  chunkOutputType: ViteChunkOutputType;
   dynamicRootModuleIds: string[];
   jsChunks: OutputChunk[];
   manifestFilePath: string;
@@ -46,6 +61,7 @@ export async function renameCompiledNonBaseJsOutputs(input: {
   publicPath: string;
   runtimeModuleSourceMapFilePath: string;
 }) {
+  const deferNaming = input.chunkOutputType === "esm";
   const manifest = parseGccRuntimeManifest(
     await fs.readFile(input.manifestFilePath, "utf8"),
     input.manifestFilePath,
@@ -67,6 +83,7 @@ export async function renameCompiledNonBaseJsOutputs(input: {
     runtimeModuleSourceMap: runtimeModuleSourceMap ?? {},
   });
   const dynamicRootModuleIds = new Set(input.dynamicRootModuleIds);
+  const deferredChunkSeeds: DeferredChunkSeed[] = [];
   const renameMap = new Map<string, string>();
   const reservedNames = new Set<string>([
     stripPublicPathPrefix(baseChunk.url, manifest.publicPath),
@@ -108,15 +125,24 @@ export async function renameCompiledNonBaseJsOutputs(input: {
         dynamicRootModuleIds,
         moduleIds: chunk.sourceModuleIds,
       });
+    if (deferNaming) {
+      deferredChunkSeeds.push({
+        chunkId: chunk.chunkId,
+        info: renderableInfo,
+        preferredName: preferredSeed?.preferredName ?? null,
+      });
+      continue;
+    }
+    const contentHash = hashText(sourceText);
     const renderedFileName = ensureUniqueJsFileName(
       preferredSeed?.preferredName ??
         renderPatternFileName(
           input.outputOptions.chunkFileNames,
           renderableInfo,
-          sourceText,
+          contentHash,
           input.outputOptions.format,
         ),
-      sourceText,
+      contentHash,
       reservedNames,
     );
     reservedNames.add(renderedFileName);
@@ -162,6 +188,7 @@ export async function renameCompiledNonBaseJsOutputs(input: {
       entryModuleIds: [...(chunkModuleIds.get(baseChunkId)?.values() ?? [])],
       jsChunks: input.jsChunks,
     }),
+    deferredChunkSeeds,
     emittedOutputFiles: renamedOutputFiles,
     manifest,
     manifestFilePath: input.manifestFilePath,
@@ -171,12 +198,17 @@ export async function renameCompiledNonBaseJsOutputs(input: {
 export async function finalizeBaseJsOutputName(input: {
   baseChunkFilePath: string;
   baseSeed: BaseOutputSeed;
+  chunkOutputType: ViteChunkOutputType;
+  deferredChunkSeeds: DeferredChunkSeed[];
   emittedOutputFiles: string[];
   manifestFilePath: string;
   outputOptions: NormalizedOutputOptions;
   outDir: string;
   publicPath: string;
 }) {
+  if (input.chunkOutputType === "esm") {
+    return finalizeEsmChunkNames(input);
+  }
   const manifest = parseGccRuntimeManifest(
     await fs.readFile(input.manifestFilePath, "utf8"),
     input.manifestFilePath,
@@ -195,15 +227,16 @@ export async function finalizeBaseJsOutputName(input: {
       .filter((chunk) => chunk !== baseChunk)
       .map((chunk) => stripPublicPathPrefix(chunk.url, manifest.publicPath)),
   );
+  const contentHash = hashText(sourceText);
   const finalBaseFileName = ensureUniqueJsFileName(
     input.baseSeed.preferredName ??
       renderPatternFileName(
         input.outputOptions.entryFileNames,
         input.baseSeed.info,
-        sourceText,
+        contentHash,
         input.outputOptions.format,
       ),
-    sourceText,
+    contentHash,
     reservedNames,
   );
   if (finalBaseFileName === currentBaseFileName) {
@@ -226,6 +259,223 @@ export async function finalizeBaseJsOutputName(input: {
       renameMap,
     ),
   };
+}
+
+/**
+ * ES module output embeds chunk file names in two directions at once: every
+ * lazy chunk carries `import ... from "./<base>.js"`, and the base chunk
+ * carries the lazy chunk names in the runtime manifest. Hashing either side
+ * changes the other, so content hashes cannot be taken over the shipped bytes.
+ *
+ * This is Rollup's placeholder scheme: every chunk reference is replaced with
+ * a stable token, each chunk is hashed over that tokenised text, and a chunk's
+ * final hash additionally folds in the tokenised hashes of every chunk it can
+ * reach. Cycles are fine because the folded-in hashes are themselves
+ * cycle-free, and a change anywhere in a chunk's reference closure still
+ * changes its name.
+ */
+async function finalizeEsmChunkNames(input: {
+  baseSeed: BaseOutputSeed;
+  deferredChunkSeeds: DeferredChunkSeed[];
+  emittedOutputFiles: string[];
+  manifestFilePath: string;
+  outDir: string;
+  outputOptions: NormalizedOutputOptions;
+  publicPath: string;
+}) {
+  const manifest = parseGccRuntimeManifest(
+    await fs.readFile(input.manifestFilePath, "utf8"),
+    input.manifestFilePath,
+  );
+  const baseChunkId = manifest.baseChunk;
+  const chunks = Object.entries(manifest.chunks)
+    .map(([chunkId, chunk]) => {
+      const oldFileName = stripPublicPathPrefix(chunk.url, manifest.publicPath);
+      return {
+        // Closure names its outputs after the chunk id and the base chunk is
+        // renamed on the way out of the compiler, so sibling chunks can still
+        // import it under `./<chunkId>.js`. Both spellings resolve here.
+        aliases: [...new Set([oldFileName, `${chunkId}.js`])],
+        chunkId,
+        chunk,
+        oldFileName,
+      };
+    })
+    .sort((left, right) => left.chunkId.localeCompare(right.chunkId));
+  const baseChunk = chunks.find((chunk) => chunk.chunkId === baseChunkId);
+  if (!baseChunk) {
+    throw new Error("gccTsBundler() could not resolve the base runtime chunk.");
+  }
+
+  const tokenByChunkId = new Map(
+    chunks.map((chunk, index) => [chunk.chunkId, chunkNameToken(index)]),
+  );
+  const tokenisedByChunkId = new Map<string, string>();
+  const referencesByChunkId = new Map<string, Set<string>>();
+  for (const chunk of chunks) {
+    const sourceText = await fs.readFile(
+      path.join(input.outDir, chunk.oldFileName),
+      "utf8",
+    );
+    const references = new Set<string>();
+    let tokenised = sourceText;
+    for (const other of chunks) {
+      const token = tokenByChunkId.get(other.chunkId) ?? "";
+      for (const alias of other.aliases) {
+        const replaced = replaceChunkSpecifier(tokenised, alias, token);
+        if (replaced !== tokenised) {
+          references.add(other.chunkId);
+          tokenised = replaced;
+        }
+      }
+    }
+    tokenisedByChunkId.set(chunk.chunkId, tokenised);
+    referencesByChunkId.set(chunk.chunkId, references);
+  }
+
+  const finalHashByChunkId = new Map(
+    chunks.map((chunk) => [
+      chunk.chunkId,
+      hashText(
+        [
+          tokenisedByChunkId.get(chunk.chunkId) ?? "",
+          ...[
+            ...collectReferenceClosure(chunk.chunkId, referencesByChunkId),
+          ].map((referencedId) =>
+            hashText(tokenisedByChunkId.get(referencedId) ?? ""),
+          ),
+        ].join("\u0000"),
+      ),
+    ]),
+  );
+
+  const seedByChunkId = new Map(
+    input.deferredChunkSeeds.map((seed) => [seed.chunkId, seed]),
+  );
+  const reservedNames = new Set<string>();
+  const renameMap = new Map<string, string>();
+  // The base chunk is named first so that its entryFileNames pattern wins any
+  // collision against a lazy chunk that renders to the same name.
+  for (const chunk of [
+    baseChunk,
+    ...chunks.filter((candidate) => candidate.chunkId !== baseChunkId),
+  ]) {
+    const isBase = chunk.chunkId === baseChunkId;
+    const seed = seedByChunkId.get(chunk.chunkId);
+    const chunkHash = finalHashByChunkId.get(chunk.chunkId) ?? "";
+    const info =
+      (isBase ? input.baseSeed.info : seed?.info) ??
+      createFallbackChunkInfo({
+        chunkId: chunk.chunkId,
+        dynamicRootModuleIds: new Set<string>(),
+        moduleIds: new Set<string>(),
+      });
+    const preferredName = isBase
+      ? input.baseSeed.preferredName
+      : (seed?.preferredName ?? null);
+    const renderedFileName = ensureUniqueJsFileName(
+      preferredName ??
+        renderPatternFileName(
+          isBase
+            ? input.outputOptions.entryFileNames
+            : input.outputOptions.chunkFileNames,
+          info,
+          chunkHash,
+          input.outputOptions.format,
+        ),
+      chunkHash,
+      reservedNames,
+    );
+    reservedNames.add(renderedFileName);
+    renameMap.set(chunk.oldFileName, renderedFileName);
+  }
+
+  for (const chunk of chunks) {
+    let contents = tokenisedByChunkId.get(chunk.chunkId) ?? "";
+    const importerDir = path.posix.dirname(
+      renameMap.get(chunk.oldFileName) ?? chunk.oldFileName,
+    );
+    for (const other of chunks) {
+      // Specifiers are resolved against the importing module, so a chunk that
+      // moved into `assets/` must reference its sibling as `./sibling.js`, not
+      // `./assets/sibling.js`. The `./` prefix Closure emitted stays in the
+      // text, so only the path after it is substituted.
+      const target = renameMap.get(other.oldFileName) ?? other.oldFileName;
+      contents = contents
+        .split(tokenByChunkId.get(other.chunkId) ?? "")
+        .join(path.posix.relative(importerDir, target) || target);
+    }
+    await fs.writeFile(
+      path.join(input.outDir, chunk.oldFileName),
+      contents,
+      "utf8",
+    );
+    const renamedFileName = renameMap.get(chunk.oldFileName);
+    if (renamedFileName) {
+      chunk.chunk.url = joinPublicPath(input.publicPath, renamedFileName);
+    }
+  }
+  await writeManifest(input.manifestFilePath, manifest);
+
+  const emittedOutputFiles = mapOutputFiles(
+    input.emittedOutputFiles,
+    input.outDir,
+    renameMap,
+  );
+  await applyFileRenames(input.outDir, renameMap);
+
+  return {
+    baseScriptFileName:
+      renameMap.get(baseChunk.oldFileName) ?? baseChunk.oldFileName,
+    emittedOutputFiles,
+  };
+}
+
+/**
+ * A token that cannot occur in compiled JavaScript, so tokenised text never
+ * collides with real source.
+ */
+function chunkNameToken(index: number) {
+  return `\u0000gcc-chunk-${index}\u0000`;
+}
+
+/**
+ * Replaces `"./name.js"` / `"name.js"` (either quote style) with `"./token"` /
+ * `"token"`. Matching only complete quoted strings keeps the substitution away
+ * from arbitrary application text that happens to contain a chunk file name.
+ */
+function replaceChunkSpecifier(
+  sourceText: string,
+  fileName: string,
+  replacement: string,
+) {
+  const pattern = new RegExp(`(["'])(\\./)?${escapeRegExp(fileName)}\\1`, "gu");
+  return sourceText.replace(
+    pattern,
+    (_match: string, quote: string, prefix: string | undefined) =>
+      `${quote}${prefix ?? ""}${replacement}${quote}`,
+  );
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function collectReferenceClosure(
+  chunkId: string,
+  referencesByChunkId: Map<string, Set<string>>,
+) {
+  const closure = new Set<string>();
+  const queue = [...(referencesByChunkId.get(chunkId) ?? [])];
+  while (queue.length > 0) {
+    const next = queue.pop();
+    if (next === undefined || next === chunkId || closure.has(next)) {
+      continue;
+    }
+    closure.add(next);
+    queue.push(...(referencesByChunkId.get(next) ?? []));
+  }
+  return [...closure].sort((left, right) => left.localeCompare(right));
 }
 
 function deriveBaseOutputSeed(input: {
@@ -350,13 +600,13 @@ function renderPatternFileName(
     | NormalizedOutputOptions["chunkFileNames"]
     | NormalizedOutputOptions["entryFileNames"],
   chunkInfo: RenderableChunkInfo,
-  sourceText: string,
+  contentHash: string,
   format: NormalizedOutputOptions["format"],
 ) {
   const rendered = typeof pattern === "function" ? pattern(chunkInfo) : pattern;
   return normalizeOutputFileName(
     rendered.replace(/\[(name|format|ext|extname|hash(?::\d+)?)\]/gu, (token) =>
-      renderTokenReplacement(token, chunkInfo, sourceText, format),
+      renderTokenReplacement(token, chunkInfo, contentHash, format),
     ),
   );
 }
@@ -364,7 +614,7 @@ function renderPatternFileName(
 function renderTokenReplacement(
   token: string,
   chunkInfo: RenderableChunkInfo,
-  sourceText: string,
+  contentHash: string,
   format: NormalizedOutputOptions["format"],
 ) {
   if (token === "[name]") {
@@ -382,7 +632,7 @@ function renderTokenReplacement(
   const hashMatch = token.match(/^\[hash(?::(\d+))?\]$/u);
   if (hashMatch) {
     const hashLength = Number(hashMatch[1] ?? "8");
-    return hashText(sourceText).slice(0, hashLength);
+    return contentHash.slice(0, hashLength);
   }
   return token;
 }
@@ -393,7 +643,7 @@ function hashText(sourceText: string) {
 
 function ensureUniqueJsFileName(
   fileName: string,
-  sourceText: string,
+  contentHash: string,
   reservedNames: Set<string>,
 ) {
   const normalized = normalizeOutputFileName(fileName);
@@ -402,7 +652,7 @@ function ensureUniqueJsFileName(
   }
 
   const { dir, ext, name } = path.posix.parse(normalized);
-  const suffix = hashText(sourceText).slice(0, 8);
+  const suffix = contentHash.slice(0, 8);
   const deduped = normalizeOutputFileName(
     path.posix.join(dir, `${name}-${suffix}${ext || ".js"}`),
   );

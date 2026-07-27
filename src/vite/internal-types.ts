@@ -1,5 +1,7 @@
 import type { Rollup } from "vite";
 
+import type { ResolvedChunkOutputType } from "../api/types";
+
 export type NormalizedOutputOptions = Rollup.NormalizedOutputOptions;
 export type OutputAsset = Rollup.OutputAsset;
 export type OutputBundle = Rollup.OutputBundle;
@@ -69,6 +71,14 @@ export interface GccRuntimeManifest {
   modules: Record<string, string>;
   publicPath: string;
 }
+
+/**
+ * Resolved shape of `chunks.outputType`, after gating. `"script"` keeps the
+ * global-namespace chunks that are injected as classic scripts; `"esm"` means
+ * Closure emitted native modules whose cross-chunk edges are real
+ * `import`/`export` statements.
+ */
+export type ViteChunkOutputType = ResolvedChunkOutputType;
 
 export interface ViteCssOwnership {
   enabled: boolean;

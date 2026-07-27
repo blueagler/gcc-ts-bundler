@@ -126,6 +126,10 @@ export function getCapturedModuleAnalysis(
   return analysis;
 }
 
+function isDependencyModuleId(id: string) {
+  return stripQuery(id).includes("/node_modules/");
+}
+
 export async function normalizeCapturedCode(
   id: string,
   code: string,
@@ -134,13 +138,20 @@ export async function normalizeCapturedCode(
   let nextCode = code;
   const moduleAnalysis = analysis ?? analyzeModuleCode(id, code);
 
-  if (moduleAnalysis.needsClosureCompatibilityDownlevel) {
+  // Dependency modules flow through the region prebundle, which lowers
+  // Closure-unsupported syntax once per bundle with esbuild code splitting.
+  // Lowering them here instead would duplicate esbuild's private-field
+  // helpers into every module that uses them.
+  if (
+    moduleAnalysis.needsClosureCompatibilityDownlevel &&
+    !isDependencyModuleId(id)
+  ) {
     const transformWithEsbuild = await loadViteEsbuildTransform();
     const result = await transformWithEsbuild(nextCode, stripQuery(id), {
       format: "esm",
       loader: resolveEsbuildLoader(id),
       sourcemap: false,
-      target: "es2018",
+      target: "es2021",
     });
     nextCode = result.code;
   }
@@ -240,15 +251,39 @@ export async function resolveCapturedSpecifier(
   const cacheKey = `${input.importerId}\u0000${input.specifier}`;
   let pendingResolution = input.resolutionCache.get(cacheKey);
   if (!pendingResolution) {
-    if (input.metrics) {
-      input.metrics.retainedEdgeResolutionCount += 1;
+    // Bare package specifiers resolve identically for every importer in the
+    // same directory, and most retained-graph edges are repeated package
+    // imports (`svelte/internal/client` from dozens of modules).
+    const directoryKey = isBarePackageSpecifier(input.specifier)
+      ? `\u0001${path.dirname(stripQuery(input.importerId))}\u0000${input.specifier}`
+      : null;
+    if (directoryKey) {
+      pendingResolution = input.resolutionCache.get(directoryKey);
     }
-    pendingResolution = this.resolve(input.specifier, input.importerId, {
-      skipSelf: true,
-    });
+    if (!pendingResolution) {
+      if (input.metrics) {
+        input.metrics.retainedEdgeResolutionCount += 1;
+      }
+      pendingResolution = this.resolve(input.specifier, input.importerId, {
+        skipSelf: true,
+      });
+      if (directoryKey) {
+        input.resolutionCache.set(directoryKey, pendingResolution);
+      }
+    }
     input.resolutionCache.set(cacheKey, pendingResolution);
   }
   return await pendingResolution;
+}
+
+function isBarePackageSpecifier(specifier: string) {
+  return (
+    specifier.length > 0 &&
+    !specifier.startsWith(".") &&
+    !specifier.startsWith("/") &&
+    !specifier.startsWith("\u0000") &&
+    !path.isAbsolute(specifier)
+  );
 }
 
 export function isAuthoredModuleId(moduleId: string, projectRoot: string) {

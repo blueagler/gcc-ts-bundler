@@ -8,6 +8,7 @@ import {
   DIAGNOSTICS_PREFLIGHT_MODES,
   LANGUAGE_OUTPUTS,
   PACKAGE_MODES,
+  PLATFORM_EXTERNS_MODES,
 } from "../api/types";
 export interface CliParseResult {
   options: BuildOptions;
@@ -35,6 +36,7 @@ export function parseCliArgs(args: string[]): CliParseResult {
       "language-out": { type: "string" },
       "out-dir": { type: "string" },
       packages: { type: "string" },
+      "platform-externs": { type: "string" },
       preflight: { type: "string" },
       "project-root": { type: "string" },
       "src-dir": { type: "string" },
@@ -82,6 +84,11 @@ export function parseCliArgs(args: string[]): CliParseResult {
     ),
     outDir: values["out-dir"],
     packages: parseChoice(values.packages, PACKAGE_MODES, "--packages"),
+    platformExterns: parseChoice(
+      values["platform-externs"],
+      PLATFORM_EXTERNS_MODES,
+      "--platform-externs",
+    ),
     projectRoot: values["project-root"],
     srcDir: values["src-dir"],
   };

@@ -37,6 +37,8 @@ interface NativeClosureCompileJob {
   assumeFunctionWrapper: boolean;
   chunk?: string[];
   chunkOutputPathPrefix?: string;
+  /** Closure `--chunk_output_type`; omitted for GLOBAL_NAMESPACE (default). */
+  chunkOutputType?: string;
   compilationLevel: string;
   dependencyMode?: string;
   entryPoint?: string[];
@@ -75,6 +77,8 @@ interface NativePostprocessAction {
 interface NativePrepareClosureJobsInput {
   chunkLoader: string;
   chunkMode: string;
+  /** Resolved `"script" | "esm"`; never `"auto"`. */
+  chunkOutputType: string;
   chunkPlan: NativeChunkPlanChunkOutput[];
   compilationLevel: string;
   diagnosticsVerbose: boolean;
@@ -164,6 +168,27 @@ interface NativeTranspilePackageAlias {
   targetPath: string;
 }
 
+interface NativeTranspileChunkInput {
+  files: string[];
+  name: string;
+}
+
+interface NativeClassMapCallInput {
+  argIndex: number;
+  callee: string;
+  keyPattern?: string | undefined;
+}
+
+/** Mirrors `TypedAnnotationFile`; napi object passed to `transpile_sources`. */
+interface NativeTypedAnnotationFileInput {
+  bindings: Array<{
+    jsdoc: string;
+    members: Array<{ jsdoc: string; name: string }>;
+    name: string;
+  }>;
+  filePath: string;
+}
+
 interface NativeBinding {
   collectFileStates(filePaths: string[]): NativeFileStateEntry[];
   collectPublishedOutputStats(
@@ -211,6 +236,10 @@ interface NativeBinding {
     packageAliases: NativeTranspilePackageAlias[],
     packageJsonFiles: string[],
     lazyImports: NativeLazyImportInput[],
+    chunkGraph: NativeTranspileChunkInput[],
+    classMapCalls: NativeClassMapCallInput[],
+    pureCallees: string[],
+    typedAnnotations: NativeTypedAnnotationFileInput[],
   ): NativeTranspileOutput;
   writeEntryShims(entries: NativeShimEntry[]): string[];
 }
@@ -325,7 +354,11 @@ export function rewriteDecoratorMetadata(
 }
 
 export function transpileSources(input: {
+  chunkGraph: NativeTranspileChunkInput[];
   chunkMode: string;
+  classMapCalls: NativeClassMapCallInput[];
+  pureCallees: string[];
+  typedAnnotations: NativeTypedAnnotationFileInput[];
   explicitExternPaths: string[];
   externsPath: string;
   fileNames: string[];
@@ -349,6 +382,10 @@ export function transpileSources(input: {
     input.packageAliases,
     input.packageJsonFiles,
     input.lazyImports,
+    input.chunkGraph,
+    input.classMapCalls,
+    input.pureCallees,
+    input.typedAnnotations,
   );
 }
 

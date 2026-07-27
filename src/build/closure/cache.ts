@@ -12,22 +12,30 @@ export interface ClosureJobCacheMetadata {
   version: number;
 }
 
-export const CLOSURE_JOB_CACHE_VERSION = 2;
+export const CLOSURE_JOB_CACHE_VERSION = 3;
 
 export interface ClosureCompileJobConfig {
   assumeFunctionWrapper: boolean;
   chunk?: string[] | null;
+  chunkOutputType?: string | null;
   compilationLevel: string;
   dependencyMode?: string | null;
   entryPoint?: string[] | null;
+  env?: string | null;
   externs: string[];
   js: string[];
   jsOutputFile?: string | null;
   languageIn: string;
   languageOut: string;
+  propertyMapInputFile?: string | null;
   propertyRenamingReportPath?: string | null;
+  variableMapInputFile?: string | null;
+  variableRenamingReportPath?: string | null;
   renamePrefixNamespace?: string | null;
   rewritePolyfills: boolean;
+  /** Silent `checkTypes` inference; see `applyTypeInference`. Not derivable
+   * from any hashed file, so it has to be keyed explicitly. */
+  typeInference?: boolean;
   warningLevel: string;
 }
 
@@ -53,10 +61,14 @@ export function getCompileJobArtifactFiles(job: {
   chunk?: string[] | null;
   jsOutputFile?: string | null;
   propertyRenamingReportPath?: string | null;
+  variableRenamingReportPath?: string | null;
 }) {
   const artifacts = getCompileJobOutputFiles(job);
   if (job.propertyRenamingReportPath) {
     artifacts.push(job.propertyRenamingReportPath);
+  }
+  if (job.variableRenamingReportPath) {
+    artifacts.push(job.variableRenamingReportPath);
   }
   return artifacts;
 }
@@ -166,20 +178,34 @@ async function getClosureJobCacheDir(
   const outputFiles = getCompileJobOutputFiles(job);
   const jsHash = await hashFilesInOrder(job.js);
   const externHash = await hashFilesInOrder(job.externs);
+  const renamingMapHash = await hashFilesInOrder(
+    [job.propertyMapInputFile, job.variableMapInputFile].filter(
+      (filePath): filePath is string => typeof filePath === "string",
+    ),
+  );
   const cacheKey = hashJson({
     compilerVersion,
     externHash,
+    renamingMapHash,
     job: {
       assumeFunctionWrapper: job.assumeFunctionWrapper,
       chunk: job.chunk ?? null,
+      chunkOutputType: job.chunkOutputType ?? null,
       compilationLevel: job.compilationLevel,
       dependencyMode: job.dependencyMode ?? null,
       entryPoint: job.entryPoint ?? null,
+      env: job.env ?? null,
       hasPropertyRenamingReport: Boolean(job.propertyRenamingReportPath),
+      hasRenamingMapInputs: [
+        Boolean(job.propertyMapInputFile),
+        Boolean(job.variableMapInputFile),
+      ],
+      hasVariableRenamingReport: Boolean(job.variableRenamingReportPath),
       jsOutputKinds: outputFiles.map((outputFile) => path.basename(outputFile)),
       languageIn: job.languageIn,
       languageOut: job.languageOut,
       rewritePolyfills: job.rewritePolyfills,
+      typeInference: job.typeInference ?? false,
       warningLevel: job.warningLevel,
     },
     jsHash,

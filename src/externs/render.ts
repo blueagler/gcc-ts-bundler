@@ -7,23 +7,57 @@ import {
 } from "./contracts";
 import { renderStructuralExternLine } from "./shared";
 
-/** Extern lines for runtime protocol members plus used defined members. */
+/** How the app reads members, split by the syntax Closure sees. */
+export interface AppUsageMembers {
+  dotAccessed: ReadonlySet<string>;
+  stringLiteralRead: ReadonlySet<string>;
+}
+
+export function createEmptyAppUsageMembers(): AppUsageMembers {
+  return { dotAccessed: new Set(), stringLiteralRead: new Set() };
+}
+
+/**
+ * Extern lines for runtime protocol members plus genuinely mixed definition /
+ * read pairs:
+ *
+ * ```
+ * extern = protocolMembers
+ *        ∪ (stringDefined ∩ dotAccessed)
+ *        ∪ (dotDefined    ∩ stringLiteralRead)
+ * ```
+ *
+ * A member that is dot-defined *and* dot-accessed renames consistently inside
+ * one Closure invocation and must NOT be externed — externing it (and the
+ * native property quoting an extern drives) is what previously neutralised
+ * typed-annotation optimisation on ordinary app domain fields.
+ */
 export function collectRuntimeUsageExternLines(
   runtimeUsage: {
-    accessedMembers: ReadonlySet<string>;
-    definedMembers: Iterable<string>;
+    dotAccessed: ReadonlySet<string>;
+    dotDefined: Iterable<string>;
     protocolMembers: Iterable<string>;
+    stringDefined: Iterable<string>;
+    stringLiteralRead: ReadonlySet<string>;
   },
-  appUsageMembers: ReadonlySet<string>,
+  appUsage: AppUsageMembers,
 ): Set<string> {
   const emittedLines = new Set<string>();
   for (const member of runtimeUsage.protocolMembers) {
     emittedLines.add(renderStructuralExternLine(member));
   }
-  for (const member of runtimeUsage.definedMembers) {
+  for (const member of runtimeUsage.stringDefined) {
     if (
-      runtimeUsage.accessedMembers.has(member) ||
-      appUsageMembers.has(member)
+      runtimeUsage.dotAccessed.has(member) ||
+      appUsage.dotAccessed.has(member)
+    ) {
+      emittedLines.add(renderStructuralExternLine(member));
+    }
+  }
+  for (const member of runtimeUsage.dotDefined) {
+    if (
+      runtimeUsage.stringLiteralRead.has(member) ||
+      appUsage.stringLiteralRead.has(member)
     ) {
       emittedLines.add(renderStructuralExternLine(member));
     }
@@ -66,21 +100,31 @@ export function renderBoundaryAwareExterns({
 export async function renderRuntimeAwareExterns({
   analysis,
   modules,
+  protocolHelpers,
   runtimeEntryFiles,
 }: {
   analysis: ExternAnalysisContext;
   modules: string[];
+  protocolHelpers: {
+    keyExclusionListCallees: string[];
+    keyReadCallees: string[];
+  };
   runtimeEntryFiles: string[];
 }) {
-  const appUsageMembers =
+  // Boundary-aware usage is type-derived: members the app reaches through a
+  // contract, which it always spells as a dot access.
+  const appUsage: AppUsageMembers =
     analysis.appEntryFiles.length > 0
-      ? collectBoundaryAwareUsageMemberNames(analysis)
-      : new Set<string>();
-  const runtimeUsage = await analyzeRuntimeUsage(runtimeEntryFiles);
-  const emittedLines = collectRuntimeUsageExternLines(
-    runtimeUsage,
-    appUsageMembers,
+      ? {
+          dotAccessed: collectBoundaryAwareUsageMemberNames(analysis),
+          stringLiteralRead: new Set<string>(),
+        }
+      : createEmptyAppUsageMembers();
+  const runtimeUsage = await analyzeRuntimeUsage(
+    runtimeEntryFiles,
+    protocolHelpers,
   );
+  const emittedLines = collectRuntimeUsageExternLines(runtimeUsage, appUsage);
 
   return renderExternText({
     emittedLines,

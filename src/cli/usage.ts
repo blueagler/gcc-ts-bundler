@@ -24,6 +24,7 @@ Build flags:
   --chunk-base-name     Base chunk output name in chunk mode
   --chunk-manifest      Relative manifest path in chunk mode
   --packages            off | esm-only
+  --platform-externs    minimal | full (default minimal: generated flat platform externs)
   --extern              Closure extern file. May be provided multiple times
   --js                  Additional Closure JS input. May be provided multiple times
   --cache-mode          off | temp | persistent

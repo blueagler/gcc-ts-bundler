@@ -1,4 +1,4 @@
-import type { GenerateExternsMode } from "../externs";
+import type { ExternsProtocolHelpers, GenerateExternsMode } from "../externs";
 import type { BuildOptions } from "../api/types";
 
 export interface GccTsBundlerGeneratedExternsOptions {
@@ -7,6 +7,7 @@ export interface GccTsBundlerGeneratedExternsOptions {
   mode?: GenerateExternsMode | undefined;
   modules: readonly string[];
   outputFile?: string | undefined;
+  protocolHelpers?: ExternsProtocolHelpers | undefined;
 }
 
 export interface GccTsBundlerVitePluginOptions {

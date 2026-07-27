@@ -94,6 +94,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
         : [];
     const nativeEmitResult = await emitNativeStage({
       cacheDir: resolved.nativeEmitCacheDir,
+      chunkPlan: resolved.chunkPlan,
       fileNames:
         context.options.chunks.mode === "off"
           ? [...resolved.sourceFiles, ...resolved.shimFiles]
@@ -202,7 +203,8 @@ async function restoreFastSnapshot(
     (await publishedOutputsMatchSnapshot(
       snapshot.publishedOutputs,
       context.options.outDir,
-    )),
+    )) &&
+    (await requiredSidecarFilesExist()),
   );
   logInternalDetail("cache:final-fast", cacheHit ? "hit" : "miss");
   return snapshot && cacheHit
@@ -222,7 +224,9 @@ async function restoreFinalMetadata(
 ): Promise<BuildResult | null> {
   const metadata = await readJsonIfExists(metadataPath, isFinalCacheMetadata);
   const cacheHit = Boolean(
-    metadata && (await filesExist(metadata.outputFiles)),
+    metadata &&
+    (await filesExist(metadata.outputFiles)) &&
+    (await requiredSidecarFilesExist()),
   );
   logInternalDetail("cache:final-metadata", cacheHit ? "hit" : "miss");
   if (!metadata || !cacheHit) {
@@ -238,6 +242,15 @@ async function restoreFinalMetadata(
       context.options.outDir,
     ),
     true,
+  );
+}
+
+async function requiredSidecarFilesExist() {
+  const runtimeModuleSourceMapFile =
+    process.env.GCC_VITE_RUNTIME_SOURCE_MAP_FILE;
+  return (
+    !runtimeModuleSourceMapFile ||
+    (await filesExist([runtimeModuleSourceMapFile]))
   );
 }
 

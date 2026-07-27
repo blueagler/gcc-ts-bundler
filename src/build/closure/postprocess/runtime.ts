@@ -5,6 +5,15 @@ export function injectBundlerRuntimeEs5HelperBag(
   if (!helperBag) {
     return code;
   }
+  // The runtime preamble closes with this literal call, which Closure
+  // preserves verbatim. Helpers must be installed right after it: before any
+  // hoisted module code in the base chunk runs and before lazy chunks load.
+  const preambleMarker = ").call(this,globalThis);";
+  const preambleIndex = code.indexOf(preambleMarker);
+  if (preambleIndex !== -1) {
+    const insertAt = preambleIndex + preambleMarker.length;
+    return `${code.slice(0, insertAt)}\n${helperBag}${code.slice(insertAt)}`;
+  }
   const runtimeAlias = findBundlerRuntimeFinalizeAlias(code);
   const markers = runtimeAlias
     ? [`${runtimeAlias}.u(`, `${runtimeAlias}.n(`]
@@ -47,7 +56,9 @@ export function findBundlerRuntimeFinalizeAlias(code: string) {
 
 export function wrapBundlerRuntimeOutputFile(code: string) {
   const trimmed = code.trimEnd();
-  return `!function(){\n${trimmed}\n}();\n`;
+  // Closure's --rename_prefix_namespace output references top-level symbols
+  // through $gcc; every wrapped chunk shares the object via globalThis.
+  return `!function(){\nvar $gcc=globalThis.$gcc=globalThis.$gcc||{};\n${trimmed}\n}();\n`;
 }
 
 function findBundlerRuntimeRootAliases(code: string) {

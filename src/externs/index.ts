@@ -23,6 +23,17 @@ export const EXTERN_MODES = defineValues(
 );
 export type GenerateExternsMode = (typeof EXTERN_MODES)[number];
 
+/**
+ * Runtime helper calls that read or exclude property keys reflectively
+ * (for example a framework's `prop(props, "name")` or
+ * `rest_props(props, ["a", "b"])`). Framework presets supply these; the
+ * analyzer itself stays framework-agnostic.
+ */
+export interface ExternsProtocolHelpers {
+  keyExclusionListCallees?: readonly string[] | undefined;
+  keyReadCallees?: readonly string[] | undefined;
+}
+
 export interface GenerateExternsOptions {
   appEntryFiles?: readonly string[] | undefined;
   includeDependencies?: boolean | undefined;
@@ -30,6 +41,7 @@ export interface GenerateExternsOptions {
   modules: readonly string[];
   outputFile?: string | undefined;
   projectRoot?: string | undefined;
+  protocolHelpers?: ExternsProtocolHelpers | undefined;
   runtimeEntryFiles?: readonly string[] | undefined;
   srcDir?: string | undefined;
   tsConfigPath?: string | undefined;
@@ -51,6 +63,10 @@ interface ResolvedExternOptions {
   modules: string[];
   outputFile: string | undefined;
   projectRoot: string;
+  protocolHelpers: {
+    keyExclusionListCallees: string[];
+    keyReadCallees: string[];
+  };
   runtimeEntryFiles: string[];
   srcDir: string;
 }
@@ -128,6 +144,12 @@ async function resolveExternOptions(
         ? undefined
         : path.resolve(projectRoot, options.outputFile),
     projectRoot,
+    protocolHelpers: {
+      keyExclusionListCallees: [
+        ...(options.protocolHelpers?.keyExclusionListCallees ?? []),
+      ],
+      keyReadCallees: [...(options.protocolHelpers?.keyReadCallees ?? [])],
+    },
     runtimeEntryFiles,
     srcDir,
   };
@@ -186,6 +208,7 @@ async function renderExterns(
       return renderRuntimeAwareExterns({
         analysis,
         modules: options.modules,
+        protocolHelpers: options.protocolHelpers,
         runtimeEntryFiles: options.runtimeEntryFiles,
       });
     default:

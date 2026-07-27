@@ -283,8 +283,13 @@ function buildRuntimeCssIndexPatch(input: {
     if (!isUnknownArray(entry)) {
       return;
     }
-    const relativeUrl =
+    const rawRelativeUrl =
       typeof entry[1] === "string" ? entry[1] : String(entry[1] ?? "");
+    // The esm loader manifest stores `./name.js` import specifiers; the
+    // script loader stores bare names. Match both.
+    const relativeUrl = rawRelativeUrl.startsWith("./")
+      ? rawRelativeUrl.slice(2)
+      : rawRelativeUrl;
     const chunkId =
       relativeUrl.length === 0
         ? input.manifest.baseChunk

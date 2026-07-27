@@ -1,7 +1,11 @@
 import type { ResolvedConfig, UserConfig } from "vite";
 
 import { DEFAULT_BUILD_OPTIONS } from "../api/types";
-import type { BuildOptions, LanguageOut } from "../api/types";
+import type {
+  BuildOptions,
+  LanguageOut,
+  TypedAnnotationFile,
+} from "../api/types";
 import { isRecord } from "../shared/validation";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type { ManifestFileSettings } from "./internal-types";
@@ -83,6 +87,7 @@ export function createCompilerOptions(input: {
   projectRoot: string;
   publicPath: string;
   srcDir: string;
+  typedAnnotations?: readonly TypedAnnotationFile[] | undefined;
 }): BuildOptions {
   assertNoViteLanguageOut(input.options);
   const compiler = input.options.compiler ?? {};
@@ -97,6 +102,7 @@ export function createCompilerOptions(input: {
     projectRoot: input.projectRoot,
     srcDir: input.srcDir,
     languageOut: resolveViteLanguageOut(input.config),
+    typedAnnotations: input.typedAnnotations ?? [],
     chunks: {
       ...compilerChunks,
       baseChunkName:
@@ -104,6 +110,10 @@ export function createCompilerOptions(input: {
         DEFAULT_BUILD_OPTIONS.chunks.baseChunkName,
       manifestFile: input.manifestFile,
       mode: "bundler-runtime",
+      // The Vite plugin owns HTML emission and chunk naming, so module
+      // output is safe by default here. Standalone builds default to script
+      // output because the bundler does not own their HTML.
+      outputType: compilerChunks.outputType ?? "esm",
       publicPath: input.publicPath,
     },
   };

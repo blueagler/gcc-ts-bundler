@@ -3,13 +3,22 @@ import path from "path";
 import {
   CACHE_MODES,
   CHUNK_MODES,
+  CHUNK_OUTPUT_TYPES,
   COMPILATION_LEVELS,
   DEFAULT_BUILD_OPTIONS,
   DIAGNOSTICS_PREFLIGHT_MODES,
   LANGUAGE_OUTPUTS,
   PACKAGE_MODES,
+  PLATFORM_EXTERNS_MODES,
 } from "../../api/types";
-import type { BuildEntryOption, BuildOptions } from "../../api/types";
+import type {
+  BuildEntryOption,
+  BuildOptions,
+  ChunkMode,
+  ChunkOutputType,
+  LanguageOut,
+  ResolvedChunkOutputType,
+} from "../../api/types";
 import type { ResolvedBuildOptions } from "../types";
 import { requireChoice } from "../../shared/validation";
 
@@ -53,7 +62,22 @@ export function normalizeBuildOptions(
         CHUNK_MODES,
         "chunks.mode",
       ),
+      outputType: requireChoice(
+        options.chunks?.outputType ?? DEFAULT_BUILD_OPTIONS.chunks.outputType,
+        CHUNK_OUTPUT_TYPES,
+        "chunks.outputType",
+      ),
       publicPath: chunkPublicPath,
+    },
+    compat: {
+      classMapCalls: [...(options.compat?.classMapCalls ?? [])].map((call) => ({
+        argIndex: call.argIndex,
+        callee: call.callee,
+        ...(call.keyPattern === undefined
+          ? {}
+          : { keyPattern: call.keyPattern }),
+      })),
+      pureCallees: [...(options.compat?.pureCallees ?? [])],
     },
     compilationLevel: requireChoice(
       options.compilationLevel ?? DEFAULT_BUILD_OPTIONS.compilationLevel,
@@ -96,9 +120,67 @@ export function normalizeBuildOptions(
       PACKAGE_MODES,
       "packages",
     ),
+    platformExterns: requireChoice(
+      options.platformExterns ?? DEFAULT_BUILD_OPTIONS.platformExterns,
+      PLATFORM_EXTERNS_MODES,
+      "platformExterns",
+    ),
     projectRoot,
     srcDir,
+    typedAnnotations: (options.typedAnnotations ?? []).map((file) => ({
+      bindings: file.bindings.map((binding) => ({
+        jsdoc: binding.jsdoc,
+        members: (binding.members ?? []).map((member) => ({
+          jsdoc: member.jsdoc,
+          name: member.name,
+        })),
+        name: binding.name,
+      })),
+      filePath: file.filePath,
+    })),
   };
+}
+
+/**
+ * What `chunks.outputType: "auto"` resolves to once the gates below pass.
+ *
+ * Still `script`: ES_MODULES output needs placeholder-based chunk hashing and
+ * `<script type="module">` HTML emission to be correct end to end, and neither
+ * has landed. Flipping this constant to `"esm"` is the whole default flip.
+ */
+const AUTO_CHUNK_OUTPUT_TYPE: ResolvedChunkOutputType = "script";
+
+/**
+ * Applies the gates for chunk output shape.
+ *
+ * `esm` needs all three of: the bundler-runtime chunk loader (the only mode
+ * with a chunk graph and a manifest), an output level that can actually run
+ * `import`/`export` (Closure happily emits ES5 bodies *with* `import`
+ * statements, so this gate is ours), and a consumer that loads the entry as a
+ * module. Worker bundles and anything embedded with a plain `<script>` stay on
+ * `script`. The gates outrank an explicit `esm` request, so a forced-script
+ * consumer can never be handed module output.
+ */
+export function resolveChunkOutputType({
+  chunkMode,
+  languageOut,
+  outputType,
+  worker = false,
+}: {
+  chunkMode: ChunkMode;
+  languageOut: LanguageOut;
+  outputType: ChunkOutputType;
+  worker?: boolean;
+}): ResolvedChunkOutputType {
+  if (
+    chunkMode !== "bundler-runtime" ||
+    worker ||
+    languageOut === "ECMASCRIPT3" ||
+    languageOut === "ECMASCRIPT5"
+  ) {
+    return "script";
+  }
+  return outputType === "auto" ? AUTO_CHUNK_OUTPUT_TYPE : outputType;
 }
 
 function normalizeEntry(entry: BuildEntryOption, srcDir: string) {

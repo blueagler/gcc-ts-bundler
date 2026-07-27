@@ -6,6 +6,7 @@ import type {
   OutputBundle,
   OutputChunk,
   PluginContext,
+  ViteChunkOutputType,
 } from "./internal-types";
 
 export function listJavaScriptChunks(bundle: OutputBundle) {
@@ -77,9 +78,20 @@ export async function collectOutputByteBreakdown(input: {
   return { assets, css, fonts, js };
 }
 
+/**
+ * No `<link rel="modulepreload">` is emitted for ES module output, by design.
+ * The base chunk has no static imports at all — it is the whole eager graph —
+ * so there is no second-level module to preload, and lazy chunks are fetched
+ * through the runtime manifest, which already issues a chunk and every one of
+ * its dependencies in a single parallel round (measured identical to script
+ * output in docs/research/es-modules-output.md §5). Preload links would only
+ * become load-bearing if the manifest-driven dependency prefetch were ever
+ * removed in favour of the browser's own static-import discovery.
+ */
 export function rewriteHtmlAssets(input: {
   baseScriptFileName: string;
   bundle: OutputBundle;
+  chunkOutputType: ViteChunkOutputType;
   publicPath: string;
   removedChunkFileNames: Set<string>;
 }) {
@@ -100,10 +112,14 @@ export function rewriteHtmlAssets(input: {
         endsWithAnyFileName(src, input.removedChunkFileNames) ? "" : match,
     );
 
-    const scriptTag = `<script defer src="${joinPublicPath(
-      input.publicPath,
-      input.baseScriptFileName,
-    )}"></script>`;
+    const entryUrl = joinPublicPath(input.publicPath, input.baseScriptFileName);
+    // Module scripts are deferred by definition, and are always fetched in
+    // CORS mode: a cross-origin publicPath now needs Access-Control-Allow-Origin
+    // headers that a classic `defer` script never required.
+    const scriptTag =
+      input.chunkOutputType === "esm"
+        ? `<script type="module" crossorigin src="${entryUrl}"></script>`
+        : `<script defer src="${entryUrl}"></script>`;
     if (html.includes("</head>")) {
       html = html.replace("</head>", `    ${scriptTag}\n  </head>`);
     } else if (html.includes("</body>")) {

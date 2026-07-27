@@ -19,6 +19,14 @@
     "./native": {
       "types": "./dist/native/index.d.ts",
       "default": "./dist/native/index.mjs"
+    },
+    "./presets/svelte": {
+      "types": "./dist/presets/svelte.d.ts",
+      "default": "./dist/presets/svelte.mjs"
+    },
+    "./presets/vue": {
+      "types": "./dist/presets/vue.d.ts",
+      "default": "./dist/presets/vue.mjs"
     }
   },
   "devDependencies": {

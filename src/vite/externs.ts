@@ -6,8 +6,14 @@ import ts from "typescript";
 import { DEFAULT_BUILD_OPTIONS } from "../api/types";
 import { generateExterns } from "../api/build";
 import { collectRuntimeUsageExternLines } from "../externs/render";
+import type { AppUsageMembers } from "../externs/render";
 import { classifyModuleId, stripQuery } from "./capture";
-import { analyzeRuntimeUsage } from "../externs/runtime-analysis";
+import {
+  analyzeRuntimeUsage,
+  mergeRuntimeHazards,
+  RUNTIME_HAZARD_KEYS,
+} from "../externs/runtime-analysis";
+import type { RuntimeRenameHazards } from "../externs/runtime-analysis";
 import {
   getStringLiteralMemberName,
   isRuntimeExternPropertyName,
@@ -25,18 +31,26 @@ import { getPackageSignature } from "../build/resolve/signatures";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type { MaterializedGraph } from "./internal-types";
 
-interface CachedRuntimeHazards {
-  accessedMembers: string[];
-  definedMembers: string[];
-  protocolMembers: string[];
-}
+type CachedRuntimeHazards = Record<
+  (typeof RUNTIME_HAZARD_KEYS)[number],
+  string[]
+>;
 
-const VITE_EXTERN_PACKAGE_CACHE_VERSION = 2;
+// v3: hazard payload split into evidence classes (see externs/render.ts).
+const VITE_EXTERN_PACKAGE_CACHE_VERSION = 3;
 
 export async function resolveCompilerExterns(input: {
   captureRoot: string;
   materialized: MaterializedGraph;
   options: GccTsBundlerVitePluginOptions;
+  /**
+   * The graph Closure actually compiles. Dependency hazards must be read from
+   * here: esbuild's class-field lowering is what *creates* the string-keyed
+   * definitions (`__publicField(this, "name")`), so they do not exist yet in
+   * the pre-prebundle graph. Kept as a promise so the app-side scans still run
+   * concurrently with prebundling.
+   */
+  postPrebundleMaterialized: Promise<MaterializedGraph>;
   projectRoot: string;
 }) {
   const explicitExterns = [...(input.options.compiler?.externs ?? [])].map(
@@ -53,6 +67,14 @@ export async function resolveCompilerExterns(input: {
       path.join(input.captureRoot, "generated.externs.js"),
   );
 
+  const protocolHelpers = {
+    keyExclusionListCallees: [
+      ...(generateOptions.protocolHelpers?.keyExclusionListCallees ?? []),
+    ],
+    keyReadCallees: [
+      ...(generateOptions.protocolHelpers?.keyReadCallees ?? []),
+    ],
+  };
   if ((generateOptions.mode ?? "runtime-aware") === "runtime-aware") {
     await generateViteRuntimeAwareExterns({
       captureRoot: input.captureRoot,
@@ -61,7 +83,9 @@ export async function resolveCompilerExterns(input: {
       materialized: input.materialized,
       modules: [...generateOptions.modules],
       options: input.options,
+      postPrebundleMaterialized: input.postPrebundleMaterialized,
       projectRoot: input.projectRoot,
+      protocolHelpers,
     });
   } else {
     await generateExterns({
@@ -71,6 +95,7 @@ export async function resolveCompilerExterns(input: {
       modules: [...generateOptions.modules],
       outputFile: generatedExternFile,
       projectRoot: input.projectRoot,
+      protocolHelpers,
       runtimeEntryFiles: input.materialized.runtimeEntries,
       srcDir: input.materialized.srcDir,
     });
@@ -93,7 +118,12 @@ async function generateViteRuntimeAwareExterns(input: {
   materialized: MaterializedGraph;
   modules: string[];
   options: GccTsBundlerVitePluginOptions;
+  postPrebundleMaterialized: Promise<MaterializedGraph>;
   projectRoot: string;
+  protocolHelpers: {
+    keyExclusionListCallees: string[];
+    keyReadCallees: string[];
+  };
 }) {
   const packageSignature = await getPackageSignature();
   const cacheRoot = resolvePackageExternCacheRoot({
@@ -102,32 +132,18 @@ async function generateViteRuntimeAwareExterns(input: {
   });
   await fs.mkdir(cacheRoot, { recursive: true });
 
-  const appRuntimeFiles: string[] = [];
-  const dependencyFilesByPackage = new Map<string, string[]>();
-  for (const module of input.materialized.modules) {
-    if (isDependencyRuntimeModule(module.sourceModuleIds)) {
-      const packageNames = new Set(
-        module.sourceModuleIds
-          .map((moduleId) => classifyModuleId(moduleId))
-          .filter((packageName) => packageName !== "app"),
-      );
-      for (const packageName of packageNames) {
-        const current = dependencyFilesByPackage.get(packageName);
-        if (current) {
-          current.push(module.filePath);
-        } else {
-          dependencyFilesByPackage.set(packageName, [module.filePath]);
-        }
-      }
-      continue;
-    }
-    appRuntimeFiles.push(module.filePath);
-  }
-
-  const appUsageMembers = await analyzeJsUsageMembers(
+  // App-side scans read the pre-prebundle graph and start immediately, so they
+  // overlap with prebundling; only the dependency scan waits for it.
+  const appUsagePromise = analyzeJsUsageMembers(
     input.materialized.authoredFiles,
   );
-  const appRuntimeUsage = await analyzeRuntimeUsage(appRuntimeFiles);
+  const appRuntimeUsagePromise = analyzeRuntimeUsage(
+    splitRuntimeModules(input.materialized).appRuntimeFiles,
+    input.protocolHelpers,
+  );
+
+  const postPrebundle = await input.postPrebundleMaterialized;
+  const { dependencyFilesByPackage } = splitRuntimeModules(postPrebundle);
   const cacheStats = {
     hits: 0,
     misses: 0,
@@ -141,6 +157,7 @@ async function generateViteRuntimeAwareExterns(input: {
           includeDependencies: input.includeDependencies ?? true,
           packageName,
           packageSignature,
+          protocolHelpers: input.protocolHelpers,
         });
         if (hazards.cacheHit) {
           cacheStats.hits += 1;
@@ -152,23 +169,31 @@ async function generateViteRuntimeAwareExterns(input: {
     ),
   );
 
-  const runtimeUsage = mergeRuntimeHazards(appRuntimeUsage, ...packageHazards);
-  const emittedLines = collectRuntimeUsageExternLines(
-    runtimeUsage,
-    appUsageMembers,
+  const runtimeUsage = mergeRuntimeHazards(
+    await appRuntimeUsagePromise,
+    ...packageHazards,
   );
+  const appUsage = await appUsagePromise;
+  const emittedLines = collectRuntimeUsageExternLines(runtimeUsage, appUsage);
 
   logInternalDetail(
     "vite:extern-package-cache",
     `hits=${cacheStats.hits} misses=${cacheStats.misses} packages=${dependencyFilesByPackage.size}`,
   );
-  logInternalDetail("vite:extern-app-usage-members", `${appUsageMembers.size}`);
+  logInternalDetail(
+    "vite:extern-app-usage-members",
+    `dot=${appUsage.dotAccessed.size} string=${appUsage.stringLiteralRead.size}`,
+  );
+  logInternalDetail(
+    "vite:extern-hazards",
+    `stringDefined=${runtimeUsage.stringDefined.size} dotDefined=${runtimeUsage.dotDefined.size} stringRead=${runtimeUsage.stringLiteralRead.size} protocol=${runtimeUsage.protocolMembers.size}`,
+  );
 
   const text = [
     "/** @externs */",
     `// Generated by gcc-ts-bundler for: ${input.modules.join(", ")}`,
     "// Mode: runtime-aware",
-    `// Scanned 0 type files and ${input.materialized.runtimeEntries.length} runtime file${input.materialized.runtimeEntries.length === 1 ? "" : "s"}.`,
+    `// Scanned 0 type files and ${postPrebundle.runtimeEntries.length} runtime file${postPrebundle.runtimeEntries.length === 1 ? "" : "s"}.`,
     "",
     ...[...emittedLines].sort((left, right) => left.localeCompare(right)),
     "",
@@ -184,6 +209,10 @@ async function loadCachedPackageRuntimeHazards(input: {
   includeDependencies: boolean;
   packageName: string;
   packageSignature: string;
+  protocolHelpers: {
+    keyExclusionListCallees: string[];
+    keyReadCallees: string[];
+  };
 }) {
   const fileHashes = await Promise.all(
     [...input.filePaths]
@@ -197,6 +226,7 @@ async function loadCachedPackageRuntimeHazards(input: {
     mode: "runtime-aware",
     packageName: input.packageName,
     packageSignature: input.packageSignature,
+    protocolHelpers: input.protocolHelpers,
   });
   const cacheFile = path.join(input.cacheRoot, `${cacheKey}.json`);
   const cached = await readJsonIfExists(cacheFile, isCachedRuntimeHazards);
@@ -207,7 +237,10 @@ async function loadCachedPackageRuntimeHazards(input: {
     };
   }
 
-  const analyzed = await analyzeRuntimeUsage(input.filePaths);
+  const analyzed = await analyzeRuntimeUsage(
+    input.filePaths,
+    input.protocolHelpers,
+  );
   const serialized = serializeRuntimeHazards(analyzed);
   await writeJson(cacheFile, serialized);
   return {
@@ -216,8 +249,45 @@ async function loadCachedPackageRuntimeHazards(input: {
   };
 }
 
-async function analyzeJsUsageMembers(filePaths: string[]) {
-  const members = new Set<string>();
+/**
+ * Splits a materialized graph into app runtime files and dependency files
+ * grouped by package. Used twice with different graphs: the pre-prebundle one
+ * for app scans, the post-prebundle one for dependency hazards.
+ */
+function splitRuntimeModules(materialized: MaterializedGraph) {
+  const appRuntimeFiles: string[] = [];
+  const dependencyFilesByPackage = new Map<string, string[]>();
+  for (const module of materialized.modules) {
+    if (!isDependencyRuntimeModule(module.sourceModuleIds)) {
+      appRuntimeFiles.push(module.filePath);
+      continue;
+    }
+    const packageNames = new Set(
+      module.sourceModuleIds
+        .map((moduleId) => classifyModuleId(moduleId))
+        .filter((packageName) => packageName !== "app"),
+    );
+    for (const packageName of packageNames) {
+      const current = dependencyFilesByPackage.get(packageName);
+      if (current) {
+        current.push(module.filePath);
+      } else {
+        dependencyFilesByPackage.set(packageName, [module.filePath]);
+      }
+    }
+  }
+  return { appRuntimeFiles, dependencyFilesByPackage };
+}
+
+/**
+ * How authored app code reads members, split by syntax: a dot read renames
+ * with a dot definition, a literal string read does not.
+ */
+async function analyzeJsUsageMembers(
+  filePaths: string[],
+): Promise<AppUsageMembers> {
+  const dotAccessed = new Set<string>();
+  const stringLiteralRead = new Set<string>();
 
   for (const filePath of filePaths) {
     const sourceText = await fs.readFile(filePath, "utf8");
@@ -228,16 +298,24 @@ async function analyzeJsUsageMembers(filePaths: string[]) {
       true,
       ts.ScriptKind.JS,
     );
+    const add = (target: Set<string>, memberName: string | null) => {
+      if (memberName && isRuntimeExternPropertyName(memberName)) {
+        target.add(memberName);
+      }
+    };
     const visit = (node: ts.Node) => {
       if (ts.isPropertyAccessExpression(node)) {
-        if (isRuntimeExternPropertyName(node.name.text)) {
-          members.add(node.name.text);
-        }
+        add(dotAccessed, node.name.text);
       } else if (ts.isElementAccessExpression(node)) {
-        const memberName = getStringLiteralMemberName(node.argumentExpression);
-        if (memberName && isRuntimeExternPropertyName(memberName)) {
-          members.add(memberName);
-        }
+        add(
+          stringLiteralRead,
+          getStringLiteralMemberName(node.argumentExpression),
+        );
+      } else if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.InKeyword
+      ) {
+        add(stringLiteralRead, getStringLiteralMemberName(node.left));
       }
       ts.forEachChild(node, visit);
     };
@@ -245,61 +323,30 @@ async function analyzeJsUsageMembers(filePaths: string[]) {
     visit(sourceFile);
   }
 
-  return members;
+  return { dotAccessed, stringLiteralRead };
 }
 
-function mergeRuntimeHazards(
-  ...hazardsList: Array<Awaited<ReturnType<typeof analyzeRuntimeUsage>>>
-) {
-  const merged = {
-    accessedMembers: new Set<string>(),
-    definedMembers: new Set<string>(),
-    protocolMembers: new Set<string>(),
-  };
-
-  for (const hazards of hazardsList) {
-    for (const member of hazards.accessedMembers) {
-      merged.accessedMembers.add(member);
-    }
-    for (const member of hazards.definedMembers) {
-      merged.definedMembers.add(member);
-    }
-    for (const member of hazards.protocolMembers) {
-      merged.protocolMembers.add(member);
-    }
-  }
-
-  return merged;
-}
-
-const isCachedRuntimeHazards = isObjectOf<CachedRuntimeHazards>({
-  accessedMembers: isStringArray,
-  definedMembers: isStringArray,
-  protocolMembers: isStringArray,
-});
+const isCachedRuntimeHazards = isObjectOf<CachedRuntimeHazards>(
+  Object.fromEntries(
+    RUNTIME_HAZARD_KEYS.map((key) => [key, isStringArray]),
+  ) as Record<(typeof RUNTIME_HAZARD_KEYS)[number], typeof isStringArray>,
+);
 
 function serializeRuntimeHazards(
-  hazards: Awaited<ReturnType<typeof analyzeRuntimeUsage>>,
+  hazards: RuntimeRenameHazards,
 ): CachedRuntimeHazards {
-  return {
-    accessedMembers: [...hazards.accessedMembers].sort((left, right) =>
-      left.localeCompare(right),
-    ),
-    definedMembers: [...hazards.definedMembers].sort((left, right) =>
-      left.localeCompare(right),
-    ),
-    protocolMembers: [...hazards.protocolMembers].sort((left, right) =>
-      left.localeCompare(right),
-    ),
-  };
+  return Object.fromEntries(
+    RUNTIME_HAZARD_KEYS.map((key) => [
+      key,
+      [...hazards[key]].sort((left, right) => left.localeCompare(right)),
+    ]),
+  ) as CachedRuntimeHazards;
 }
 
-function toRuntimeHazards(hazards: CachedRuntimeHazards) {
-  return {
-    accessedMembers: new Set(hazards.accessedMembers),
-    definedMembers: new Set(hazards.definedMembers),
-    protocolMembers: new Set(hazards.protocolMembers),
-  };
+function toRuntimeHazards(hazards: CachedRuntimeHazards): RuntimeRenameHazards {
+  return Object.fromEntries(
+    RUNTIME_HAZARD_KEYS.map((key) => [key, new Set(hazards[key])]),
+  ) as unknown as RuntimeRenameHazards;
 }
 
 function resolvePackageExternCacheRoot(input: {
