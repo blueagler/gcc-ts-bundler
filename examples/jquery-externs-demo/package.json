@@ -7,7 +7,7 @@
   },
   "dependencies": {
     "@types/jquery": "^3.5.33",
-    "gcc-ts-bundler": "file:../..",
+    "gcc-ts-bundler": "link:gcc-ts-bundler",
     "jquery": "^3.7.1"
   }
 }

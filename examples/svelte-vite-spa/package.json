@@ -4,10 +4,11 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
+    "build:pure": "vite build --config vite.pure.config.ts",
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
-    "gcc-ts-bundler": "file:../..",
+    "gcc-ts-bundler": "link:gcc-ts-bundler",
     "m3-svelte": "^7.1.2",
     "svelte": "5.55.2",
     "vite": "^7.3.2"
