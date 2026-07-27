@@ -253,6 +253,58 @@ test.serial(
 );
 
 test.serial(
+  "runtime-aware mode catches constructed-key prefixes and camelized kebab keys",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/runtime.js",
+      [
+        "// vue vapor's event delegation shape: handlers assigned with a dot,",
+        "// read back through a key built from a template literal.",
+        "export function attach(node, handler) {",
+        "  node.$evtclick = handler;",
+        "}",
+        "export function dispatch(node, event) {",
+        "  const key = `$evt${event.type}`;",
+        "  return node[key];",
+        "}",
+        "// vapor props: quoted kebab-case pass site, camelCase declaration,",
+        "// bridged by camelize() at runtime.",
+        "export function pass(component) {",
+        '  return { "click-count": () => component.count };',
+        "}",
+        "export function declare(props) {",
+        "  return props.clickCount;",
+        "}",
+        "// An ordinary message template must not become prefix evidence.",
+        "export function label(kind) {",
+        "  return `count: ${kind}`;",
+        "}",
+        "export function readCount(state) {",
+        "  return state.countLabel;",
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await generateExternsFromSource({
+      mode: "runtime-aware",
+      modules: ["demo-runtime"],
+      projectRoot: fixture.projectRoot,
+      runtimeEntryFiles: ["./runtime.js"],
+      srcDir: fixture.srcDir,
+    });
+
+    // `$`-prefixed template head + dot mention -> externed.
+    expect(result.text).toContain("Object.prototype.$evtclick;");
+    // Hyphenated string definition externs its camelCase alias too.
+    expect(result.text).toContain("Object.prototype.clickCount;");
+    // Non-$/_ template heads are not prefix evidence.
+    expect(result.text).not.toContain("Object.prototype.countLabel;");
+  },
+);
+
+test.serial(
   "externs CLI emits boundary-aware and runtime-aware outputs",
   async () => {
     const boundaryFixture = await createExternFixture();

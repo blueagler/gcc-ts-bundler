@@ -25,7 +25,13 @@ function createEmptyAppUsageMembers(): AppUsageMembers {
  * extern = protocolMembers
  *        ∪ (stringDefined ∩ dotAccessed)
  *        ∪ (dotDefined    ∩ stringLiteralRead)
+ *        ∪ (dotAccessed   ∩ constructedKeyPrefix match)
  * ```
+ *
+ * The last class covers keys assembled at runtime from an identifier-shaped
+ * `$`/`_` template head (`` node[`$evt${type}`] `` in vue vapor's event
+ * delegation): the read is statically invisible, but a dot-defined member
+ * starting with a collected prefix is reached through it.
  *
  * A member that is dot-defined *and* dot-accessed renames consistently inside
  * one Closure invocation and must NOT be externed — externing it (and the
@@ -34,6 +40,7 @@ function createEmptyAppUsageMembers(): AppUsageMembers {
  */
 export function collectRuntimeUsageExternLines(
   runtimeUsage: {
+    constructedKeyPrefixes: ReadonlySet<string>;
     dotAccessed: ReadonlySet<string>;
     dotDefined: Iterable<string>;
     protocolMembers: Iterable<string>;
@@ -60,6 +67,26 @@ export function collectRuntimeUsageExternLines(
       appUsage.stringLiteralRead.has(member)
     ) {
       emittedLines.add(renderStructuralExternLine(member));
+    }
+  }
+  // Constructed-key reads are invisible statically, so the dot side alone
+  // is the evidence: any dot-mentioned member (assignments included —
+  // compiled templates assign handlers to plain locals) matching a
+  // collected `$`/`_` template prefix must keep its literal name.
+  const prefixes = [...runtimeUsage.constructedKeyPrefixes];
+  if (prefixes.length > 0) {
+    for (const member of [
+      ...runtimeUsage.dotAccessed,
+      ...appUsage.dotAccessed,
+    ]) {
+      if (
+        prefixes.some(
+          (prefix) =>
+            member.length > prefix.length && member.startsWith(prefix),
+        )
+      ) {
+        emittedLines.add(renderStructuralExternLine(member));
+      }
     }
   }
   return emittedLines;

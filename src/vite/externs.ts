@@ -39,7 +39,7 @@ type CachedRuntimeHazards = Record<
 >;
 
 // v3: hazard payload split into evidence classes (see externs/render.ts).
-const VITE_EXTERN_PACKAGE_CACHE_VERSION = 3;
+const VITE_EXTERN_PACKAGE_CACHE_VERSION = 4;
 
 export async function resolveCompilerExterns(input: {
   captureRoot: string;
@@ -329,6 +329,7 @@ async function analyzeJsUsageMembers(
 }
 
 const isCachedRuntimeHazards = isObjectOf<CachedRuntimeHazards>({
+  constructedKeyPrefixes: isStringArray,
   dotAccessed: isStringArray,
   dotDefined: isStringArray,
   protocolMembers: isStringArray,
@@ -342,6 +343,7 @@ function serializeRuntimeHazards(
   const sorted = (values: ReadonlySet<string>) =>
     [...values].sort((left, right) => left.localeCompare(right));
   return {
+    constructedKeyPrefixes: sorted(hazards.constructedKeyPrefixes),
     dotAccessed: sorted(hazards.dotAccessed),
     dotDefined: sorted(hazards.dotDefined),
     protocolMembers: sorted(hazards.protocolMembers),
@@ -352,6 +354,7 @@ function serializeRuntimeHazards(
 
 function toRuntimeHazards(hazards: CachedRuntimeHazards): RuntimeRenameHazards {
   return {
+    constructedKeyPrefixes: new Set(hazards.constructedKeyPrefixes),
     dotAccessed: new Set(hazards.dotAccessed),
     dotDefined: new Set(hazards.dotDefined),
     protocolMembers: new Set(hazards.protocolMembers),

@@ -28,12 +28,26 @@ import {
  * there would miss the hazard the rule exists to catch.
  */
 export interface RuntimeRenameHazards {
+  /**
+   * Identifier-shaped heads of template literals that build property keys
+   * (`` node[`$evt${type}`] ``, vue vapor's event delegation). The full key
+   * is invisible statically, but a dot-defined member matching a collected
+   * prefix is read through it at runtime. Restricted to `$`/`_`-leading
+   * heads: framework-internal protocol names by convention, which keeps
+   * message templates and URL builders out of the evidence.
+   */
+  constructedKeyPrefixes: Set<string>;
   /** `o.x` read anywhere. */
   dotAccessed: Set<string>;
   /** `this.x = v`, class members, object-literal keys. */
   dotDefined: Set<string>;
   protocolMembers: Set<string>;
-  /** `__publicField(this, "x")`, `defineProperty`, `this["x"] =`, `"x" = v`. */
+  /**
+   * `__publicField(this, "x")`, `defineProperty`, `this["x"] =`, `"x" = v`.
+   * Hyphenated keys also record their camelCase alias: framework prop
+   * systems bridge quoted kebab-case pass sites to camelCase declaration
+   * keys via `camelize`, so the camelCase side must not rename either.
+   */
   stringDefined: Set<string>;
   /** `o["x"]` read or `"x" in o`. */
   stringLiteralRead: Set<string>;
@@ -46,6 +60,7 @@ export interface RuntimeProtocolHelpers {
 
 function createEmptyRuntimeHazards(): RuntimeRenameHazards {
   return {
+    constructedKeyPrefixes: new Set(),
     dotAccessed: new Set(),
     dotDefined: new Set(),
     protocolMembers: new Set(),
@@ -69,6 +84,7 @@ export function mergeRuntimeHazards(
 }
 
 export const RUNTIME_HAZARD_KEYS = [
+  "constructedKeyPrefixes",
   "dotAccessed",
   "dotDefined",
   "protocolMembers",
@@ -113,6 +129,8 @@ function collectFileHazards(
           getStringLiteralMemberName(node.argumentExpression),
         );
       }
+    } else if (ts.isTemplateExpression(node)) {
+      collectConstructedKeyPrefix(node, hazards);
     } else if (ts.isBinaryExpression(node)) {
       if (isAssignmentOperator(node.operatorToken.kind)) {
         collectRuntimeAssignmentMembers(node.left, knownConstructors, hazards);
@@ -137,9 +155,38 @@ function collectFileHazards(
   visit(sourceFile);
 }
 
+/**
+ * Records the head of a key-building template literal
+ * (`` `$evt${type}` ``). Only `$`/`_`-leading identifier-shaped heads count:
+ * that is the framework-internal-name convention, and it keeps message and
+ * URL templates out of the evidence. Position is deliberately ignored -
+ * vapor assigns the template to a `key` const before indexing with it, so
+ * requiring an element-access parent would miss the real pattern.
+ */
+function collectConstructedKeyPrefix(
+  node: ts.TemplateExpression,
+  hazards: RuntimeRenameHazards,
+) {
+  const head = node.head.text;
+  if (/^[$_][\w$]*$/u.test(head) && head.length >= 2) {
+    hazards.constructedKeyPrefixes.add(head);
+  }
+}
+
 function addMember(target: Set<string>, memberName: string | null | undefined) {
   if (memberName && isRuntimeExternPropertyName(memberName)) {
     target.add(memberName);
+    // Prop systems bridge quoted kebab-case pass sites ("click-count") to
+    // camelCase declaration keys via camelize, so a hyphenated string
+    // definition means the camelCase member must not rename either.
+    if (memberName.includes("-")) {
+      const camelized = memberName.replace(/-(\w)/gu, (_, letter: string) =>
+        letter.toUpperCase(),
+      );
+      if (isRuntimeExternPropertyName(camelized)) {
+        target.add(camelized);
+      }
+    }
   }
 }
 

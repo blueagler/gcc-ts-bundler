@@ -32,12 +32,27 @@ await generateExterns({
 });
 await augmentGeneratedExterns(compiledDir, externsFile);
 
+// Runtime-aware externs over the compiled app plus the vendored vapor
+// runtime: vapor reaches DOM handlers through constructed keys
+// (`node[\`$evt${type}\`]`) and bridges quoted kebab-case prop pass sites to
+// camelCase declarations via camelize - both are rename hazards only the
+// runtime scan can see.
+const runtimeExternsFile = path.join(projectRoot, "vue.runtime.externs.js");
+await generateExterns({
+  mode: "runtime-aware",
+  modules: ["vue"],
+  outputFile: runtimeExternsFile,
+  projectRoot,
+  runtimeEntryFiles: await collectCompiledJsFiles(compiledDir),
+  srcDir: "./.vue-compiled",
+});
+
 const result = await build({
   cache: { mode: "off" },
   chunks: { mode: "split", publicPath: "./dist/" },
   diagnostics: { preflight: "full" },
   entries: ["./main.js"],
-  // externs: ["./vue.generated.externs.js"],
+  externs: ["./vue.generated.externs.js", "./vue.runtime.externs.js"],
   outDir: "./dist",
   projectRoot,
   srcDir: "./.vue-compiled",
@@ -311,4 +326,20 @@ async function walkCompiledFiles(rootDir, visitFile) {
       await visitFile(fullPath);
     }
   }
+}
+
+async function collectCompiledJsFiles(rootDir) {
+  const files = [];
+  const walk = async (dir) => {
+    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+      const entryPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(entryPath);
+      } else if (entry.name.endsWith(".js")) {
+        files.push(path.relative(projectRoot, entryPath));
+      }
+    }
+  };
+  await walk(rootDir);
+  return files.sort();
 }
