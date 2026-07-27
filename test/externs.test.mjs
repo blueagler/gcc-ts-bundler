@@ -4,6 +4,10 @@ import { pathToFileURL } from "node:url";
 import { expect, test } from "bun:test";
 
 import { build, generateExterns } from "../dist/index.mjs";
+// The evidence-class rule lives in src and is asserted directly, so this test
+// is meaningful before dist is rebuilt; the tests above validate the built
+// artifact and need `bun run build:js` to see rule changes.
+import { generateExterns as generateExternsFromSource } from "../src/api/build.ts";
 import {
   createFixture,
   createExternFixture,
@@ -174,6 +178,10 @@ test.serial(
       mode: "runtime-aware",
       modules: ["demo-runtime"],
       projectRoot: protocolFixture.projectRoot,
+      protocolHelpers: {
+        keyExclusionListCallees: ["rest_props"],
+        keyReadCallees: ["prop"],
+      },
       runtimeEntryFiles: ["./runtime.js"],
       srcDir: protocolFixture.srcDir,
     });
@@ -185,6 +193,62 @@ test.serial(
     expect(protocolResult.text).toContain("Object.prototype.size;");
     expect(protocolResult.text).not.toContain("Object.prototype.prop;");
     expect(protocolResult.text).not.toContain("Object.prototype.rest_props;");
+  },
+);
+
+test.serial(
+  "generateExterns runtime-aware mode externs only mixed definition/read pairs",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/runtime.js",
+      [
+        "const __publicField = (obj, key, value) => (obj[key] = value);",
+        "export class Widget {",
+        "  constructor() {",
+        // string-keyed definition, read back through a dot: Closure renames the
+        // read and leaves the string, so this one needs an extern.
+        '    __publicField(this, "loweredField", 1);',
+        '    Object.defineProperty(this, "definedField", { value: 2 });',
+        '    this["bracketField"] = 3;',
+        // dot definitions: safe unless something reads them as a string.
+        "    this.dotOnlyField = 4;",
+        "    this.literalReadField = 5;",
+        "    this.inCheckField = 6;",
+        "  }",
+        "  read(other) {",
+        "    return (",
+        "      this.loweredField +",
+        "      this.definedField +",
+        "      this.bracketField +",
+        "      other.dotOnlyField +",
+        '      other["literalReadField"] +',
+        '      ("inCheckField" in other ? 1 : 0)',
+        "    );",
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await generateExternsFromSource({
+      mode: "runtime-aware",
+      modules: ["demo-runtime"],
+      projectRoot: fixture.projectRoot,
+      runtimeEntryFiles: ["./runtime.js"],
+      srcDir: fixture.srcDir,
+    });
+
+    // string-defined + dot-accessed -> externed.
+    expect(result.text).toContain("Object.prototype.loweredField;");
+    expect(result.text).toContain("Object.prototype.definedField;");
+    expect(result.text).toContain("Object.prototype.bracketField;");
+    // dot-defined + literal string read -> externed.
+    expect(result.text).toContain("Object.prototype.literalReadField;");
+    expect(result.text).toContain("Object.prototype.inCheckField;");
+    // dot-defined + dot-accessed renames consistently in one Closure
+    // invocation, so externing it would only block optimisation.
+    expect(result.text).not.toContain("Object.prototype.dotOnlyField;");
   },
 );
 

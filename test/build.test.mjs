@@ -4,6 +4,15 @@ import { pathToFileURL } from "node:url";
 import { expect, test } from "bun:test";
 
 import { build } from "../dist/index.mjs";
+import {
+  persistCachedClosureJob,
+  tryRestoreCachedClosureJob,
+} from "../src/build/closure/cache.ts";
+import {
+  shouldEnableTypeInference,
+  TYPE_INFERENCE_OPTIONS,
+} from "../src/build/closure/compiler.ts";
+import { generatePlatformExternsText } from "../src/build/closure/platform-externs.ts";
 import { createFixture } from "./helpers.mjs";
 
 test.serial(
@@ -39,6 +48,49 @@ test.serial(
     expect(result.outputFiles).toHaveLength(1);
     const output = await fixture.read("dist/index.js");
     expect(output).not.toMatch(/demo-pkg/);
+  },
+);
+
+test.serial(
+  "minimal platform externs preserve referenced platform APIs",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/index.ts",
+      [
+        "const node = document.querySelector(\"#app\");",
+        "if (node) {",
+        "  node.setAttribute(\"data-ready\", \"yes\");",
+        "  node.addEventListener(\"click\", () => {",
+        "    queueMicrotask(() => console.log(node.textContent));",
+        "  });",
+        "}",
+        "export default node;",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await build({
+      cache: { mode: "off" },
+      entries: ["./index.ts"],
+      outDir: fixture.outDir,
+      platformExterns: "minimal",
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+
+    expect(result.ok).toBe(true);
+    const output = await fixture.read("dist/index.js");
+    for (const name of [
+      "document",
+      "querySelector",
+      "setAttribute",
+      "addEventListener",
+      "queueMicrotask",
+      "textContent",
+    ]) {
+      expect(output).toContain(name);
+    }
   },
 );
 
@@ -384,5 +436,97 @@ test.serial(
     expect(String(result.diagnostics[0].message)).toMatch(
       /Unsupported CommonJS/,
     );
+  },
+);
+
+test.serial(
+  "platform externs declare typed constructors only when the build carries typed annotations",
+  async () => {
+    const untyped = await generatePlatformExternsText([]);
+    const typed = await generatePlatformExternsText([], {
+      typedConstructors: true,
+    });
+
+    // An untyped `var HTMLElement;` leaves the platform type unknown, which
+    // makes every subclass unknown and silently disables all type-based
+    // passes for it (docs/research/typed-input.md §4c). The typed form costs
+    // +134 B gzip on untyped input, so it stays gated.
+    expect(untyped).toContain("var HTMLElement;");
+    expect(untyped).not.toContain("function HTMLElement()");
+    expect(typed).toContain("/** @constructor */ function HTMLElement() {}");
+    expect(typed).not.toContain("var HTMLElement;");
+    // Non-constructor globals are untouched by the gate.
+    expect(typed).toContain("var undefined;");
+  },
+);
+
+test.serial(
+  "silent type inference is added to bundler-runtime ADVANCED jobs and removable by the escape hatch",
+  async () => {
+    expect(shouldEnableTypeInference("bundler-runtime", "ADVANCED")).toBe(true);
+    // Only bundler-runtime carries the typed annotations inference exists to
+    // feed, and only ADVANCED runs the passes that consume them.
+    expect(shouldEnableTypeInference("split", "ADVANCED")).toBe(false);
+    expect(shouldEnableTypeInference("off", "ADVANCED")).toBe(false);
+    expect(shouldEnableTypeInference("bundler-runtime", "SIMPLE")).toBe(false);
+
+    process.env.GCC_DISABLE_TYPE_INFERENCE = "1";
+    try {
+      expect(shouldEnableTypeInference("bundler-runtime", "ADVANCED")).toBe(
+        false,
+      );
+    } finally {
+      delete process.env.GCC_DISABLE_TYPE_INFERENCE;
+    }
+
+    // The wrapper's camelCase keys must render the hidden-inference CLI pair;
+    // a typo here is silent (the compiler simply keeps QUIET behaviour).
+    const { compiler: ClosureCompiler } = await import(
+      "google-closure-compiler"
+    );
+    expect(
+      new ClosureCompiler(TYPE_INFERENCE_OPTIONS).commandArguments,
+    ).toEqual(["--hide_warnings_for=/", "--jscomp_warning=checkTypes"]);
+  },
+);
+
+test.serial(
+  "the closure job cache key separates inference-on from inference-off builds",
+  async () => {
+    const fixture = await createFixture();
+    const cacheDir = path.join(fixture.projectRoot, "job-cache");
+    const outputFile = path.join(fixture.projectRoot, "out.js");
+    await fs.mkdir(path.dirname(outputFile), { recursive: true });
+    await fs.writeFile(outputFile, "var a = 1;\n", "utf8");
+    const baseJob = {
+      assumeFunctionWrapper: true,
+      compilationLevel: "ADVANCED",
+      externs: [],
+      js: [],
+      jsOutputFile: outputFile,
+      languageIn: "UNSTABLE",
+      languageOut: "ECMASCRIPT_NEXT",
+      rewritePolyfills: false,
+      warningLevel: "QUIET",
+    };
+    const restore = (job) =>
+      tryRestoreCachedClosureJob({
+        artifactFiles: [outputFile],
+        cacheDir,
+        compilerVersion: "test",
+        job,
+      });
+
+    await persistCachedClosureJob({
+      artifactFiles: [outputFile],
+      cacheDir,
+      compilerVersion: "test",
+      job: { ...baseJob, typeInference: true },
+    });
+
+    expect(await restore({ ...baseJob, typeInference: true })).toBe(true);
+    // The flag lives in no hashed file, so without explicit keying a cached
+    // inference-on artifact would be served to an inference-off build.
+    expect(await restore(baseJob)).toBe(false);
   },
 );

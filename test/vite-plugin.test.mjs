@@ -1,8 +1,9 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { expect, test } from "bun:test";
+import { expect, onTestFinished, test } from "bun:test";
 
 import {
   getCapturedModuleAnalysis,
@@ -10,12 +11,24 @@ import {
   resolveViteCaptureRootPath,
 } from "../src/vite/capture.ts";
 import { resolveNormalizedBridgeModuleIds } from "../src/vite/graph.ts";
+import { resolveCompilerExterns } from "../src/vite/externs.ts";
 import { materializeCapturedGraph } from "../src/vite/materialize.ts";
+import {
+  finalizeBaseJsOutputName,
+  renameCompiledNonBaseJsOutputs,
+} from "../src/vite/naming.ts";
 import { prebundleMaterializedDependencies } from "../src/vite/prebundle/index.ts";
 import {
+  createCompilerOptions,
   resolveViteLanguageOut,
   VITE_LANGUAGE_OUT_ERROR,
 } from "../src/vite/config.ts";
+import {
+  extractTypedAnnotations,
+  isTypedAnnotationSource,
+} from "../src/vite/typed-annotations.ts";
+import { normalizeBuildOptions } from "../src/build/resolve/options.ts";
+import { getOptionsSignature } from "../src/build/resolve/signatures.ts";
 import {
   createFixture,
   execFileAsync,
@@ -91,7 +104,11 @@ async function buildViteFixture(fixture, overrides = {}) {
 }
 
 function readRewrittenEntryScript(html) {
-  const match = html.match(/<script defer src="([^"]+)"><\/script>/u);
+  // script mode emits `<script defer src>`; esm mode (the bundler-runtime
+  // default) emits `<script type="module" crossorigin src>`.
+  const match = html.match(
+    /<script (?:defer|type="module" crossorigin) src="([^"]+)"><\/script>/u,
+  );
   expect(match).toBeTruthy();
   return match[1];
 }
@@ -359,27 +376,36 @@ test.serial(
         module.relativePath.startsWith("__dep-bundles/"),
       ),
     ).toBe(true);
-    expect(
-      prebundled.modules.some(
-        (module) =>
-          module.relativePath.startsWith("__dep-bundles/") &&
-          !module.relativePath.startsWith("__dep-bundles/chunks/"),
-      ),
-    ).toBe(false);
 
+    // Barrel flattening resolves entry->foo and lazy->bar to their defining
+    // modules, so each region keeps its own bundle while the code shared by
+    // both regions splits into a chunks/ bundle.
+    const bundleSources = await Promise.all(
+      prebundled.modules
+        .filter((module) => module.relativePath.startsWith("__dep-bundles/"))
+        .map((module) => fs.readFile(module.filePath, "utf8")),
+    );
     const rewrittenEntry = await fs.readFile(authoredEntry, "utf8");
     const rewrittenLazy = await fs.readFile(authoredLazy, "utf8");
-    expect(rewrittenEntry).toContain("__dep-bundles/chunks/");
-    expect(rewrittenLazy).toContain("__dep-bundles/chunks/");
-    expect(rewrittenEntry).not.toContain("__dep-bundles/eager/");
-    expect(rewrittenLazy).not.toContain("__dep-bundles/lazy/");
-    expect(
-      prebundled.runtimeEntries.every(
-        (entry) =>
-          !entry.startsWith("./__dep-bundles/") ||
-          entry.startsWith("./__dep-bundles/chunks/"),
-      ),
-    ).toBe(true);
+    expect(rewrittenEntry).toContain("__dep-bundles/");
+    expect(rewrittenLazy).toContain("__dep-bundles/");
+    const entryBundlePath = rewrittenEntry.match(/__dep-bundles\/[\w./-]+/)?.[0];
+    const lazyBundlePath = rewrittenLazy.match(/__dep-bundles\/[\w./-]+/)?.[0];
+    expect(entryBundlePath).toBeTruthy();
+    expect(lazyBundlePath).toBeTruthy();
+    expect(entryBundlePath).not.toBe(lazyBundlePath);
+    const entryBundle = await fs.readFile(
+      path.join(srcDir, entryBundlePath),
+      "utf8",
+    );
+    const lazyBundle = await fs.readFile(
+      path.join(srcDir, lazyBundlePath),
+      "utf8",
+    );
+    // foo stays out of the lazy region and bar stays out of the eager region.
+    expect(entryBundle).not.toContain("shared - helper");
+    expect(lazyBundle).not.toContain("shared + helper");
+    expect(bundleSources.length).toBeGreaterThan(0);
   },
 );
 
@@ -725,7 +751,6 @@ test.serial(
     expect(cssFiles.length).toBeGreaterThan(1);
 
     const html = await fixture.read("dist/index.html");
-    expect(html).not.toContain('type="module"');
     expect(html).not.toContain('rel="modulepreload"');
     const entryScript = readRewrittenEntryScript(html);
     expect(entryScript).toMatch(/^\/assets\/.+\.js$/u);
@@ -1104,6 +1129,42 @@ test.serial(
 );
 
 test.serial(
+  "gccTsBundler recreates the runtime source map when the capture root is deleted",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    await writeViteCssFixture(fixture);
+    const options = {
+      cache: { dir: ".cache", mode: "persistent" },
+      env: { GCC_BUILD_TIMINGS: "1" },
+    };
+
+    await buildViteFixture(fixture, options);
+    await fs.rm(path.join(fixture.projectRoot, ".gcc-ts-bundler-vite"), {
+      force: true,
+      recursive: true,
+    });
+    const rebuilt = await buildViteFixture(fixture, options);
+
+    expect(rebuilt.stderr).toContain(
+      "[gcc-ts-bundler timing] cache:native-emit: miss",
+    );
+    const [captureRootId] = await listDirectoryNames(
+      path.join(fixture.projectRoot, ".gcc-ts-bundler-vite"),
+    );
+    expect(
+      await fixture.read(
+        path.join(
+          ".gcc-ts-bundler-vite",
+          captureRootId,
+          ".gcc-ts-bundler-vite-runtime-module-sources.json",
+        ),
+      ),
+    ).toContain("{");
+  },
+);
+
+test.serial(
   "gccTsBundler falls back to final metadata restore when core outputs are missing",
   { timeout: 20000 },
   async () => {
@@ -1203,3 +1264,515 @@ test.serial(
     });
   },
 );
+
+// --- chunk naming ---------------------------------------------------------
+//
+// These exercise src/vite/naming.ts directly with a hand-built compiled-output
+// directory: two chunks, a base and one lazy chunk, wired the way Closure
+// emits them for each chunk output type.
+
+const NAMING_OUTPUT_OPTIONS = {
+  chunkFileNames: "assets/[name]-[hash].js",
+  entryFileNames: "assets/[name]-[hash].js",
+  format: "es",
+};
+
+async function createNamingWorkspace(input) {
+  const outDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "gcc-ts-bundler-naming-"),
+  );
+  onTestFinished(async () => {
+    await fs.rm(outDir, { force: true, recursive: true });
+  });
+
+  const baseChunkId = input.baseChunkId ?? "main";
+  const manifestFilePath = path.join(outDir, "manifest.json");
+  await fs.writeFile(
+    manifestFilePath,
+    JSON.stringify({
+      baseChunk: baseChunkId,
+      chunks: {
+        lazy: { css: [], deps: [baseChunkId], modules: [], url: "/lazy.js" },
+        [baseChunkId]: { css: [], deps: [], modules: [], url: "/main.js" },
+      },
+      loader: "script",
+      modules: {},
+      publicPath: "/",
+    }),
+    "utf8",
+  );
+  await fs.writeFile(path.join(outDir, "main.js"), input.baseSource, "utf8");
+  await fs.writeFile(path.join(outDir, "lazy.js"), input.lazySource, "utf8");
+
+  return {
+    manifestFilePath,
+    outDir,
+    outputFiles: [path.join(outDir, "main.js"), path.join(outDir, "lazy.js")],
+  };
+}
+
+async function runNamingPasses(workspace, chunkOutputType) {
+  const renamed = await renameCompiledNonBaseJsOutputs({
+    baseChunkName: "main",
+    chunkOutputType,
+    dynamicRootModuleIds: [],
+    jsChunks: [],
+    manifestFilePath: workspace.manifestFilePath,
+    materialized: { modules: [] },
+    outDir: workspace.outDir,
+    outputFiles: workspace.outputFiles,
+    outputOptions: NAMING_OUTPUT_OPTIONS,
+    publicPath: "/",
+    runtimeModuleSourceMapFilePath: path.join(workspace.outDir, "missing.json"),
+  });
+  const finalized = await finalizeBaseJsOutputName({
+    baseChunkFilePath: renamed.baseChunkFilePath,
+    baseSeed: renamed.baseSeed,
+    chunkOutputType,
+    deferredChunkSeeds: renamed.deferredChunkSeeds,
+    emittedOutputFiles: renamed.emittedOutputFiles,
+    manifestFilePath: workspace.manifestFilePath,
+    outDir: workspace.outDir,
+    outputOptions: NAMING_OUTPUT_OPTIONS,
+    publicPath: "/",
+  });
+  const manifest = JSON.parse(
+    await fs.readFile(workspace.manifestFilePath, "utf8"),
+  );
+  const emitted = finalized.emittedOutputFiles.map((filePath) =>
+    path.relative(workspace.outDir, filePath).replace(/\\/g, "/"),
+  );
+  return {
+    baseScriptFileName: finalized.baseScriptFileName,
+    emitted,
+    manifest,
+    read: (relativePath) =>
+      fs.readFile(path.join(workspace.outDir, relativePath), "utf8"),
+  };
+}
+
+const ESM_BASE_SOURCE =
+  'var r=globalThis.__g;r.a([0,[[[],"",[]],[[0],"./lazy.js",[]]],[0,1],"/assets/"]);export{r};\n';
+const ESM_LAZY_SOURCE = 'import{r}from"./main.js";r.u(1);\n';
+
+test("esm chunk naming hashes every chunk and rewrites import specifiers", async () => {
+  const workspace = await createNamingWorkspace({
+    baseSource: ESM_BASE_SOURCE,
+    lazySource: ESM_LAZY_SOURCE,
+  });
+  const result = await runNamingPasses(workspace, "esm");
+
+  const baseFileName = result.baseScriptFileName;
+  const lazyFileName = toDistRelativeFile(result.manifest.chunks.lazy.url);
+  expect(baseFileName).toMatch(/^assets\/main-[\w-]{8}\.js$/u);
+  expect(lazyFileName).toMatch(/^assets\/shared-lazy-[\w-]{8}\.js$/u);
+  expect(result.emitted.sort()).toEqual([baseFileName, lazyFileName].sort());
+
+  // The lazy chunk imports the base chunk under its final hashed name, and the
+  // base chunk's runtime manifest points at the lazy chunk's final name.
+  const lazySource = await result.read(lazyFileName);
+  expect(lazySource).toContain(`"./${path.posix.basename(baseFileName)}"`);
+  expect(lazySource).not.toContain('"./main.js"');
+  const baseSource = await result.read(baseFileName);
+  expect(baseSource).toContain(`"./${path.posix.basename(lazyFileName)}"`);
+  expect(baseSource).not.toContain('"./lazy.js"');
+  expect(result.manifest.chunks.main.url).toBe(`/${baseFileName}`);
+});
+
+test("esm chunk naming resolves the base chunk under its compiler chunk id", async () => {
+  // Closure names every output after its chunk id and the pipeline renames the
+  // base chunk on the way out, so siblings still import `./<chunkId>.js`.
+  const workspace = await createNamingWorkspace({
+    baseChunkId: "c0abc",
+    baseSource: ESM_BASE_SOURCE,
+    lazySource: 'import{r}from"./c0abc.js";r.u(1);\n',
+  });
+  const result = await runNamingPasses(workspace, "esm");
+
+  const lazyFileName = toDistRelativeFile(result.manifest.chunks.lazy.url);
+  const lazySource = await result.read(lazyFileName);
+  expect(lazySource).toContain(
+    `"./${path.posix.basename(result.baseScriptFileName)}"`,
+  );
+  expect(lazySource).not.toContain('"./c0abc.js"');
+});
+
+test("esm chunk naming rehashes dependents when a referenced chunk changes", async () => {
+  const first = await runNamingPasses(
+    await createNamingWorkspace({
+      baseSource: ESM_BASE_SOURCE,
+      lazySource: ESM_LAZY_SOURCE,
+    }),
+    "esm",
+  );
+  const second = await runNamingPasses(
+    await createNamingWorkspace({
+      baseSource: ESM_BASE_SOURCE.replace("export{r}", "console.log(1);export{r}"),
+      lazySource: ESM_LAZY_SOURCE,
+    }),
+    "esm",
+  );
+
+  // The lazy chunk's own bytes are unchanged, but it embeds the base chunk's
+  // name: without folding the reference closure into the hash it would keep a
+  // stale name while its shipped bytes changed.
+  expect(second.baseScriptFileName).not.toBe(first.baseScriptFileName);
+  expect(second.manifest.chunks.lazy.url).not.toBe(
+    first.manifest.chunks.lazy.url,
+  );
+});
+
+test("script chunk naming leaves chunk sources untouched", async () => {
+  const baseSource =
+    'var r=globalThis.__g;r.a([0,[[[],"",[]],[[0],"lazy.js",[]]],[0,1],"/assets/"]);\n';
+  const lazySource = 'globalThis.__g.u(1);\n';
+  const workspace = await createNamingWorkspace({ baseSource, lazySource });
+  const result = await runNamingPasses(workspace, "script");
+
+  const lazyFileName = toDistRelativeFile(result.manifest.chunks.lazy.url);
+  // Script output only ever rewrites the base chunk's runtime manifest; the
+  // lazy chunk keeps its exact compiled bytes.
+  expect(await result.read(lazyFileName)).toBe(lazySource);
+  const baseSourceOut = await result.read(result.baseScriptFileName);
+  expect(baseSourceOut).toContain(path.posix.basename(lazyFileName));
+  expect(baseSourceOut).not.toContain('"lazy.js"');
+});
+
+const TYPED_ANNOTATION_TSCONFIG = JSON.stringify(
+  {
+    compilerOptions: {
+      module: "ESNext",
+      moduleResolution: "Bundler",
+      skipLibCheck: true,
+      strict: true,
+      target: "ESNext",
+    },
+  },
+  null,
+  2,
+);
+
+const TYPED_ANNOTATION_SOURCE = [
+  "export class Point {",
+  "  x: number;",
+  "  constructor(x: number) {",
+  "    this.x = x;",
+  "  }",
+  "}",
+  "export function scale(p: Point, k: number): number {",
+  "  return p.x * k;",
+  "}",
+  "export function label(name: string, on: boolean): string {",
+  '  return on ? name : "";',
+  "}",
+  "export const factor: number = 3;",
+  "export function widen(v: number | string): string {",
+  "  return String(v);",
+  "}",
+  "export function identity<T>(v: T): T {",
+  "  return v;",
+  "}",
+  "export function optional(a?: number): number {",
+  "  return a ?? 0;",
+  "}",
+  "export function shape(): { a: number } {",
+  "  return { a: 1 };",
+  "}",
+  "",
+].join("\n");
+
+test("extracts conservative Closure annotations from TypeScript sources", async () => {
+  const fixture = await createFixture();
+  await fixture.write("tsconfig.json", TYPED_ANNOTATION_TSCONFIG);
+  await fixture.write("src/mod.ts", TYPED_ANNOTATION_SOURCE);
+  // Stands in for the materialized module: types erased, bindings preserved.
+  await fixture.write("src/mod__ts.js", TYPED_ANNOTATION_SOURCE);
+
+  const result = await extractTypedAnnotations({
+    candidates: [
+      {
+        materializedFilePath: path.join(fixture.srcDir, "mod__ts.js"),
+        sourceFilePath: path.join(fixture.srcDir, "mod.ts"),
+      },
+    ],
+    projectRoot: fixture.projectRoot,
+  });
+
+  expect(result.files).toHaveLength(1);
+  const byName = new Map(
+    result.files[0].bindings.map((binding) => [binding.name, binding.jsdoc]),
+  );
+
+  // A function whose params/return are a same-module class and primitives.
+  expect(byName.get("scale")).toBe(
+    "/** @param {!Point} p @param {number} k @return {number} */\n",
+  );
+  expect(byName.get("label")).toBe(
+    "/** @param {string} name @param {boolean} on @return {string} */\n",
+  );
+  // Single-declarator top-level variable with a primitive type.
+  expect(byName.get("factor")).toBe("/** @type {number} */\n");
+
+  // Classes carry no JSDoc of their own (Closure reads ES6 class structure
+  // natively), but since v2 they carry per-member @type entries.
+  const point = result.files[0].bindings.find(
+    (binding) => binding.name === "Point",
+  );
+  expect(point).toBeTruthy();
+  expect(point.jsdoc).toBe("");
+  expect(
+    point.members.some(
+      (member) =>
+        member.name === "x" && member.jsdoc === "/** @type {number} */\n",
+    ),
+  ).toBe(true);
+  // Ineligible signatures are omitted whole - absence is always sound.
+  for (const omitted of ["widen", "identity", "optional", "shape"]) {
+    expect(byName.has(omitted)).toBe(false);
+  }
+  expect(result.bindingCount).toBe(byName.size);
+});
+
+test("drops annotations whose binding did not survive the transform", async () => {
+  const fixture = await createFixture();
+  await fixture.write("tsconfig.json", TYPED_ANNOTATION_TSCONFIG);
+  await fixture.write("src/mod.ts", TYPED_ANNOTATION_SOURCE);
+  // Only `scale` survives into the emitted text.
+  await fixture.write("src/mod__ts.js", "export function scale() {}\n");
+
+  const result = await extractTypedAnnotations({
+    candidates: [
+      {
+        materializedFilePath: path.join(fixture.srcDir, "mod__ts.js"),
+        sourceFilePath: path.join(fixture.srcDir, "mod.ts"),
+      },
+    ],
+    projectRoot: fixture.projectRoot,
+  });
+
+  expect(result.files[0].bindings.map((binding) => binding.name)).toEqual([
+    "scale",
+  ]);
+});
+
+test("emits no annotations without a tsconfig", async () => {
+  // Not createFixture(): that scaffolds a tsconfig.json, and TypeScript
+  // discovers config files by walking up from the project root.
+  const root = await fs.realpath(
+    await fs.mkdtemp(path.join(os.tmpdir(), "gcc-typed-no-tsconfig-")),
+  );
+  onTestFinished(() => fs.rm(root, { force: true, recursive: true }));
+  await fs.writeFile(path.join(root, "mod.ts"), TYPED_ANNOTATION_SOURCE);
+
+  const result = await extractTypedAnnotations({
+    candidates: [
+      {
+        materializedFilePath: path.join(root, "mod.ts"),
+        sourceFilePath: path.join(root, "mod.ts"),
+      },
+    ],
+    projectRoot: root,
+  });
+
+  expect(result).toEqual({ bindingCount: 0, files: [] });
+});
+
+test("only plain project TypeScript modules are annotation sources", () => {
+  const projectRoot = "/project";
+  expect(isTypedAnnotationSource("/project/src/main.ts", projectRoot)).toBe(
+    true,
+  );
+  expect(isTypedAnnotationSource("/project/src/App.tsx", projectRoot)).toBe(
+    true,
+  );
+  // Framework single-file components compile through their own toolchain.
+  expect(isTypedAnnotationSource("/project/src/App.svelte", projectRoot)).toBe(
+    false,
+  );
+  expect(isTypedAnnotationSource("/project/src/App.vue", projectRoot)).toBe(
+    false,
+  );
+  // Query suffixes change the materialized file name and the text.
+  expect(
+    isTypedAnnotationSource("/project/src/main.ts?used", projectRoot),
+  ).toBe(false);
+  expect(isTypedAnnotationSource("\0virtual:entry.ts", projectRoot)).toBe(
+    false,
+  );
+  expect(
+    isTypedAnnotationSource("/project/node_modules/dep/index.ts", projectRoot),
+  ).toBe(false);
+  expect(isTypedAnnotationSource("/elsewhere/main.ts", projectRoot)).toBe(
+    false,
+  );
+});
+
+test("typed annotations reach build options and move the options signature", async () => {
+  const fixture = await createFixture();
+  const typedAnnotations = [
+    {
+      bindings: [{ jsdoc: "/** @type {number} */\n", name: "factor" }],
+      filePath: path.join(fixture.srcDir, "mod__ts.js"),
+    },
+  ];
+  const baseInput = {
+    config: { base: "/", build: { target: "esnext" }, root: fixture.projectRoot },
+    entries: ["./main.js"],
+    externs: [],
+    manifestFile: "manifest.json",
+    options: {},
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    publicPath: "/",
+    srcDir: fixture.srcDir,
+  };
+
+  const withTypes = createCompilerOptions({ ...baseInput, typedAnnotations });
+  expect(withTypes.typedAnnotations).toEqual(typedAnnotations);
+  const withoutTypes = createCompilerOptions(baseInput);
+  expect(withoutTypes.typedAnnotations).toEqual([]);
+
+  const signatureOf = (compilerOptions) =>
+    getOptionsSignature(normalizeBuildOptions(compilerOptions));
+  const untypedSignature = signatureOf(withoutTypes);
+  const typedSignature = signatureOf(withTypes);
+  expect(typedSignature).not.toBe(untypedSignature);
+
+  // Same sources, different inferred type: the signature must still move, or
+  // a type-only edit would be served a stale cached build.
+  const retypedSignature = signatureOf(
+    createCompilerOptions({
+      ...baseInput,
+      typedAnnotations: [
+        {
+          bindings: [{ jsdoc: "/** @type {string} */\n", name: "factor" }],
+          filePath: typedAnnotations[0].filePath,
+        },
+      ],
+    }),
+  );
+  expect(retypedSignature).not.toBe(typedSignature);
+  expect(signatureOf(createCompilerOptions({ ...baseInput, typedAnnotations }))).toBe(
+    typedSignature,
+  );
+});
+
+/**
+ * Builds the two graphs the externs stage sees. The dependency module differs
+ * between them exactly as esbuild's class-field lowering makes it differ: the
+ * authored source assigns `this.loweredField`, the prebundled output writes it
+ * through `__publicField(this, "loweredField", ...)`.
+ */
+async function writeExternsGraphFixture(fixture) {
+  const preDepFile = path.join(fixture.srcDir, "pre-dep.js");
+  const postDepFile = path.join(fixture.srcDir, "post-dep.js");
+  const appFile = path.join(fixture.srcDir, "app.js");
+  const depModuleId = path.join(
+    fixture.projectRoot,
+    "node_modules",
+    "dep-pkg",
+    "index.js",
+  );
+
+  await fs.mkdir(fixture.srcDir, { recursive: true });
+  await fs.writeFile(
+    preDepFile,
+    [
+      "export class Widget {",
+      "  constructor() {",
+      "    this.loweredField = 1;",
+      "  }",
+      "  read(other) {",
+      "    return other.loweredField;",
+      "  }",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  await fs.writeFile(
+    postDepFile,
+    [
+      "const __publicField = (obj, key, value) => (obj[key] = value);",
+      "export class Widget {",
+      "  constructor() {",
+      '    __publicField(this, "loweredField", 1);',
+      "  }",
+      "  read(other) {",
+      "    return other.loweredField;",
+      "  }",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  await fs.writeFile(appFile, "export const app = 1;\n");
+
+  const graph = (depFilePath) => ({
+    authoredFiles: [appFile],
+    entries: ["./app.js"],
+    modules: [
+      { filePath: appFile, id: appFile, relativePath: "app.js", sourceModuleIds: [appFile] },
+      {
+        filePath: depFilePath,
+        id: depFilePath,
+        relativePath: path.basename(depFilePath),
+        sourceModuleIds: [depModuleId],
+      },
+    ],
+    prunedEmptyModuleIds: [],
+    retainedEmptyModuleIds: [],
+    runtimeEntries: ["./app.js", `./${path.basename(depFilePath)}`],
+    srcDir: fixture.srcDir,
+  });
+
+  return { post: graph(postDepFile), pre: graph(preDepFile) };
+}
+
+test("dependency hazards are read from the post-prebundle graph", async () => {
+  // Running the externs stage straight from src skips the bundler define that
+  // normally supplies this; the package signature only needs to resolve to a
+  // package.json.
+  globalThis.__gcc_current_module_url = pathToFileURL(
+    path.join(process.cwd(), "dist/index.mjs"),
+  ).href;
+  const fixture = await createFixture();
+  const graphs = await writeExternsGraphFixture(fixture);
+  const generatedExternFile = path.join(fixture.projectRoot, "generated.externs.js");
+
+  const options = {
+    compiler: { cache: { mode: "off" } },
+    externs: {
+      generate: {
+        modules: ["dep-pkg"],
+        outputFile: generatedExternFile,
+      },
+    },
+  };
+
+  await resolveCompilerExterns({
+    captureRoot: fixture.projectRoot,
+    materialized: graphs.pre,
+    options,
+    postPrebundleMaterialized: Promise.resolve(graphs.post),
+    projectRoot: fixture.projectRoot,
+  });
+
+  // The string-keyed definition only exists after prebundling. Scanning the
+  // pre-prebundle graph would see `this.loweredField = 1` (dot-defined,
+  // dot-accessed, safe) and emit nothing, silently dropping a real hazard.
+  expect(await fs.readFile(generatedExternFile, "utf8")).toContain(
+    "Object.prototype.loweredField;",
+  );
+
+  // Control: feeding the pre-prebundle graph to both sides must NOT find it,
+  // which is what makes the assertion above about ordering rather than luck.
+  await resolveCompilerExterns({
+    captureRoot: fixture.projectRoot,
+    materialized: graphs.pre,
+    options,
+    postPrebundleMaterialized: Promise.resolve(graphs.pre),
+    projectRoot: fixture.projectRoot,
+  });
+  expect(await fs.readFile(generatedExternFile, "utf8")).not.toContain(
+    "Object.prototype.loweredField;",
+  );
+});

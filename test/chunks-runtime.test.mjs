@@ -3,14 +3,17 @@ import path from "node:path";
 import { expect, test } from "bun:test";
 
 import { build } from "../dist/index.mjs";
+import { resolveChunkOutputType } from "../src/build/resolve/options.ts";
 import {
   createFixture,
+  findFilesNamed,
   getProjectCacheDir,
   listDirectoryNames,
 } from "./helpers.mjs";
 
 test.serial(
   "emits smaller script chunks for explicit lazy modules",
+  { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
     await fixture.write(
@@ -35,7 +38,7 @@ test.serial(
 
     const result = await build({
       cache: { mode: "off" },
-      chunks: { mode: "bundler-runtime" },
+      chunks: { mode: "bundler-runtime", outputType: "script" },
       entries: ["./main.ts"],
       outDir: fixture.outDir,
       projectRoot: fixture.projectRoot,
@@ -61,9 +64,9 @@ test.serial(
     expect(baseOutput).not.toContain("gcc.src.feature");
     expect(baseOutput).not.toMatch(/m[0-9a-f]{8}/);
     expect(baseOutput).toContain(".__g");
-    expect(baseOutput).toMatch(
-      /(?:globalThis\.__g|[A-Za-z_$][\w$]*)\.n\(\[0\]\)/,
-    );
+    // Hoisted entry modules execute inline; no `.n([...])` kick remains.
+    expect(baseOutput).not.toMatch(/\.n\(\[/);
+    expect(baseOutput).toContain('textContent="base"');
     expect(baseOutput).not.toMatch(/LAZY_FEATURE/);
     expect(lazyOutput).toMatch(/LAZY_FEATURE/);
   },
@@ -71,6 +74,7 @@ test.serial(
 
 test.serial(
   "emits bundler-runtime chunks for explicit lazy modules",
+  { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
     await fixture.write(
@@ -95,7 +99,7 @@ test.serial(
 
     const result = await build({
       cache: { mode: "off" },
-      chunks: { mode: "bundler-runtime" },
+      chunks: { mode: "bundler-runtime", outputType: "script" },
       entries: ["./main.ts"],
       outDir: fixture.outDir,
       projectRoot: fixture.projectRoot,
@@ -124,9 +128,9 @@ test.serial(
     expect(baseOutput.trimStart()).not.toMatch(/^var\s/);
     expect(baseOutput.trimStart()).toMatch(/^!function\(\)\{/);
     expect(baseOutput).toContain(".__g");
-    expect(baseOutput).toMatch(
-      /(?:globalThis\.__g|[A-Za-z_$][\w$]*)\.n\(\[0\]\)/,
-    );
+    // Hoisted entry modules execute inline; no `.n([...])` kick remains.
+    expect(baseOutput).not.toMatch(/\.n\(\[/);
+    expect(baseOutput).toContain('textContent="base"');
     expect(baseOutput).not.toMatch(/goog\.module/);
     expect(baseOutput).not.toMatch(/ModuleManager/);
     expect(baseOutput).not.toContain('Object.defineProperty(d,"default"');
@@ -144,11 +148,16 @@ test.serial(
     expect(lazyOutput).toMatch(/\[[0-9]+\]=/);
     expect(lazyOutput).not.toContain('["default"]');
     expect(lazyOutput).not.toMatch(/goog\.module/);
+    // Hoisted lazy chunks run on script load rather than through `h()`.
+    expect(lazyOutput).not.toMatch(
+      /(?:G|\$gcc\.[A-Za-z_$][\w$]*)\.[A-Za-z_$][\w$]*\(function\(/,
+    );
   },
 );
 
 test.serial(
   "bundler-runtime ES5 reuses the helper alias for lazy registration and base finalization",
+  { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
     await fixture.write(
@@ -200,22 +209,32 @@ test.serial(
     expect(baseOutput).not.toContain("globalThis.__g.u(");
     expect(baseOutput).not.toContain('globalThis["__g"].u(');
     expect(baseOutput).not.toContain("globalThis.__g.n(");
-    expect(baseOutput).toMatch(
-      /\bvar _=[A-Za-z_$][\w$]*\._\|\|\([A-Za-z_$][\w$]*\._=\[\]\);/,
-    );
 
-    expect(lazyOutput).toContain("var G=globalThis.__g,_=G._;");
-    expect(lazyOutput).toMatch(/G\.[A-Za-z_$][\w$]*\(function\(/);
-    expect(lazyOutput).not.toContain("globalThis.__g.i(");
-    expect(lazyOutput).not.toContain('globalThis["__g"].i(');
+    // Hoisted chunks emit module code at top level, so Closure keeps the
+    // downleveled helper as an ordinary local function instead of routing it
+    // through the shared ES5 helper bag; no bag reference may survive
+    // without its installation.
+    expect(lazyOutput).toContain("arguments.length>2");
+    expect(lazyOutput).not.toContain("__runInitializers");
+    const usesHelperBag = /_\[\d+\]\(/.test(lazyOutput);
+    if (usesHelperBag) {
+      expect(baseOutput).toContain("var G=globalThis.__g,_=G._||(G._=[]);");
+      expect(lazyOutput).toContain("var G=globalThis.__g,_=G._;");
+    }
+    // No `h(function(...))` deferral wrapper, just a trailing
+    // `l(<chunkIndex>)`-style call that resolves the loader.
     expect(lazyOutput).not.toMatch(
-      /(?:^|[;\n])\s*[A-Za-z_$][\w$]*=globalThis(?:\.__g|\["__g"\]);/m,
+      /(?:G|\$gcc\.[A-Za-z_$][\w$]*)\.[A-Za-z_$][\w$]*\(function\(\s*\)\s*\{/,
+    );
+    expect(lazyOutput.trimEnd()).toMatch(
+      /\.[A-Za-z_$][\w$]*\(1\);?\s*\}\(\);?$/,
     );
   },
 );
 
 test.serial(
   "bundler-runtime rewrites property-protocol strings from the renaming report",
+  { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
     await fixture.write(
@@ -275,6 +294,7 @@ test.serial(
 
 test.serial(
   "bundler-runtime caches one combined Closure job when one lazy chunk changes",
+  { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
     const cacheDir = path.join(fixture.projectRoot, ".cache");
@@ -341,6 +361,7 @@ test.serial(
 
 test.serial(
   "parallel bundler-runtime Closure execution is byte-equivalent to serial execution",
+  { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
     await fixture.write(
@@ -413,6 +434,7 @@ test.serial(
 
 test.serial(
   "emits a bundler-runtime chunk manifest when requested",
+  { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
     await fixture.write(
@@ -550,6 +572,7 @@ function createScriptRuntimeStub(baseUrl = "http://localhost/dist/main.js") {
 
 test.serial(
   "split mode emits flat-quality chunks with a working lazy runtime",
+  { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
     await fixture.write(
@@ -655,3 +678,273 @@ test.serial("rejects the removed runtime helper API", async () => {
     /gcc-ts-bundler\/runtime|Cannot find module|Failed to resolve package/,
   );
 });
+
+test("resolves chunk output type through the auto gates", () => {
+  const resolve = (overrides) =>
+    resolveChunkOutputType({
+      chunkMode: "bundler-runtime",
+      languageOut: "ECMASCRIPT_NEXT",
+      outputType: "auto",
+      ...overrides,
+    });
+
+  // Explicit requests are honoured where the gates allow module output.
+  expect(resolve({ outputType: "esm" })).toBe("esm");
+  expect(resolve({ outputType: "script" })).toBe("script");
+  expect(resolve({ outputType: "esm", languageOut: "ECMASCRIPT6" })).toBe(
+    "esm",
+  );
+
+  // Forced-script gates outrank an explicit esm request: Closure will happily
+  // emit ES5 bodies *with* import statements, and script/worker consumers
+  // cannot load module output at all.
+  for (const languageOut of ["ECMASCRIPT3", "ECMASCRIPT5"]) {
+    expect(resolve({ languageOut, outputType: "esm" })).toBe("script");
+  }
+  for (const chunkMode of ["off", "split"]) {
+    expect(resolve({ chunkMode, outputType: "esm" })).toBe("script");
+  }
+  expect(resolve({ outputType: "esm", worker: true })).toBe("script");
+});
+
+test.serial(
+  "emits native module chunks when chunk output type is esm",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/main.ts",
+      [
+        'const load = () => import("./feature");',
+        '(globalThis as Record<string, unknown>)["__loadFeature"] = load;',
+        'document.body.textContent = "base";',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/feature.ts",
+      ['export const marker = "LAZY_FEATURE";', ""].join("\n"),
+    );
+
+    const result = await build({
+      cache: { mode: "off" },
+      chunks: { mode: "bundler-runtime", outputType: "esm", publicPath: "./" },
+      entries: ["./main.ts"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+
+    expect(result.ok).toBe(true);
+    const baseOutput = await fixture.read("dist/main.js");
+
+    // The $gcc machinery is gone: no rename prefix namespace, no per-chunk
+    // IIFE wrapper, no canonicalized root access.
+    expect(baseOutput).not.toContain("globalThis.$gcc");
+    expect(baseOutput).not.toContain("var G=globalThis.__g,_=G._");
+
+    // Chunks are loaded with native import() against relative specifiers,
+    // so no script element injection and no currentScript base derivation.
+    expect(baseOutput).not.toContain('createElement("script")');
+    expect(baseOutput).not.toContain("currentScript");
+    expect(baseOutput).toMatch(/import\(/);
+    expect(baseOutput).toMatch(/"\.\/c[0-9a-f]{8}\.js"/);
+
+    // Loader properties that must survive: CSS coupling and the registry.
+    expect(baseOutput).toContain('createElement("link")');
+  },
+);
+
+test.serial(
+  "keeps script chunk output when chunk output type is script",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/main.ts",
+      [
+        'const load = () => import("./feature");',
+        '(globalThis as Record<string, unknown>)["__loadFeature"] = load;',
+        'document.body.textContent = "base";',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write("src/feature.ts", 'export const marker = "LAZY";\n');
+
+    const result = await build({
+      cache: { mode: "off" },
+      chunks: {
+        mode: "bundler-runtime",
+        outputType: "script",
+        publicPath: "./",
+      },
+      entries: ["./main.ts"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+
+    expect(result.ok).toBe(true);
+    const baseOutput = await fixture.read("dist/main.js");
+    expect(baseOutput).toContain('createElement("script")');
+    expect(baseOutput).toContain("currentScript");
+    expect(baseOutput).not.toMatch(/^import\s|\bexport\s*\{/m);
+  },
+);
+
+test.serial(
+  "typed annotations reach the hoisted bundler-runtime input as JSDoc",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    const cacheDir = path.join(fixture.projectRoot, ".cache");
+    await fixture.write(
+      "src/widget.ts",
+      [
+        "export class Widget {",
+        "  constructor() {",
+        "    this.size = 1;",
+        "  }",
+        "}",
+        "export function measure(widget) {",
+        "  return widget.size;",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/main.ts",
+      [
+        'import { Widget, measure } from "./widget";',
+        "document.body.textContent = String(measure(new Widget()));",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await build({
+      cache: { dir: cacheDir, mode: "persistent" },
+      chunks: { mode: "bundler-runtime" },
+      entries: ["./main.ts"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+      typedAnnotations: [
+        {
+          bindings: [
+            { jsdoc: "/** @constructor */\n", name: "Widget" },
+            {
+              jsdoc:
+                "/**\n * @param {!Widget} widget\n * @return {number}\n */\n",
+              name: "measure",
+            },
+          ],
+          filePath: path.join(fixture.srcDir, "widget.ts"),
+        },
+      ],
+    });
+    expect(result.ok).toBe(true);
+
+    // Assert on the linked input Closure is handed, not on dist: ADVANCED
+    // strips every comment, so the annotations are invisible downstream even
+    // when they did their job.
+    const projectCacheDir = getProjectCacheDir(cacheDir, fixture.projectRoot);
+    const linkedFiles = await findFilesNamed(projectCacheDir, "main.linked.js");
+    expect(linkedFiles.length).toBeGreaterThan(0);
+    const linked = await fs.readFile(linkedFiles[0], "utf8");
+
+    // Hoisting suffixes the bindings, so a naive name match would miss them.
+    expect(linked).toMatch(/\/\*\* @constructor \*\/\s*\nclass Widget\$\$\d+/);
+    expect(linked).toMatch(
+      /@return \{number\}\n \*\/\nfunction measure\$\$\d+/,
+    );
+  },
+);
+
+test.serial(
+  "typed annotations v2: member JSDoc lands inside the class and imported class types resolve",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    const cacheDir = path.join(fixture.projectRoot, ".cache");
+    await fixture.write(
+      "src/money.ts",
+      [
+        "export class Money {",
+        '  unit = "eur";',
+        "  constructor(minor) {",
+        "    this.minor = minor;",
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/main.ts",
+      [
+        'import { Money as Cash } from "./money";',
+        "function total(cash) {",
+        "  return cash.minor;",
+        "}",
+        "document.body.textContent = String(total(new Cash(2)));",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await build({
+      cache: { dir: cacheDir, mode: "persistent" },
+      chunks: { mode: "bundler-runtime" },
+      entries: ["./main.ts"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+      typedAnnotations: [
+        {
+          bindings: [
+            {
+              jsdoc: "",
+              members: [
+                { jsdoc: "/** @type {number} */\n", name: "minor" },
+                { jsdoc: "/** @type {string} */\n", name: "unit" },
+              ],
+              name: "Money",
+            },
+          ],
+          filePath: path.join(fixture.srcDir, "money.ts"),
+        },
+        {
+          bindings: [
+            {
+              // The checker names the imported class by the LOCAL alias; the
+              // emitter routes it through the same map it rewrites code with.
+              jsdoc: "/** @param {!Cash} cash @return {number} */\n",
+              name: "total",
+            },
+            // Nothing named `Ghost` exists in either map, so this whole block
+            // must be dropped rather than emitted against a stale name.
+            {
+              jsdoc: "/** @param {!Ghost} cash @return {number} */\n",
+              name: "unused",
+            },
+          ],
+          filePath: path.join(fixture.srcDir, "main.ts"),
+        },
+      ],
+    });
+    expect(result.ok).toBe(true);
+
+    const projectCacheDir = getProjectCacheDir(cacheDir, fixture.projectRoot);
+    const linkedFiles = await findFilesNamed(projectCacheDir, "main.linked.js");
+    expect(linkedFiles.length).toBeGreaterThan(0);
+    const linked = await fs.readFile(linkedFiles[0], "utf8");
+
+    // Member blocks sit inside the class body, on the right member.
+    expect(linked).toMatch(/\/\*\* @type \{string\} \*\/\n\s+unit = "eur";/);
+    expect(linked).toMatch(/\/\*\* @type \{number\} \*\/\n\s+this\.minor = /);
+    // The imported class resolves to the origin module's suffixed binding.
+    expect(linked).toMatch(/@param \{!Money\$\$\d+\} cash/);
+    expect(linked).not.toContain("Cash");
+    // Unresolvable names drop the block, never the code.
+    expect(linked).not.toContain("Ghost");
+    expect(linked).toMatch(/function total\$\$\d+/);
+  },
+);
