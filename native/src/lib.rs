@@ -39,6 +39,9 @@ pub fn resolve_graph(
 }
 
 #[napi(js_name = "planChunks")]
+// napi positional contract: the TS side calls these by argument
+// position, so the parameter list is the published signature.
+#[allow(clippy::too_many_arguments)]
 pub fn plan_chunks(
     chunk_mode: String,
     base_chunk_name: String,
@@ -76,6 +79,9 @@ pub fn write_entry_shims(entries: Vec<shims::ShimEntry>) -> Result<Vec<String>> 
 }
 
 #[napi(js_name = "transpileSources")]
+// napi positional contract: the TS side calls these by argument
+// position, so the parameter list is the published signature.
+#[allow(clippy::too_many_arguments)]
 pub fn transpile_sources(
     file_names: Vec<String>,
     explicit_extern_paths: Vec<String>,

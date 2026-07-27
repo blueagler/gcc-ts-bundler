@@ -11,7 +11,7 @@ type ClosureCompilerInstance = InstanceType<
   typeof closureCompilerPackage.compiler
 >;
 
-export function applyInternalClosureDebugOptions(
+function applyInternalClosureDebugOptions(
   closureOptions: ClosureCompilerOptions,
 ) {
   if (process.env["GCC_CLOSURE_DEBUG"] === "1") {
@@ -33,14 +33,6 @@ export function applyInternalClosureDebugOptions(
         closureOptions[flag.slice(2, separator)] = flag.slice(separator + 1);
       }
     }
-  }
-  if (
-    closureOptions["compilationLevel"] === "ADVANCED" &&
-    process.env["GCC_USE_TYPES_FOR_OPTIMIZATION"] !== "false"
-  ) {
-    closureOptions["useTypesForOptimization"] = true;
-  } else if (process.env["GCC_USE_TYPES_FOR_OPTIMIZATION"] === "false") {
-    closureOptions["useTypesForOptimization"] = false;
   }
 }
 

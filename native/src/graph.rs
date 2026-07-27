@@ -158,6 +158,9 @@ impl ChunkMode {
     }
 }
 
+// napi positional contract: the TS side calls these by argument
+// position, so the parameter list is the published signature.
+#[allow(clippy::too_many_arguments)]
 pub fn plan_chunks(
     chunk_mode: String,
     base_chunk_name: String,

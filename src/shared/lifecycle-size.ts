@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import zlib from "node:zlib";
 
-export interface JsGraphStats {
+interface JsGraphStats {
   entryCount: number;
   forwardingModuleCount: number;
   lazyRootCount: number;
@@ -9,7 +9,7 @@ export interface JsGraphStats {
   totalBytes: number;
 }
 
-export interface OutputChunkStats {
+interface OutputChunkStats {
   entryFactoryCount: number;
   entryGzipBytes: number;
   entryRawBytes: number;
@@ -86,7 +86,7 @@ export async function collectOutputChunkStats(input: {
   } satisfies OutputChunkStats;
 }
 
-export function countRegisteredModuleFactories(sourceText: string) {
+function countRegisteredModuleFactories(sourceText: string) {
   return [...sourceText.matchAll(/\((\d+),function\(/gu)].length;
 }
 

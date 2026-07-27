@@ -180,10 +180,8 @@ fn collect_pattern_idents(pattern: &Pat, out: &mut BTreeSet<String>) {
             out.insert(ident.id.sym.to_string());
         }
         Pat::Array(array) => {
-            for element in &array.elems {
-                if let Some(pattern) = element {
-                    collect_pattern_idents(pattern, out);
-                }
+            for pattern in array.elems.iter().flatten() {
+                collect_pattern_idents(pattern, out);
             }
         }
         Pat::Object(object) => {

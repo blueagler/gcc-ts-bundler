@@ -226,7 +226,7 @@ export function groupBundleRequests(requests: RegionBundleRequest[]) {
   return { groupedRequests, requestGroupKeyByTarget };
 }
 
-export function canCombineBundleRequests(requests: RegionBundleRequest[]) {
+function canCombineBundleRequests(requests: RegionBundleRequest[]) {
   const exportedNames = new Set<string>();
   let exportedDefaultCount = 0;
 

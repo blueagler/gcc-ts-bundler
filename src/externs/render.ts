@@ -13,7 +13,7 @@ export interface AppUsageMembers {
   stringLiteralRead: ReadonlySet<string>;
 }
 
-export function createEmptyAppUsageMembers(): AppUsageMembers {
+function createEmptyAppUsageMembers(): AppUsageMembers {
   return { dotAccessed: new Set(), stringLiteralRead: new Set() };
 }
 

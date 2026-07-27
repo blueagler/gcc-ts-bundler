@@ -95,9 +95,6 @@ IIFE wrappers with `--rename_prefix_namespace=$gcc`; every chunk declares
 module code lives inside the chunk wrapper function, so it never pays the
 `$gcc.` prefix.
 
-Set `GCC_DISABLE_HOIST=1` to fall back to pure registry emission when
-debugging.
-
 ### 4. Analyze types and transpile
 
 The JavaScript layer uses the TypeScript compiler API for diagnostics and for Closure metadata that needs semantic information, including type declarations, JSDoc, enums, and decorators. Plain JavaScript files can take a faster scan path when no semantic work is needed.

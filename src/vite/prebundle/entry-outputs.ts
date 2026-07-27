@@ -255,9 +255,7 @@ export async function collectCollapsibleBundleEntryOutputs(
   return collapsibleByPath;
 }
 
-export async function analyzeCollapsibleBundleEntryOutput(
-  outputFilePath: string,
-) {
+async function analyzeCollapsibleBundleEntryOutput(outputFilePath: string) {
   const sourceText = await fs.readFile(outputFilePath, "utf8");
   const sourceFile = ts.createSourceFile(
     outputFilePath,
@@ -382,7 +380,7 @@ export async function analyzeCollapsibleBundleEntryOutput(
   } satisfies CollapsibleBundleEntryOutput;
 }
 
-export function renderCollapsedBundleImportStatement(input: {
+function renderCollapsedBundleImportStatement(input: {
   importerFilePath: string;
   sourceFile: ts.SourceFile;
   statement: ts.ImportDeclaration | ts.ExportDeclaration;
@@ -420,10 +418,7 @@ export function renderCollapsedBundleImportStatement(input: {
   return [...sideEffectImports, rewrittenStatementText].join("\n");
 }
 
-export function dedupeAuthoredImportStatements(
-  filePath: string,
-  sourceText: string,
-) {
+function dedupeAuthoredImportStatements(filePath: string, sourceText: string) {
   const sourceFile = ts.createSourceFile(
     filePath,
     sourceText,

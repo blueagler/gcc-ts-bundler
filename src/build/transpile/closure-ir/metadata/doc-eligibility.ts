@@ -2,7 +2,7 @@ import ts from "typescript";
 
 import { hasExportModifier } from "./modifiers";
 
-export interface ClosureIrDocEligibility {
+interface ClosureIrDocEligibility {
   exportedDeclarationNames: Set<string>;
   hasJsDocText: boolean;
   hasTsCheckText: boolean;
@@ -42,7 +42,7 @@ export function classifyClosureIrDocEligibility(
   };
 }
 
-export function isDocRelevantTopLevelDeclaration(
+function isDocRelevantTopLevelDeclaration(
   statement: ts.Statement,
   eligibility: Pick<
     ClosureIrDocEligibility,

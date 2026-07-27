@@ -98,7 +98,7 @@ pub(super) fn resolve_graph_impl(
         );
 
         module_cache.insert(current_file.clone(), module);
-        pending.extend(dependencies.into_iter());
+        pending.extend(dependencies);
     }
 
     for package_json_file in &consulted_package_jsons {

@@ -775,7 +775,7 @@ fn compute_facade_slots(
             }
         }
         if !consumer_hoisted {
-            for (_, (target, orig)) in &scan.reexports {
+            for (target, orig) in scan.reexports.values() {
                 needs.need(target, orig);
             }
             for star_target in &scan.stars {

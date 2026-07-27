@@ -187,7 +187,7 @@ pub(super) fn collect_raw_bundler_exports(
                     .extend(exported_decl_names(&export_decl.decl));
             }
             ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportNamed(named_export)) => {
-                if matches!(named_export.type_only, true) {
+                if named_export.type_only {
                     continue;
                 }
                 if let Some(src) = &named_export.src {

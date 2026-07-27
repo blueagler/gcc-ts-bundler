@@ -316,11 +316,11 @@ impl VisitMut for JsCompatAstVisitor {
             return;
         }
 
-        *returned_expr = Box::new(Expr::Unary(UnaryExpr {
+        **returned_expr = Expr::Unary(UnaryExpr {
             span: Default::default(),
             op: UnaryOp::Void,
             arg: Box::new(Expr::Lit(Lit::Num(0f64.into()))),
-        }));
+        });
     }
 }
 

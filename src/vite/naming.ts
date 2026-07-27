@@ -39,7 +39,7 @@ interface DeferredChunkSeed {
   preferredName: string | null;
 }
 
-export interface RenamedNonBaseOutputs {
+interface RenamedNonBaseOutputs {
   baseChunkFilePath: string;
   baseSeed: BaseOutputSeed;
   deferredChunkSeeds: DeferredChunkSeed[];

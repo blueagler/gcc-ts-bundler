@@ -39,7 +39,7 @@ export function resolveViteCaptureRootPath(input: {
   );
 }
 
-export function resolveViteCaptureRootId(input: {
+function resolveViteCaptureRootId(input: {
   config: Pick<ResolvedConfig, "base" | "mode" | "root" | "build">;
   options: GccTsBundlerVitePluginOptions;
   projectRoot: string;
@@ -130,7 +130,7 @@ function isDependencyModuleId(id: string) {
   return stripQuery(id).includes("/node_modules/");
 }
 
-export async function normalizeCapturedCode(
+async function normalizeCapturedCode(
   id: string,
   code: string,
   analysis?: CapturedModuleAnalysis,
@@ -201,7 +201,7 @@ export async function normalizeRetainedCapturedModules(input: {
   return new Map(normalizedEntries);
 }
 
-export async function getNormalizedCapturedModule(
+async function getNormalizedCapturedModule(
   record: CapturedModule,
   metrics?: ViteBuildMetrics,
 ): Promise<CapturedModule> {

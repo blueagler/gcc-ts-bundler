@@ -873,6 +873,18 @@ fn quoted_valueless_class_fields_gain_explicit_undefined() {
 }
 
 #[test]
+fn rewrites_quoted_exports_assignments_in_registry_modules() {
+    let rewritten = crate::transpile::emit_runtime::rewrite_bundler_exports(
+        "exports.plain = 1;\nexports[\"quoted\"] = 2;\nexports['single'] = 3;\nvalue[\"quoted\"] = 4;\n",
+    );
+    assert!(rewritten.contains("__exports[\"plain\"] ="), "{rewritten}");
+    assert!(rewritten.contains("__exports[\"quoted\"] ="), "{rewritten}");
+    assert!(rewritten.contains("__exports[\"single\"] ="), "{rewritten}");
+    // Non-exports receivers stay untouched.
+    assert!(rewritten.contains("value[\"quoted\"] = 4"), "{rewritten}");
+}
+
+#[test]
 fn collects_pure_annotated_binding_names_from_source() {
     let names = crate::transpile::pure_calls::collect_pure_annotated_binding_names(
         &[
@@ -2306,9 +2318,14 @@ fn hoisted_dynamic_import_target_keeps_facade() {
     assert!(!transformed.contains("__require("), "{transformed}");
 }
 
+/// A bundler-runtime build with no chunk graph gets no hoist plan
+/// (`build_hoist_plan` returns `None` for an empty graph), and emission then
+/// falls back to registry form. This is a live path, not the deleted
+/// `GCC_DISABLE_HOIST` mode: hoisting is now unconditional whenever a plan
+/// exists.
 #[test]
-fn registry_fallback_emission_is_unchanged_without_hoist_plan() {
-    let mut fixture = make_cross_chunk_fixture("cross-chunk-fallback", None);
+fn emission_without_a_hoist_plan_stays_registry_form() {
+    let mut fixture = make_cross_chunk_fixture("cross-chunk-no-plan", None);
     fixture.context.hoist_plan = None;
     let transformed = emit(&fixture, "main.ts");
 

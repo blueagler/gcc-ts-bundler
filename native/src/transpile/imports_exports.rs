@@ -154,6 +154,9 @@ pub(super) fn convert_named_export(
     Ok(lines)
 }
 
+// Threads the whole export-lowering context through one call; splitting it
+// into a struct would only move the same eight values behind a name.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn convert_bundler_named_export(
     file_path: &Path,
     named_export: &swc_core::ecma::ast::NamedExport,

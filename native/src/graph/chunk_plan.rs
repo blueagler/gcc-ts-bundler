@@ -294,14 +294,12 @@ pub(super) fn build_bundler_chunk_plan(
             name: sanitize_chunk_name(&format!(
                 "{}-lazy",
                 path_relative_to(Path::new(&lazy_import.targetPath), workspace_dir)
-                    .replace('\\', "-")
-                    .replace('/', "-")
+                    .replace(['\\', '/'], "-")
                     .rsplit_once('.')
                     .map(|(head, _)| head.to_string())
                     .unwrap_or_else(|| {
                         path_relative_to(Path::new(&lazy_import.targetPath), workspace_dir)
-                            .replace('\\', "-")
-                            .replace('/', "-")
+                            .replace(['\\', '/'], "-")
                     })
             )),
         });

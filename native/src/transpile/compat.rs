@@ -43,7 +43,7 @@ pub(super) fn apply_program_compat_transforms(program: &mut Program, context: &T
     if context.chunk_mode != ChunkMode::BundlerRuntime {
         program.visit_mut_with(&mut GoogModuleThrowRewriteVisitor);
     }
-    program.visit_mut_with(&mut ObjectPatternParamVisitor::default());
+    program.visit_mut_with(&mut ObjectPatternParamVisitor);
 }
 
 pub(super) fn apply_file_compat_transforms(

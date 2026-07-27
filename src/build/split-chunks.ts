@@ -12,7 +12,7 @@ import type { ChunkPlanChunk, LazyImport } from "./types";
  * handwritten prelude prepended to the base chunk after compilation.
  */
 
-export function lazyRegShimFileName(moduleId: string) {
+function lazyRegShimFileName(moduleId: string) {
   return `gcc_lazyreg_${moduleId.replace(/[^A-Za-z0-9_]/gu, "_")}.ts`;
 }
 

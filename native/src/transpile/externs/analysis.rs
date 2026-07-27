@@ -53,7 +53,10 @@ struct ParsedExternFileAnalysis {
     static_property_names: HashSet<String>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+/// The externs-free shorthand. Production always has explicit externs to
+/// intersect against, so this exists only to keep the analysis tests from
+/// threading an empty slice through every call.
+#[cfg(test)]
 pub(crate) fn collect_extern_property_names(
     file_names: &[String],
 ) -> std::result::Result<ExternPropertyAnalysis, String> {
@@ -448,8 +451,8 @@ impl Visit for ExternPropertyCollector {
     }
 
     fn visit_call_expr(&mut self, call_expr: &CallExpr) {
-        match &call_expr.callee {
-            Callee::Expr(callee_expr) => match &**callee_expr {
+        if let Callee::Expr(callee_expr) = &call_expr.callee {
+            match &**callee_expr {
                 Expr::Ident(ident) if ident.sym == *"JSCompiler_renameProperty" => {
                     if let Some(ExprOrSpread { expr, .. }) = call_expr.args.first() {
                         if let Expr::Lit(swc_core::ecma::ast::Lit::Str(value)) = &**expr {
@@ -497,8 +500,7 @@ impl Visit for ExternPropertyCollector {
                     }
                 }
                 _ => {}
-            },
-            _ => {}
+            }
         }
         call_expr.visit_children_with(self);
     }

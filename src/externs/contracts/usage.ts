@@ -11,9 +11,7 @@ import {
 } from "../shared";
 import type { ContractRegistry, UsageAnalysis } from "../shared";
 
-export function analyzeAppUsage(
-  analysis: ExternAnalysisContext,
-): UsageAnalysis {
+function analyzeAppUsage(analysis: ExternAnalysisContext): UsageAnalysis {
   const { checker, program, projectRoot, registry } = analysis;
   const usage: UsageAnalysis = {
     nominalInstanceMembers: new Map(),

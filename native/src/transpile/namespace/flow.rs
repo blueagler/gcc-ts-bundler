@@ -536,9 +536,8 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
             })
             .collect::<Vec<_>>();
 
-        match &mut call_expr.callee {
-            Callee::Expr(expr) => expr.visit_mut_with(self),
-            _ => {}
+        if let Callee::Expr(expr) = &mut call_expr.callee {
+            expr.visit_mut_with(self)
         }
         for (index, arg) in call_expr.args.iter_mut().enumerate() {
             if index == 0 {
@@ -569,14 +568,12 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
                         if matches!(
                             method_name.as_str(),
                             "assign" | "entries" | "keys" | "values"
-                        ) {
-                            if call_expr.args.iter().any(|arg| {
-                                matches!(&*arg.expr, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id()))
-                            }) {
-                                self.push_error(
-                                    "bundler-runtime does not support reflective Object.* operations on module namespace values",
-                                );
-                            }
+                        ) && call_expr.args.iter().any(|arg| {
+                            matches!(&*arg.expr, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id()))
+                        }) {
+                            self.push_error(
+                                "bundler-runtime does not support reflective Object.* operations on module namespace values",
+                            );
                         }
                     }
                 }

@@ -45,15 +45,15 @@ export type SignatureParamInfo = {
   type: string;
 };
 
-export const MAX_RECORDS_PER_FILE = 160;
+const MAX_RECORDS_PER_FILE = 160;
 
-export const MAX_RECORD_PROPERTIES = 48;
+const MAX_RECORD_PROPERTIES = 48;
 
-export const MAX_TYPE_DEPTH = 28;
+const MAX_TYPE_DEPTH = 28;
 
-export const MAX_UNION_MEMBERS = 16;
+const MAX_UNION_MEMBERS = 16;
 
-export const BUILTIN_TYPE_NAMES = new Set([
+const BUILTIN_TYPE_NAMES = new Set([
   "AbortController",
   "AbortSignal",
   "Array",
@@ -105,7 +105,7 @@ export const BUILTIN_TYPE_NAMES = new Set([
   "WritableStreamDefaultWriter",
 ]);
 
-export const BUILTIN_GENERIC_TYPE_NAMES = new Map([
+const BUILTIN_GENERIC_TYPE_NAMES = new Map([
   ["AsyncIterable", "AsyncIterable"],
   ["AsyncIterator", "AsyncIterator"],
   ["Iterable", "Iterable"],
@@ -119,7 +119,7 @@ export const BUILTIN_GENERIC_TYPE_NAMES = new Map([
   ["WeakSet", "WeakSet"],
 ]);
 
-export const FUNCTION_LIKE_GUARDS: ReadonlyArray<(node: ts.Node) => boolean> = [
+const FUNCTION_LIKE_GUARDS: ReadonlyArray<(node: ts.Node) => boolean> = [
   ts.isArrowFunction,
   ts.isCallSignatureDeclaration,
   ts.isConstructorDeclaration,
@@ -148,14 +148,6 @@ export function createClosureDocRenderContext(
     typeIds: new WeakMap(),
     usedRecordNames: new Set(),
   };
-}
-
-export function buildClosureTypeReference(
-  type: ts.Type,
-  checker: ts.TypeChecker,
-  context: ClosureDocRenderContext,
-) {
-  return toClosureType(type, checker, context);
 }
 
 export function toClosureType(
@@ -322,7 +314,7 @@ export function getTypedDeclarationClosureType(
     : closureType;
 }
 
-export function renderNamedType(
+function renderNamedType(
   type: ts.Type,
   checker: ts.TypeChecker,
   context: ClosureDocRenderContext,
@@ -389,7 +381,7 @@ export function renderNamedType(
     : `!${symbolName}`;
 }
 
-export function renderBuiltinNamedType(
+function renderBuiltinNamedType(
   symbolName: string,
   type: ts.Type,
   checker: ts.TypeChecker,
@@ -418,7 +410,7 @@ export function renderBuiltinNamedType(
   return `!${symbolName}`;
 }
 
-export function isTypeLikeSymbol(symbol: ts.Symbol) {
+function isTypeLikeSymbol(symbol: ts.Symbol) {
   return Boolean(
     symbol.flags &
     (ts.SymbolFlags.Class |
@@ -429,7 +421,7 @@ export function isTypeLikeSymbol(symbol: ts.Symbol) {
   );
 }
 
-export function isDeclarationFileSymbol(symbol: ts.Symbol) {
+function isDeclarationFileSymbol(symbol: ts.Symbol) {
   return (symbol.declarations ?? []).some(
     (declaration) => declaration.getSourceFile().isDeclarationFile,
   );
@@ -498,7 +490,7 @@ export function collectSignatureParamInfos({
   });
 }
 
-export function renderParameterType(
+function renderParameterType(
   parameter: ts.ParameterDeclaration,
   checker: ts.TypeChecker,
   context: ClosureDocRenderContext,
@@ -512,14 +504,14 @@ export function renderParameterType(
   return elementType ? toClosureType(elementType, checker, context) : "?";
 }
 
-export function getArrayElementType(type: ts.Type, checker: ts.TypeChecker) {
+function getArrayElementType(type: ts.Type, checker: ts.TypeChecker) {
   if (!checker.isArrayType(type) && !isReadonlyArrayType(type, checker)) {
     return null;
   }
   return firstOrUndefined(getTypeArguments(type, checker)) ?? null;
 }
 
-export function isThisParameter(parameter: ts.ParameterDeclaration) {
+function isThisParameter(parameter: ts.ParameterDeclaration) {
   return ts.isIdentifier(parameter.name) && parameter.name.text === "this";
 }
 
@@ -543,9 +535,7 @@ export function toClosureHeritageType(
     .replace(/,\s*this(?=>)/gu, "");
 }
 
-export function getHeritageExpressionName(
-  expression: ts.Expression,
-): string | null {
+function getHeritageExpressionName(expression: ts.Expression): string | null {
   if (ts.isIdentifier(expression)) {
     return expression.text;
   }
@@ -556,10 +546,7 @@ export function getHeritageExpressionName(
   return null;
 }
 
-export function collapseLargeUnion(
-  type: ts.UnionType,
-  checker: ts.TypeChecker,
-) {
+function collapseLargeUnion(type: ts.UnionType, checker: ts.TypeChecker) {
   const nonNullable = type.types.filter(
     (item) =>
       !(item.flags & ts.TypeFlags.Null) &&
@@ -613,11 +600,11 @@ export function isWorthAnnotatingVariableType(
   );
 }
 
-export function getDeclarationParameters(declaration: FunctionLikeDeclaration) {
+function getDeclarationParameters(declaration: FunctionLikeDeclaration) {
   return "parameters" in declaration ? declaration.parameters : [];
 }
 
-export function parameterNameForJsDoc(
+function parameterNameForJsDoc(
   declaration: ts.ParameterDeclaration | undefined,
   index: number,
 ) {
@@ -627,10 +614,7 @@ export function parameterNameForJsDoc(
   return `__param${index}`;
 }
 
-export function reserveRecordName(
-  baseName: string,
-  context: ClosureDocRenderContext,
-) {
+function reserveRecordName(baseName: string, context: ClosureDocRenderContext) {
   let candidate = baseName || "Record";
   let index = 0;
   while (context.usedRecordNames.has(candidate)) {
@@ -641,10 +625,7 @@ export function reserveRecordName(
   return candidate;
 }
 
-export function structuralRecordKey(
-  type: ts.Type,
-  context: ClosureDocRenderContext,
-) {
+function structuralRecordKey(type: ts.Type, context: ClosureDocRenderContext) {
   const existingId = context.typeIds.get(type);
   if (existingId !== undefined) {
     return `id:${existingId}`;
@@ -656,20 +637,20 @@ export function structuralRecordKey(
   return `id:${typeId}`;
 }
 
-export function isReadonlyArrayType(type: ts.Type, checker: ts.TypeChecker) {
+function isReadonlyArrayType(type: ts.Type, checker: ts.TypeChecker) {
   const symbol = type.getSymbol();
   return symbol ? checker.symbolToString(symbol) === "ReadonlyArray" : false;
 }
 
-export function getTypeArguments(type: ts.Type, checker: ts.TypeChecker) {
+function getTypeArguments(type: ts.Type, checker: ts.TypeChecker) {
   return isTypeReference(type) ? checker.getTypeArguments(type) : [];
 }
 
-export function isTypeReference(type: ts.Type): type is ts.TypeReference {
+function isTypeReference(type: ts.Type): type is ts.TypeReference {
   return "target" in type;
 }
 
-export function isFunctionLikeDeclaration(
+function isFunctionLikeDeclaration(
   declaration: ts.Node | undefined,
 ): declaration is FunctionLikeDeclaration {
   return (
@@ -678,7 +659,7 @@ export function isFunctionLikeDeclaration(
   );
 }
 
-export function isGlobalObjectType(type: ts.Type, checker: ts.TypeChecker) {
+function isGlobalObjectType(type: ts.Type, checker: ts.TypeChecker) {
   const symbol = type.getSymbol();
   if (!symbol) {
     return false;

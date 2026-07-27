@@ -1,18 +1,12 @@
-import type { ExternAnalysisContext } from "../context";
-import { collectContracts as collectRegistryContracts } from "./registry";
-import {
-  collectBoundaryAwareExternLines as collectUsageExternLines,
-  collectBoundaryAwareUsageMemberNames as collectUsageMemberNames,
+export {
+  collectBoundaryAwareExternLines,
+  collectBoundaryAwareUsageMemberNames,
 } from "./usage";
-export { createEmptyContractRegistry } from "../shared";
-
 import {
   collectStructuralContractMembers,
   renderStructuralExternLine,
 } from "../shared";
 import type { ContractRegistry } from "../shared";
-
-export const collectContracts = collectRegistryContracts;
 
 export function collectCandidateExternLines(registry: ContractRegistry) {
   const properties = new Set<string>();
@@ -40,16 +34,4 @@ export function collectCandidateExternLines(registry: ContractRegistry) {
       .sort((left, right) => left.localeCompare(right))
       .map((property) => renderStructuralExternLine(property)),
   );
-}
-
-export function collectBoundaryAwareExternLines(
-  analysis: ExternAnalysisContext,
-) {
-  return collectUsageExternLines(analysis);
-}
-
-export function collectBoundaryAwareUsageMemberNames(
-  analysis: ExternAnalysisContext,
-) {
-  return collectUsageMemberNames(analysis);
 }

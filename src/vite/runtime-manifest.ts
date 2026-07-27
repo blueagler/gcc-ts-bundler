@@ -111,7 +111,7 @@ const isGccRuntimeManifestChunk = isObjectOf<GccRuntimeManifestChunk>({
   url: isString,
 });
 
-export const isGccRuntimeManifest = isObjectOf<GccRuntimeManifest>({
+const isGccRuntimeManifest = isObjectOf<GccRuntimeManifest>({
   baseChunk: isString,
   chunks: recordOf(isGccRuntimeManifestChunk),
   loader: isString,

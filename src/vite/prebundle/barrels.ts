@@ -25,7 +25,7 @@ interface BarrelModuleInfo {
   starTargets: string[];
 }
 
-export interface ResolvedDeepExport {
+interface ResolvedDeepExport {
   imported: string;
   targetFilePath: string;
 }

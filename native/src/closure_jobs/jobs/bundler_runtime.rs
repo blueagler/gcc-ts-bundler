@@ -30,9 +30,6 @@ pub(crate) fn prepare_bundler_runtime_jobs(
     let mut postprocess_actions = Vec::new();
     let mut published_outputs = Vec::new();
     let runtime_debug = bundler_runtime_ids_are_readable();
-    // Mirrors the transpile-side switch: GCC_DISABLE_HOIST=1 falls back to the
-    // old registry/h() chunk format, which the loader still supports.
-    let hoisted = !matches!(std::env::var("GCC_DISABLE_HOIST").as_deref(), Ok("1"));
     let mut module_map = BTreeMap::new();
     let mut runtime_module_map = BTreeMap::new();
     let mut manifest_chunks = BTreeMap::new();
@@ -307,7 +304,6 @@ pub(crate) fn prepare_bundler_runtime_jobs(
                 module_text,
                 include_custom_elements_es5_adapter,
                 runtime_debug,
-                hoisted,
                 chunk_output_type,
                 if runtime_core.is_some() {
                     RuntimePreamblePart::ManifestOnly
@@ -319,8 +315,6 @@ pub(crate) fn prepare_bundler_runtime_jobs(
             render_bundler_runtime_lazy_chunk(
                 chunk_index,
                 module_text,
-                runtime_debug,
-                hoisted,
                 chunk_output_type,
                 runtime_core_chunk_name
                     .as_deref()
@@ -415,8 +409,8 @@ pub(crate) fn prepare_bundler_runtime_jobs(
             leading_js_inputs
                 .iter()
                 .cloned()
-                .chain(closure_lib_files.into_iter())
-                .chain(chunk_sources.into_iter())
+                .chain(closure_lib_files)
+                .chain(chunk_sources)
                 .collect(),
         ),
         jsOutputFile: None,

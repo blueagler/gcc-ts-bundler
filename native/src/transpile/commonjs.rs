@@ -109,7 +109,6 @@ impl VisitMut for CommonJsRewriteVisitor {
                     *stmt = Stmt::Empty(EmptyStmt {
                         span: Default::default(),
                     });
-                    return;
                 }
             }
             Stmt::If(if_stmt) => match evaluate_boolean_expr(&if_stmt.test) {
@@ -159,12 +158,10 @@ pub(super) fn quote_commonjs_export_object(object: &mut swc_core::ecma::ast::Obj
             }
             swc_core::ecma::ast::Prop::Shorthand(ident) => {
                 let key = quote_commonjs_prop_name(PropName::Ident(ident.clone().into()));
-                *prop = Box::new(swc_core::ecma::ast::Prop::KeyValue(
-                    swc_core::ecma::ast::KeyValueProp {
-                        key,
-                        value: Box::new(Expr::Ident(ident.clone())),
-                    },
-                ));
+                **prop = swc_core::ecma::ast::Prop::KeyValue(swc_core::ecma::ast::KeyValueProp {
+                    key,
+                    value: Box::new(Expr::Ident(ident.clone())),
+                });
             }
             _ => {}
         }

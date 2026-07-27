@@ -81,11 +81,9 @@ pub(super) fn render_bundler_runtime_base_chunk(
     module_text: &str,
     include_custom_elements_es5_adapter: bool,
     debug_runtime: bool,
-    hoisted: bool,
     chunk_output_type: ChunkOutputType,
     preamble_part: RuntimePreamblePart,
 ) -> std::result::Result<String, String> {
-    let runtime_global = runtime_global_ref("globalThis");
     let suffix = runtime_alias_suffix(chunk_id, chunk_output_type);
     let mut parts = vec![render_bundler_runtime_preamble_part(
         manifest_json,
@@ -97,23 +95,13 @@ pub(super) fn render_bundler_runtime_base_chunk(
     if include_custom_elements_es5_adapter {
         parts.push(render_custom_elements_es5_adapter());
     }
-    if hoisted {
-        parts.extend([
-            render_runtime_alias_line(&suffix),
-            format!("__runtime{suffix}.l({chunk_id:?});"),
-            module_text.to_string(),
-        ]);
-    } else {
-        parts.extend([
-            format!(
-                "var __runtime{suffix}={runtime_global},__register{suffix}=__runtime{suffix}.r;"
-            ),
-            format!("__runtime{suffix}.l({chunk_id:?});"),
-            "(function(__require,__dynamicImport,__preloadDynamicImport){".to_string(),
-            module_text.to_string(),
-            format!("}})(__runtime{suffix}.q,__runtime{suffix}.j,__runtime{suffix}.x);"),
-        ]);
-    }
+    // Hoisted module code lives at top level, so the loader helpers are plain
+    // top-level vars and the chunk marks itself loaded before running.
+    parts.extend([
+        render_runtime_alias_line(&suffix),
+        format!("__runtime{suffix}.l({chunk_id:?});"),
+        module_text.to_string(),
+    ]);
     if entry_points_json != "[]" {
         parts.push(format!("__runtime{suffix}.n({entry_points_json});"));
     }
@@ -124,13 +112,10 @@ pub(super) fn render_bundler_runtime_base_chunk(
 pub(super) fn render_bundler_runtime_lazy_chunk(
     chunk_id: usize,
     module_text: &str,
-    debug_runtime: bool,
-    hoisted: bool,
     chunk_output_type: ChunkOutputType,
     runtime_core: Option<&str>,
     assigner_names: &[String],
 ) -> String {
-    let runtime_global = runtime_global_ref("globalThis");
     let suffix = runtime_alias_suffix(chunk_id, chunk_output_type);
     // A vendor chunk runs before base, so it brings the runtime core with it;
     // every other non-base chunk finds the runtime already built.
@@ -146,30 +131,12 @@ pub(super) fn render_bundler_runtime_lazy_chunk(
     )
     .map(|pin| format!("{pin}\n"))
     .unwrap_or_default();
-    if hoisted {
-        // Hoisted chunks execute at top level on script load; the trailing
-        // `l()` is what resolves the loader promise for this chunk.
-        return format!(
-            "{core}{}\n{module_text}\n{pin}__runtime{suffix}.l({chunk_id:?});\n",
-            render_runtime_alias_line(&suffix),
-        );
-    }
-    let runtime_aliases = format!(
-        "var __require=__runtime{suffix}.q,__dynamicImport=__runtime{suffix}.j,__preloadDynamicImport=__runtime{suffix}.x;"
-    );
-    if debug_runtime {
-        let fallback_error = "\"base chunk missing\"";
-        format!(
-            "{core}var __runtime{suffix}={runtime_global};(__runtime{suffix}||{{h:function(){{throw Error({fallback_error});}}}}).h(function(__register){{\n  {runtime_aliases}\n{}\n}},{chunk_id:?});\n",
-            indent_block(module_text),
-            fallback_error = fallback_error,
-        )
-    } else {
-        format!(
-            "{core}var __runtime{suffix}={runtime_global};__runtime{suffix}.h(function(__register){{\n  {runtime_aliases}\n{}\n}},{chunk_id:?});\n",
-            indent_block(module_text),
-        )
-    }
+    // Hoisted chunks execute at top level on script load; the trailing `l()`
+    // is what resolves the loader promise for this chunk.
+    format!(
+        "{core}{}\n{module_text}\n{pin}__runtime{suffix}.l({chunk_id:?});\n",
+        render_runtime_alias_line(&suffix),
+    )
 }
 
 /// Which half of the runtime preamble a chunk emits.
@@ -195,22 +162,6 @@ pub(super) enum RuntimePreamblePart {
     Core,
     /// `r.a(<manifest>)` only, for a chunk whose core ran earlier.
     ManifestOnly,
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn render_bundler_runtime_preamble(
-    manifest_json: &str,
-    numeric_module_ids: bool,
-    debug_runtime: bool,
-    chunk_output_type: ChunkOutputType,
-) -> std::result::Result<String, String> {
-    render_bundler_runtime_preamble_part(
-        manifest_json,
-        numeric_module_ids,
-        debug_runtime,
-        chunk_output_type,
-        RuntimePreamblePart::All,
-    )
 }
 
 pub(super) fn render_bundler_runtime_preamble_part(
@@ -310,7 +261,6 @@ pub(super) fn render_bundler_runtime_preamble_part(
         "function h(a,b){r.s[a]=2;var c=r.d[a];if(c){c.j(b);delete r.d[a];}}".to_string(),
         "r.r=function(a,b){r.f[a]=b;};".to_string(),
         "r.g=function(a,b,c){if(typeof c===\"function\"){Object.defineProperty(a,b,{configurable:!0,enumerable:!0,get:c});return;}for(var d=0;d<c.length;d+=2)!function(e,f){Object.defineProperty(a,e,{configurable:!0,enumerable:!0,get:function(){return b[f];}})}(c[d],c[d+1]);};".to_string(),
-        "r.h=function(a,b){a(r.r);r.l(b);};".to_string(),
         format!("r.q=function(a){{if(Object.prototype.hasOwnProperty.call(r.c,a))return r.c[a];var b=r.f[a];if(b===void 0)throw Error({missing_module_error});var c=[];r.c[a]=c;b(r.q,c,r.j,r.x,r.g);return c;}};"),
         loader_specific,
         module_lookup,
@@ -399,17 +349,6 @@ pub(super) fn render_custom_elements_es5_adapter() -> String {
     .join("\n")
 }
 
-fn indent_block(source: &str) -> String {
-    if source.is_empty() {
-        return String::new();
-    }
-    source
-        .lines()
-        .map(|line| format!("  {line}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn render_script_loader_runtime(
     missing_chunk_error: &str,
     script_error: &str,
@@ -488,7 +427,6 @@ mod tests {
             "__register(0,function(){});",
             false,
             false,
-            true,
             ChunkOutputType::Script,
             RuntimePreamblePart::All,
         )
@@ -512,30 +450,6 @@ mod tests {
     }
 
     #[test]
-    fn registry_fallback_base_chunk_keeps_the_wrapper_form() {
-        let rendered = render_bundler_runtime_base_chunk(
-            0,
-            "[0]",
-            "script",
-            "[0,[],[],\"./\"]",
-            true,
-            "__register(0,function(){});",
-            false,
-            false,
-            false,
-            ChunkOutputType::Script,
-            RuntimePreamblePart::All,
-        )
-        .expect("render base chunk");
-
-        assert!(rendered.contains("var __runtime=globalThis[\"__g\"],__register=__runtime.r;"));
-        assert!(rendered.contains("__runtime.l(0);"));
-        assert!(rendered.contains("(function(__require,__dynamicImport,__preloadDynamicImport){"));
-        assert!(rendered.contains("})(__runtime.q,__runtime.j,__runtime.x);"));
-        assert!(rendered.contains("__runtime.n([0]);"));
-    }
-
-    #[test]
     fn base_chunk_skips_entry_execution_when_no_registry_entries_remain() {
         let rendered = render_bundler_runtime_base_chunk(
             0,
@@ -546,7 +460,6 @@ mod tests {
             "var hoisted$$0 = 1;",
             false,
             false,
-            true,
             ChunkOutputType::Script,
             RuntimePreamblePart::All,
         )
@@ -560,8 +473,6 @@ mod tests {
         let rendered = render_bundler_runtime_lazy_chunk(
             3,
             "__register(1,function(){});",
-            false,
-            true,
             ChunkOutputType::Script,
             None,
             &[],
@@ -574,36 +485,22 @@ mod tests {
     }
 
     #[test]
-    fn registry_fallback_lazy_chunk_keeps_the_deferral_wrapper() {
-        let rendered = render_bundler_runtime_lazy_chunk(
-            3,
-            "__register(1,function(){});",
-            false,
-            false,
-            ChunkOutputType::Script,
-            None,
-            &[],
-        );
-        assert_eq!(
-            rendered,
-            "var __runtime=globalThis[\"__g\"];\
-__runtime.h(function(__register){\n  var __require=__runtime.q,__dynamicImport=__runtime.j,__preloadDynamicImport=__runtime.x;\n  __register(1,function(){});\n},3);\n"
-        );
-    }
-
-    #[test]
     fn specialized_script_preamble_hoists_environment_access() {
-        let rendered = render_bundler_runtime_preamble(
+        let rendered = render_bundler_runtime_preamble_part(
             "[0,[],[],\"./\"]",
             true,
             false,
             ChunkOutputType::Script,
+            RuntimePreamblePart::All,
         )
         .expect("render preamble");
         assert!(rendered.contains("var d=global.document,l=global.location;"));
-        // Ordered execution for hoisted chunks, plus the kept h() fallback.
+        // Ordered execution for hoisted chunks.
         assert!(rendered.contains("f.async=false;"));
-        assert!(rendered.contains("r.h=function(a,b){a(r.r);r.l(b);};"));
+        // `r.h` was the deferral entry point of the deleted registry chunk
+        // format; every chunk now executes at top level and calls `r.l`.
+        assert!(!rendered.contains("r.h="), "{rendered}");
+        assert!(rendered.contains("r.l=function(a){"), "{rendered}");
         // Dependency scripts are inserted before the target chunk's script.
         assert!(
             rendered
@@ -631,7 +528,6 @@ __runtime.h(function(__register){\n  var __require=__runtime.q,__dynamicImport=_
             "__register(0,function(){});",
             false,
             false,
-            true,
             ChunkOutputType::Esm,
             RuntimePreamblePart::All,
         )
@@ -642,8 +538,6 @@ __runtime.h(function(__register){\n  var __require=__runtime.q,__dynamicImport=_
         let lazy = render_bundler_runtime_lazy_chunk(
             3,
             "__register_3(1,function(){});",
-            false,
-            true,
             ChunkOutputType::Esm,
             None,
             &[],
@@ -700,9 +594,14 @@ __runtime.h(function(__register){\n  var __require=__runtime.q,__dynamicImport=_
 
         // Split in half, joined back: same content as the combined form, so
         // the two halves cannot drift from the single-preamble path.
-        let all =
-            render_bundler_runtime_preamble("[0,[],[],\"./\"]", true, false, ChunkOutputType::Esm)
-                .expect("render preamble");
+        let all = render_bundler_runtime_preamble_part(
+            "[0,[],[],\"./\"]",
+            true,
+            false,
+            ChunkOutputType::Esm,
+            RuntimePreamblePart::All,
+        )
+        .expect("render preamble");
         assert!(all.contains("if(!r.i){"), "{all}");
         assert!(all.contains("r.a([0,[],[],\"./\"]);"), "{all}");
         assert_eq!(all.matches(").call(this,globalThis);").count(), 1, "{all}");
@@ -710,9 +609,14 @@ __runtime.h(function(__register){\n  var __require=__runtime.q,__dynamicImport=_
 
     #[test]
     fn esm_preamble_loads_chunks_with_dynamic_import() {
-        let rendered =
-            render_bundler_runtime_preamble("[0,[],[],\"./\"]", true, false, ChunkOutputType::Esm)
-                .expect("render preamble");
+        let rendered = render_bundler_runtime_preamble_part(
+            "[0,[],[],\"./\"]",
+            true,
+            false,
+            ChunkOutputType::Esm,
+            RuntimePreamblePart::All,
+        )
+        .expect("render preamble");
 
         // The script-injection half is gone: no element creation, no URL
         // resolution against r.b for JS.
@@ -738,10 +642,9 @@ __runtime.h(function(__register){\n  var __require=__runtime.q,__dynamicImport=_
         assert!(rendered.contains("createElement(\"link\")"), "{rendered}");
         assert!(rendered.contains("b&&b[2]||[]"), "{rendered}");
         // Registry, chunk state table and error propagation are untouched.
-        assert!(
-            rendered.contains("r.h=function(a,b){a(r.r);r.l(b);};"),
-            "{rendered}"
-        );
+        // `r.h` is gone with the registry chunk format; `h` (lower case) is a
+        // different, still-live helper that fails a chunk's load promise.
+        assert!(!rendered.contains("r.h="), "{rendered}");
         assert!(rendered.contains("r.q=function(a){"), "{rendered}");
         assert!(rendered.contains("function h(a,b){r.s[a]=2;"), "{rendered}");
         // CSS still needs a base URL; the document URL replaces currentScript.
@@ -766,7 +669,6 @@ __runtime.h(function(__register){\n  var __require=__runtime.q,__dynamicImport=_
             "__register(0,function(){});",
             false,
             false,
-            true,
             ChunkOutputType::Script,
             RuntimePreamblePart::All,
         )
@@ -774,11 +676,12 @@ __runtime.h(function(__register){\n  var __require=__runtime.q,__dynamicImport=_
         assert!(base.contains(HOISTED_ALIAS_LINE), "{base}");
         assert!(!base.contains("__runtime_0"), "{base}");
 
-        let preamble = render_bundler_runtime_preamble(
+        let preamble = render_bundler_runtime_preamble_part(
             "[0,[],[],\"./\"]",
             true,
             false,
             ChunkOutputType::Script,
+            RuntimePreamblePart::All,
         )
         .expect("render preamble");
         assert!(preamble.contains("createElement(\"script\")"), "{preamble}");
@@ -795,11 +698,12 @@ __runtime.h(function(__register){\n  var __require=__runtime.q,__dynamicImport=_
 
     #[test]
     fn live_export_helper_supports_packed_alias_mode() {
-        let rendered = render_bundler_runtime_preamble(
+        let rendered = render_bundler_runtime_preamble_part(
             "[0,[],[],\"./\"]",
             true,
             false,
             ChunkOutputType::Script,
+            RuntimePreamblePart::All,
         )
         .expect("render preamble");
         assert!(rendered.contains("typeof c===\"function\""), "{rendered}");

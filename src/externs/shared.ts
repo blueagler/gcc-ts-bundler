@@ -152,51 +152,10 @@ export function resolveAliasedSymbol(
     : symbol;
 }
 
-export function resolveNominalInstanceTarget(
-  symbol: ts.Symbol,
-  registry: ContractRegistry,
-) {
-  const contract = registry.classContracts.get(symbol);
-  if (!contract) {
-    return null;
-  }
-  return isAmbientGlobalSymbol(symbol) ? contract.name : null;
-}
-
-export function resolveNominalStaticTarget(
-  symbol: ts.Symbol,
-  registry: ContractRegistry,
-) {
-  const contract = registry.classContracts.get(symbol);
-  if (!contract) {
-    return null;
-  }
-  return isAmbientGlobalSymbol(symbol) ? contract.name : null;
-}
-
-function isAmbientGlobalSymbol(symbol: ts.Symbol) {
-  return (symbol.declarations ?? []).some((declaration) => {
-    const sourceFile = declaration.getSourceFile();
-    return !ts.isExternalModule(sourceFile);
-  });
-}
-
 export function renderStructuralExternLine(name: string) {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)
     ? `Object.prototype.${name};`
     : `Object.prototype[${JSON.stringify(name)}];`;
-}
-
-export function renderNominalInstanceExternLine(target: string, name: string) {
-  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)
-    ? `${target}.prototype.${name};`
-    : `${target}.prototype[${JSON.stringify(name)}];`;
-}
-
-export function renderNominalStaticExternLine(target: string, name: string) {
-  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)
-    ? `${target}.${name};`
-    : `${target}[${JSON.stringify(name)}];`;
 }
 
 export function addMapSetValue<K>(

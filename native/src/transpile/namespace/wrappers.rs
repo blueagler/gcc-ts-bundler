@@ -435,7 +435,7 @@ fn extract_dynamic_import_object_wrapper_from_arrow(
     }
 }
 
-fn extract_wrapper_return_argument<'a>(statements: &'a [Stmt]) -> Option<&'a Expr> {
+fn extract_wrapper_return_argument(statements: &[Stmt]) -> Option<&Expr> {
     let (return_stmt, prelude) = statements.split_last()?;
     if !prelude.iter().all(is_wrapper_prelude_statement) {
         return None;

@@ -161,33 +161,29 @@ impl Visit for CommonJsCollector {
             return;
         }
 
-        match &expression.left {
-            AssignTarget::Simple(SimpleAssignTarget::Member(member)) => {
-                if is_module_exports_target(member) {
-                    self.record_default_export();
-                    if let Expr::Call(call_expr) = &*expression.right {
-                        if let Some(specifier) = require_call_specifier(call_expr) {
-                            self.record_dependency(specifier.clone());
-                            self.record_proxy_export(specifier);
-                        }
-                    } else if let Some(object_keys) = object_literal_export_names(&expression.right)
-                    {
-                        for key in object_keys {
-                            self.record_named_export(key);
-                        }
+        if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &expression.left {
+            if is_module_exports_target(member) {
+                self.record_default_export();
+                if let Expr::Call(call_expr) = &*expression.right {
+                    if let Some(specifier) = require_call_specifier(call_expr) {
+                        self.record_dependency(specifier.clone());
+                        self.record_proxy_export(specifier);
                     }
-                } else if is_commonjs_export_object(&member.obj) {
-                    if let Some(export_name) = member_prop_name(&member.prop) {
-                        self.record_named_export(export_name);
-                    } else {
-                        self.has_commonjs = true;
-                        self.unsupported.push(
-                            "Computed CommonJS export names must be string literals.".to_string(),
-                        );
+                } else if let Some(object_keys) = object_literal_export_names(&expression.right) {
+                    for key in object_keys {
+                        self.record_named_export(key);
                     }
                 }
+            } else if is_commonjs_export_object(&member.obj) {
+                if let Some(export_name) = member_prop_name(&member.prop) {
+                    self.record_named_export(export_name);
+                } else {
+                    self.has_commonjs = true;
+                    self.unsupported.push(
+                        "Computed CommonJS export names must be string literals.".to_string(),
+                    );
+                }
             }
-            _ => {}
         }
 
         expression.visit_children_with(self);

@@ -44,7 +44,7 @@ export interface RuntimeProtocolHelpers {
   keyReadCallees: string[];
 }
 
-export function createEmptyRuntimeHazards(): RuntimeRenameHazards {
+function createEmptyRuntimeHazards(): RuntimeRenameHazards {
   return {
     dotAccessed: new Set(),
     dotDefined: new Set(),

@@ -30,10 +30,7 @@ export function isUnknownArray(value: unknown): value is unknown[] {
   return Array.isArray(value);
 }
 
-export function isArrayOf<T>(
-  value: unknown,
-  validate: Validator<T>,
-): value is T[] {
+function isArrayOf<T>(value: unknown, validate: Validator<T>): value is T[] {
   return isUnknownArray(value) && value.every(validate);
 }
 
@@ -80,7 +77,7 @@ export function isObjectOf<T>(schema: ObjectSchema<T>): Validator<T> {
     properties.every(([key, validate]) => validate(value[key]));
 }
 
-export function isOneOf<const Value extends string>(
+function isOneOf<const Value extends string>(
   value: unknown,
   choices: readonly Value[],
 ): value is Value {

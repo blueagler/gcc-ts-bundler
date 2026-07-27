@@ -10,7 +10,7 @@ import { isRecord } from "../shared/validation";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type { ManifestFileSettings } from "./internal-types";
 
-export const INTERNAL_VITE_MANIFEST_FILE = ".gcc-ts-bundler-vite-manifest.json";
+const INTERNAL_VITE_MANIFEST_FILE = ".gcc-ts-bundler-vite-manifest.json";
 export const INTERNAL_VITE_RUNTIME_MODULE_SOURCES_FILE =
   ".gcc-ts-bundler-vite-runtime-module-sources.json";
 export const INTERNAL_VITE_AUTHORED_FILES_FILE =

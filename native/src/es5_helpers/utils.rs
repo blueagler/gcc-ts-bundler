@@ -66,7 +66,6 @@ pub(super) fn helper_alias_decl(runtime_alias: &str, helper_alias: &str) -> Stmt
                 definite: false,
             },
         ],
-        ..Default::default()
     })))
 }
 

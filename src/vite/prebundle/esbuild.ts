@@ -33,8 +33,6 @@ export async function loadEsbuildBuild() {
   return await cachedEsbuildBuild;
 }
 
-export function isEsbuildModule(
-  value: unknown,
-): value is { build: EsbuildBuild } {
+function isEsbuildModule(value: unknown): value is { build: EsbuildBuild } {
   return isRecord(value) && typeof value.build === "function";
 }

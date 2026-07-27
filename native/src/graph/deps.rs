@@ -17,10 +17,8 @@ pub(super) fn extract_dependencies(module: &Module) -> Vec<String> {
                     }
                 }
             }
-            ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export_all)) => {
-                if !export_all.type_only {
-                    dependencies.push(export_all.src.value.to_string_lossy().to_string());
-                }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportAll(export_all)) if !export_all.type_only => {
+                dependencies.push(export_all.src.value.to_string_lossy().to_string());
             }
             _ => {}
         }

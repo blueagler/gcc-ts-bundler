@@ -13,7 +13,7 @@ export function unionClosureTypes(types: string[]) {
     : `(${unique.join("|")})`;
 }
 
-export function expandClosureUnionType(type: string): string[] {
+function expandClosureUnionType(type: string): string[] {
   return type.startsWith("(") && type.endsWith(")")
     ? splitTopLevelUnion(type.slice(1, -1))
     : [type];
@@ -40,7 +40,7 @@ export function stripUndefinedFromClosureType(type: string) {
       : `(${parts.join("|")})`;
 }
 
-export function splitTopLevelUnion(type: string) {
+function splitTopLevelUnion(type: string) {
   const parts: string[] = [];
   let depth = 0;
   let start = 0;
@@ -84,7 +84,7 @@ export function sanitizeClosureName(name: string) {
   return sanitized;
 }
 
-export function isClosureIdentifier(name: string) {
+function isClosureIdentifier(name: string) {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(name);
 }
 

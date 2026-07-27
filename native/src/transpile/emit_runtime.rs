@@ -300,7 +300,7 @@ fn indent_block(source: &str) -> String {
         .join("\n")
 }
 
-fn rewrite_bundler_exports(source: &str) -> String {
+pub(crate) fn rewrite_bundler_exports(source: &str) -> String {
     let dot_rewritten = regex::Regex::new(r"\bexports\.([A-Za-z_$][A-Za-z0-9_$]*)\s*=")
         .map(|regex| {
             regex
@@ -308,10 +308,13 @@ fn rewrite_bundler_exports(source: &str) -> String {
                 .into_owned()
         })
         .unwrap_or_else(|_| source.to_string());
-    regex::Regex::new(r#"\bexports\[(["'])(.+?)\1\]\s*="#)
+    // No backreferences in the `regex` crate: match each quote style
+    // explicitly (the old `(["'])...\1` pattern failed to compile and
+    // silently skipped this rewrite entirely).
+    regex::Regex::new(r#"\bexports\[(?:"([^"]*)"|'([^']*)')\]\s*="#)
         .map(|regex| {
             regex
-                .replace_all(&dot_rewritten, "__exports[\"$2\"] =")
+                .replace_all(&dot_rewritten, "__exports[\"$1$2\"] =")
                 .into_owned()
         })
         .unwrap_or(dot_rewritten)
@@ -530,13 +533,10 @@ fn collect_simple_assign_target_ids(
     tracked_ids: &HashSet<Id>,
     reassigned_ids: &mut HashSet<Id>,
 ) {
-    match target {
-        swc_core::ecma::ast::SimpleAssignTarget::Ident(binding) => {
-            let binding_id = binding.id.to_id();
-            if tracked_ids.contains(&binding_id) {
-                reassigned_ids.insert(binding_id);
-            }
+    if let swc_core::ecma::ast::SimpleAssignTarget::Ident(binding) = target {
+        let binding_id = binding.id.to_id();
+        if tracked_ids.contains(&binding_id) {
+            reassigned_ids.insert(binding_id);
         }
-        _ => {}
     }
 }

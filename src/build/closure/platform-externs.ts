@@ -41,7 +41,7 @@ const requireFromHere = createRequire(import.meta.url);
 
 let universePromise: Promise<PlatformExternsUniverse | null> | undefined;
 
-export function loadPlatformExternsUniverse() {
+function loadPlatformExternsUniverse() {
   universePromise ??= buildUniverse().catch(() => null);
   return universePromise;
 }

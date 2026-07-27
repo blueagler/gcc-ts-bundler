@@ -139,11 +139,11 @@ fn rewrite_arrow_component(arrow: &mut ArrowExpr) {
                 span: Default::default(),
                 arg: Some(expression.clone()),
             });
-            arrow.body = Box::new(BlockStmtOrExpr::BlockStmt(BlockStmt {
+            *arrow.body = BlockStmtOrExpr::BlockStmt(BlockStmt {
                 span: Default::default(),
                 ctxt: Default::default(),
                 stmts: setup_stmts.into_iter().chain([return_stmt]).collect(),
-            }));
+            });
         }
     }
 }
@@ -224,8 +224,8 @@ fn build_component_prop_setup(
                 let key = assign.key.sym.to_string();
                 omitted_keys.push(key.clone());
                 statements.push(create_component_prop_read_stmt(
-                    &assign.key.sym.to_string(),
-                    &assign.key.sym.to_string(),
+                    assign.key.sym.as_ref(),
+                    assign.key.sym.as_ref(),
                     props_name,
                 ));
             }
@@ -241,7 +241,7 @@ fn build_component_prop_setup(
                 omitted_keys.push(key.clone());
                 statements.push(create_component_prop_read_stmt(
                     &key,
-                    &binding.id.sym.to_string(),
+                    binding.id.sym.as_ref(),
                     props_name,
                 ));
             }

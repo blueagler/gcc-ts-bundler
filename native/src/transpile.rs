@@ -7,7 +7,7 @@ mod context;
 mod emit;
 mod emit_goog;
 mod emit_hoist;
-mod emit_runtime;
+pub(crate) mod emit_runtime;
 mod enums;
 mod externs;
 mod global_this;
@@ -151,6 +151,9 @@ pub struct TypedAnnotationFileInput {
     pub filePath: String,
 }
 
+// napi positional contract: the TS side calls these by argument
+// position, so the parameter list is the published signature.
+#[allow(clippy::too_many_arguments)]
 pub fn transpile_sources(
     file_names: Vec<String>,
     explicit_extern_paths: Vec<String>,
@@ -185,8 +188,7 @@ pub fn transpile_sources(
         .map(|module_id| (to_bundler_runtime_module_id(module_id), module_id.clone()))
         .collect::<HashMap<_, _>>();
     let file_metadata = load_closure_metadata(&metadata_path)?;
-    let hoist_disabled = matches!(std::env::var("GCC_DISABLE_HOIST").as_deref(), Ok("1"));
-    let hoist_plan = if chunk_mode == ChunkMode::BundlerRuntime && !hoist_disabled {
+    let hoist_plan = if chunk_mode == ChunkMode::BundlerRuntime {
         build_hoist_plan(
             &file_names,
             &workspace_dir,

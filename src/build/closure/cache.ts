@@ -7,12 +7,12 @@ import { zipExact } from "../../shared/arrays";
 import { ensureDirectory, hashFilesInOrder } from "../../shared/files";
 import { isNumber, isObjectOf, isStringArray } from "../../shared/validation";
 
-export interface ClosureJobCacheMetadata {
+interface ClosureJobCacheMetadata {
   artifactFiles: string[];
   version: number;
 }
 
-export const CLOSURE_JOB_CACHE_VERSION = 3;
+const CLOSURE_JOB_CACHE_VERSION = 3;
 
 export interface ClosureCompileJobConfig {
   assumeFunctionWrapper: boolean;

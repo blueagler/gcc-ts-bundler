@@ -145,10 +145,10 @@ fn quote_object_literal_keys(
         match property.as_mut() {
             Prop::Shorthand(ident) => {
                 if matches_pattern(ident.sym.as_ref()) {
-                    *property = Box::new(Prop::KeyValue(KeyValueProp {
+                    **property = Prop::KeyValue(KeyValueProp {
                         key: quote_prop_name(PropName::Ident(ident.clone().into())),
                         value: Box::new(Expr::Ident(ident.clone())),
-                    }));
+                    });
                 }
             }
             Prop::KeyValue(property) => {
