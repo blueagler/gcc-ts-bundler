@@ -5,7 +5,6 @@ export function mergeClosureTypes(types: string[]) {
   return unionClosureTypes(types.filter(Boolean));
 }
 
-
 export function unionClosureTypes(types: string[]) {
   const unique = uniqueSortedStrings(types.flatMap(expandClosureUnionType));
   const onlyType = firstOrUndefined(unique);
@@ -14,13 +13,11 @@ export function unionClosureTypes(types: string[]) {
     : `(${unique.join("|")})`;
 }
 
-
 export function expandClosureUnionType(type: string): string[] {
   return type.startsWith("(") && type.endsWith(")")
     ? splitTopLevelUnion(type.slice(1, -1))
     : [type];
 }
-
 
 export function stripUndefinedFromClosureType(type: string) {
   if (type === "undefined") {
@@ -43,7 +40,6 @@ export function stripUndefinedFromClosureType(type: string) {
       : `(${parts.join("|")})`;
 }
 
-
 export function splitTopLevelUnion(type: string) {
   const parts: string[] = [];
   let depth = 0;
@@ -63,7 +59,6 @@ export function splitTopLevelUnion(type: string) {
   return parts;
 }
 
-
 export function unionWithSuffix(base: string, suffix: string[]) {
   const rendered = uniqueSortedStrings([base, ...suffix]);
   const onlyType = firstOrUndefined(rendered);
@@ -72,13 +67,14 @@ export function unionWithSuffix(base: string, suffix: string[]) {
     : `(${rendered.join("|")})`;
 }
 
-
-export function renderPrototypeProperty(typeName: string, propertyName: string) {
+export function renderPrototypeProperty(
+  typeName: string,
+  propertyName: string,
+) {
   return isClosureIdentifier(propertyName)
     ? `${typeName}.prototype.${propertyName};`
     : `${typeName}.prototype[${JSON.stringify(propertyName)}];`;
 }
-
 
 export function sanitizeClosureName(name: string) {
   const sanitized = name.replace(/[^A-Za-z0-9_$]/gu, "_");
@@ -88,11 +84,9 @@ export function sanitizeClosureName(name: string) {
   return sanitized;
 }
 
-
 export function isClosureIdentifier(name: string) {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(name);
 }
-
 
 export function isClosureQualifiedName(name: string) {
   return /^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$/u.test(

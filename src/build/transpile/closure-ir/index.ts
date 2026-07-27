@@ -3,10 +3,7 @@ import ts from "typescript";
 import type { DiagnosticsPreflight } from "../../../api/types";
 import { logInternalDetail } from "../../../shared/timing";
 import { loadCompilerOptions } from "../compiler-options";
-import {
-  collectClosureIrFiles,
-  scanClosureIrFiles,
-} from "./metadata";
+import { collectClosureIrFiles, scanClosureIrFiles } from "./metadata";
 import type { ClosureIrScanResult } from "./metadata/scan";
 import { collectNativePreflightDiagnostics } from "./preflight";
 export type {

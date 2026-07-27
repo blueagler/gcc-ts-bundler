@@ -142,7 +142,6 @@ function hasConstModifier(node: ts.EnumDeclaration) {
   return (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Const) !== 0;
 }
 
-
 function literalValueFromExpression(
   expression: ts.Expression,
 ): boolean | number | string | undefined {

@@ -43,7 +43,12 @@ export function collectClosureIrFileMetadata({
     ? collectTypeDeclarationsForSourceFile(sourceFile, checker, renderContext)
     : [];
   const topLevelDocs = features.hasTopLevelDocs
-    ? collectClosureDocsForSourceFile(sourceFile, checker, features, renderContext)
+    ? collectClosureDocsForSourceFile(
+        sourceFile,
+        checker,
+        features,
+        renderContext,
+      )
     : [];
   const typeDeclarations = [
     ...explicitTypeDeclarations,
@@ -155,7 +160,10 @@ function collectClosureDocsForSourceFile(
             name: node.name.text,
           });
         }
-        if (node.initializer && ts.isObjectLiteralExpression(node.initializer)) {
+        if (
+          node.initializer &&
+          ts.isObjectLiteralExpression(node.initializer)
+        ) {
           for (const member of node.initializer.properties) {
             const memberName = getObjectPropertyName(member);
             if (!memberName) {

@@ -292,32 +292,32 @@ function createResolveMetadata(
   const shimDir = path.join(env.cacheStore.workspaceDir, "entries");
   const shimFiles = toShimFiles(entryFiles, shimDir);
   const chunkPlan = planChunks({
-      baseChunkName: options.chunks.baseChunkName,
-      chunkMode: options.chunks.mode,
-      entryFiles: entryFiles.map((entry) => ({
-        chunkName: entry.chunkName,
-        outputName: entry.outputName,
-        sourcePath: entry.sourcePath,
+    baseChunkName: options.chunks.baseChunkName,
+    chunkMode: options.chunks.mode,
+    entryFiles: entryFiles.map((entry) => ({
+      chunkName: entry.chunkName,
+      outputName: entry.outputName,
+      sourcePath: entry.sourcePath,
+    })),
+    graphEntries: [
+      ...Object.entries(fresh.graphResult.graph).map(
+        ([filePath, dependencies]) => ({
+          dependencies,
+          filePath,
+        }),
+      ),
+      ...zipExact(
+        shimFiles,
+        entryFiles,
+        "entry shims and resolved entries",
+      ).map(([shimFile, entry]) => ({
+        dependencies: [entry.sourcePath],
+        filePath: shimFile,
       })),
-      graphEntries: [
-        ...Object.entries(fresh.graphResult.graph).map(
-          ([filePath, dependencies]) => ({
-            dependencies,
-            filePath,
-          }),
-        ),
-        ...zipExact(
-          shimFiles,
-          entryFiles,
-          "entry shims and resolved entries",
-        ).map(([shimFile, entry]) => ({
-          dependencies: [entry.sourcePath],
-          filePath: shimFile,
-        })),
-      ],
-      lazyImports: fresh.graphResult.lazyImports,
-      shimFiles,
-      workspaceDir: env.cacheStore.workspaceDir,
+    ],
+    lazyImports: fresh.graphResult.lazyImports,
+    shimFiles,
+    workspaceDir: env.cacheStore.workspaceDir,
   });
   return {
     chunkPlan:

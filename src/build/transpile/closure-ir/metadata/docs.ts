@@ -34,12 +34,10 @@ type JsDocTagInput = {
   type?: string | undefined;
 };
 
-
 type ResolvedSignature = {
   declaration: FunctionLikeDeclaration;
   signature: ts.Signature;
 };
-
 
 const CONFLICTING_GENERATED_TAGS = new Set([
   "argument",
@@ -53,7 +51,6 @@ const CONFLICTING_GENERATED_TAGS = new Set([
   "type",
   "typedef",
 ]);
-
 
 export function buildInterfaceDeclarationSnippet(
   statement: ts.InterfaceDeclaration,
@@ -79,7 +76,6 @@ export function buildInterfaceDeclarationSnippet(
   };
 }
 
-
 export function buildTypeAliasDeclarationSnippet(
   statement: ts.TypeAliasDeclaration,
   checker: ts.TypeChecker,
@@ -93,7 +89,13 @@ export function buildTypeAliasDeclarationSnippet(
     appendTemplateTags(lines, statement.typeParameters);
     lines.push(" */");
     lines.push(`function ${name}() {}`);
-    appendInterfaceMembers(lines, name, statement.type.members, checker, context);
+    appendInterfaceMembers(
+      lines,
+      name,
+      statement.type.members,
+      checker,
+      context,
+    );
     if (hasExportModifier(statement)) {
       lines.push(`exports.${name} = ${name};`);
     }
@@ -117,7 +119,6 @@ export function buildTypeAliasDeclarationSnippet(
   };
 }
 
-
 export function buildFunctionJsDoc(
   statement: ts.FunctionDeclaration,
   checker: ts.TypeChecker,
@@ -135,7 +136,6 @@ export function buildFunctionJsDoc(
     firstParamObjectRecordTypeName,
   });
 }
-
 
 export function buildFunctionObjectParamRecord(
   statement: ts.FunctionDeclaration,
@@ -169,7 +169,6 @@ export function buildFunctionObjectParamRecord(
   };
 }
 
-
 export function buildClassJsDoc(
   statement: ts.ClassDeclaration,
   checker: ts.TypeChecker,
@@ -198,7 +197,6 @@ export function buildClassJsDoc(
   return tags.length > 0 ? renderJsDoc(tags) : null;
 }
 
-
 export function buildFunctionLikeDoc(
   declaration: FunctionLikeDeclaration,
   checker: ts.TypeChecker,
@@ -210,7 +208,6 @@ export function buildFunctionLikeDoc(
   const declarations = collectOverloadDeclarations(declaration);
   return buildSignaturesJsDoc({ checker, context, declarations });
 }
-
 
 export function buildVariableJsDoc({
   checker,
@@ -242,7 +239,6 @@ export function buildVariableJsDoc({
   return buildTypeJsDoc(toClosureType(type, checker, context));
 }
 
-
 export function buildClassMemberDoc({
   checker,
   context,
@@ -264,9 +260,10 @@ export function buildClassMemberDoc({
   if (!ts.isPropertyDeclaration(member) || !member.type) {
     return null;
   }
-  return buildTypeJsDoc(getTypedDeclarationClosureType(member, checker, context));
+  return buildTypeJsDoc(
+    getTypedDeclarationClosureType(member, checker, context),
+  );
 }
-
 
 export function buildObjectMemberDoc({
   checker,
@@ -302,7 +299,6 @@ export function buildObjectMemberDoc({
 
   return null;
 }
-
 
 function buildSignaturesJsDoc({
   checker,
@@ -345,7 +341,6 @@ function buildSignaturesJsDoc({
   return renderJsDoc(tags);
 }
 
-
 function resolveSignatures(
   declarations: FunctionLikeDeclaration[],
   checker: ts.TypeChecker,
@@ -355,9 +350,10 @@ function resolveSignatures(
       declaration,
       signature: checker.getSignatureFromDeclaration(declaration),
     }))
-    .filter((entry): entry is ResolvedSignature => entry.signature !== undefined);
+    .filter(
+      (entry): entry is ResolvedSignature => entry.signature !== undefined,
+    );
 }
-
 
 function appendThisTag(
   tags: JsDocTagInput[],
@@ -373,7 +369,6 @@ function appendThisTag(
   }
 }
 
-
 function appendParameterTags(
   tags: JsDocTagInput[],
   signatureParams: SignatureParamInfo[][],
@@ -381,7 +376,10 @@ function appendParameterTags(
   const realParams = signatureParams.map((params) =>
     params.filter((param) => !param.thisParam),
   );
-  const maxParamCount = Math.max(0, ...realParams.map((params) => params.length));
+  const maxParamCount = Math.max(
+    0,
+    ...realParams.map((params) => params.length),
+  );
   const minParamCount = Math.min(
     ...realParams.map((params) => params.filter((param) => !param.rest).length),
   );
@@ -403,7 +401,6 @@ function appendParameterTags(
     }
   }
 }
-
 
 function buildParameterTag(input: {
   foundOptional: boolean;
@@ -440,7 +437,6 @@ function buildParameterTag(input: {
   };
 }
 
-
 function appendReturnTag(input: {
   checker: ts.TypeChecker;
   context: ClosureDocRenderContext;
@@ -451,7 +447,8 @@ function appendReturnTag(input: {
   if (
     input.signatures.some(({ declaration }) =>
       ts.isConstructorDeclaration(declaration),
-    ) || isSetterDeclaration(input.implementation)
+    ) ||
+    isSetterDeclaration(input.implementation)
   ) {
     return;
   }
@@ -469,11 +466,9 @@ function appendReturnTag(input: {
   });
 }
 
-
 function buildTypeJsDoc(closureType: string) {
   return renderJsDoc([{ name: "type", type: closureType }]);
 }
-
 
 function appendInterfaceMembers(
   lines: string[],
@@ -513,7 +508,6 @@ function appendInterfaceMembers(
   }
 }
 
-
 function collectFunctionOverloadDeclarations(
   implementation: ts.FunctionDeclaration,
 ): FunctionLikeDeclaration[] {
@@ -537,7 +531,6 @@ function collectFunctionOverloadDeclarations(
     : [implementation];
 }
 
-
 function collectOverloadDeclarations(
   implementation: FunctionLikeDeclaration,
 ): FunctionLikeDeclaration[] {
@@ -551,10 +544,11 @@ function collectOverloadDeclarations(
     ts.isMethodDeclaration(implementation) ||
     ts.isConstructorDeclaration(implementation)
   ) {
-    const members = ts.isClassDeclaration(implementation.parent) ||
+    const members =
+      ts.isClassDeclaration(implementation.parent) ||
       ts.isClassExpression(implementation.parent)
-      ? implementation.parent.members
-      : undefined;
+        ? implementation.parent.members
+        : undefined;
     if (!members) {
       return [implementation];
     }
@@ -573,16 +567,15 @@ function collectOverloadDeclarations(
   return [implementation];
 }
 
-
 function hasFunctionBody(declaration: FunctionLikeDeclaration) {
   return "body" in declaration && !!declaration.body;
 }
 
-
-function isBodylessFunctionLikeDeclaration(declaration: FunctionLikeDeclaration) {
+function isBodylessFunctionLikeDeclaration(
+  declaration: FunctionLikeDeclaration,
+) {
   return "body" in declaration && !declaration.body;
 }
-
 
 function collectPreservedJsDocTags(node: ts.Node): JsDocTagInput[] {
   const tags: JsDocTagInput[] = [];
@@ -597,7 +590,6 @@ function collectPreservedJsDocTags(node: ts.Node): JsDocTagInput[] {
   return tags;
 }
 
-
 function jsDocCommentText(
   comment: string | ts.NodeArray<ts.JSDocComment> | undefined,
 ) {
@@ -607,9 +599,11 @@ function jsDocCommentText(
   if (typeof comment === "string") {
     return comment.trim();
   }
-  return comment.map((part) => part.getText()).join(" ").trim();
+  return comment
+    .map((part) => part.getText())
+    .join(" ")
+    .trim();
 }
-
 
 function uniqueTemplateTags(declarations: FunctionLikeDeclaration[]) {
   return uniqueSortedStrings(
@@ -618,7 +612,6 @@ function uniqueTemplateTags(declarations: FunctionLikeDeclaration[]) {
     ),
   ).map((name) => ({ name: "template", text: name }));
 }
-
 
 function templateTags(
   typeParameters:
@@ -631,7 +624,6 @@ function templateTags(
     text: name,
   }));
 }
-
 
 function renderJsDoc(tags: JsDocTagInput[]) {
   const lines = ["/**"];
@@ -653,11 +645,11 @@ function renderJsDoc(tags: JsDocTagInput[]) {
   return `${lines.join("\n")}\n`;
 }
 
-
 function getSignatureTypeParameters(declaration: FunctionLikeDeclaration) {
-  return "typeParameters" in declaration ? declaration.typeParameters : undefined;
+  return "typeParameters" in declaration
+    ? declaration.typeParameters
+    : undefined;
 }
-
 
 function appendTemplateTags(
   lines: string[],
@@ -671,7 +663,6 @@ function appendTemplateTags(
   }
 }
 
-
 function getTemplateNames(
   typeParameters:
     | readonly ts.TypeParameterDeclaration[]
@@ -683,13 +674,9 @@ function getTemplateNames(
   );
 }
 
-
 function hasRestElement(pattern: ts.ObjectBindingPattern) {
   return pattern.elements.some((element) => element.dotDotDotToken);
 }
-
-
-
 
 export function getClassMemberName(member: ts.ClassElement) {
   if (ts.isConstructorDeclaration(member)) {
@@ -697,7 +684,6 @@ export function getClassMemberName(member: ts.ClassElement) {
   }
   return getPropertyNameText(member.name);
 }
-
 
 export function getObjectPropertyName(member: ts.ObjectLiteralElementLike) {
   if (
@@ -712,16 +698,14 @@ export function getObjectPropertyName(member: ts.ObjectLiteralElementLike) {
   return null;
 }
 
-
 export function hasStaticModifier(node: ts.Node) {
   return Boolean(
     ts.canHaveModifiers(node) &&
-      ts
-        .getModifiers(node)
-        ?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword),
+    ts
+      .getModifiers(node)
+      ?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword),
   );
 }
-
 
 function isSetterDeclaration(declaration: FunctionLikeDeclaration) {
   return ts.isSetAccessorDeclaration(declaration);

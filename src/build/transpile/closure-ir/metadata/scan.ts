@@ -83,8 +83,9 @@ export function classifyClosureIrSourceFile(
   }
 
   const docEligibility = classifyClosureIrDocEligibility(sourceFile);
-  const hasExplicitTypeSignals =
-    sourceFile.statements.some(containsExplicitTypeSignal);
+  const hasExplicitTypeSignals = sourceFile.statements.some(
+    containsExplicitTypeSignal,
+  );
   const hasTypeDrivenClosureDocs =
     docEligibility.isTypeScriptLike && hasExplicitTypeSignals;
   const hasDecorators =
@@ -121,4 +122,3 @@ function classifyClosureIrFile(
 ): ClosureIrFileFeatures {
   return classifyClosureIrSourceFile(sourceFile);
 }
-
