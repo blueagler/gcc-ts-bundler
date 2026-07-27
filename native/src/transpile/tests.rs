@@ -777,6 +777,78 @@ fn preserves_property_names_from_explicit_extern_files_in_precompiled_js_output(
 }
 
 #[test]
+fn class_map_calls_gate_on_string_literal_args_and_member_callees() {
+    // React's shape: host elements take a string-literal type and dispatch
+    // on literal prop keys; component elements rename consistently. The
+    // classic JSX transform emits a member callee, and CommonJS namespace
+    // quoting turns it into `React["createElement"]` before this pass.
+    let source = [
+        "const host = React[\"createElement\"](\"button\", { onClick: handle, children: kids });",
+        "const component = React[\"createElement\"](Panel, { onClick: handle });",
+        "const dotted = React.createElement(\"div\", { className: name });",
+        "",
+    ]
+    .join("\n");
+    let context = super::TranspileContext {
+        class_map_calls: vec![super::ClassMapCallInput {
+            argIndex: 1,
+            callee: "createElement".to_string(),
+            keyExcludePattern: Some("^(?:children|key|ref)$".to_string()),
+            keyPattern: None,
+            stringLiteralArgIndex: Some(0),
+        }],
+        ..empty_context()
+    };
+    let transformed = transform_js_pass_through_module(
+        parse_module(std::path::Path::new("fixture.js"), &source).expect("module"),
+        source,
+        std::path::Path::new("fixture.js"),
+        &context,
+    )
+    .expect("transform");
+
+    // Host element: quoted through both callee spellings.
+    assert!(transformed.contains("\"onClick\": handle"), "{transformed}");
+    assert!(transformed.contains("\"className\": name"), "{transformed}");
+    // Excluded key stays renamable (React reads `props.children` with a dot).
+    assert!(transformed.contains("children: kids"), "{transformed}");
+    // Component element (identifier type) is not gated in, so it renames.
+    assert!(
+        transformed.contains("(Panel, {\n    onClick: handle\n})")
+            || transformed.contains("(Panel, { onClick: handle })"),
+        "{transformed}"
+    );
+}
+
+#[test]
+fn class_map_call_rules_with_unparsable_patterns_are_dropped() {
+    // Fail closed: the regex crate has no lookahead, and silently widening
+    // to "quote every key" would be a behavior change rather than a visible
+    // missing transform.
+    let source = "const host = jsx(\"button\", { onClick: handle });\n".to_string();
+    let context = super::TranspileContext {
+        class_map_calls: vec![super::ClassMapCallInput {
+            argIndex: 1,
+            callee: "jsx".to_string(),
+            keyExcludePattern: Some("^(?!children$).+$".to_string()),
+            keyPattern: None,
+            stringLiteralArgIndex: Some(0),
+        }],
+        ..empty_context()
+    };
+    let transformed = transform_js_pass_through_module(
+        parse_module(std::path::Path::new("fixture.js"), &source).expect("module"),
+        source,
+        std::path::Path::new("fixture.js"),
+        &context,
+    )
+    .expect("transform");
+
+    assert!(transformed.contains("onClick: handle"), "{transformed}");
+    assert!(!transformed.contains("\"onClick\""), "{transformed}");
+}
+
+#[test]
 fn preserves_configured_class_map_call_keys() {
     let source = [
         "let classes;",
@@ -788,7 +860,9 @@ fn preserves_configured_class_map_call_keys() {
         class_map_calls: vec![super::ClassMapCallInput {
             argIndex: 5,
             callee: "set_class".to_string(),
+            keyExcludePattern: None,
             keyPattern: None,
+            stringLiteralArgIndex: None,
         }],
         ..empty_context()
     };

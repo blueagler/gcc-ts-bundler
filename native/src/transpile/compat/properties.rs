@@ -44,10 +44,30 @@ pub(crate) fn collect_class_static_assignments(source_text: &str) -> Vec<(String
 /// that must match CSS class names at runtime. The call list comes from
 /// build options; framework presets supply their runtime's helpers.
 pub(crate) struct ClassMapCallCompatVisitor {
-    calls: HashMap<String, Vec<(usize, Option<regex::Regex>)>>,
+    calls: HashMap<String, Vec<ClassMapCallRule>>,
     /// local import binding name -> imported export name, so compiler
     /// aliases like `_createElementVNode` still match the configured callee.
     import_aliases: HashMap<String, String>,
+}
+
+/// `Some(None)` when no pattern was configured, `Some(Some(regex))` when it
+/// compiled, `None` when the caller supplied a pattern this engine cannot
+/// parse (the rule is then dropped rather than silently widened).
+fn compile_optional_pattern(pattern: Option<&str>) -> Option<Option<regex::Regex>> {
+    match pattern {
+        None => Some(None),
+        Some(pattern) => regex::Regex::new(pattern).ok().map(Some),
+    }
+}
+
+/// One configured quoting rule for a call: which argument holds the object
+/// literal, which keys it covers, and whether it is gated on another
+/// argument being a string literal.
+struct ClassMapCallRule {
+    arg_index: usize,
+    key_exclude_pattern: Option<regex::Regex>,
+    key_pattern: Option<regex::Regex>,
+    string_literal_arg_index: Option<usize>,
 }
 
 impl ClassMapCallCompatVisitor {
@@ -55,16 +75,32 @@ impl ClassMapCallCompatVisitor {
         calls: &[ClassMapCallInput],
         import_aliases: HashMap<String, String>,
     ) -> Self {
-        let mut grouped: HashMap<String, Vec<(usize, Option<regex::Regex>)>> = HashMap::new();
+        let mut grouped: HashMap<String, Vec<ClassMapCallRule>> = HashMap::new();
         for call in calls {
-            let key_pattern = call
-                .keyPattern
-                .as_deref()
-                .and_then(|pattern| regex::Regex::new(pattern).ok());
+            // Fail closed: an unparsable pattern skips the rule instead of
+            // falling through to "quote every key", which would be a silent
+            // behavior change rather than a visible missing transform.
+            // (The regex crate has no lookahead or backreferences.)
+            let key_pattern = match compile_optional_pattern(call.keyPattern.as_deref()) {
+                Some(pattern) => pattern,
+                None => continue,
+            };
+            let key_exclude_pattern =
+                match compile_optional_pattern(call.keyExcludePattern.as_deref()) {
+                    Some(pattern) => pattern,
+                    None => continue,
+                };
             grouped
                 .entry(call.callee.clone())
                 .or_default()
-                .push((call.argIndex as usize, key_pattern));
+                .push(ClassMapCallRule {
+                    arg_index: call.argIndex as usize,
+                    key_exclude_pattern,
+                    key_pattern,
+                    string_literal_arg_index: call
+                        .stringLiteralArgIndex
+                        .map(|index| index as usize),
+                });
         }
         Self {
             calls: grouped,
@@ -101,25 +137,56 @@ impl VisitMut for ClassMapCallCompatVisitor {
         let Callee::Expr(callee) = &call.callee else {
             return;
         };
-        let Expr::Ident(callee) = callee.as_ref() else {
-            return;
+        // Bare identifier (`_createElementVNode(...)`, the shape Vue's SFC
+        // compiler emits) or a member call (`React.createElement(...)`, what
+        // swc's classic JSX transform emits). Member calls match on the
+        // property name; configuration is opt-in per callee, so the
+        // namespace is not part of the contract.
+        let local_name = match callee.as_ref() {
+            Expr::Ident(ident) => ident.sym.to_string(),
+            Expr::Member(member) => match &member.prop {
+                MemberProp::Ident(prop) => prop.sym.to_string(),
+                // CommonJS namespace access is quoted before this pass runs,
+                // so `React.createElement` reaches us as
+                // `React["createElement"]`.
+                MemberProp::Computed(computed) => match computed.expr.as_ref() {
+                    Expr::Lit(Lit::Str(value)) => value.value.to_string_lossy().to_string(),
+                    _ => return,
+                },
+                _ => return,
+            },
+            _ => return,
         };
         let callee_name = self
             .import_aliases
-            .get(callee.sym.as_ref())
-            .map(String::as_str)
-            .unwrap_or(callee.sym.as_ref());
+            .get(&local_name)
+            .cloned()
+            .unwrap_or(local_name);
+        let callee_name = callee_name.as_str();
         let Some(arg_rules) = self.calls.get(callee_name) else {
             return;
         };
-        for (arg_index, key_pattern) in arg_rules {
-            let Some(class_map) = call.args.get_mut(*arg_index) else {
+        for rule in arg_rules {
+            if let Some(gate_index) = rule.string_literal_arg_index {
+                let is_string_literal = call
+                    .args
+                    .get(gate_index)
+                    .is_some_and(|arg| matches!(arg.expr.as_ref(), Expr::Lit(Lit::Str(_))));
+                if !is_string_literal {
+                    continue;
+                }
+            }
+            let Some(class_map) = call.args.get_mut(rule.arg_index) else {
                 continue;
             };
             let Expr::Object(class_map) = class_map.expr.as_mut() else {
                 continue;
             };
-            quote_object_literal_keys(class_map, key_pattern.as_ref());
+            quote_object_literal_keys(
+                class_map,
+                rule.key_pattern.as_ref(),
+                rule.key_exclude_pattern.as_ref(),
+            );
         }
     }
 }
@@ -127,15 +194,19 @@ impl VisitMut for ClassMapCallCompatVisitor {
 fn quote_object_literal_keys(
     class_map: &mut swc_core::ecma::ast::ObjectLit,
     key_pattern: Option<&regex::Regex>,
+    key_exclude_pattern: Option<&regex::Regex>,
 ) {
     let matches_pattern = |name: &str| {
+        if key_exclude_pattern.is_some_and(|pattern| pattern.is_match(name)) {
+            return false;
+        }
         key_pattern
             .map(|pattern| pattern.is_match(name))
             .unwrap_or(true)
     };
     let prop_name_matches = |prop_name: &PropName| match prop_name {
         PropName::Ident(ident) => matches_pattern(ident.sym.as_ref()),
-        PropName::Num(_) => key_pattern.is_none(),
+        PropName::Num(_) => key_pattern.is_none() && key_exclude_pattern.is_none(),
         _ => false,
     };
     for property in &mut class_map.props {

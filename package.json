@@ -20,6 +20,10 @@
       "types": "./dist/native/index.d.ts",
       "default": "./dist/native/index.mjs"
     },
+    "./presets/react": {
+      "types": "./dist/presets/react.d.ts",
+      "default": "./dist/presets/react.mjs"
+    },
     "./presets/svelte": {
       "types": "./dist/presets/svelte.d.ts",
       "default": "./dist/presets/svelte.mjs"

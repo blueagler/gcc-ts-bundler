@@ -17,6 +17,7 @@ await runCommandsInParallel([
       "./src/index.ts",
       "./src/vite/index.ts",
       "./src/native/index.ts",
+      "./src/presets/react.ts",
       "./src/presets/svelte.ts",
       "./src/presets/vue.ts",
       "./src/shared/lifecycle-size.ts",

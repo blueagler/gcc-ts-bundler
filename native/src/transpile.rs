@@ -113,7 +113,16 @@ pub struct TranspileChunkInput {
 pub struct ClassMapCallInput {
     pub argIndex: u32,
     pub callee: String,
+    /// Keys matching this regex are left alone even when `keyPattern`
+    /// admits them.
+    pub keyExcludePattern: Option<String>,
     pub keyPattern: Option<String>,
+    /// When set, the rule applies only if the argument at this index is a
+    /// string literal. Element factories take the element type as their
+    /// first argument, and only the literal (host/DOM) form dispatches on
+    /// literal prop keys — component props stay renamable because the
+    /// creation site and the component body rename together.
+    pub stringLiteralArgIndex: Option<u32>,
 }
 
 /// One top-level binding's Closure JSDoc, rendered by the TypeScript-checker

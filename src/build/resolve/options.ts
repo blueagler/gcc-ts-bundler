@@ -86,9 +86,15 @@ export function normalizeBuildOptions(
       classMapCalls: [...(options.compat?.classMapCalls ?? [])].map((call) => ({
         argIndex: call.argIndex,
         callee: call.callee,
+        ...(call.keyExcludePattern === undefined
+          ? {}
+          : { keyExcludePattern: call.keyExcludePattern }),
         ...(call.keyPattern === undefined
           ? {}
           : { keyPattern: call.keyPattern }),
+        ...(call.stringLiteralArgIndex === undefined
+          ? {}
+          : { stringLiteralArgIndex: call.stringLiteralArgIndex }),
       })),
       pureCallees: [...(options.compat?.pureCallees ?? [])],
     },

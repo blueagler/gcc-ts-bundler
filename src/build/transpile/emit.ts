@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import ts from "typescript";
 
-import type { DiagnosticsPreflight } from "../../api/types";
+import type { CompatClassMapCall, DiagnosticsPreflight } from "../../api/types";
 import { uniqueSortedStrings } from "../../shared/files";
 import { filesExist } from "../../shared/file-state";
 import { logInternalDetail, withInternalTiming } from "../../shared/timing";
@@ -504,7 +504,7 @@ function runNativeTranspile({
 }: {
   chunkMode: string;
   chunkPlan: ChunkPlanChunk[];
-  classMapCalls: Array<{ argIndex: number; callee: string }>;
+  classMapCalls: CompatClassMapCall[];
   pureCallees: string[];
   typedAnnotations: ReadonlyArray<{
     bindings: ReadonlyArray<{

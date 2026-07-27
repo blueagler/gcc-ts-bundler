@@ -37,6 +37,18 @@ export default defineConfig({
 ```
 
 ```ts
+// React
+import react from "@vitejs/plugin-react";
+import { gccTsBundler } from "gcc-ts-bundler/vite";
+import { reactPreset } from "gcc-ts-bundler/presets/react";
+
+export default defineConfig({
+  build: { target: "esnext" },
+  plugins: [react(), gccTsBundler(reactPreset())],
+});
+```
+
+```ts
 // Vue
 import vue from "@vitejs/plugin-vue";
 import { gccTsBundler } from "gcc-ts-bundler/vite";
@@ -58,8 +70,10 @@ gccTsBundler(sveltePreset({ externModules: ["m3-svelte"] }));
 Presets are plain option builders on top of two generic core mechanisms:
 
 - `compiler.compat.classMapCalls` — calls whose object-literal argument keys
-  must survive property renaming (optionally limited by a `keyPattern`
-  regex);
+  must survive property renaming. A rule may be limited by `keyPattern` /
+  `keyExcludePattern`, and gated on another argument being a string literal
+  via `stringLiteralArgIndex` (element factories dispatch on literal prop
+  keys only for host elements, whose type argument is a string);
 - `externs.generate.protocolHelpers` — helper callees that read or exclude
   property keys by string at runtime.
 

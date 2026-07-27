@@ -102,8 +102,22 @@ export type BuildEntryOption =
 export interface CompatClassMapCall {
   argIndex: number;
   callee: string;
+  /**
+   * Optional regex; keys matching it are left alone even when `keyPattern`
+   * admits them. Patterns are compiled by Rust's `regex` crate, which has
+   * no lookahead or backreferences; an unparsable pattern drops the rule.
+   */
+  keyExcludePattern?: string | undefined;
   /** Optional regex; when set, only matching keys are quoted. */
   keyPattern?: string | undefined;
+  /**
+   * When set, the rule applies only if the argument at this index is a
+   * string literal. Element factories take the element type first, and only
+   * the literal (host/DOM) form dispatches on literal prop keys; component
+   * props stay renamable because creation site and component body rename
+   * together.
+   */
+  stringLiteralArgIndex?: number | undefined;
 }
 
 export interface CompatOptions {

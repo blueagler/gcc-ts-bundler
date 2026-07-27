@@ -176,7 +176,9 @@ interface NativeTranspileChunkInput {
 interface NativeClassMapCallInput {
   argIndex: number;
   callee: string;
+  keyExcludePattern?: string | undefined;
   keyPattern?: string | undefined;
+  stringLiteralArgIndex?: number | undefined;
 }
 
 /** Mirrors `TypedAnnotationFile`; napi object passed to `transpile_sources`. */
