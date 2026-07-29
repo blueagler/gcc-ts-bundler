@@ -15,7 +15,7 @@ pub(crate) fn normalize_commonjs_module(
     file_path: &Path,
     context: &TranspileContext,
     file_metadata: Option<&ClosureFileMetadata>,
-) -> std::result::Result<String, String> {
+) -> std::result::Result<EmittedProgram, String> {
     if let Some(reason) = analysis.unsupported.first() {
         return Err(format!("Unsupported CommonJS pattern: {reason}"));
     }
@@ -41,15 +41,29 @@ pub(crate) fn normalize_commonjs_module(
         .collect::<Vec<_>>();
 
     let mut program = Program::Module(module);
-    program.visit_mut_with(&mut CommonJsRewriteVisitor::new(require_bindings)?);
+    program.visit_mut_with(&mut CommonJsRewriteVisitor::new(
+        require_bindings,
+        context.opaque_commonjs.file_is_opaque(file_path),
+    )?);
     let Program::Module(mut module) = program else {
         return Err("Expected module program".to_string());
     };
 
     let mut normalized_body = Vec::new();
     normalized_body.extend(import_items);
-    normalized_body.extend(parse_module_items("var module = { exports: {} };")?);
-    normalized_body.extend(wrap_commonjs_body(module.body.drain(..).collect())?);
+    // The scratch `module` object keeps its quoted `exports` slot regardless of
+    // the export-name decision. Dotting it types `module` as a bare `{}` and
+    // Closure's checkTypes then rejects the assignment
+    // (JSC_TYPE_MISMATCH "assignment to property exports"); it also buys
+    // nothing, since `module` is file-local and `exports` is one name.
+    normalized_body.extend(parse_module_items(
+        "var module = {}; module[\"exports\"] = {};",
+    )?);
+    if uses_top_level_this(&module) {
+        normalized_body.extend(wrap_commonjs_body(module.body.drain(..).collect())?);
+    } else {
+        normalized_body.extend(module.body.drain(..));
+    }
     normalized_body.extend(parse_module_items("var __cjsExports = module.exports;")?);
 
     let mut program = Program::Module(Module {
@@ -58,6 +72,7 @@ pub(crate) fn normalize_commonjs_module(
         span: module.span,
     });
     let has_t_declaration = false;
+    apply_resolver_and_global_this_compat(&mut program, true)?;
     program.visit_mut_with(&mut JsCompatAstVisitor::new(has_t_declaration));
     apply_file_compat_transforms(&mut program, file_path, context);
 
@@ -68,6 +83,27 @@ pub(crate) fn normalize_commonjs_module(
         file_metadata,
         Some("__cjsExports"),
     )
+}
+
+fn uses_top_level_this(module: &Module) -> bool {
+    #[derive(Default)]
+    struct Finder {
+        found: bool,
+    }
+
+    impl Visit for Finder {
+        fn visit_this_expr(&mut self, _this_expr: &swc_core::ecma::ast::ThisExpr) {
+            self.found = true;
+        }
+
+        fn visit_function(&mut self, _function: &swc_core::ecma::ast::Function) {}
+
+        fn visit_class(&mut self, _class: &swc_core::ecma::ast::Class) {}
+    }
+
+    let mut finder = Finder::default();
+    module.visit_with(&mut finder);
+    finder.found
 }
 
 fn wrap_commonjs_body(items: Vec<ModuleItem>) -> std::result::Result<Vec<ModuleItem>, String> {
@@ -171,7 +207,45 @@ pub(crate) fn apply_resolver_and_global_this_compat(
             unresolved_ctxt,
         )?);
     }
+    program.visit_mut_with(&mut ProcessEnvNodeEnvVisitor { unresolved_ctxt });
     Ok(resolver_marks)
+}
+
+struct ProcessEnvNodeEnvVisitor {
+    unresolved_ctxt: swc_core::common::SyntaxContext,
+}
+
+impl VisitMut for ProcessEnvNodeEnvVisitor {
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        expr.visit_mut_children_with(self);
+        if !is_unresolved_process_env_node_env(expr, self.unresolved_ctxt) {
+            return;
+        }
+        *expr = Expr::Lit(Lit::Str(Str {
+            span: Default::default(),
+            value: "production".into(),
+            raw: None,
+        }));
+    }
+}
+
+fn is_unresolved_process_env_node_env(
+    expr: &Expr,
+    unresolved_ctxt: swc_core::common::SyntaxContext,
+) -> bool {
+    let Expr::Member(node_env) = expr else {
+        return false;
+    };
+    if !matches!(&node_env.prop, MemberProp::Ident(prop) if prop.sym == *"NODE_ENV") {
+        return false;
+    }
+    let Expr::Member(env) = &*node_env.obj else {
+        return false;
+    };
+    if !matches!(&env.prop, MemberProp::Ident(prop) if prop.sym == *"env") {
+        return false;
+    }
+    matches!(&*env.obj, Expr::Ident(process) if process.sym == *"process" && process.ctxt == unresolved_ctxt)
 }
 
 fn source_declares_ident(source_text: &str, name: &str) -> bool {
@@ -345,6 +419,48 @@ fn branch_declares_hoisted_bindings(stmt: &Stmt) -> bool {
     let mut scanner = HoistedBindingScanner { found: false };
     stmt.visit_with(&mut scanner);
     scanner.found
+}
+
+pub(crate) struct DirectoryModuleSpecifierVisitor;
+
+impl VisitMut for DirectoryModuleSpecifierVisitor {
+    fn visit_mut_module_decl(&mut self, declaration: &mut swc_core::ecma::ast::ModuleDecl) {
+        match declaration {
+            swc_core::ecma::ast::ModuleDecl::Import(import) => {
+                rewrite_directory_specifier(&mut import.src)
+            }
+            swc_core::ecma::ast::ModuleDecl::ExportNamed(export) => {
+                if let Some(src) = &mut export.src {
+                    rewrite_directory_specifier(src);
+                }
+            }
+            swc_core::ecma::ast::ModuleDecl::ExportAll(export) => {
+                rewrite_directory_specifier(&mut export.src)
+            }
+            _ => {}
+        }
+        declaration.visit_mut_children_with(self);
+    }
+
+    fn visit_mut_call_expr(&mut self, call: &mut CallExpr) {
+        call.visit_mut_children_with(self);
+        if !matches!(call.callee, Callee::Import(_)) || call.args.len() != 1 {
+            return;
+        }
+        if let Expr::Lit(Lit::Str(specifier)) = call.args[0].expr.as_mut() {
+            rewrite_directory_specifier(specifier);
+        }
+    }
+}
+
+fn rewrite_directory_specifier(specifier: &mut Str) {
+    let replacement = match specifier.value.to_string_lossy().as_ref() {
+        "." => "./index.js",
+        ".." => "../index.js",
+        _ => return,
+    };
+    specifier.value = replacement.into();
+    specifier.raw = None;
 }
 
 pub(crate) fn parse_module_items(source: &str) -> std::result::Result<Vec<ModuleItem>, String> {

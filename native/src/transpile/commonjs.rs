@@ -1,8 +1,14 @@
 use super::*;
 
+/// Producer side of the CommonJS export ABI.
+///
+/// `quoted` is the shared verdict from `cjs_opacity::OpaqueCommonJs`, not a
+/// local choice: the two consumer sites read the same value for the same
+/// package, because quoting one side while another renames resolves to
+/// `undefined` at runtime.
 pub(super) struct CommonJsRewriteVisitor {
     module_exports_expr: Box<Expr>,
-    production_expr: Box<Expr>,
+    quoted: bool,
     require_bindings: HashMap<String, String>,
     commonjs_object_bindings: HashSet<String>,
 }
@@ -10,11 +16,12 @@ pub(super) struct CommonJsRewriteVisitor {
 impl CommonJsRewriteVisitor {
     pub(super) fn new(
         require_bindings: HashMap<String, String>,
+        quoted: bool,
     ) -> std::result::Result<Self, String> {
         let commonjs_object_bindings = require_bindings.values().cloned().collect::<HashSet<_>>();
         Ok(Self {
-            module_exports_expr: parse_expr("module.exports")?,
-            production_expr: parse_expr("\"production\"")?,
+            module_exports_expr: parse_expr("module[\"exports\"]")?,
+            quoted,
             require_bindings,
             commonjs_object_bindings,
         })
@@ -32,7 +39,18 @@ impl VisitMut for CommonJsRewriteVisitor {
             return;
         };
 
-        if is_commonjs_export_member_expr(member) || is_module_exports_member_expr(member) {
+        // The `exports` slot on the scratch `module` object is always quoted,
+        // independently of the export-name verdict: `var module = {}` types the
+        // object as empty, and a dotted write to it is a checkTypes mismatch.
+        // Only the names *inside* the export object follow the verdict.
+        if is_module_exports_member_expr(member) {
+            quote_commonjs_export_member(member);
+            return;
+        }
+        if !self.quoted {
+            return;
+        }
+        if is_commonjs_export_member_expr(member) {
             quote_commonjs_export_member(member);
             if let Expr::Object(object) = &mut *expression.right {
                 quote_commonjs_export_object(object);
@@ -44,15 +62,23 @@ impl VisitMut for CommonJsRewriteVisitor {
         expr.visit_mut_children_with(self);
 
         match expr {
+            // The export slot is spelled the same way everywhere, whatever the
+            // export-name verdict is: see `visit_mut_assign_expr`.
+            Expr::Member(member_expr) if is_module_exports_member_expr(member_expr) => {
+                quote_commonjs_export_member(member_expr);
+            }
             Expr::Member(member_expr)
-                if !member_expr.prop.is_computed()
+                if self.quoted
+                    && !member_expr.prop.is_computed()
                     && matches!(&*member_expr.obj, Expr::Ident(ident) if self.commonjs_object_bindings.contains(ident.sym.as_ref())) =>
             {
                 if let MemberProp::Ident(ident) = &member_expr.prop {
                     member_expr.prop = create_string_computed_prop(ident.sym.as_ref());
                 }
             }
-            Expr::Member(member_expr) if is_commonjs_export_member_expr(member_expr) => {
+            Expr::Member(member_expr)
+                if self.quoted && is_commonjs_export_member_expr(member_expr) =>
+            {
                 quote_commonjs_export_member(member_expr);
             }
             Expr::Call(call_expr) => {
@@ -65,9 +91,6 @@ impl VisitMut for CommonJsRewriteVisitor {
             }
             Expr::Ident(ident) if ident.sym == *"exports" => {
                 *expr = *self.module_exports_expr.clone();
-            }
-            Expr::Member(member_expr) if is_process_env_node_env_expr(member_expr) => {
-                *expr = *self.production_expr.clone();
             }
             _ => {}
         }
@@ -201,12 +224,20 @@ pub(super) fn create_string_computed_name(
     }
 }
 
+/// Recognises the export slot in either spelling. The rewriter canonicalises
+/// `exports` to `module["exports"]`, so a recogniser that only matched the
+/// dotted form would stop seeing the slot the moment it had been rewritten.
 pub(super) fn is_module_exports_member_expr(member_expr: &MemberExpr) -> bool {
-    matches!(
-        (&*member_expr.obj, &member_expr.prop),
-        (Expr::Ident(module_ident), MemberProp::Ident(exports_ident))
-            if module_ident.sym == *"module" && exports_ident.sym == *"exports"
-    )
+    if !matches!(&*member_expr.obj, Expr::Ident(module_ident) if module_ident.sym == *"module") {
+        return false;
+    }
+    match &member_expr.prop {
+        MemberProp::Ident(exports_ident) => exports_ident.sym == *"exports",
+        MemberProp::Computed(computed) => {
+            matches!(&*computed.expr, Expr::Lit(Lit::Str(value)) if value.value == *"exports")
+        }
+        MemberProp::PrivateName(_) => false,
+    }
 }
 
 pub(super) fn parse_expr(source: &str) -> std::result::Result<Box<Expr>, String> {
@@ -215,27 +246,6 @@ pub(super) fn parse_expr(source: &str) -> std::result::Result<Box<Expr>, String>
         return Err("Expected expression snippet".to_string());
     };
     Ok(expr)
-}
-
-pub(super) fn is_process_env_node_env_expr(member_expr: &MemberExpr) -> bool {
-    let MemberProp::Ident(node_env_ident) = &member_expr.prop else {
-        return false;
-    };
-    if node_env_ident.sym != *"NODE_ENV" {
-        return false;
-    }
-
-    let Expr::Member(env_member) = &*member_expr.obj else {
-        return false;
-    };
-    let MemberProp::Ident(env_ident) = &env_member.prop else {
-        return false;
-    };
-    if env_ident.sym != *"env" {
-        return false;
-    }
-
-    matches!(&*env_member.obj, Expr::Ident(process_ident) if process_ident.sym == *"process")
 }
 
 pub(super) fn object_define_property_es_module(call_expr: &CallExpr) -> bool {

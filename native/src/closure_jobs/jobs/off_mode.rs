@@ -1,12 +1,11 @@
 use super::super::*;
-use super::shared::property_renaming_report_path;
+use super::shared::{aggregate_type_metadata, property_renaming_report_path};
 
 pub(crate) fn prepare_off_mode_jobs(
     input: &PrepareClosureJobsInput,
     resolved_chunks: &[ResolvedClosureChunk],
     raw_dir: &Path,
     warning_level: &str,
-    rename_prefix_namespace: Option<String>,
 ) -> std::result::Result<PrepareClosureJobsOutput, String> {
     let mut generated_assets = Vec::new();
     let closure_lib_files = select_closure_lib_files(
@@ -55,6 +54,13 @@ pub(crate) fn prepare_off_mode_jobs(
         explicit_js_inputs.push(adapter_path.to_string_lossy().to_string());
     }
     explicit_js_inputs = unique_paths(explicit_js_inputs);
+    let (type_metadata_counts, has_type_metadata) = aggregate_type_metadata(
+        input,
+        resolved_chunks
+            .iter()
+            .flat_map(|chunk| chunk.files.iter().cloned())
+            .collect::<Vec<_>>(),
+    )?;
 
     let compile_jobs = if resolved_chunks.len() == 1 {
         let entry_chunk = resolved_chunks
@@ -88,9 +94,11 @@ pub(crate) fn prepare_off_mode_jobs(
             languageIn: "UNSTABLE".to_string(),
             languageOut: input.languageOut.clone(),
             propertyRenamingReportPath: property_renaming_report_path.clone(),
-            renamePrefixNamespace: rename_prefix_namespace.clone(),
+            renamePrefixNamespace: None,
             rewritePolyfills: false,
             warningLevel: warning_level.to_string(),
+            hasTypeMetadata: has_type_metadata,
+            typeMetadataCounts: type_metadata_counts.clone(),
         }]
     } else {
         let leading_js = unique_paths(
@@ -152,9 +160,11 @@ pub(crate) fn prepare_off_mode_jobs(
             languageIn: "UNSTABLE".to_string(),
             languageOut: input.languageOut.clone(),
             propertyRenamingReportPath: property_renaming_report_path.clone(),
-            renamePrefixNamespace: rename_prefix_namespace.clone(),
+            renamePrefixNamespace: None,
             rewritePolyfills: false,
             warningLevel: warning_level.to_string(),
+            hasTypeMetadata: has_type_metadata,
+            typeMetadataCounts: type_metadata_counts,
         }]
     };
 
@@ -165,16 +175,13 @@ pub(crate) fn prepare_off_mode_jobs(
                 .join(format!("{}.js", chunk.name))
                 .to_string_lossy()
                 .to_string(),
-            kind: if property_renaming_report_path.is_some() {
-                "rewrite-gcc-exports-and-decorator-metadata".to_string()
-            } else {
-                "rewrite-gcc-exports".to_string()
-            },
+            // Off and split mode publish Closure wrapper exports, so every
+            // action goes through the ESM export rewrite.
+            kind: "rewrite-gcc-exports".to_string(),
             outputPath: PathBuf::from(&input.outDir)
                 .join(format!("{}.js", chunk.name))
                 .to_string_lossy()
                 .to_string(),
-            propertyRenamingReportPath: property_renaming_report_path.clone(),
         })
         .collect::<Vec<_>>();
     let published_outputs = postprocess_actions

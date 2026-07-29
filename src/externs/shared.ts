@@ -152,11 +152,7 @@ export function resolveAliasedSymbol(
     : symbol;
 }
 
-export function renderStructuralExternLine(name: string) {
-  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)
-    ? `Object.prototype.${name};`
-    : `Object.prototype[${JSON.stringify(name)}];`;
-}
+export { renderStructuralExternLine } from "./barriers";
 
 export function addMapSetValue<K>(
   map: Map<K, Set<string>>,
@@ -235,27 +231,50 @@ export function getStringLiteralMemberName(
     : null;
 }
 
-export function isExternPropertyName(name: string) {
-  return (
-    name !== "prototype" &&
-    name !== "constructor" &&
-    !name.startsWith("#") &&
-    !name.includes("@") &&
-    !name.startsWith("_") &&
-    !name.startsWith("$") &&
-    !BUILTIN_CONTAINER_NAMES.has(name)
-  );
+/**
+ * Which evidence source a candidate member name came from. The two sources
+ * genuinely need different filters, and the difference is not arbitrary:
+ *
+ * - `"contract"` — names read off *declaration* files (boundary-aware and
+ *   candidates modes). A `_`/`$`-leading member in a `.d.ts` is by convention
+ *   private API the application is not supposed to reach, so pinning it is
+ *   pure cost. Excluded.
+ * - `"runtime"` — names read off *emitted runtime* files (runtime-aware mode).
+ *   Here `_`/`$` names are the opposite signal: `__v_isRef`, `$el`, `_value`
+ *   are exactly the framework-internal protocol members whose definition and
+ *   read sides are spelled differently, i.e. the hazard the mode exists to
+ *   catch. Included — excluding them is what left vue's reactivity frozen.
+ *   Runtime evidence also drops host-object members (`addEventListener`,
+ *   `setAttribute`, …): those are already in Closure's browser externs, so
+ *   re-pinning them adds bytes and proves nothing.
+ *
+ * Previously these were two functions with a silently divergent body and no
+ * comment; `boundary-aware` could not emit a name that `runtime-aware` proved
+ * necessary, and nothing said why.
+ */
+export type ExternNameSource = "contract" | "runtime";
+
+export function isExternPropertyName(
+  name: string,
+  source: ExternNameSource = "contract",
+) {
+  if (
+    name === "prototype" ||
+    name === "constructor" ||
+    name.startsWith("#") ||
+    name.includes("@") ||
+    BUILTIN_CONTAINER_NAMES.has(name)
+  ) {
+    return false;
+  }
+  return source === "runtime"
+    ? !BUILTIN_RUNTIME_MEMBER_NAMES.has(name)
+    : !name.startsWith("_") && !name.startsWith("$");
 }
 
+/** `isExternPropertyName(name, "runtime")`. */
 export function isRuntimeExternPropertyName(name: string) {
-  return (
-    name !== "prototype" &&
-    name !== "constructor" &&
-    !name.startsWith("#") &&
-    !name.includes("@") &&
-    !BUILTIN_CONTAINER_NAMES.has(name) &&
-    !BUILTIN_RUNTIME_MEMBER_NAMES.has(name)
-  );
+  return isExternPropertyName(name, "runtime");
 }
 
 export function isThisOrSuperExpression(expression: ts.Node) {

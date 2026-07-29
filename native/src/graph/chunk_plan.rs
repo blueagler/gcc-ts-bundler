@@ -95,33 +95,56 @@ pub(super) fn build_off_chunk_plan(
 /// Path segments that mark a file as dependency-originated rather than app
 /// code. `node_modules/` is the direct case; `__dep-bundles/` and
 /// `__virtual__/` are the Vite pre-bundle and virtual-module staging
-/// directories, whose contents are likewise not authored by the app.
+/// directories.
 const VENDOR_PATH_SEGMENTS: [&str; 3] = ["node_modules", "__dep-bundles", "__virtual__"];
 
 /// Selects the eagerly reachable files that belong in the vendor chunk.
 ///
-/// The point of the split is filename stability: an app-code edit must
-/// re-hash only the entry chunk, leaving vendor and the lazy panels byte- and
-/// name-identical (docs/research/es-modules-output.md §7, byte-stability
-/// finding). So the vendor set must contain nothing an app edit can change,
-/// and entry files are app code by definition however they are pathed.
+/// Path origin only nominates candidates. The final set is dependency-closed:
+/// anything that reaches an authored/base file is removed, and that removal
+/// propagates to vendor candidates that depend on it. This preserves the only
+/// legal direction for the split: base may depend on vendor, never vice versa.
+/// Entry files remain app code by definition however they are pathed.
 fn partition_vendor_files(
     base_reachable: &BTreeSet<String>,
     entry_files: &[ChunkPlanEntryInput],
+    graph: &HashMap<String, Vec<String>>,
     workspace_dir: &Path,
 ) -> BTreeSet<String> {
     let entry_paths = entry_files
         .iter()
         .map(|entry| entry.sourcePath.clone())
         .collect::<BTreeSet<_>>();
-    base_reachable
+    let mut vendor_files = base_reachable
         .iter()
         .filter(|file_path| {
             !entry_paths.contains(*file_path)
                 && is_vendor_path(&path_relative_to(Path::new(file_path), workspace_dir))
         })
         .cloned()
-        .collect()
+        .collect::<BTreeSet<_>>();
+
+    loop {
+        let unsafe_files = vendor_files
+            .iter()
+            .filter(|file_path| {
+                graph.get(*file_path).is_some_and(|dependencies| {
+                    dependencies.iter().any(|dependency| {
+                        base_reachable.contains(dependency) && !vendor_files.contains(dependency)
+                    })
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if unsafe_files.is_empty() {
+            break;
+        }
+        for file_path in unsafe_files {
+            vendor_files.remove(&file_path);
+        }
+    }
+
+    vendor_files
 }
 
 fn is_vendor_path(relative_path: &str) -> bool {
@@ -144,7 +167,7 @@ pub(super) fn build_bundler_chunk_plan(
     }
 
     let vendor_files = if vendor_chunk {
-        partition_vendor_files(&base_reachable, entry_files, workspace_dir)
+        partition_vendor_files(&base_reachable, entry_files, graph, workspace_dir)
     } else {
         BTreeSet::new()
     };

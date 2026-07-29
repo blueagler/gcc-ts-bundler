@@ -19,11 +19,10 @@ export const CACHE_MODES = defineValues("off", "temp", "persistent");
 export type CacheMode = (typeof CACHE_MODES)[number];
 
 /**
- * `minimal` compiles with `--env CUSTOM` plus a generated flat externs file
- * covering only the platform globals and properties the program references,
- * instead of Closure's full multi-megabyte browser externs. This roughly
- * halves Closure compile time. On any compile error the build automatically
- * retries with the full browser externs.
+ * `minimal` compiles typed ADVANCED jobs with `--env CUSTOM` plus a
+ * dependency-closed slice of the exact browser extern declarations shipped
+ * with Closure. Untyped jobs and any failed slice/compile use Closure's full
+ * browser externs.
  */
 export const PLATFORM_EXTERNS_MODES = defineValues("minimal", "full");
 export type PlatformExternsMode = (typeof PLATFORM_EXTERNS_MODES)[number];
@@ -48,7 +47,8 @@ export type ChunkMode = (typeof CHUNK_MODES)[number];
  * `$gcc` namespace object, loaded by injecting `<script>` elements.
  * `esm` is Closure's `ES_MODULES` output: native `import`/`export` between
  * chunks, loaded with dynamic `import()`.
- * `auto` picks `esm` wherever it is safe (see `resolveChunkOutputType`).
+ * `auto` uses the integration default: standalone builds resolve to `script`;
+ * Vite resolves to `esm` when its target supports modules.
  */
 export const CHUNK_OUTPUT_TYPES = defineValues("auto", "script", "esm");
 export type ChunkOutputType = (typeof CHUNK_OUTPUT_TYPES)[number];
@@ -62,7 +62,6 @@ export interface CacheOptions {
 }
 
 export interface DiagnosticsOptions {
-  fatalWarnings?: boolean | undefined;
   preflight?: DiagnosticsPreflight | undefined;
   verbose?: boolean | undefined;
 }
@@ -83,8 +82,8 @@ export interface ChunkOptions {
    * dependency half out means an app edit only re-hashes the entry, and the
    * vendor and lazy chunks keep their names (and their cache entries).
    *
-   * `"auto"` (the default) enables it exactly where it works: `bundler-runtime`
-   * chunks whose resolved `outputType` is `"esm"`.
+   * `"auto"` resolves to `false`. Explicit `true` is still gated to
+   * `bundler-runtime` chunks whose resolved `outputType` is `"esm"`.
    */
   vendorChunk?: boolean | "auto" | undefined;
 }
@@ -104,18 +103,17 @@ export interface CompatClassMapCall {
   callee: string;
   /**
    * Optional regex; keys matching it are left alone even when `keyPattern`
-   * admits them. Patterns are compiled by Rust's `regex` crate, which has
-   * no lookahead or backreferences; an unparsable pattern drops the rule.
+   * admits them. Patterns are compiled by Rust's `regex` crate, which has no
+   * lookahead or backreferences; unsupported syntax fails the build.
    */
   keyExcludePattern?: string | undefined;
   /** Optional regex; when set, only matching keys are quoted. */
   keyPattern?: string | undefined;
   /**
-   * When set, the rule applies only if the argument at this index is a
-   * string literal. Element factories take the element type first, and only
-   * the literal (host/DOM) form dispatches on literal prop keys; component
-   * props stay renamable because creation site and component body rename
-   * together.
+   * When set, the rule applies only if the argument at this index is a string
+   * literal or an immutable value produced by another matching literal-gated
+   * call. Host-element provenance can therefore flow through transforms such
+   * as `cloneElement` while component props remain renamable.
    */
   stringLiteralArgIndex?: number | undefined;
 }
@@ -131,41 +129,6 @@ export interface CompatOptions {
   pureCallees?: readonly string[] | undefined;
 }
 
-/**
- * One top-level binding of a module, paired with the JSDoc block to emit
- * immediately before its declaration.
- *
- * Type references inside `jsdoc` use **pre-suffix** names: hoisted emission
- * renames every top-level binding to `name$$ordinal`, and the native emitter
- * rewrites same-module type references inside the block to match. Only types
- * declared in the same module may be referenced.
- */
-/** One class member's JSDoc, rendered before that member in the class body. */
-export interface TypedAnnotationMember {
-  /** Complete JSDoc block ending in a newline. */
-  jsdoc: string;
-  /** Member key as authored; computed and quoted keys are never matched. */
-  name: string;
-}
-
-export interface TypedAnnotationBinding {
-  /** Top-level binding name as authored, before the `$$` hoist suffix. */
-  name: string;
-  /** Complete JSDoc block ending in a newline, or `""` for a binding that
-   * takes no block of its own (a class: Closure reads ES6 `class` structure
-   * natively and rejects `@constructor` on one). */
-  jsdoc: string;
-  /** Per-member JSDoc when the binding is a class. */
-  members?: readonly TypedAnnotationMember[] | undefined;
-}
-
-/** Typed annotations for one materialized module fed to native emit. */
-export interface TypedAnnotationFile {
-  bindings: readonly TypedAnnotationBinding[];
-  /** Absolute path of the materialized module native emit reads. */
-  filePath: string;
-}
-
 export interface BuildOptions {
   cache?: CacheOptions | undefined;
   chunks?: ChunkOptions | undefined;
@@ -173,6 +136,10 @@ export interface BuildOptions {
   compilationLevel?: CompilationLevel | undefined;
   diagnostics?: DiagnosticsOptions | undefined;
   entries: readonly BuildEntryOption[];
+  /**
+   * Explicit externs keep their historical dual meaning: Closure consumes
+   * them and native preservation scans them for rename barriers.
+   */
   externs?: readonly string[] | undefined;
   js?: readonly string[] | undefined;
   languageOut?: LanguageOut | undefined;
@@ -181,11 +148,8 @@ export interface BuildOptions {
   platformExterns?: PlatformExternsMode | undefined;
   projectRoot?: string | undefined;
   srcDir?: string | undefined;
-  /**
-   * Internal: TypeScript-derived JSDoc for materialized modules, produced by
-   * the Vite stage. Not part of the public option surface.
-   */
-  typedAnnotations?: readonly TypedAnnotationFile[] | undefined;
+  /** Closure-only typed declarations. Native preservation never scans these. */
+  typedExterns?: readonly string[] | undefined;
 }
 
 export interface CleanCacheOptions {
@@ -228,7 +192,6 @@ export interface ResolvedBuildOptions {
   compat: { classMapCalls: CompatClassMapCall[]; pureCallees: string[] };
   compilationLevel: CompilationLevel;
   diagnostics: {
-    fatalWarnings: boolean;
     preflight: DiagnosticsPreflight;
     verbose: boolean;
   };
@@ -242,10 +205,24 @@ export interface ResolvedBuildOptions {
   platformExterns: PlatformExternsMode;
   projectRoot: string;
   srcDir: string;
-  typedAnnotations: TypedAnnotationFile[];
+  typedExterns: string[];
 }
 
-export const DEFAULT_BUILD_OPTIONS = Object.freeze({
+function deepFreeze<T extends object>(value: T): T {
+  Object.freeze(value);
+  for (const child of Object.values(value)) {
+    if (
+      child !== null &&
+      typeof child === "object" &&
+      !Object.isFrozen(child)
+    ) {
+      deepFreeze(child);
+    }
+  }
+  return value;
+}
+
+export const DEFAULT_BUILD_OPTIONS = deepFreeze({
   cache: {
     dir: "",
     mode: "persistent",
@@ -261,7 +238,6 @@ export const DEFAULT_BUILD_OPTIONS = Object.freeze({
   compat: { classMapCalls: [], pureCallees: [] },
   compilationLevel: "ADVANCED",
   diagnostics: {
-    fatalWarnings: false,
     preflight: "errors-only",
     verbose: false,
   },
@@ -274,5 +250,5 @@ export const DEFAULT_BUILD_OPTIONS = Object.freeze({
   platformExterns: "minimal",
   projectRoot: "",
   srcDir: "",
-  typedAnnotations: [],
+  typedExterns: [],
 } satisfies ResolvedBuildOptions);

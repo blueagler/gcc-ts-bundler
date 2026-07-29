@@ -40,7 +40,7 @@ BuildOptions
   -> generate native property externs
   -> prepare Closure compile jobs (Rust)
   -> run Google Closure Compiler
-  -> rewrite exports, decorator metadata, and ES5 runtime helpers
+  -> convert the export bag to ESM, wrap chunks, publish
   -> publish output files and cache metadata
 ```
 
@@ -64,12 +64,22 @@ Package resolution supports browser-safe ESM and statically analyzable CommonJS.
 
 ### 3. Plan outputs
 
-There are two output models:
+There are three output models:
 
 - **`chunks.mode = "off"`** creates Closure entry shims and emits importable entry bundles. Multiple entries may produce shared chunks.
-- **`chunks.mode = "bundler-runtime"`** treats entries as application bootstraps and converts literal `import()` calls into an internal script-chunk runtime. Entry exports are rejected because this mode does not produce library entry modules.
+- **`chunks.mode = "split"`** compiles one Closure chunk graph, preserving cross-module optimization while supporting literal lazy imports.
+- **`chunks.mode = "bundler-runtime"`** treats entries as application bootstraps and compiles chunks as separate cacheable jobs. Entry exports are rejected because this mode does not produce library entry modules.
 
-Dynamic import specifiers must be string literals. Dynamic imports are rejected when chunk mode is off.
+Dynamic import specifiers must be string literals. Dynamic imports are rejected when chunk mode is off. Chunked builds can emit classic script chunks loaded through the runtime or ESM chunks loaded with native `import()`, according to `chunks.outputType`.
+
+`chunks.outputType: "auto"` (the default) resolves to **`"esm"`**. Measured on
+the Svelte example, module output is 120,762 -> 115,049 bytes raw and
+41,015 -> 40,262 gzipped, purely from dropping the per-chunk IIFE wrapper and
+the `$gcc.` prefix on every cross-chunk reference. The gates still outrank the
+default: `chunks.mode` other than `bundler-runtime`, `ECMASCRIPT3`/`ECMASCRIPT5`
+output, and worker bundles all force `"script"`. A standalone consumer of a
+module-output build must load the entry with `<script type="module">`; the Vite
+plugin emits the right tag itself.
 
 #### Bundler-runtime hoisted linking
 
@@ -97,20 +107,79 @@ module code lives inside the chunk wrapper function, so it never pays the
 
 ### 4. Analyze types and transpile
 
-The JavaScript layer uses the TypeScript compiler API for diagnostics and for Closure metadata that needs semantic information, including type declarations, JSDoc, enums, and decorators. Plain JavaScript files can take a faster scan path when no semantic work is needed.
+The JavaScript layer uses one TypeScript checker/extractor for standalone and Vite. It serializes tokenized binding/member annotations, declarations, enums, canonical symbol identities, provenance, and non-fatal degradation diagnostics through `closure-ir.json`. Plain JavaScript files can take a faster scan path when no semantic work is needed.
 
-The Rust layer then transforms files in parallel with SWC. It strips TypeScript, lowers JSX where needed, normalizes supported CommonJS, rewrites imports/exports for the selected output model, emits support files, and generates property externs.
+Rust resolves that metadata against the final SWC/import/hoist plan, transforms files in parallel, and returns exact delivered counts and diagnostics per emitted JavaScript file. The same stage strips TypeScript, lowers JSX where needed, normalizes supported CommonJS, rewrites imports/exports, emits support files, and generates proven property rename barriers.
+
+Three things that used to be patched into Closure's *output* are decided here
+instead, because this is the last point at which the provenance they need still
+exists:
+
+- **Lowering helpers.** TypeScript inlines `__esDecorate`, `__runInitializers`,
+  `__classPrivateFieldGet` and friends into every file that needs them. Emission
+  renames each such declaration to a *content-addressed* name
+  (`__esDecorate$$h<hash of the body>`) instead of an ordinal-suffixed one and
+  hands it to the driver, which emits one copy into the first file of the first
+  chunk. Copies collapse only when their bodies are byte-identical, so an
+  application function that merely shares a helper's name keeps its own body.
+- **Reflective property keys.** A string literal compared against a `for...in`
+  binding, or listed in a filter list tested against one, is a property name
+  read as data. Those names go into the preserved-property channel, so Closure
+  never renames them and no literal ever has to be respelled afterwards.
+  Decorator metadata keys (`__esDecorate`'s `{name: "..."}` context) are
+  preserved the same way.
+- **Framework bundler directives.** `"use client"` / `"use server"` in the
+  directive prologue are instructions to an RSC-aware bundler and are dropped;
+  terminal browser output has no use for them.
+
+Postprocessing after Closure is therefore limited to delivery shape. Each
+remaining rule carries a match count and fails the build when its input says the
+rule should have fired and it did not, so a rule cannot silently become a no-op.
 
 ### 5. Compile and postprocess
 
-Rust prepares explicit Closure jobs and postprocess actions. The JavaScript layer invokes the installed `google-closure-compiler` package, preferring its native compiler binary when available.
+Rust prepares explicit Closure jobs and aggregates delivered metadata counts over each job's real native inputs. The JavaScript layer enables silent `checkTypes` inference and the typed platform extern slice only for ADVANCED jobs whose aggregate is non-empty, unless `GCC_DISABLE_TYPE_INFERENCE=1`, then invokes the installed `google-closure-compiler` package.
 
-Off mode runs Closure serially. Bundler-runtime mode may compile independent jobs concurrently and caches each Closure job separately. Postprocessing then:
+Off mode runs Closure serially, split mode compiles one Closure chunk graph, and bundler-runtime mode may compile independent jobs concurrently while caching each job separately. Postprocessing then:
 
 - converts Closure wrapper exports back into ESM exports in off mode;
-- rewrites decorator metadata using the property-renaming report;
-- shares ES5 helper code across runtime chunks;
-- wraps application chunks and publishes the requested manifest when enabled.
+- wraps application chunks for the resolved script/ESM loading model and publishes the requested manifest when enabled;
+- prunes chunks that survived the plan but carry no code.
+
+### Runtime capability gating
+
+The runtime preamble is Closure *input*, but every block hangs off the global
+`__g` object, so Closure can never prove one dead. Which blocks are emitted is
+therefore decided when the preamble is rendered, from the plan and the
+assembled module text:
+
+| Block | Emitted when |
+| ----- | ------------ |
+| `<link>` stylesheet loader + per-chunk CSS fan-out (`z`) | a manifest CSS row can exist |
+| preload (`r.x`) | some module calls `__preloadDynamicImport` |
+| entry runner (`r.n`) | some entry module stays in registry form |
+| live-export helper (`r.g`) | some module calls `__live` |
+| script URL resolution (`u`) and `<script>` injection (`p`) | script output |
+
+Each answer is a fail-closed over-approximation: a call site anywhere in the
+plan keeps the block. Standalone builds never fill a CSS row, so the CSS half
+is always gated out there; the Vite plugin fills rows *after* the compile and
+passes its pre-compile CSS-ownership answer in, because that is the only point
+where the question can still be answered. A no-CSS ESM app drops from 2,126 to
+1,007 bytes of loader code.
+
+### Empty-chunk pruning
+
+The planner creates a shared chunk whenever two lazy roots reach the same
+module. Closure's cross-chunk code motion can then hoist every module out of
+it, leaving an output file that is only scaffolding: the generated `import`
+edges and the loader's "this chunk finished" call. Those chunks are dropped
+after the final JavaScript exists - the file is deleted, importers lose the
+`import`, the manifest row is emptied and dependency arrays and the
+module-to-chunk table are rewritten onto the surviving chunk. Dynamic-import
+roots are never pruned: `import()` still has to resolve to them. The row is
+emptied rather than spliced out because chunk ids are dense array indices baked
+into every surviving chunk's completion call.
 
 ## Persistent cache
 
@@ -125,10 +194,10 @@ The default persistent cache is outside the project:
 Each project gets a directory keyed by its absolute `projectRoot`. The main cache layers are:
 
 1. **Resolve snapshot** — graph, entries, lazy imports, tracked file state.
-2. **Native emit** — transpiled Closure inputs, metadata, externs, and support files.
-3. **Closure jobs** — compiler artifacts keyed per job and compiler version.
-4. **Final metadata** — immutable cached outputs that can repopulate a deleted `outDir`.
-5. **Final-fast snapshot** — returns immediately when options, inputs, package/runtime signatures, and published output sizes still match.
+2. **Native emit** — transpiled Closure inputs, serialized metadata, delivered per-file counts/diagnostics, rename barriers, dependency-content snapshots, and support files.
+3. **Closure jobs** — compiler artifacts keyed per job, compiler version, delivered counts, inference decision, platform environment, JS, and extern content.
+4. **Final metadata** — immutable cached outputs plus type/declaration dependency identities that can repopulate a deleted `outDir`.
+5. **Final-fast snapshot** — returns immediately only when options, metadata/provenance dependencies, package/runtime signatures, and published outputs still match.
 
 `cache.mode = "temp"` uses an isolated temporary workspace and does not reuse data across builds. `cache.mode = "off"` also uses a temporary workspace and disables compiler artifact restoration.
 
@@ -143,7 +212,8 @@ Vite transforms modules
   -> plugin keeps only retained modules
   -> normalize and materialize the graph on disk
   -> prebundle dependency regions with Vite's esbuild
-  -> call core build() in bundler-runtime mode
+  -> collect unified source/declaration metadata with exact runtime provenance
+  -> call core build() in bundler-runtime mode with that sidecar
   -> merge Vite CSS ownership into the runtime manifest
   -> apply Vite output naming
   -> replace Rollup JS and rewrite HTML entry scripts

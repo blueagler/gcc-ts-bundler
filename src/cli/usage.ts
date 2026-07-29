@@ -19,19 +19,19 @@ Build flags:
   --out-dir             Output directory
   --language-out        ECMASCRIPT3 | ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT_NEXT
   --compilation-level   WHITESPACE_ONLY | SIMPLE | ADVANCED
-  --chunks              off | bundler-runtime
+  --chunks              off | split | bundler-runtime
   --chunk-public-path   Public URL prefix for chunk files in chunk mode
   --chunk-base-name     Base chunk output name in chunk mode
   --chunk-manifest      Relative manifest path in chunk mode
   --packages            off | esm-only
-  --platform-externs    minimal | full (default minimal: generated flat platform externs)
-  --extern              Closure extern file. May be provided multiple times
+  --platform-externs    minimal | full (default minimal: typed per-job platform slice)
+  --extern              Explicit extern file consumed by Closure and native preservation. Repeatable
+  --typed-extern        Closure-only typed extern declaration file. Repeatable
   --js                  Additional Closure JS input. May be provided multiple times
   --cache-mode          off | temp | persistent
   --cache-dir           Explicit cache directory
   --preflight           off | errors-only | full
   --verbose             Print verbose diagnostics
-  --fatal-warnings      Treat typed transpile warnings as fatal
   -h, --help            Show this help message
 
 Extern flags:
@@ -40,14 +40,13 @@ Extern flags:
   --entry                 App entry file for boundary-aware usage analysis. May be provided multiple times
   --module                Package or subpath specifier to scan. May be provided multiple times
   --runtime-entry         Runtime JS entry for runtime-aware analysis. May be provided multiple times
-  --mode                  boundary-aware | candidates | runtime-aware
+  --mode                  boundary-aware | runtime-aware
   --output-file           Write generated externs to a file instead of stdout
   --include-dependencies  Follow imported declaration files across node_modules (default: true)
   --tsconfig              Explicit tsconfig path relative to --project-root
 
 Modes:
   boundary-aware          App usage + dependency types
-  candidates              Dependency types only
   runtime-aware           Dependency runtime code + dependency types, with optional app usage filtering from --entry
 `);
 }

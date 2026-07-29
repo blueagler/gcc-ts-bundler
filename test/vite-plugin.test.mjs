@@ -18,20 +18,18 @@ import {
   renameCompiledNonBaseJsOutputs,
 } from "../src/vite/naming.ts";
 import { prebundleMaterializedDependencies } from "../src/vite/prebundle/index.ts";
+import { extractRuntimeInitManifest } from "../src/vite/runtime-manifest.ts";
 import {
+  applyViteBuildGuards,
   createCompilerOptions,
   resolveViteLanguageOut,
   VITE_LANGUAGE_OUT_ERROR,
 } from "../src/vite/config.ts";
-import {
-  extractTypedAnnotations,
-  isTypedAnnotationSource,
-} from "../src/vite/typed-annotations.ts";
 import { normalizeBuildOptions } from "../src/build/resolve/options.ts";
-import { getOptionsSignature } from "../src/build/resolve/signatures.ts";
 import {
   createFixture,
   execFileAsync,
+  findFilesNamed,
   listDirectoryNames,
 } from "./helpers.mjs";
 
@@ -65,8 +63,10 @@ async function buildViteFixture(fixture, overrides = {}) {
     "vite.config.mjs",
     [
       `import { gccTsBundler } from ${JSON.stringify(pluginUrl)};`,
+      ...(overrides.preambleLines ?? []),
       "",
       "export default {",
+      ...(overrides.configLines ?? []),
       "  build: {",
       '    outDir: "dist",',
       '    target: "es2018",',
@@ -76,9 +76,11 @@ async function buildViteFixture(fixture, overrides = {}) {
       ...(overrides.buildLines ?? []),
       "  },",
       "  plugins: [",
+      ...(overrides.pluginEntries ?? []),
       "    gccTsBundler({",
       "      compiler: {",
       `        cache: ${JSON.stringify(overrides.cache ?? { mode: "off" })},`,
+      ...(overrides.compilerLines ?? []),
       "      },",
       ...(overrides.debugDir
         ? [
@@ -140,7 +142,7 @@ async function writeViteCssFixture(fixture) {
     [
       'import "./base.css";',
       'document.getElementById("app").innerHTML = "<button id=\\"load\\">Load</button>";',
-      'globalThis.__loadFeature = () => import("./feature.js").then((module) => module.mount());',
+      'globalThis["__loadFeature"] = () => import("./feature.js").then((module) => module.mount());',
       "",
     ].join("\n"),
   );
@@ -389,7 +391,9 @@ test.serial(
     const rewrittenLazy = await fs.readFile(authoredLazy, "utf8");
     expect(rewrittenEntry).toContain("__dep-bundles/");
     expect(rewrittenLazy).toContain("__dep-bundles/");
-    const entryBundlePath = rewrittenEntry.match(/__dep-bundles\/[\w./-]+/)?.[0];
+    const entryBundlePath = rewrittenEntry.match(
+      /__dep-bundles\/[\w./-]+/,
+    )?.[0];
     const lazyBundlePath = rewrittenLazy.match(/__dep-bundles\/[\w./-]+/)?.[0];
     expect(entryBundlePath).toBeTruthy();
     expect(lazyBundlePath).toBeTruthy();
@@ -738,6 +742,310 @@ test.serial(
 );
 
 test.serial(
+  "gccTsBundler resolves Vite asset and public placeholders before final output hashing",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<script type="module" src="/src/main.js"></script>\n',
+    );
+    await fixture.write(
+      "src/main.js",
+      [
+        'import logo from "./logo.svg";',
+        'globalThis.__viteAssetUrls = [logo, new URL("/public-logo.svg", import.meta.url).href];',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/logo.svg",
+      '<svg xmlns="http://www.w3.org/2000/svg"><text>A</text></svg>\n',
+    );
+    await fixture.write(
+      "public/public-logo.svg",
+      '<svg xmlns="http://www.w3.org/2000/svg"/>\n',
+    );
+
+    const build = () =>
+      buildViteFixture(fixture, {
+        buildLines: [
+          "    assetsInlineLimit: 0,",
+          '    rollupOptions: { output: { entryFileNames: "scripts/[name]-[hash].js" } },',
+        ],
+        configLines: ['  base: "./",'],
+      });
+
+    await build();
+    const firstFiles = await listFiles(fixture.outDir);
+    const firstJsFile = firstFiles.find((filePath) => filePath.endsWith(".js"));
+    const firstLogoFile = firstFiles.find(
+      (filePath) =>
+        filePath.startsWith("assets/logo-") && filePath.endsWith(".svg"),
+    );
+    expect(firstJsFile).toMatch(/^scripts\/.+\.js$/u);
+    expect(firstLogoFile).toBeTruthy();
+    const firstSource = await fixture.read(path.join("dist", firstJsFile));
+    expect(firstSource).not.toContain("__VITE_ASSET__");
+    expect(firstSource).not.toContain("__VITE_PUBLIC_ASSET__");
+    expect(firstSource).toContain(`../${firstLogoFile}`);
+    expect(firstSource).toContain("../public-logo.svg");
+
+    await fixture.write(
+      "src/logo.svg",
+      '<svg xmlns="http://www.w3.org/2000/svg"><text>B</text></svg>\n',
+    );
+    await build();
+    const secondFiles = await listFiles(fixture.outDir);
+    const secondJsFile = secondFiles.find((filePath) =>
+      filePath.endsWith(".js"),
+    );
+    expect(secondJsFile).toMatch(/^scripts\/.+\.js$/u);
+    expect(secondJsFile).not.toBe(firstJsFile);
+    const secondSource = await fixture.read(path.join("dist", secondJsFile));
+    expect(secondSource).not.toContain("__VITE_ASSET__");
+    expect(secondSource).not.toContain("__VITE_PUBLIC_ASSET__");
+  },
+);
+
+test.serial(
+  "gccTsBundler rejects multiple distinct HTML entry facades",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<script type="module" src="/src/a.js"></script>\n',
+    );
+    await fixture.write(
+      "pages/b.html",
+      '<script type="module" src="../src/b.js"></script>\n',
+    );
+    await fixture.write("src/a.js", "globalThis.__pageA = true;\n");
+    await fixture.write("src/b.js", "globalThis.__pageB = true;\n");
+
+    await expect(
+      buildViteFixture(fixture, {
+        buildLines: [
+          '    rollupOptions: { input: { a: "index.html", b: "pages/b.html" } },',
+        ],
+      }),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining(
+        "does not yet support multiple distinct HTML entry facades",
+      ),
+    });
+  },
+);
+
+test.serial(
+  "gccTsBundler makes relative-base entry URLs relative to each HTML asset",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "pages/app.html",
+      '<script type="module" src="../src/main.js"></script>\n',
+    );
+    await fixture.write("src/main.js", 'document.body.textContent = "ok";\n');
+
+    await buildViteFixture(fixture, {
+      buildLines: ['    rollupOptions: { input: "pages/app.html" },'],
+      configLines: ['  base: "./",'],
+    });
+
+    const html = await fixture.read("dist/pages/app.html");
+    const entryScript = readRewrittenEntryScript(html);
+    expect(entryScript).toMatch(/^\.\.\/assets\/.+\.js$/u);
+    expect(
+      (await listFiles(fixture.outDir)).includes(
+        path.posix.normalize(`pages/${entryScript}`),
+      ),
+    ).toBe(true);
+  },
+);
+
+test.serial(
+  "gccTsBundler removes only Rollup chunks and preserves JavaScript assets",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<script type="module" src="/src/main.js"></script>\n',
+    );
+    await fixture.write("src/main.js", 'document.body.textContent = "ok";\n');
+
+    await buildViteFixture(fixture, {
+      pluginEntries: ["    emitJavaScriptAsset,"],
+      preambleLines: [
+        "const emitJavaScriptAsset = {",
+        '  name: "emit-javascript-asset",',
+        "  buildStart() {",
+        "    this.emitFile({",
+        '      type: "asset",',
+        '      fileName: "extras/keep.js",',
+        '      source: "globalThis.__keepAsset = true;\\n",',
+        "    });",
+        "  },",
+        "};",
+      ],
+    });
+
+    expect(await fixture.read("dist/extras/keep.js")).toContain("__keepAsset");
+  },
+);
+
+test.serial(
+  "gccTsBundler recognizes local named default exports in dependency metadata",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<script type="module" src="/src/main.js"></script>\n',
+    );
+    await fixture.write(
+      "src/main.js",
+      'import * as ns from "pkg"; globalThis.__nsDefault = ns.default;\n',
+    );
+    await fixture.write(
+      "node_modules/pkg/package.json",
+      '{"name":"pkg","version":"1.0.0","type":"module","exports":"./index.js"}\n',
+    );
+    await fixture.write(
+      "node_modules/pkg/index.js",
+      'const value = "EXPECTED_DEFAULT"; export { value as default };\n',
+    );
+
+    await buildViteFixture(fixture);
+
+    const jsFile = (await listFiles(fixture.outDir)).find((filePath) =>
+      filePath.endsWith(".js"),
+    );
+    expect(jsFile).toBeTruthy();
+    expect(await fixture.read(path.join("dist", jsFile))).toContain(
+      "EXPECTED_DEFAULT",
+    );
+  },
+);
+
+test.serial(
+  "vendor chunk keeps virtual modules with authored dependencies in the base chunk",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<script type="module" src="/src/main.js"></script>\n',
+    );
+    await fixture.write(
+      "src/main.js",
+      'import { bridged } from "virtual:bridge"; globalThis.__vendorVirtual = bridged;\n',
+    );
+    await fixture.write("src/value.js", 'export const value = "APP_VALUE";\n');
+
+    await buildViteFixture(fixture, {
+      compilerLines: [
+        '        chunks: { outputType: "esm", vendorChunk: true },',
+      ],
+      pluginEntries: ["    virtualBridge,"],
+      preambleLines: [
+        "const virtualBridge = {",
+        '  name: "virtual-bridge",',
+        "  resolveId(id) {",
+        '    return id === "virtual:bridge" ? "\\0virtual:bridge" : null;',
+        "  },",
+        "  load(id) {",
+        '    if (id === "\\0virtual:bridge") return \'import { value } from "/src/value.js"; export const bridged = value;\';',
+        "  },",
+        "};",
+      ],
+    });
+
+    const jsFiles = (await listFiles(fixture.outDir)).filter((filePath) =>
+      filePath.endsWith(".js"),
+    );
+    expect(jsFiles).toHaveLength(1);
+    expect(await fixture.read(path.join("dist", jsFiles[0]))).toContain(
+      "APP_VALUE",
+    );
+  },
+);
+
+test.serial(
+  "lazy dependency roots receive dependency prebundle compatibility lowering",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<script type="module" src="/src/main.js"></script>\n',
+    );
+    await fixture.write(
+      "src/main.js",
+      'globalThis.__loadPrivate = () => import("pkg").then((module) => module.read());\n',
+    );
+    await fixture.write(
+      "node_modules/pkg/package.json",
+      '{"name":"pkg","version":"1.0.0","type":"module","exports":"./index.js"}\n',
+    );
+    await fixture.write(
+      "node_modules/pkg/index.js",
+      [
+        "class Box {",
+        "  #value = 7;",
+        "  read() { return this.#value; }",
+        "}",
+        "export function read() { return new Box().read(); }",
+        "",
+      ].join("\n"),
+    );
+
+    await buildViteFixture(fixture, { configLines: ['  base: "./",'] });
+
+    const jsFiles = (await listFiles(fixture.outDir)).filter((filePath) =>
+      filePath.endsWith(".js"),
+    );
+    expect(jsFiles.length).toBeGreaterThan(1);
+    const sources = await Promise.all(
+      jsFiles.map((filePath) => fixture.read(path.join("dist", filePath))),
+    );
+    expect(sources.join("\n")).not.toContain("#value");
+  },
+);
+
+test.serial(
+  "gccTsBundler bridges legacy Closure targets through Vite's capture floor",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<script type="module" src="/src/main.js"></script>\n',
+    );
+    await fixture.write(
+      "src/main.js",
+      "const add = (left, right) => left + right; globalThis.__legacy = add(2, 3);\n",
+    );
+
+    await buildViteFixture(fixture, {
+      buildLines: ['    target: "es5",'],
+    });
+
+    const html = await fixture.read("dist/index.html");
+    expect(html).toContain("<script defer src=");
+    expect(html).not.toContain('<script type="module" crossorigin');
+    const jsFile = (await listFiles(fixture.outDir)).find((filePath) =>
+      filePath.endsWith(".js"),
+    );
+    const source = await fixture.read(path.join("dist", jsFile));
+    expect(source).not.toContain("=>");
+    expect(source).not.toMatch(/\b(?:const|let)\b/u);
+  },
+);
+
+test.serial(
   "gccTsBundler wires lazy Vite CSS through the runtime when cssCodeSplit is enabled",
   { timeout: 20000 },
   async () => {
@@ -766,6 +1074,97 @@ test.serial(
     );
     expect(mainJs).toContain(lazyCss);
     expect(mainJs).toContain("globalThis.__g");
+    expect(mainJs).not.toContain("if(!r||!r.k");
+
+    const runtimeManifest = extractRuntimeInitManifest(mainJs).manifest;
+    expect(Array.isArray(runtimeManifest)).toBe(true);
+    const runtimeRows = runtimeManifest[1];
+    expect(Array.isArray(runtimeRows)).toBe(true);
+    const baseRow = runtimeRows.find(
+      (entry) => Array.isArray(entry) && entry[1] === "",
+    );
+    expect(baseRow?.[2]).toEqual([]);
+    const lazyRow = runtimeRows.find(
+      (entry) =>
+        Array.isArray(entry) &&
+        Array.isArray(entry[2]) &&
+        entry[2].includes(lazyCss),
+    );
+    expect(lazyRow?.[2]).toEqual([lazyCss]);
+
+    const previousDocument = globalThis.document;
+    const previousLocation = globalThis.location;
+    const previousRuntime = globalThis.__g;
+    const previousLoadFeature = globalThis.__loadFeature;
+    const loadedCss = [];
+    const mountedNodes = [];
+    const events = [];
+    const appendChild = (node) => {
+      if (node.rel === "stylesheet") {
+        loadedCss.push(node.href);
+        queueMicrotask(() => {
+          events.push("css");
+          node.onload?.();
+        });
+      } else {
+        events.push("mount");
+        mountedNodes.push(node);
+      }
+      return node;
+    };
+    try {
+      globalThis.document = {
+        body: { appendChild },
+        createElement: () => ({}),
+        documentElement: { appendChild },
+        getElementById: () => ({}),
+        head: { appendChild },
+        querySelectorAll: () =>
+          linkedCss.map((fileName) => ({
+            href: new URL(fileName, "http://vite.test/").toString(),
+          })),
+      };
+      globalThis.location = { href: "http://vite.test/index.html" };
+      // A runtime root left on globalThis by a concurrently-running test file
+      // carries that build's module registry, so this bundle would look up its
+      // own module ids in a stranger's table and fail with `m<id>`.
+      delete globalThis.__g;
+      await import(
+        `${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?css=${Date.now()}`
+      );
+      expect(typeof globalThis.__loadFeature).toBe("function");
+      await globalThis.__loadFeature();
+      expect(loadedCss).toHaveLength(1);
+      expect(loadedCss[0]?.endsWith(`/${lazyCss}`)).toBe(true);
+      expect(events).toEqual(["css", "mount"]);
+      expect(mountedNodes).toContainEqual(
+        expect.objectContaining({
+          className: "feature-panel",
+          textContent: "lazy feature",
+        }),
+      );
+    } finally {
+      if (previousDocument === undefined) {
+        delete globalThis.document;
+      } else {
+        globalThis.document = previousDocument;
+      }
+      if (previousLocation === undefined) {
+        delete globalThis.location;
+      } else {
+        globalThis.location = previousLocation;
+      }
+      if (previousRuntime === undefined) {
+        delete globalThis.__g;
+      } else {
+        globalThis.__g = previousRuntime;
+      }
+      if (previousLoadFeature === undefined) {
+        delete globalThis.__loadFeature;
+      } else {
+        globalThis.__loadFeature = previousLoadFeature;
+      }
+    }
   },
 );
 
@@ -1016,6 +1415,43 @@ test("resolveViteLanguageOut rejects unsupported target strings", () => {
   ).toThrow(/could not derive a compiler output level/);
 });
 
+test("Vite separates legacy capture targets and treats explicit auto as omission", () => {
+  expect(applyViteBuildGuards({ build: { target: "es3" } }).build.target).toBe(
+    "es2015",
+  );
+  expect(applyViteBuildGuards({ build: { target: "es5" } }).build.target).toBe(
+    "es2015",
+  );
+  expect(
+    applyViteBuildGuards({ build: { target: "es2018" } }).build.target,
+  ).toBeUndefined();
+
+  const baseInput = {
+    config: { build: { target: "es2018" } },
+    entries: ["./main.js"],
+    externs: [],
+    manifestFile: "manifest.json",
+    outDir: "/tmp/dist",
+    projectRoot: "/tmp/project",
+    publicPath: "/",
+    srcDir: "/tmp/project/src",
+  };
+  const resolve = (chunks) =>
+    normalizeBuildOptions(
+      createCompilerOptions({
+        ...baseInput,
+        options: { compiler: { chunks } },
+      }),
+    ).chunks;
+  const omitted = resolve({ vendorChunk: true });
+  const explicitAuto = resolve({ outputType: "auto", vendorChunk: true });
+
+  expect(omitted.outputType).toBe("esm");
+  expect(explicitAuto.outputType).toBe("esm");
+  expect(omitted.vendorChunk).toBe(true);
+  expect(explicitAuto.vendorChunk).toBe(true);
+});
+
 test("resolveViteCaptureRootPath is deterministic for identical inputs", () => {
   const input = {
     config: {
@@ -1125,6 +1561,204 @@ test.serial(
     expect(second.stderr).not.toContain(
       "[gcc-ts-bundler timing] native-emit:transpile:",
     );
+  },
+);
+test.serial(
+  "Vite delivers unified metadata and type-only edits invalidate caches",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<!doctype html><script type="module" src="/src/main.ts"></script>\n',
+    );
+    await fixture.write(
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          module: "ESNext",
+          moduleResolution: "Bundler",
+          strict: true,
+          target: "ESNext",
+        },
+        include: ["src"],
+      }),
+    );
+    await fixture.write(
+      "src/main.ts",
+      [
+        'import type { Config } from "./types";',
+        "function label(config: Config): string { return config.label; }",
+        'document.body.textContent = label({ label: "ok" });',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/types.ts",
+      "export interface Config { label: string; optional?: string }\n",
+    );
+    const options = {
+      cache: { dir: ".cache", mode: "persistent" },
+      env: { GCC_BUILD_TIMINGS: "1" },
+    };
+
+    const first = await buildViteFixture(fixture, options);
+    expect(first.stderr).toMatch(
+      /closure:type-metadata-job: metadata=true .*inference=true/u,
+    );
+    expect(first.stderr).toMatch(
+      /\[gcc-ts-bundler timing\] closure:platform-externs: bytes=\d+ metadata=true/u,
+    );
+
+    await fixture.write(
+      "src/types.ts",
+      "export interface Config { label: string; optional?: number }\n",
+    );
+    const rebuilt = await buildViteFixture(fixture, options);
+    expect(rebuilt.stderr).toContain(
+      "[gcc-ts-bundler timing] cache:final-fast: miss",
+    );
+    expect(rebuilt.stderr).toContain(
+      "[gcc-ts-bundler timing] cache:native-emit: miss",
+    );
+    expect(rebuilt.stderr).toContain(
+      "[gcc-ts-bundler timing] closure:compile:",
+    );
+  },
+);
+
+test.serial(
+  "Vite routes typed extern declarations to Closure but not native preservation",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<!doctype html><script type="module" src="/src/main.js"></script>\n',
+    );
+    await fixture.write(
+      "src/main.js",
+      'globalThis["__typedExternRead"] = externalValue.typedOnly;\n',
+    );
+    await fixture.write(
+      "barrier.externs.js",
+      "/** @externs */\nObject.prototype.barrierOnly;\n",
+    );
+    await fixture.write(
+      "typed.externs.js",
+      [
+        "/** @externs */",
+        "/** @constructor */",
+        "function ExternalThing() {}",
+        "/** @type {string} */",
+        "ExternalThing.prototype.typedOnly;",
+        "/** @type {!ExternalThing} */",
+        "var externalValue;",
+        "",
+      ].join("\n"),
+    );
+
+    const built = await buildViteFixture(fixture, {
+      cache: { dir: ".cache", mode: "persistent" },
+      compilerLines: [
+        '        externs: ["./barrier.externs.js"],',
+        '        typedExterns: ["./typed.externs.js"],',
+      ],
+      env: { GCC_BUILD_TIMINGS: "1" },
+    });
+    expect(built.stderr).toContain(
+      "[gcc-ts-bundler timing] native-emit:extern-preserved-properties: 1",
+    );
+
+    const [nativeExtern] = await findFilesNamed(
+      path.join(fixture.projectRoot, ".cache"),
+      "native-generated.externs.js",
+    );
+    expect(nativeExtern).toBeTruthy();
+    const nativeExternText = await fs.readFile(nativeExtern, "utf8");
+    expect(nativeExternText).toContain("barrierOnly");
+    expect(nativeExternText).not.toContain("typedOnly");
+  },
+);
+
+test.serial(
+  "Vite escape hatch removes optional metadata, inference, and typed platform slicing",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<!doctype html><script type="module" src="/src/main.ts"></script>\n',
+    );
+    await fixture.write(
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          module: "ESNext",
+          moduleResolution: "Bundler",
+          strict: true,
+          target: "ESNext",
+        },
+        include: ["src"],
+      }),
+    );
+    await fixture.write(
+      "src/main.ts",
+      [
+        "enum Mode { Active = 1 }",
+        "function select(value: number): Mode { void value; return Mode.Active; }",
+        'globalThis["__mode"] = select(1);',
+        "",
+      ].join("\n"),
+    );
+
+    const built = await buildViteFixture(fixture, {
+      cache: { dir: ".cache", mode: "persistent" },
+      env: {
+        GCC_BUILD_TIMINGS: "1",
+        GCC_DISABLE_TYPE_INFERENCE: "1",
+      },
+    });
+    expect(built.stderr).toMatch(
+      /closure:type-metadata-job: metadata=false .*inference=false/u,
+    );
+    expect(built.stderr).not.toContain(
+      "[gcc-ts-bundler timing] closure:platform-externs: bytes=",
+    );
+
+    const metadataFiles = (
+      await findFilesNamed(
+        path.join(fixture.projectRoot, ".cache"),
+        "meta.json",
+      )
+    ).filter((filePath) =>
+      filePath.includes(`${path.sep}native-emit${path.sep}`),
+    );
+    expect(metadataFiles.length).toBeGreaterThan(0);
+    const nativeMetadata = JSON.parse(
+      await fs.readFile(metadataFiles[0], "utf8"),
+    );
+    const delivered = nativeMetadata.typeMetadata.reduce(
+      (counts, file) => ({
+        annotationCount: counts.annotationCount + file.counts.annotationCount,
+        enumDeclarationCount:
+          counts.enumDeclarationCount + file.counts.enumDeclarationCount,
+        memberAnnotationCount:
+          counts.memberAnnotationCount + file.counts.memberAnnotationCount,
+        typeDeclarationCount:
+          counts.typeDeclarationCount + file.counts.typeDeclarationCount,
+      }),
+      {
+        annotationCount: 0,
+        enumDeclarationCount: 0,
+        memberAnnotationCount: 0,
+        typeDeclarationCount: 0,
+      },
+    );
+    expect(delivered.enumDeclarationCount).toBe(0);
+    expect(delivered.annotationCount).toBe(0);
+    expect(delivered.memberAnnotationCount).toBe(0);
+    expect(delivered.typeDeclarationCount).toBe(0);
   },
 );
 
@@ -1430,7 +2064,10 @@ test("esm chunk naming rehashes dependents when a referenced chunk changes", asy
   );
   const second = await runNamingPasses(
     await createNamingWorkspace({
-      baseSource: ESM_BASE_SOURCE.replace("export{r}", "console.log(1);export{r}"),
+      baseSource: ESM_BASE_SOURCE.replace(
+        "export{r}",
+        "console.log(1);export{r}",
+      ),
       lazySource: ESM_LAZY_SOURCE,
     }),
     "esm",
@@ -1467,9 +2104,7 @@ test("esm chunk naming gives base-dependency chunks the stable vendor name", asy
   // The base chunk's import of the vendor chunk is rewritten to the final
   // hashed name, exactly like the manifest urls of the lazy chunks.
   const baseSource = await result.read(result.baseScriptFileName);
-  expect(baseSource).toContain(
-    `"./${path.posix.basename(vendorFileName)}"`,
-  );
+  expect(baseSource).toContain(`"./${path.posix.basename(vendorFileName)}"`);
   expect(baseSource).not.toContain('"./vendor.js"');
 });
 
@@ -1515,7 +2150,7 @@ test("vendor chunk keeps its file name across an app-code edit", async () => {
 test("script chunk naming leaves chunk sources untouched", async () => {
   const baseSource =
     'var r=globalThis.__g;r.a([0,[[[],"",[]],[[0],"lazy.js",[]]],[0,1],"/assets/"]);\n';
-  const lazySource = 'globalThis.__g.u(1);\n';
+  const lazySource = "globalThis.__g.u(1);\n";
   const workspace = await createNamingWorkspace({ baseSource, lazySource });
   const result = await runNamingPasses(workspace, "script");
 
@@ -1526,225 +2161,6 @@ test("script chunk naming leaves chunk sources untouched", async () => {
   const baseSourceOut = await result.read(result.baseScriptFileName);
   expect(baseSourceOut).toContain(path.posix.basename(lazyFileName));
   expect(baseSourceOut).not.toContain('"lazy.js"');
-});
-
-const TYPED_ANNOTATION_TSCONFIG = JSON.stringify(
-  {
-    compilerOptions: {
-      module: "ESNext",
-      moduleResolution: "Bundler",
-      skipLibCheck: true,
-      strict: true,
-      target: "ESNext",
-    },
-  },
-  null,
-  2,
-);
-
-const TYPED_ANNOTATION_SOURCE = [
-  "export class Point {",
-  "  x: number;",
-  "  constructor(x: number) {",
-  "    this.x = x;",
-  "  }",
-  "}",
-  "export function scale(p: Point, k: number): number {",
-  "  return p.x * k;",
-  "}",
-  "export function label(name: string, on: boolean): string {",
-  '  return on ? name : "";',
-  "}",
-  "export const factor: number = 3;",
-  "export function widen(v: number | string): string {",
-  "  return String(v);",
-  "}",
-  "export function identity<T>(v: T): T {",
-  "  return v;",
-  "}",
-  "export function optional(a?: number): number {",
-  "  return a ?? 0;",
-  "}",
-  "export function shape(): { a: number } {",
-  "  return { a: 1 };",
-  "}",
-  "",
-].join("\n");
-
-test("extracts conservative Closure annotations from TypeScript sources", async () => {
-  const fixture = await createFixture();
-  await fixture.write("tsconfig.json", TYPED_ANNOTATION_TSCONFIG);
-  await fixture.write("src/mod.ts", TYPED_ANNOTATION_SOURCE);
-  // Stands in for the materialized module: types erased, bindings preserved.
-  await fixture.write("src/mod__ts.js", TYPED_ANNOTATION_SOURCE);
-
-  const result = await extractTypedAnnotations({
-    candidates: [
-      {
-        materializedFilePath: path.join(fixture.srcDir, "mod__ts.js"),
-        sourceFilePath: path.join(fixture.srcDir, "mod.ts"),
-      },
-    ],
-    projectRoot: fixture.projectRoot,
-  });
-
-  expect(result.files).toHaveLength(1);
-  const byName = new Map(
-    result.files[0].bindings.map((binding) => [binding.name, binding.jsdoc]),
-  );
-
-  // A function whose params/return are a same-module class and primitives.
-  expect(byName.get("scale")).toBe(
-    "/** @param {!Point} p @param {number} k @return {number} */\n",
-  );
-  expect(byName.get("label")).toBe(
-    "/** @param {string} name @param {boolean} on @return {string} */\n",
-  );
-  // Single-declarator top-level variable with a primitive type.
-  expect(byName.get("factor")).toBe("/** @type {number} */\n");
-
-  // Classes carry no JSDoc of their own (Closure reads ES6 class structure
-  // natively), but since v2 they carry per-member @type entries.
-  const point = result.files[0].bindings.find(
-    (binding) => binding.name === "Point",
-  );
-  expect(point).toBeTruthy();
-  expect(point.jsdoc).toBe("");
-  expect(
-    point.members.some(
-      (member) =>
-        member.name === "x" && member.jsdoc === "/** @type {number} */\n",
-    ),
-  ).toBe(true);
-  // Ineligible signatures are omitted whole - absence is always sound.
-  for (const omitted of ["widen", "identity", "optional", "shape"]) {
-    expect(byName.has(omitted)).toBe(false);
-  }
-  expect(result.bindingCount).toBe(byName.size);
-});
-
-test("drops annotations whose binding did not survive the transform", async () => {
-  const fixture = await createFixture();
-  await fixture.write("tsconfig.json", TYPED_ANNOTATION_TSCONFIG);
-  await fixture.write("src/mod.ts", TYPED_ANNOTATION_SOURCE);
-  // Only `scale` survives into the emitted text.
-  await fixture.write("src/mod__ts.js", "export function scale() {}\n");
-
-  const result = await extractTypedAnnotations({
-    candidates: [
-      {
-        materializedFilePath: path.join(fixture.srcDir, "mod__ts.js"),
-        sourceFilePath: path.join(fixture.srcDir, "mod.ts"),
-      },
-    ],
-    projectRoot: fixture.projectRoot,
-  });
-
-  expect(result.files[0].bindings.map((binding) => binding.name)).toEqual([
-    "scale",
-  ]);
-});
-
-test("emits no annotations without a tsconfig", async () => {
-  // Not createFixture(): that scaffolds a tsconfig.json, and TypeScript
-  // discovers config files by walking up from the project root.
-  const root = await fs.realpath(
-    await fs.mkdtemp(path.join(os.tmpdir(), "gcc-typed-no-tsconfig-")),
-  );
-  onTestFinished(() => fs.rm(root, { force: true, recursive: true }));
-  await fs.writeFile(path.join(root, "mod.ts"), TYPED_ANNOTATION_SOURCE);
-
-  const result = await extractTypedAnnotations({
-    candidates: [
-      {
-        materializedFilePath: path.join(root, "mod.ts"),
-        sourceFilePath: path.join(root, "mod.ts"),
-      },
-    ],
-    projectRoot: root,
-  });
-
-  expect(result).toEqual({ bindingCount: 0, files: [] });
-});
-
-test("only plain project TypeScript modules are annotation sources", () => {
-  const projectRoot = "/project";
-  expect(isTypedAnnotationSource("/project/src/main.ts", projectRoot)).toBe(
-    true,
-  );
-  expect(isTypedAnnotationSource("/project/src/App.tsx", projectRoot)).toBe(
-    true,
-  );
-  // Framework single-file components compile through their own toolchain.
-  expect(isTypedAnnotationSource("/project/src/App.svelte", projectRoot)).toBe(
-    false,
-  );
-  expect(isTypedAnnotationSource("/project/src/App.vue", projectRoot)).toBe(
-    false,
-  );
-  // Query suffixes change the materialized file name and the text.
-  expect(
-    isTypedAnnotationSource("/project/src/main.ts?used", projectRoot),
-  ).toBe(false);
-  expect(isTypedAnnotationSource("\0virtual:entry.ts", projectRoot)).toBe(
-    false,
-  );
-  expect(
-    isTypedAnnotationSource("/project/node_modules/dep/index.ts", projectRoot),
-  ).toBe(false);
-  expect(isTypedAnnotationSource("/elsewhere/main.ts", projectRoot)).toBe(
-    false,
-  );
-});
-
-test("typed annotations reach build options and move the options signature", async () => {
-  const fixture = await createFixture();
-  const typedAnnotations = [
-    {
-      bindings: [{ jsdoc: "/** @type {number} */\n", name: "factor" }],
-      filePath: path.join(fixture.srcDir, "mod__ts.js"),
-    },
-  ];
-  const baseInput = {
-    config: { base: "/", build: { target: "esnext" }, root: fixture.projectRoot },
-    entries: ["./main.js"],
-    externs: [],
-    manifestFile: "manifest.json",
-    options: {},
-    outDir: fixture.outDir,
-    projectRoot: fixture.projectRoot,
-    publicPath: "/",
-    srcDir: fixture.srcDir,
-  };
-
-  const withTypes = createCompilerOptions({ ...baseInput, typedAnnotations });
-  expect(withTypes.typedAnnotations).toEqual(typedAnnotations);
-  const withoutTypes = createCompilerOptions(baseInput);
-  expect(withoutTypes.typedAnnotations).toEqual([]);
-
-  const signatureOf = (compilerOptions) =>
-    getOptionsSignature(normalizeBuildOptions(compilerOptions));
-  const untypedSignature = signatureOf(withoutTypes);
-  const typedSignature = signatureOf(withTypes);
-  expect(typedSignature).not.toBe(untypedSignature);
-
-  // Same sources, different inferred type: the signature must still move, or
-  // a type-only edit would be served a stale cached build.
-  const retypedSignature = signatureOf(
-    createCompilerOptions({
-      ...baseInput,
-      typedAnnotations: [
-        {
-          bindings: [{ jsdoc: "/** @type {string} */\n", name: "factor" }],
-          filePath: typedAnnotations[0].filePath,
-        },
-      ],
-    }),
-  );
-  expect(retypedSignature).not.toBe(typedSignature);
-  expect(signatureOf(createCompilerOptions({ ...baseInput, typedAnnotations }))).toBe(
-    typedSignature,
-  );
 });
 
 /**
@@ -1800,7 +2216,12 @@ async function writeExternsGraphFixture(fixture) {
     authoredFiles: [appFile],
     entries: ["./app.js"],
     modules: [
-      { filePath: appFile, id: appFile, relativePath: "app.js", sourceModuleIds: [appFile] },
+      {
+        filePath: appFile,
+        id: appFile,
+        relativePath: "app.js",
+        sourceModuleIds: [appFile],
+      },
       {
         filePath: depFilePath,
         id: depFilePath,
@@ -1826,7 +2247,10 @@ test("dependency hazards are read from the post-prebundle graph", async () => {
   ).href;
   const fixture = await createFixture();
   const graphs = await writeExternsGraphFixture(fixture);
-  const generatedExternFile = path.join(fixture.projectRoot, "generated.externs.js");
+  const generatedExternFile = path.join(
+    fixture.projectRoot,
+    "generated.externs.js",
+  );
 
   const options = {
     compiler: { cache: { mode: "off" } },

@@ -13,12 +13,12 @@ pub(super) struct ResolvedExportBinding {
     pub(super) owner_module_id: String,
     pub(super) owner_export_name: String,
     pub(super) owner_local_name: String,
+    pub(super) owner_slot_mode: BundlerExportSlotMode,
 }
 
-/// Which export slots a hoisted module's facade must expose. `All` keeps the
-/// full slot table alive (namespace/dynamic-import consumers); `Named` prunes
-/// the facade to the slots that are actually required somewhere, letting
-/// Closure tree-shake every unused export.
+/// Which export slots a hoisted module's registry factory must expose.
+/// `All` keeps the full slot table alive; `Named` prunes registration to the
+/// slots required by cross-chunk consumers.
 #[derive(Clone, Debug)]
 pub(super) enum FacadeSlots {
     All,
@@ -27,10 +27,15 @@ pub(super) enum FacadeSlots {
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct HoistPlan {
+    /// For each chunk index, the chunk indices the loader guarantees have
+    /// executed before it (transitive closure of the plan's dependency
+    /// edges). Empty when the chunk graph carried no dependency edges.
+    chunk_dependency_closure: Vec<HashSet<usize>>,
     pub(super) export_bindings: HashMap<String, BTreeMap<String, ResolvedExportBinding>>,
     pub(super) facade_slots: HashMap<String, FacadeSlots>,
     pub(super) hoisted_modules: HashSet<String>,
     pub(super) module_chunks: HashMap<String, usize>,
+    module_positions: HashMap<String, usize>,
     pub(super) module_ordinals: HashMap<String, usize>,
 }
 
@@ -55,26 +60,71 @@ impl HoistPlan {
         self.export_bindings.get(module_id)?.get(export_name)
     }
 
-    /// A resolved binding can be referenced directly whenever its owner is
-    /// hoisted into some chunk — including a *different* chunk. Static imports
-    /// only cross chunk edges that the loader guarantees are already executed
-    /// (dep chunks load first), and Closure moves cross-chunk survivors onto
-    /// `$gcc`, so a plain identifier is a correct live reference.
+    /// A resolved binding can be referenced directly only when the loader has
+    /// already executed the chunk that owns it: the same chunk, or one this
+    /// chunk transitively depends on (dependency chunks are fetched and run
+    /// first). Sibling chunks are *not* ordered against each other, so a
+    /// binding owned by one lazy chunk and read from another has to go back
+    /// through the `__require` registry.
     ///
-    /// ponytail: `consumer_module_id` is kept in the signature because every
-    /// call site has it and a future chunk-order check would need it.
+    /// The plan is built so this never happens; the `debug_assert` says so out
+    /// loud in tests, and the release path still falls back to the registry
+    /// rather than emitting a reference to a binding that may not exist yet.
     pub(super) fn is_direct_binding(
         &self,
-        _consumer_module_id: &str,
+        consumer_module_id: &str,
         binding: &ResolvedExportBinding,
     ) -> bool {
-        self.is_hoisted(&binding.owner_module_id)
-            && self.chunk_of(&binding.owner_module_id).is_some()
+        if !self.is_hoisted(&binding.owner_module_id) {
+            return false;
+        }
+        let Some(owner_chunk) = self.chunk_of(&binding.owner_module_id) else {
+            return false;
+        };
+        let Some(consumer_chunk) = self.chunk_of(consumer_module_id) else {
+            // The consumer is not in the chunk graph at all, so there is no
+            // ordering to check and nothing new to forbid.
+            return true;
+        };
+        if self.chunk_dependency_closure.is_empty() {
+            return true;
+        }
+        let ordered = owner_chunk == consumer_chunk
+            || self
+                .chunk_dependency_closure
+                .get(consumer_chunk)
+                .is_some_and(|dependencies| dependencies.contains(&owner_chunk));
+        debug_assert!(
+            ordered,
+            "direct binding {} (chunk {owner_chunk}) read from {consumer_module_id} (chunk {consumer_chunk}), which does not depend on it",
+            binding.owner_module_id,
+        );
+        ordered
     }
 
     pub(super) fn direct_binding_name(&self, binding: &ResolvedExportBinding) -> Option<String> {
         let ordinal = self.ordinal_of(&binding.owner_module_id)?;
         Some(suffixed_name(&binding.owner_local_name, ordinal))
+    }
+
+    pub(super) fn direct_binding_slot_mode(
+        &self,
+        consumer_module_id: &str,
+        binding: &ResolvedExportBinding,
+    ) -> BundlerExportSlotMode {
+        let owner_precedes_consumer = self
+            .module_positions
+            .get(&binding.owner_module_id)
+            .zip(self.module_positions.get(consumer_module_id))
+            .is_some_and(|(owner, consumer)| owner < consumer);
+        if binding.owner_slot_mode == BundlerExportSlotMode::Static
+            && self.chunk_of(consumer_module_id) == self.chunk_of(&binding.owner_module_id)
+            && owner_precedes_consumer
+        {
+            BundlerExportSlotMode::Static
+        } else {
+            BundlerExportSlotMode::Live
+        }
     }
 
     pub(super) fn facade_slots_for(&self, module_id: &str) -> Option<&FacadeSlots> {
@@ -100,6 +150,7 @@ struct ModuleScan {
     /// `export ... from` targets (execution + facade edges)
     reexport_targets: Vec<String>,
     scan_failed: bool,
+    local_export_modes: HashMap<String, BundlerExportSlotMode>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -119,6 +170,7 @@ pub(super) fn build_hoist_plan(
     file_names: &[String],
     workspace_dir: &Path,
     package_aliases: &[PackageAliasInput],
+    resolved_module_ids: &HashMap<String, String>,
     chunk_graph: &[TranspileChunkInput],
     lazy_imports: &[LazyImportInput],
     file_metadata: &HashMap<String, ClosureFileMetadata>,
@@ -134,25 +186,30 @@ pub(super) fn build_hoist_plan(
         class_map_calls: Vec::new(),
         pure_callees: HashSet::new(),
         commonjs_specifiers: HashSet::new(),
+        opaque_commonjs: Default::default(),
         file_metadata: HashMap::new(),
         hoist_plan: None,
         lazy_imports_by_file: HashMap::new(),
         lazy_target_module_ids: HashSet::new(),
         package_aliases: package_aliases.to_vec(),
+        resolved_module_ids: resolved_module_ids.clone(),
         preserved_property_names: HashSet::new(),
         static_property_names: HashSet::new(),
-        typed_annotations: HashMap::new(),
+        type_metadata_enabled: false,
         vendor_module_ids: HashSet::new(),
         workspace_dir: workspace_dir.to_path_buf(),
     };
 
     let mut module_chunks = HashMap::new();
+    let mut module_positions = HashMap::new();
     for (chunk_index, chunk) in chunk_graph.iter().enumerate() {
-        for relative_file in &chunk.files {
+        for (position, relative_file) in chunk.files.iter().enumerate() {
             let module_id = to_goog_module_id(&workspace_dir.join(relative_file), workspace_dir);
-            module_chunks.insert(module_id, chunk_index);
+            module_chunks.insert(module_id.clone(), chunk_index);
+            module_positions.insert(module_id, position);
         }
     }
+    let chunk_dependency_closure = build_chunk_dependency_closure(chunk_graph);
 
     let mut scans = HashMap::<String, ModuleScan>::new();
     let mut hoistable = HashSet::new();
@@ -164,7 +221,7 @@ pub(super) fn build_hoist_plan(
         let file_path = PathBuf::from(file_name);
         let module_id = to_goog_module_id(&file_path, workspace_dir);
         sorted_module_ids.insert(module_id.clone());
-        let metadata = file_metadata.get(file_name);
+        let metadata = file_metadata.get(&closure_metadata_key(&file_path));
         let module = if let Some(decorated_text) = metadata
             .as_ref()
             .and_then(|metadata| metadata.decorated_output_text.clone())
@@ -174,28 +231,30 @@ pub(super) fn build_hoist_plan(
             get_or_parse_cached_module(&file_path)?
         };
         let commonjs_analysis = analyze_commonjs_module(&module);
-        let scan = if should_normalize_commonjs(&file_path, &commonjs_analysis) {
+        let normalize_commonjs = should_normalize_commonjs(&file_path, &commonjs_analysis);
+        let mut scan = if normalize_commonjs {
             scan_commonjs_module(&file_path, &commonjs_analysis, &resolution_context)
         } else {
             scan_esm_module(&module, &file_path, &resolution_context)
         };
-        // Enum and typedef snippets are emitted by the registry paths only,
-        // so a file carrying them cannot be flattened without losing them.
-        // Note this is orthogonal to `TranspileContext::typed_annotations`:
-        // those arrive on their own channel, are re-attached by
-        // `emit_hoist`, and never set this flag — a plain typed `.ts` module
-        // hoists *and* keeps its JSDoc. The residual gap is a file that has
-        // both, which falls back to registry emission and drops its typed
-        // annotations; closing it needs AST-level typedef/enum emission in
-        // the hoisted form (docs/research/typed-input.md §5 item 2).
-        let has_typed_metadata = metadata
-            .map(|metadata| {
-                !metadata.enum_declarations.is_empty() || !metadata.type_declarations.is_empty()
-            })
-            .unwrap_or(false);
-        let can_hoist =
-            module_chunks.contains_key(&module_id) && !scan.scan_failed && !has_typed_metadata;
-        if can_hoist {
+        if !normalize_commonjs {
+            scan.local_export_modes = collect_resolved_local_export_modes(&module)?;
+        }
+        if let Some(metadata) = metadata {
+            scan.own_exports.extend(
+                metadata
+                    .enums
+                    .iter()
+                    .filter(|enum_decl| enum_decl.exported)
+                    .map(|enum_decl| {
+                        (
+                            enum_decl.binding_name.clone(),
+                            enum_decl.binding_name.clone(),
+                        )
+                    }),
+            );
+        }
+        if module_chunks.contains_key(&module_id) && !scan.scan_failed {
             hoistable.insert(module_id.clone());
         }
         scans.insert(module_id, scan);
@@ -210,10 +269,12 @@ pub(super) fn build_hoist_plan(
     let export_bindings = resolve_all_export_bindings(&scans);
 
     let plan_without_facades = HoistPlan {
+        chunk_dependency_closure,
         export_bindings,
         facade_slots: HashMap::new(),
         hoisted_modules: hoistable,
         module_chunks,
+        module_positions,
         module_ordinals,
     };
     let facade_slots = compute_facade_slots(&plan_without_facades, &scans, lazy_imports);
@@ -222,6 +283,60 @@ pub(super) fn build_hoist_plan(
         facade_slots,
         ..plan_without_facades
     }))
+}
+
+/// Transitive closure of the plan's chunk dependency edges, by chunk index.
+///
+/// The loader fetches and runs a chunk's dependencies before the chunk
+/// itself, so "is in the closure" is exactly "has already executed". An empty
+/// result (no chunk declared a dependency) disables the ordering check rather
+/// than forbidding every cross-chunk binding, which is what callers that do
+/// not build a dependency graph rely on.
+fn build_chunk_dependency_closure(chunk_graph: &[TranspileChunkInput]) -> Vec<HashSet<usize>> {
+    if chunk_graph
+        .iter()
+        .all(|chunk| chunk.dependencies.is_empty())
+    {
+        return Vec::new();
+    }
+    let index_by_name = chunk_graph
+        .iter()
+        .enumerate()
+        .map(|(index, chunk)| (chunk.name.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let mut closure = vec![HashSet::new(); chunk_graph.len()];
+    for (index, chunk) in chunk_graph.iter().enumerate() {
+        let mut pending = chunk
+            .dependencies
+            .iter()
+            .filter_map(|name| index_by_name.get(name.as_str()).copied())
+            .collect::<Vec<_>>();
+        while let Some(dependency) = pending.pop() {
+            if dependency == index || !closure[index].insert(dependency) {
+                continue;
+            }
+            pending.extend(
+                chunk_graph[dependency]
+                    .dependencies
+                    .iter()
+                    .filter_map(|name| index_by_name.get(name.as_str()).copied()),
+            );
+        }
+    }
+    closure
+}
+
+fn collect_resolved_local_export_modes(
+    module: &Module,
+) -> std::result::Result<HashMap<String, BundlerExportSlotMode>, String> {
+    GLOBALS.set(&Globals::new(), || {
+        let mut program = Program::Module(module.clone());
+        apply_resolver_and_global_this_compat(&mut program, true)?;
+        let Program::Module(module) = program else {
+            unreachable!("resolver preserves modules")
+        };
+        Ok(collect_local_export_modes(&module))
+    })
 }
 
 fn scan_commonjs_module(
@@ -495,29 +610,39 @@ fn resolve_export_binding(
     if !visiting.insert(module_id.to_string()) {
         return None;
     }
-    let resolved = (|| {
-        let scan = scans.get(module_id)?;
-        if let Some(local) = scan.own_exports.get(export_name) {
-            return Some(ResolvedExportBinding {
-                owner_module_id: module_id.to_string(),
-                owner_export_name: export_name.to_string(),
-                owner_local_name: local.clone(),
-            });
-        }
-        if let Some((target, orig)) = scan.reexports.get(export_name) {
-            return resolve_export_binding(target, orig, scans, memo, visiting);
-        }
-        if export_name != "default" {
-            for star_target in &scan.stars {
-                if let Some(binding) =
-                    resolve_export_binding(star_target, export_name, scans, memo, visiting)
-                {
-                    return Some(binding);
+    let resolved =
+        (|| {
+            let scan = scans.get(module_id)?;
+            if let Some(local) = scan.own_exports.get(export_name) {
+                return Some(ResolvedExportBinding {
+                    owner_module_id: module_id.to_string(),
+                    owner_export_name: export_name.to_string(),
+                    owner_local_name: local.clone(),
+                    owner_slot_mode: scan.local_export_modes.get(local).copied().unwrap_or_else(
+                        || {
+                            if local == DEFAULT_EXPORT_LOCAL {
+                                BundlerExportSlotMode::Static
+                            } else {
+                                BundlerExportSlotMode::Live
+                            }
+                        },
+                    ),
+                });
+            }
+            if let Some((target, orig)) = scan.reexports.get(export_name) {
+                return resolve_export_binding(target, orig, scans, memo, visiting);
+            }
+            if export_name != "default" {
+                for star_target in &scan.stars {
+                    if let Some(binding) =
+                        resolve_export_binding(star_target, export_name, scans, memo, visiting)
+                    {
+                        return Some(binding);
+                    }
                 }
             }
-        }
-        None
-    })();
+            None
+        })();
     visiting.remove(module_id);
     memo.insert(key, resolved.clone());
     resolved
@@ -699,8 +824,8 @@ fn compute_facade_slots(
         worklist: Vec::new(),
     };
 
-    // Dynamic-import namespaces are consumed member-by-member via the target
-    // slot table, so lazy targets keep their full facade.
+    // Dynamic imports expose namespace values across user and framework
+    // boundaries, so keep the complete slot table and the named facade.
     for lazy_import in lazy_imports {
         needs.need_all(&lazy_import.moduleId);
     }
@@ -747,7 +872,7 @@ fn compute_facade_slots(
                                 edge.target_module_id, module_id, consumer_hoisted, edge.namespace_members
                             );
                         }
-                        needs.need_all(&edge.target_module_id)
+                        needs.need_all(&edge.target_module_id);
                     }
                 }
             }

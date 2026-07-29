@@ -2,19 +2,52 @@ import fs from "fs/promises";
 import path from "path";
 
 import { ensureParentDirectory } from "../../../shared/files";
-import {
-  rewriteDecoratorMetadata,
-  rewriteGccExports,
-} from "../../../native/load";
+import { rewriteGccExports } from "../../../native/load";
 import type { prepareClosureJobs } from "../../../native/load";
-import { applyEs5HelperRewrite, createEs5HelperRewriteContext } from "./es5";
-import { readCachedText, readPropertyRenamingReport } from "./io";
-import {
-  canonicalizeBundlerRuntimeRootAccess,
-  findBundlerRuntimeFinalizeAlias,
-  injectBundlerRuntimeEs5HelperBag,
-  wrapBundlerRuntimeOutputFile,
-} from "./runtime";
+import { readCachedText } from "./io";
+import { wrapBundlerRuntimeOutputFile } from "./runtime";
+
+/**
+ * Post-Closure rewriting is a hazard, not a feature: after ADVANCED the
+ * compiler has erased the provenance that would make a rewrite decidable. Every
+ * transform that needed that provenance now runs before Closure, in the native
+ * emit stage, where the information still exists:
+ *
+ * - lowering-helper pooling is content-addressed at emit (`emit_helpers.rs`)
+ *   instead of fingerprint-matched in optimizer output;
+ * - decorator-metadata property keys are preserved through the extern channel
+ *   instead of respelled from the property-renaming report;
+ * - the bundler-runtime root alias is emitted canonically instead of being
+ *   collapsed with `String.replaceAll` over minified JavaScript.
+ *
+ * What remains here is delivery-shape work that genuinely can only happen on
+ * final output: converting Closure's export bag to ESM, wrapping script-mode
+ * chunks, and repointing sibling imports at published file names. Each rule
+ * carries a match count and fails the build when its input says the rule should
+ * have fired and it did not.
+ */
+
+class PostprocessRuleReport {
+  readonly #failures: string[] = [];
+
+  assertAllRulesFired() {
+    if (this.#failures.length === 0) {
+      return;
+    }
+    throw new Error(
+      `Closure postprocessing failed closed:\n${this.#failures.map((failure) => `  - ${failure}`).join("\n")}`,
+    );
+  }
+
+  expectMatch(rule: string, outputPath: string, matched: number) {
+    if (matched > 0) {
+      return;
+    }
+    this.#failures.push(
+      `${rule} found its trigger in ${path.basename(outputPath)} but rewrote nothing`,
+    );
+  }
+}
 
 function resolveBaseSpecifierRewrite({
   chunkOutputType,
@@ -40,15 +73,26 @@ function resolveBaseSpecifierRewrite({
   return { from: `"./${internalName}"`, to: `"./${publishedName}"` };
 }
 
+function countOccurrences(haystack: string, needle: string) {
+  if (needle.length === 0) {
+    return 0;
+  }
+  let count = 0;
+  let index = haystack.indexOf(needle);
+  while (index !== -1) {
+    count += 1;
+    index = haystack.indexOf(needle, index + needle.length);
+  }
+  return count;
+}
+
 export async function runClosurePostprocess({
   chunkMode,
   chunkOutputType,
-  languageOut,
   prepared,
 }: {
   chunkMode: string;
   chunkOutputType: "esm" | "script";
-  languageOut: string;
   prepared: ReturnType<typeof prepareClosureJobs>;
 }) {
   // Standalone publishing renames the base chunk from its internal Closure
@@ -59,85 +103,41 @@ export async function runClosurePostprocess({
     chunkOutputType,
     prepared,
   });
-
-  const propertyRenamingReports = new Map<string, Promise<string>>();
-  const es5Rewrite = createEs5HelperRewriteContext({
-    bundlerRuntimeBaseInputPath: prepared.bundlerRuntimeBaseInputPath,
-    chunkMode,
-    languageOut,
-  });
+  const report = new PostprocessRuleReport();
   const inputContents = new Map<string, Promise<string>>();
-  const inputPaths = [
-    ...new Set(prepared.postprocessActions.map((action) => action.inputPath)),
-  ];
-
-  await Promise.all(
-    inputPaths.map(async (inputPath) => {
-      if (!es5Rewrite.requiresInputRead()) {
-        return;
-      }
-      const originalContents = await readCachedText(inputPath, inputContents);
-      applyEs5HelperRewrite(inputPath, originalContents, es5Rewrite);
-    }),
-  );
 
   await Promise.all(
     prepared.postprocessActions.map(async (action) => {
       await ensureParentDirectory(action.outputPath);
-      // ES_MODULES output has no $gcc namespace to canonicalize and cannot be
-      // wrapped: `import`/`export` are top-level-only, and Closure ignores
-      // --isolation_mode for chunk output. Decorator-metadata rewriting and
-      // the ES5 helper bag stay on in both modes.
+      // ES_MODULES output has no $gcc namespace and cannot be wrapped:
+      // `import`/`export` are top-level-only, and Closure ignores
+      // --isolation_mode for chunk output.
       const wrapBundlerRuntimeOutput =
-        chunkMode === "bundler-runtime" && chunkOutputType !== "esm";
-      const reportText = action.propertyRenamingReportPath
-        ? await readPropertyRenamingReport(
-            action.propertyRenamingReportPath,
-            propertyRenamingReports,
-          )
-        : "";
-      const hasNoRewriteActions =
-        action.kind === "copy" &&
-        !reportText &&
-        !es5Rewrite.requiresInputRead() &&
+        chunkMode !== "off" && chunkOutputType !== "esm";
+      const rewritesExports = action.kind.startsWith("rewrite-gcc-exports");
+      if (
+        !rewritesExports &&
         !wrapBundlerRuntimeOutput &&
-        !baseSpecifierRewrite;
-      if (hasNoRewriteActions) {
+        !baseSpecifierRewrite
+      ) {
         await fs.copyFile(action.inputPath, action.outputPath);
         return;
       }
 
-      const originalContents = await readCachedText(
-        action.inputPath,
-        inputContents,
-      );
-      let contents = applyEs5HelperRewrite(
-        action.inputPath,
-        originalContents,
-        es5Rewrite,
-      );
-      if (
-        action.kind === "rewrite-gcc-exports" ||
-        action.kind === "rewrite-gcc-exports-and-decorator-metadata"
-      ) {
-        contents = rewriteGccExports(contents);
-      }
-      if (
-        reportText &&
-        (action.kind === "rewrite-decorator-metadata" ||
-          action.kind === "rewrite-gcc-exports-and-decorator-metadata")
-      ) {
-        contents = rewriteDecoratorMetadata(contents, reportText);
-      }
-      if (action.inputPath === prepared.bundlerRuntimeBaseInputPath) {
-        const runtimeAlias = findBundlerRuntimeFinalizeAlias(contents);
-        contents = injectBundlerRuntimeEs5HelperBag(
-          contents,
-          es5Rewrite.renderHelperBag(runtimeAlias),
-        );
-      }
-      if (chunkOutputType !== "esm") {
-        contents = canonicalizeBundlerRuntimeRootAccess(contents);
+      let contents = await readCachedText(action.inputPath, inputContents);
+      if (rewritesExports) {
+        const hasExportBag =
+          contents.includes("globalThis.GCC") ||
+          contents.includes('globalThis["GCC"]');
+        const rewritten = rewriteGccExports(contents);
+        if (hasExportBag) {
+          report.expectMatch(
+            "gcc-exports",
+            action.outputPath,
+            rewritten.rewrittenExportCount,
+          );
+        }
+        contents = rewritten.code;
       }
       if (wrapBundlerRuntimeOutput) {
         contents = wrapBundlerRuntimeOutputFile(contents);
@@ -146,12 +146,22 @@ export async function runClosurePostprocess({
         baseSpecifierRewrite &&
         action.inputPath !== prepared.bundlerRuntimeBaseInputPath
       ) {
+        const expected = countOccurrences(contents, baseSpecifierRewrite.from);
         contents = contents.replaceAll(
           baseSpecifierRewrite.from,
           baseSpecifierRewrite.to,
         );
+        if (expected > 0) {
+          report.expectMatch(
+            "base-chunk-specifier",
+            action.outputPath,
+            countOccurrences(contents, baseSpecifierRewrite.to),
+          );
+        }
       }
       await fs.writeFile(action.outputPath, contents);
     }),
   );
+
+  report.assertAllRulesFired();
 }

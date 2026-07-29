@@ -33,13 +33,20 @@ import { getPackageSignature } from "../build/resolve/signatures";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type { MaterializedGraph } from "./internal-types";
 
+export interface CompilerExternArtifacts {
+  renameBarriers: string[];
+  typedDeclarations: string[];
+}
+
 type CachedRuntimeHazards = Record<
   (typeof RUNTIME_HAZARD_KEYS)[number],
   string[]
 >;
 
 // v3: hazard payload split into evidence classes (see externs/render.ts).
-const VITE_EXTERN_PACKAGE_CACHE_VERSION = 4;
+// v5: runtime hazards gained `constructedKeyFragments`.
+// v6: runtime hazards gained `selfReferentialKeys`.
+const VITE_EXTERN_PACKAGE_CACHE_VERSION = 6;
 
 export async function resolveCompilerExterns(input: {
   captureRoot: string;
@@ -58,9 +65,15 @@ export async function resolveCompilerExterns(input: {
   const explicitExterns = [...(input.options.compiler?.externs ?? [])].map(
     (filePath) => path.resolve(input.projectRoot, filePath),
   );
+  const explicitTypedExterns = [
+    ...(input.options.compiler?.typedExterns ?? []),
+  ].map((filePath) => path.resolve(input.projectRoot, filePath));
   const generateOptions = input.options.externs?.generate;
   if (!generateOptions) {
-    return explicitExterns;
+    return {
+      renameBarriers: explicitExterns,
+      typedDeclarations: explicitTypedExterns,
+    } satisfies CompilerExternArtifacts;
   }
 
   const generatedExternFile = path.resolve(
@@ -90,7 +103,7 @@ export async function resolveCompilerExterns(input: {
       protocolHelpers,
     });
   } else {
-    await generateExterns({
+    const result = await generateExterns({
       appEntryFiles: input.materialized.entries,
       includeDependencies: generateOptions.includeDependencies,
       mode: generateOptions.mode ?? "runtime-aware",
@@ -101,6 +114,14 @@ export async function resolveCompilerExterns(input: {
       runtimeEntryFiles: input.materialized.runtimeEntries,
       srcDir: input.materialized.srcDir,
     });
+    for (const warning of result.barrierWarnings) {
+      console.warn(`gcc-ts-bundler: ${warning.message}`);
+    }
+    if (result.typedDeclarations.moduleExports.length > 0) {
+      throw new Error(
+        "Vite-generated external-runtime declarations require a compiled runtime bridge, which the Vite integration does not provide. Generate them separately and add the declaration file through compiler.typedExterns only after supplying that bridge.",
+      );
+    }
   }
 
   const appendLines = generateOptions.appendLines ?? [];
@@ -110,7 +131,10 @@ export async function resolveCompilerExterns(input: {
     await writeFileIfChanged(generatedExternFile, appendedText);
   }
 
-  return [...new Set([...explicitExterns, generatedExternFile])];
+  return {
+    renameBarriers: [...new Set([...explicitExterns, generatedExternFile])],
+    typedDeclarations: [...new Set(explicitTypedExterns)],
+  } satisfies CompilerExternArtifacts;
 }
 
 async function generateViteRuntimeAwareExterns(input: {
@@ -329,10 +353,12 @@ async function analyzeJsUsageMembers(
 }
 
 const isCachedRuntimeHazards = isObjectOf<CachedRuntimeHazards>({
+  constructedKeyFragments: isStringArray,
   constructedKeyPrefixes: isStringArray,
   dotAccessed: isStringArray,
   dotDefined: isStringArray,
   protocolMembers: isStringArray,
+  selfReferentialKeys: isStringArray,
   stringDefined: isStringArray,
   stringLiteralRead: isStringArray,
 });
@@ -343,10 +369,12 @@ function serializeRuntimeHazards(
   const sorted = (values: ReadonlySet<string>) =>
     [...values].sort((left, right) => left.localeCompare(right));
   return {
+    constructedKeyFragments: sorted(hazards.constructedKeyFragments),
     constructedKeyPrefixes: sorted(hazards.constructedKeyPrefixes),
     dotAccessed: sorted(hazards.dotAccessed),
     dotDefined: sorted(hazards.dotDefined),
     protocolMembers: sorted(hazards.protocolMembers),
+    selfReferentialKeys: sorted(hazards.selfReferentialKeys),
     stringDefined: sorted(hazards.stringDefined),
     stringLiteralRead: sorted(hazards.stringLiteralRead),
   };
@@ -354,10 +382,12 @@ function serializeRuntimeHazards(
 
 function toRuntimeHazards(hazards: CachedRuntimeHazards): RuntimeRenameHazards {
   return {
+    constructedKeyFragments: new Set(hazards.constructedKeyFragments),
     constructedKeyPrefixes: new Set(hazards.constructedKeyPrefixes),
     dotAccessed: new Set(hazards.dotAccessed),
     dotDefined: new Set(hazards.dotDefined),
     protocolMembers: new Set(hazards.protocolMembers),
+    selfReferentialKeys: new Set(hazards.selfReferentialKeys),
     stringDefined: new Set(hazards.stringDefined),
     stringLiteralRead: new Set(hazards.stringLiteralRead),
   };

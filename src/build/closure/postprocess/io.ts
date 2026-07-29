@@ -11,10 +11,3 @@ export async function readCachedText(
   }
   return pending;
 }
-
-export async function readPropertyRenamingReport(
-  reportPath: string,
-  cache: Map<string, Promise<string>>,
-) {
-  return readCachedText(reportPath, cache);
-}

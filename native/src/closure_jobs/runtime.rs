@@ -45,6 +45,43 @@ pub(super) fn bundler_runtime_output_file_name(
     }
 }
 
+/// Which optional runtime blocks a plan actually needs.
+///
+/// The preamble is Closure *input*, but every block hangs off the global
+/// `__g` object, so Closure can never prove one dead: it must be gated at
+/// render time or it ships. Each flag is a fail-closed over-approximation —
+/// a substring hit on the assembled module text is enough to turn a block
+/// back on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct RuntimeCapabilities {
+    /// Any chunk can own CSS, so the `<link>` loader and the per-chunk CSS
+    /// fan-out (`z`) must ship. Standalone builds never fill CSS rows; the
+    /// Vite plugin computes this from its pre-compile CSS ownership scan
+    /// because it fills the rows *after* the compile.
+    pub(super) css: bool,
+    /// The base chunk kicks registry-form entry modules with `r.n`.
+    pub(super) entry_runner: bool,
+    /// Some module registers a live export slot through the 5th factory
+    /// parameter (`__live` -> `r.g`).
+    pub(super) live_exports: bool,
+    /// Some module preloads a dynamic-import target (`r.x`).
+    pub(super) preload: bool,
+}
+
+impl RuntimeCapabilities {
+    /// Everything on. Used by tests and by any caller that cannot analyse the
+    /// plan; never by the production path.
+    #[cfg(test)]
+    pub(super) fn all() -> Self {
+        Self {
+            css: true,
+            entry_runner: true,
+            live_exports: true,
+            preload: true,
+        }
+    }
+}
+
 /// Names the loader helpers are aliased to at the top of every chunk. Every
 /// linked chunk input is a *script*, so under ES_MODULES output Closure sees
 /// one shared global scope, assigns each surviving global to exactly one
@@ -63,16 +100,99 @@ pub(super) fn runtime_alias_suffix(
     }
 }
 
+/// The runtime's cross-chunk member ABI, in one place because two independent
+/// emitter families spell these names.
+///
+/// The *core* (`render_bundler_runtime_core`) defines them on the runtime
+/// object; the *per-chunk* emitters — the alias line, the chunk-completion
+/// call, the entry-point kick — read them back off `globalThis["__g"]`. The two
+/// families are hundreds of lines apart and a desynced pair is not a compile
+/// error: a base that defined `.loaded` while its chunks still called `.l(`
+/// built cleanly and passed every unit test, and only failed on the first lazy
+/// load in a browser (`/tmp/gcc-w2-polish.md`).
+///
+/// So neither family spells a member literally. Both read it from here, and
+/// `runtime_member_abi_is_single_sourced` mutation-proves that drift in either
+/// direction fails the suite.
+///
+/// Only members that cross the family boundary live here. The core's private
+/// storage slots (`f`/`c`/`s`/`d`/`k`/`m`/`b`/`a`/`i`/`g`) are never read by a
+/// chunk, so they cannot desync; the invariant test still covers them in case
+/// that changes.
+pub(super) mod abi {
+    /// `r.r(id, factory)` — a chunk registering one module factory.
+    pub(super) const REGISTER: &str = "r";
+    /// `r.q(id)` — instantiate a module and return its exports.
+    pub(super) const REQUIRE: &str = "q";
+    /// `r.j(id)` — dynamic import: resolve the owning chunk, then require.
+    pub(super) const DYNAMIC_IMPORT: &str = "j";
+    /// `r.x(id)` — preload the owning chunk without instantiating.
+    pub(super) const PRELOAD: &str = "x";
+    /// `r.l(chunk)` — mark this chunk loaded and resolve its waiters.
+    pub(super) const LOADED: &str = "l";
+    /// `r.n(entries)` — run the entry modules of this chunk.
+    pub(super) const RUN_ENTRIES: &str = "n";
+}
+
 /// The single alias line every hoisted chunk opens with. Hoisted module code
 /// lives at top level, so the runtime helpers must be plain top-level vars
-/// instead of wrapper-function parameters.
-fn render_runtime_alias_line(suffix: &str) -> String {
+/// instead of wrapper-function parameters. The preload alias is dropped when
+/// no module in the plan preloads, so the declaration cannot outlive `r.x`.
+fn render_runtime_alias_line(suffix: &str, capabilities: RuntimeCapabilities) -> String {
     let runtime_global = runtime_global_ref("globalThis");
-    format!("var __runtime{suffix}={runtime_global},__register{suffix}=__runtime{suffix}.r,__require{suffix}=__runtime{suffix}.q,__dynamicImport{suffix}=__runtime{suffix}.j,__preloadDynamicImport{suffix}=__runtime{suffix}.x;")
+    let preload = if capabilities.preload {
+        format!(
+            ",__preloadDynamicImport{suffix}=__runtime{suffix}.{member}",
+            member = abi::PRELOAD,
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "var __runtime{suffix}={runtime_global},\
+         __register{suffix}=__runtime{suffix}.{register},\
+         __require{suffix}=__runtime{suffix}.{require},\
+         __dynamicImport{suffix}=__runtime{suffix}.{dynamic_import}{preload};",
+        register = abi::REGISTER,
+        require = abi::REQUIRE,
+        dynamic_import = abi::DYNAMIC_IMPORT,
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_bundler_runtime_base_chunk(
+    chunk_id: usize,
+    entry_points_json: &str,
+    loader: &str,
+    manifest_json: &str,
+    numeric_module_ids: bool,
+    module_text: &str,
+    include_custom_elements_es5_adapter: bool,
+    debug_runtime: bool,
+    chunk_output_type: ChunkOutputType,
+    preamble_part: RuntimePreamblePart,
+    capabilities: RuntimeCapabilities,
+) -> std::result::Result<String, String> {
+    let suffix = runtime_alias_suffix(chunk_id, chunk_output_type);
+    render_bundler_runtime_base_chunk_with_alias_suffix(
+        chunk_id,
+        entry_points_json,
+        loader,
+        manifest_json,
+        numeric_module_ids,
+        module_text,
+        include_custom_elements_es5_adapter,
+        debug_runtime,
+        chunk_output_type,
+        preamble_part,
+        &suffix,
+        capabilities,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn render_bundler_runtime_base_chunk(
+pub(super) fn render_bundler_runtime_base_chunk_with_alias_suffix(
     chunk_id: usize,
     entry_points_json: &str,
     _loader: &str,
@@ -83,14 +203,16 @@ pub(super) fn render_bundler_runtime_base_chunk(
     debug_runtime: bool,
     chunk_output_type: ChunkOutputType,
     preamble_part: RuntimePreamblePart,
+    suffix: &str,
+    capabilities: RuntimeCapabilities,
 ) -> std::result::Result<String, String> {
-    let suffix = runtime_alias_suffix(chunk_id, chunk_output_type);
     let mut parts = vec![render_bundler_runtime_preamble_part(
         manifest_json,
         numeric_module_ids,
         debug_runtime,
         chunk_output_type,
         preamble_part,
+        capabilities,
     )?];
     if include_custom_elements_es5_adapter {
         parts.push(render_custom_elements_es5_adapter());
@@ -98,25 +220,51 @@ pub(super) fn render_bundler_runtime_base_chunk(
     // Hoisted module code lives at top level, so the loader helpers are plain
     // top-level vars and the chunk marks itself loaded before running.
     parts.extend([
-        render_runtime_alias_line(&suffix),
-        format!("__runtime{suffix}.l({chunk_id:?});"),
+        render_runtime_alias_line(suffix, capabilities),
+        format!(
+            "__runtime{suffix}.{member}({chunk_id:?});",
+            member = abi::LOADED
+        ),
         module_text.to_string(),
     ]);
     if entry_points_json != "[]" {
-        parts.push(format!("__runtime{suffix}.n({entry_points_json});"));
+        parts.push(format!(
+            "__runtime{suffix}.{member}({entry_points_json});",
+            member = abi::RUN_ENTRIES,
+        ));
     }
     parts.push(String::new());
     Ok(parts.join("\n"))
 }
 
+#[cfg(test)]
 pub(super) fn render_bundler_runtime_lazy_chunk(
     chunk_id: usize,
     module_text: &str,
     chunk_output_type: ChunkOutputType,
     runtime_core: Option<&str>,
+    capabilities: RuntimeCapabilities,
     assigner_names: &[String],
 ) -> String {
     let suffix = runtime_alias_suffix(chunk_id, chunk_output_type);
+    render_bundler_runtime_lazy_chunk_with_alias_suffix(
+        chunk_id,
+        module_text,
+        runtime_core,
+        assigner_names,
+        &suffix,
+        capabilities,
+    )
+}
+
+pub(super) fn render_bundler_runtime_lazy_chunk_with_alias_suffix(
+    chunk_id: usize,
+    module_text: &str,
+    runtime_core: Option<&str>,
+    assigner_names: &[String],
+    suffix: &str,
+    capabilities: RuntimeCapabilities,
+) -> String {
     // A vendor chunk runs before base, so it brings the runtime core with it;
     // every other non-base chunk finds the runtime already built.
     let core = runtime_core.unwrap_or_default();
@@ -134,8 +282,9 @@ pub(super) fn render_bundler_runtime_lazy_chunk(
     // Hoisted chunks execute at top level on script load; the trailing `l()`
     // is what resolves the loader promise for this chunk.
     format!(
-        "{core}{}\n{module_text}\n{pin}__runtime{suffix}.l({chunk_id:?});\n",
-        render_runtime_alias_line(&suffix),
+        "{core}{alias}\n{module_text}\n{pin}__runtime{suffix}.{loaded}({chunk_id:?});\n",
+        alias = render_runtime_alias_line(suffix, capabilities),
+        loaded = abi::LOADED,
     )
 }
 
@@ -170,6 +319,7 @@ pub(super) fn render_bundler_runtime_preamble_part(
     debug_runtime: bool,
     chunk_output_type: ChunkOutputType,
     part: RuntimePreamblePart,
+    capabilities: RuntimeCapabilities,
 ) -> std::result::Result<String, String> {
     if part == RuntimePreamblePart::ManifestOnly {
         // `r.i` is set by the core, so this can only run after it. Reading the
@@ -204,6 +354,22 @@ pub(super) fn render_bundler_runtime_preamble_part(
     } else {
         "\"s\"+a"
     };
+    // The single-letter member names below are collision-proof by
+    // construction, not legacy shorthand. Do not "improve" them to
+    // descriptive names.
+    //
+    // Property renaming excludes every name the extern set pins, the extern
+    // namespace is flat, and the platform slice is computed per job. A runtime
+    // member whose name collides with any platform extern name therefore pins
+    // in the jobs whose slice contains it and renames in the jobs whose slice
+    // does not — and since chunks reach the runtime through
+    // `globalThis["__g"]`, a base chunk and its lazy chunks can land on
+    // opposite sides of that split and desync the cross-chunk ABI.
+    // `register`, `cache`, `ready`, `state` and `base` all collide today.
+    //
+    // Measured and refuted in /tmp/gcc-w2-polish.md: a full descriptive rename
+    // cost +250 raw / +89 gzip over three examples *and* shipped a base that
+    // defined `.loaded` while its chunks still called `.l(`.
     let storage_init = if numeric_module_ids {
         [
             "r.f=[];",
@@ -224,26 +390,65 @@ pub(super) fn render_bundler_runtime_preamble_part(
         ]
     };
     let module_lookup = if numeric_module_ids {
-        format!("r.j=function(a){{var b=r.m[a];if(b===void 0)throw Error({missing_module_error});return e(b).then(function(){{return r.q(a);}});}};")
+        format!(
+            "r.{dynamic_import}=function(a){{var b=r.m[a];if(b===void 0)throw Error({missing_module_error});return e(b).then(function(){{return r.{require}(a);}});}};",
+            dynamic_import = abi::DYNAMIC_IMPORT,
+            require = abi::REQUIRE,
+        )
     } else {
-        format!("r.j=function(a){{var b=r.m&&r.m[a];if(!b)throw Error({missing_module_error});return e(b).then(function(){{return r.q(a);}});}};")
+        format!(
+            "r.{dynamic_import}=function(a){{var b=r.m&&r.m[a];if(!b)throw Error({missing_module_error});return e(b).then(function(){{return r.{require}(a);}});}};",
+            dynamic_import = abi::DYNAMIC_IMPORT,
+            require = abi::REQUIRE,
+        )
     };
-    let module_preload = if numeric_module_ids {
-        format!("r.x=function(a){{var b=r.m[a];if(b===void 0)throw Error({missing_module_error});return e(b).then(function(){{}});}};")
+    let module_preload = if !capabilities.preload {
+        String::new()
+    } else if numeric_module_ids {
+        format!(
+            "r.{preload}=function(a){{var b=r.m[a];if(b===void 0)throw Error({missing_module_error});return e(b).then(function(){{}});}};",
+            preload = abi::PRELOAD,
+        )
     } else {
-        format!("r.x=function(a){{var b=r.m&&r.m[a];if(!b)throw Error({missing_module_error});return e(b).then(function(){{}});}};")
+        format!(
+            "r.{preload}=function(a){{var b=r.m&&r.m[a];if(!b)throw Error({missing_module_error});return e(b).then(function(){{}});}};",
+            preload = abi::PRELOAD,
+        )
+    };
+    // The factory call passes exactly the helpers some module can reach.
+    // Trailing helpers that no module in the plan uses are not just dead
+    // definitions, they are dead arguments too.
+    // The helpers handed to every module factory: a third reader of the same
+    // member ABI, so it derives from `abi` like the other two.
+    let factory_args = {
+        let require = abi::REQUIRE;
+        let dynamic_import = abi::DYNAMIC_IMPORT;
+        let preload = abi::PRELOAD;
+        if capabilities.live_exports {
+            format!("r.{require},c,r.{dynamic_import},r.{preload},r.g")
+        } else if capabilities.preload {
+            format!("r.{require},c,r.{dynamic_import},r.{preload}")
+        } else {
+            format!("r.{require},c,r.{dynamic_import}")
+        }
     };
     let manifest_apply = render_manifest_apply(manifest_json);
     let manifest_init = render_manifest_init(chunk_output_type);
     let env_setup = render_loader_env_setup();
     let loader_specific = if chunk_output_type.is_esm() {
-        render_esm_loader_runtime(missing_chunk_error, style_error, numeric_module_ids)
+        render_esm_loader_runtime(
+            missing_chunk_error,
+            style_error,
+            numeric_module_ids,
+            capabilities.css,
+        )
     } else {
         render_script_loader_runtime(
             missing_chunk_error,
             script_error,
             style_error,
             numeric_module_ids,
+            capabilities.css,
         )
     };
     Ok([
@@ -257,20 +462,41 @@ pub(super) fn render_bundler_runtime_preamble_part(
         "r.b=\"\";".to_string(),
         env_setup,
         "function g(a){var b=r.d[a];if(b)return b;b={};b.p=new Promise(function(c,d){b.r=c;b.j=d});r.d[a]=b;return b;}".to_string(),
-        "r.l=function(a){r.s[a]=1;var b=r.d[a];if(b){b.r();delete r.d[a];}};".to_string(),
+        format!(
+            "r.{loaded}=function(a){{r.s[a]=1;var b=r.d[a];if(b){{b.r();delete r.d[a];}}}};",
+            loaded = abi::LOADED,
+        ),
         "function h(a,b){r.s[a]=2;var c=r.d[a];if(c){c.j(b);delete r.d[a];}}".to_string(),
-        "r.r=function(a,b){r.f[a]=b;};".to_string(),
-        "r.g=function(a,b,c){if(typeof c===\"function\"){Object.defineProperty(a,b,{configurable:!0,enumerable:!0,get:c});return;}for(var d=0;d<c.length;d+=2)!function(e,f){Object.defineProperty(a,e,{configurable:!0,enumerable:!0,get:function(){return b[f];}})}(c[d],c[d+1]);};".to_string(),
-        format!("r.q=function(a){{if(Object.prototype.hasOwnProperty.call(r.c,a))return r.c[a];var b=r.f[a];if(b===void 0)throw Error({missing_module_error});var c=[];r.c[a]=c;b(r.q,c,r.j,r.x,r.g);return c;}};"),
+        format!("r.{register}=function(a,b){{r.f[a]=b;}};", register = abi::REGISTER),
+        if capabilities.live_exports {
+            "r.g=function(a,b,c){if(typeof c===\"function\"){Object.defineProperty(a,b,{configurable:!0,enumerable:!0,get:c});return;}for(var d=0;d<c.length;d+=2)!function(e,f){Object.defineProperty(a,e,{configurable:!0,enumerable:!0,get:function(){return b[f];}})}(c[d],c[d+1]);};".to_string()
+        } else {
+            String::new()
+        },
+        format!(
+            "r.{require}=function(a){{if(Object.prototype.hasOwnProperty.call(r.c,a))return r.c[a];var b=r.f[a];if(b===void 0)throw Error({missing_module_error});var c=[];r.c[a]=c;b({factory_args});return c;}};",
+            require = abi::REQUIRE,
+        ),
         loader_specific,
         module_lookup,
         module_preload,
-        "r.n=function(a){for(var b=0;b<a.length;b+=1)r.q(a[b]);};".to_string(),
+        if capabilities.entry_runner {
+            format!(
+                "r.{run_entries}=function(a){{for(var b=0;b<a.length;b+=1)r.{require}(a[b]);}};",
+                run_entries = abi::RUN_ENTRIES,
+                require = abi::REQUIRE,
+            )
+        } else {
+            String::new()
+        },
         manifest_init,
         "r.i=1;".to_string(),
         "}".to_string(),
     ]
     .into_iter()
+    // Gated-off blocks render as empty strings; dropping them here keeps the
+    // preamble free of blank lines whatever the capability set is.
+    .filter(|line| !line.is_empty())
     .chain((part == RuntimePreamblePart::All).then_some(manifest_apply))
     .chain(["}).call(this,globalThis);".to_string(), String::new()])
     .collect::<Vec<_>>()
@@ -354,11 +580,19 @@ fn render_script_loader_runtime(
     script_error: &str,
     style_error: &str,
     numeric_module_ids: bool,
+    css: bool,
 ) -> String {
     let chunk_lookup = if numeric_module_ids {
         "var b=r.k[a];"
     } else {
         "var b=r.k&&r.k[a];"
+    };
+    // With no CSS anywhere in the plan the fan-out collapses to the chunk's
+    // own script request, and the whole `<link>` loader goes with it.
+    let chunk_request = if css {
+        "Promise.all([z(a),p(u(a))])"
+    } else {
+        "p(u(a))"
     };
     [
         format!(
@@ -367,12 +601,15 @@ fn render_script_loader_runtime(
         // async=false keeps dynamically inserted scripts executing in
         // insertion order, so hoisted dependency chunks run before dependents.
         format!("function p(a){{return new Promise(function(c,e){{var f=d.createElement(\"script\");f.async=false;f.src=a;f.onload=function(){{c();}};f.onerror=function(){{e(Error({script_error}));}};(d.head||d.documentElement).appendChild(f);}});}}"),
-        render_css_loader_runtime(style_error),
+        render_css_loader_runtime(style_error, css),
         // Dependency scripts are inserted synchronously before this chunk's own
         // script, so ordered (async=false) execution matches dependency order
         // while all requests still fetch in parallel.
-        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!b)throw Error({missing_chunk_error});r.s[a]=0;var c=g(a),w=(b[0]||[]).map(e);w.push(Promise.all([z(a),p(u(a))]));return Promise.all(w).then(function(){{return c.p;}}).catch(function(d){{h(a,d);throw d;}});}}"),
+        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!b)throw Error({missing_chunk_error});r.s[a]=0;var c=g(a),w=(b[0]||[]).map(e);w.push({chunk_request});return Promise.all(w).then(function(){{return c.p;}}).catch(function(d){{h(a,d);throw d;}});}}"),
     ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
     .join("\n")
 }
 
@@ -387,20 +624,36 @@ fn render_esm_loader_runtime(
     missing_chunk_error: &str,
     style_error: &str,
     numeric_module_ids: bool,
+    css: bool,
 ) -> String {
     let chunk_lookup = if numeric_module_ids {
         "var b=r.k[a];"
     } else {
         "var b=r.k&&r.k[a];"
     };
+    let chunk_request = if css {
+        "Promise.all([z(a),import(b[1])])"
+    } else {
+        "import(b[1])"
+    };
     [
-        render_css_loader_runtime(style_error),
-        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!b)throw Error({missing_chunk_error});r.s[a]=0;var c=g(a),w=(b[0]||[]).map(e);w.push(Promise.all([z(a),import(b[1])]));return Promise.all(w).then(function(){{return c.p;}}).catch(function(d){{h(a,d);throw d;}});}}"),
+        render_css_loader_runtime(style_error, css),
+        format!("function e(a){{var b=r.s[a];if(b===1)return Promise.resolve();if(b===0)return g(a).p;{chunk_lookup}if(!b)throw Error({missing_chunk_error});r.s[a]=0;var c=g(a),w=(b[0]||[]).map(e);w.push({chunk_request});return Promise.all(w).then(function(){{return c.p;}}).catch(function(d){{h(a,d);throw d;}});}}"),
     ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
     .join("\n")
 }
 
-fn render_css_loader_runtime(style_error: &str) -> String {
+/// The `<link rel=stylesheet>` loader plus the per-chunk CSS fan-out `z(a)`.
+/// Measured at 797 B of a 2,623 B script-mode preamble and dead in every
+/// standalone build (nothing fills manifest CSS rows outside the Vite
+/// plugin), so it is rendered only when a CSS row can actually appear.
+fn render_css_loader_runtime(style_error: &str, css: bool) -> String {
+    if !css {
+        return String::new();
+    }
     [
         "var m=null,n=Object.create(null);".to_string(),
         "function v(){if(m)return m;m=Object.create(null);if(d)for(var a=d.querySelectorAll(\"link[rel=\\\"stylesheet\\\"]\"),b=0;b<a.length;b+=1){var c=a[b].href;c&&(m[c]=1);}return m;}".to_string(),
@@ -413,6 +666,7 @@ fn render_css_loader_runtime(style_error: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     const HOISTED_ALIAS_LINE: &str = "var __runtime=globalThis[\"__g\"],__register=__runtime.r,__require=__runtime.q,__dynamicImport=__runtime.j,__preloadDynamicImport=__runtime.x;";
 
@@ -429,6 +683,7 @@ mod tests {
             false,
             ChunkOutputType::Script,
             RuntimePreamblePart::All,
+            RuntimeCapabilities::all(),
         )
         .expect("render base chunk");
 
@@ -462,6 +717,7 @@ mod tests {
             false,
             ChunkOutputType::Script,
             RuntimePreamblePart::All,
+            RuntimeCapabilities::all(),
         )
         .expect("render base chunk");
 
@@ -475,6 +731,7 @@ mod tests {
             "__register(1,function(){});",
             ChunkOutputType::Script,
             None,
+            RuntimeCapabilities::all(),
             &[],
         );
         assert_eq!(
@@ -492,6 +749,7 @@ mod tests {
             false,
             ChunkOutputType::Script,
             RuntimePreamblePart::All,
+            RuntimeCapabilities::all(),
         )
         .expect("render preamble");
         assert!(rendered.contains("var d=global.document,l=global.location;"));
@@ -530,6 +788,7 @@ mod tests {
             false,
             ChunkOutputType::Esm,
             RuntimePreamblePart::All,
+            RuntimeCapabilities::all(),
         )
         .expect("render base chunk");
         assert!(base.contains("var __runtime_0=globalThis[\"__g\"],__register_0=__runtime_0.r,__require_0=__runtime_0.q,__dynamicImport_0=__runtime_0.j,__preloadDynamicImport_0=__runtime_0.x;"), "{base}");
@@ -540,6 +799,7 @@ mod tests {
             "__register_3(1,function(){});",
             ChunkOutputType::Esm,
             None,
+            RuntimeCapabilities::all(),
             &[],
         );
         assert_eq!(
@@ -560,6 +820,7 @@ mod tests {
             false,
             ChunkOutputType::Esm,
             RuntimePreamblePart::Core,
+            RuntimeCapabilities::all(),
         )
         .expect("render core");
         assert!(core.contains("if(!r.i){"), "{core}");
@@ -578,6 +839,7 @@ mod tests {
             false,
             ChunkOutputType::Esm,
             RuntimePreamblePart::ManifestOnly,
+            RuntimeCapabilities::all(),
         )
         .expect("render manifest half");
         assert!(
@@ -600,6 +862,7 @@ mod tests {
             false,
             ChunkOutputType::Esm,
             RuntimePreamblePart::All,
+            RuntimeCapabilities::all(),
         )
         .expect("render preamble");
         assert!(all.contains("if(!r.i){"), "{all}");
@@ -615,6 +878,7 @@ mod tests {
             false,
             ChunkOutputType::Esm,
             RuntimePreamblePart::All,
+            RuntimeCapabilities::all(),
         )
         .expect("render preamble");
 
@@ -671,6 +935,7 @@ mod tests {
             false,
             ChunkOutputType::Script,
             RuntimePreamblePart::All,
+            RuntimeCapabilities::all(),
         )
         .expect("render base chunk");
         assert!(base.contains(HOISTED_ALIAS_LINE), "{base}");
@@ -682,6 +947,7 @@ mod tests {
             false,
             ChunkOutputType::Script,
             RuntimePreamblePart::All,
+            RuntimeCapabilities::all(),
         )
         .expect("render preamble");
         assert!(preamble.contains("createElement(\"script\")"), "{preamble}");
@@ -697,6 +963,64 @@ mod tests {
     }
 
     #[test]
+    fn capability_gating_drops_the_blocks_the_plan_does_not_use() {
+        let bare = RuntimeCapabilities {
+            css: false,
+            entry_runner: false,
+            live_exports: false,
+            preload: false,
+        };
+        let rendered = render_bundler_runtime_preamble_part(
+            "[0,[],[],\"./\"]",
+            true,
+            false,
+            ChunkOutputType::Esm,
+            RuntimePreamblePart::All,
+            bare,
+        )
+        .expect("render preamble");
+
+        // CSS link loader plus the per-chunk fan-out.
+        assert!(!rendered.contains("createElement(\"link\")"), "{rendered}");
+        assert!(!rendered.contains("b&&b[2]||[]"), "{rendered}");
+        assert!(rendered.contains("w.push(import(b[1]));"), "{rendered}");
+        // Preload, entry runner, live-export helper.
+        assert!(!rendered.contains("r.x="), "{rendered}");
+        assert!(!rendered.contains("r.n="), "{rendered}");
+        assert!(!rendered.contains("r.g="), "{rendered}");
+        // The factory call stops passing helpers no module can reach.
+        assert!(rendered.contains("b(r.q,c,r.j);"), "{rendered}");
+        // What is left is still a working loader and registry.
+        assert!(rendered.contains("r.r=function(a,b){"), "{rendered}");
+        assert!(rendered.contains("r.j=function(a){"), "{rendered}");
+        assert!(!rendered.contains("\n\n"), "{rendered}");
+
+        let alias = render_runtime_alias_line("_2", bare);
+        assert!(!alias.contains("__preloadDynamicImport"), "{alias}");
+        assert!(
+            alias.contains("__dynamicImport_2=__runtime_2.j;"),
+            "{alias}"
+        );
+
+        // Turning one capability back on brings exactly that block back.
+        let with_css = render_bundler_runtime_preamble_part(
+            "[0,[],[],\"./\"]",
+            true,
+            false,
+            ChunkOutputType::Esm,
+            RuntimePreamblePart::All,
+            RuntimeCapabilities { css: true, ..bare },
+        )
+        .expect("render preamble");
+        assert!(with_css.contains("createElement(\"link\")"), "{with_css}");
+        assert!(
+            with_css.contains("w.push(Promise.all([z(a),import(b[1])]));"),
+            "{with_css}"
+        );
+        assert!(!with_css.contains("r.x="), "{with_css}");
+    }
+
+    #[test]
     fn live_export_helper_supports_packed_alias_mode() {
         let rendered = render_bundler_runtime_preamble_part(
             "[0,[],[],\"./\"]",
@@ -704,6 +1028,7 @@ mod tests {
             false,
             ChunkOutputType::Script,
             RuntimePreamblePart::All,
+            RuntimeCapabilities::all(),
         )
         .expect("render preamble");
         assert!(rendered.contains("typeof c===\"function\""), "{rendered}");
@@ -712,5 +1037,160 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("return b[f];"), "{rendered}");
+    }
+
+    /// Every runtime member a chunk *reads* must be a member the core *defines*.
+    ///
+    /// The two emitter families sit hundreds of lines apart, and a desynced pair
+    /// is not a compile error: a base that defined `.loaded` while its chunks
+    /// still called `.l(` built cleanly and passed the whole suite, failing only
+    /// on the first lazy load in a browser (`/tmp/gcc-w2-polish.md`).
+    ///
+    /// Both families now derive from `abi`, so drift is impossible by
+    /// construction. This test proves the *check* has teeth anyway: it runs the
+    /// agreement check over a deliberately mutated pair and requires it to fail,
+    /// then over the real pair and requires it to pass. Without the mutation arm
+    /// a checker that silently matched nothing would look just as green.
+    #[test]
+    fn runtime_member_abi_is_single_sourced() {
+        /// Members a chunk reads: `__runtime<suffix>.<member>`.
+        fn members_read_by_chunks(text: &str) -> BTreeSet<String> {
+            let mut found = BTreeSet::new();
+            for (index, _) in text.match_indices("__runtime") {
+                let rest = &text[index..];
+                let Some(dot) = rest.find('.') else { continue };
+                // Reject a `__runtime` that is part of a longer identifier run
+                // before the dot, e.g. `__runtime_0` is fine but a bare word is
+                // not interesting without a member access.
+                let member: String = rest[dot + 1..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if !member.is_empty() {
+                    found.insert(member);
+                }
+            }
+            found
+        }
+
+        /// Members the core defines: `r.<member>=`.
+        fn members_defined_by_core(text: &str) -> BTreeSet<String> {
+            let mut found = BTreeSet::new();
+            for (index, _) in text.match_indices("r.") {
+                // `r.` must start a token, not end one (`__runtime.` etc).
+                if index > 0 {
+                    let prev = text.as_bytes()[index - 1];
+                    if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'.' {
+                        continue;
+                    }
+                }
+                let rest = &text[index + 2..];
+                let member: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if member.is_empty() {
+                    continue;
+                }
+                if rest[member.len()..].starts_with('=') && !rest[member.len()..].starts_with("==")
+                {
+                    found.insert(member);
+                }
+            }
+            found
+        }
+
+        /// The invariant: nothing a chunk reads may be missing from the core.
+        fn undefined_reads(core: &str, chunk: &str) -> BTreeSet<String> {
+            let defined = members_defined_by_core(core);
+            members_read_by_chunks(chunk)
+                .into_iter()
+                .filter(|member| !defined.contains(member))
+                .collect()
+        }
+
+        let base = render_bundler_runtime_base_chunk(
+            0,
+            "[0]",
+            "script",
+            "[0,[],[],\"./\"]",
+            true,
+            "__register_0(0,function(){});",
+            false,
+            false,
+            ChunkOutputType::Esm,
+            RuntimePreamblePart::All,
+            RuntimeCapabilities::all(),
+        )
+        .expect("render base chunk");
+        let lazy = render_bundler_runtime_lazy_chunk(
+            3,
+            "__register_3(1,function(){});",
+            ChunkOutputType::Esm,
+            None,
+            RuntimeCapabilities::all(),
+            &[],
+        );
+
+        // The checker must actually see the ABI, or it proves nothing.
+        let read = members_read_by_chunks(&format!("{base}{lazy}"));
+        for expected in [
+            abi::REGISTER,
+            abi::REQUIRE,
+            abi::DYNAMIC_IMPORT,
+            abi::PRELOAD,
+            abi::LOADED,
+        ] {
+            assert!(
+                read.contains(expected),
+                "chunk reads missing {expected}: {read:?}"
+            );
+        }
+        assert!(
+            members_defined_by_core(&base).len() >= 10,
+            "core definitions not detected: {:?}",
+            members_defined_by_core(&base)
+        );
+
+        // Real pair: agreement holds in both directions.
+        assert!(
+            undefined_reads(&base, &base).is_empty(),
+            "base reads a member the core never defines: {:?}",
+            undefined_reads(&base, &base)
+        );
+        assert!(
+            undefined_reads(&base, &lazy).is_empty(),
+            "lazy chunk reads a member the core never defines: {:?}",
+            undefined_reads(&base, &lazy)
+        );
+
+        // Mutation arm 1: rename the member on the *core* side only. This is
+        // exactly the shipped bug — base defines `.loaded`, chunks call `.l(`.
+        let mutated_core = base.replace(
+            &format!("r.{}=", abi::LOADED),
+            &format!("r.{}Renamed=", abi::LOADED),
+        );
+        assert_ne!(mutated_core, base, "mutation did not apply");
+        assert!(
+            undefined_reads(&mutated_core, &lazy).contains(abi::LOADED),
+            "checker missed a core-side rename of {}",
+            abi::LOADED
+        );
+
+        // Mutation arm 2: rename on the *chunk* side only.
+        let mutated_chunk = lazy.replace(
+            &format!(".{}(", abi::LOADED),
+            &format!(".{}Renamed(", abi::LOADED),
+        );
+        assert_ne!(mutated_chunk, lazy, "mutation did not apply");
+        assert!(
+            !undefined_reads(&base, &mutated_chunk).is_empty(),
+            "checker missed a chunk-side rename of {}",
+            abi::LOADED
+        );
+
+        // Restored: the unmutated pair is still clean, so the arms above failed
+        // for the mutation and not for some ambient breakage.
+        assert!(undefined_reads(&base, &lazy).is_empty());
     }
 }

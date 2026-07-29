@@ -1,10 +1,9 @@
 use super::*;
 
 pub(crate) fn apply_js_compat_text_fixes(source_text: String) -> String {
-    let mut source_text =
-        rewrite_async_function_comment_placement(rewrite_typescript_helper_this_fallbacks(
-            rewrite_process_env_node_env(rewrite_directory_module_specifiers(source_text)),
-        ));
+    let mut source_text = rewrite_async_function_comment_placement(
+        rewrite_typescript_helper_this_fallbacks(source_text),
+    );
     source_text = annotate_nocollapse_static_members(source_text);
 
     for property_name in collect_closure_protocol_properties(&source_text) {
@@ -108,16 +107,6 @@ pub(super) fn rewrite_typescript_helper_this_fallbacks(source_text: String) -> S
     .unwrap_or(source_text)
 }
 
-pub(super) fn rewrite_process_env_node_env(source_text: String) -> String {
-    regex::Regex::new(r#"\bprocess\.env\.NODE_ENV\b"#)
-        .map(|regex| {
-            regex
-                .replace_all(&source_text, "\"production\"")
-                .into_owned()
-        })
-        .unwrap_or(source_text)
-}
-
 pub(super) fn annotate_nocollapse_static_members(mut source_text: String) -> String {
     for (class_name, property_name) in collect_class_static_assignments(&source_text) {
         for pattern in [
@@ -165,65 +154,6 @@ pub(super) fn annotate_nocollapse_static_members(mut source_text: String) -> Str
     }
 
     source_text
-}
-
-pub(super) fn rewrite_directory_module_specifiers(source_text: String) -> String {
-    let source_text = regex::Regex::new(r#"(?m)(\bfrom\s+)'\.'"#)
-        .map(|regex| {
-            regex
-                .replace_all(&source_text, "$1'./index.js'")
-                .into_owned()
-        })
-        .unwrap_or(source_text);
-    let source_text = regex::Regex::new(r#"(?m)(\bfrom\s+)"\.""#)
-        .map(|regex| {
-            regex
-                .replace_all(&source_text, "$1\"./index.js\"")
-                .into_owned()
-        })
-        .unwrap_or(source_text);
-    let source_text = regex::Regex::new(r#"(?m)(\bfrom\s+)'\.\.'"#)
-        .map(|regex| {
-            regex
-                .replace_all(&source_text, "$1'../index.js'")
-                .into_owned()
-        })
-        .unwrap_or(source_text);
-    let source_text = regex::Regex::new(r#"(?m)(\bfrom\s+)"\.\.""#)
-        .map(|regex| {
-            regex
-                .replace_all(&source_text, "$1\"../index.js\"")
-                .into_owned()
-        })
-        .unwrap_or(source_text);
-    let source_text = regex::Regex::new(r#"import\(\s*'\.'\s*\)"#)
-        .map(|regex| {
-            regex
-                .replace_all(&source_text, "import('./index.js')")
-                .into_owned()
-        })
-        .unwrap_or(source_text);
-    let source_text = regex::Regex::new(r#"import\(\s*"\."\s*\)"#)
-        .map(|regex| {
-            regex
-                .replace_all(&source_text, "import('./index.js')")
-                .into_owned()
-        })
-        .unwrap_or(source_text);
-    let source_text = regex::Regex::new(r#"import\(\s*'\.\.'\s*\)"#)
-        .map(|regex| {
-            regex
-                .replace_all(&source_text, "import('../index.js')")
-                .into_owned()
-        })
-        .unwrap_or(source_text);
-    regex::Regex::new(r#"import\(\s*"\.\."\s*\)"#)
-        .map(|regex| {
-            regex
-                .replace_all(&source_text, "import('../index.js')")
-                .into_owned()
-        })
-        .unwrap_or(source_text)
 }
 
 fn is_hard_static_interop_name(name: &str) -> bool {

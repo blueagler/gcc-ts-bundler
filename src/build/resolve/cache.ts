@@ -3,7 +3,12 @@ import path from "path";
 import { readJsonIfExists } from "../../shared/cache-store";
 import type { collectTrackedFiles } from "../../shared/file-state";
 import { CHUNK_KINDS } from "../types";
-import type { ChunkPlanChunk, LazyImport, PackageAlias } from "../types";
+import type {
+  ChunkPlanChunk,
+  LazyImport,
+  PackageAlias,
+  ResolvedImport,
+} from "../types";
 import {
   arrayOf,
   isBoolean,
@@ -17,6 +22,7 @@ import {
 } from "../../shared/validation";
 
 export interface ResolveMetadata {
+  optionsSignature: string;
   chunkPlan: ChunkPlanChunk[];
   entryFiles: Array<{
     chunkName: string;
@@ -28,6 +34,7 @@ export interface ResolveMetadata {
   lazyImports: LazyImport[];
   packageAliases?: PackageAlias[];
   packageJsonFiles?: string[];
+  resolvedImports?: ResolvedImport[];
   tsxRuntimeSourceFiles?: string[];
 }
 
@@ -40,6 +47,7 @@ export interface ResolveSnapshot {
   optionsSignature: string;
   packageAliases: PackageAlias[];
   packageJsonFiles: string[];
+  resolvedImports: ResolvedImport[];
   packageSignature: string;
   resolveKey: string;
   sourceFiles: string[];
@@ -50,6 +58,7 @@ export interface ResolveSnapshot {
 export async function readChunkPlan(
   projectCacheDir: string,
   resolveKey: string,
+  optionsSignature: string,
 ) {
   const resolveMetadataPath = path.join(
     projectCacheDir,
@@ -60,11 +69,9 @@ export async function readChunkPlan(
     resolveMetadataPath,
     isResolveMetadata,
   );
-  if (!metadata) {
-    throw new Error(`Missing resolve metadata for ${resolveKey}`);
-  }
-
-  return metadata.chunkPlan;
+  return metadata?.optionsSignature === optionsSignature
+    ? metadata.chunkPlan
+    : null;
 }
 
 const isResolveEntry = isObjectOf<ResolveMetadata["entryFiles"][number]>({
@@ -88,6 +95,13 @@ const isPackageAlias = isObjectOf<PackageAlias>({
   targetPath: isString,
 });
 
+const isResolvedImport = isObjectOf<ResolvedImport>({
+  importerFilePath: isString,
+  moduleId: isString,
+  specifier: isString,
+  targetPath: isString,
+});
+
 const isChunkPlanChunk = isObjectOf<ChunkPlanChunk>({
   dependencies: isStringArray,
   entryFiles: optional(isStringArray),
@@ -99,17 +113,20 @@ const isChunkPlanChunk = isObjectOf<ChunkPlanChunk>({
 
 const isFileStateSnapshot = isObjectOf<ResolveSnapshot["trackedFiles"][string]>(
   {
+    digest: isString,
     mtimeMs: isNumber,
     size: isNumber,
   },
 );
 
 export const isResolveMetadata = isObjectOf<ResolveMetadata>({
+  optionsSignature: isString,
   chunkPlan: arrayOf(isChunkPlanChunk),
   entryFiles: arrayOf(isResolveEntry),
   lazyImports: arrayOf(isLazyImport),
   packageAliases: optional(arrayOf(isPackageAlias)),
   packageJsonFiles: optional(isStringArray),
+  resolvedImports: optional(arrayOf(isResolvedImport)),
   tsxRuntimeSourceFiles: optional(isStringArray),
 });
 
@@ -122,6 +139,7 @@ export const isResolveSnapshot = isObjectOf<ResolveSnapshot>({
   optionsSignature: isString,
   packageAliases: arrayOf(isPackageAlias),
   packageJsonFiles: isStringArray,
+  resolvedImports: arrayOf(isResolvedImport),
   packageSignature: isString,
   resolveKey: isString,
   sourceFiles: isStringArray,

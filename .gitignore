@@ -21,4 +21,6 @@ examples/**/dist/
 examples/**/node_modules/
 examples/**/.gcc-ts-bundler-vite/
 examples/**/.gcc-debug/
+examples/**/.investigate-cache/
+examples/**/.investigate-dist/
 examples/**/*.generated.externs.js

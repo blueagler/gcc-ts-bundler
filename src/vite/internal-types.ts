@@ -1,6 +1,10 @@
 import type { Rollup } from "vite";
 
 import type { ResolvedChunkOutputType } from "../api/types";
+import type {
+  RuntimeModuleTypeProvenance,
+  RuntimeResolutionIdentity,
+} from "./type-metadata/types";
 
 export type NormalizedOutputOptions = Rollup.NormalizedOutputOptions;
 export type OutputAsset = Rollup.OutputAsset;
@@ -32,6 +36,7 @@ export interface CapturedRuntimeModule {
   id: string;
   relativePath: string;
   sourceModuleIds: string[];
+  typeMetadata?: RuntimeModuleTypeProvenance;
 }
 
 export interface MaterializedGraph {
@@ -41,6 +46,7 @@ export interface MaterializedGraph {
   prunedEmptyModuleIds: string[];
   retainedEmptyModuleIds: string[];
   runtimeEntries: string[];
+  runtimeResolutions: RuntimeResolutionIdentity[];
   srcDir: string;
 }
 

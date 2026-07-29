@@ -4,27 +4,39 @@ import path from "path";
 import ts from "typescript";
 
 import type { CompatClassMapCall, DiagnosticsPreflight } from "../../api/types";
+import { readJsonIfExists, writeJson } from "../../shared/cache-store";
 import { uniqueSortedStrings } from "../../shared/files";
-import { filesExist } from "../../shared/file-state";
+import {
+  collectFileContentSnapshot,
+  fileContentSnapshotMatches,
+  type FileContentSnapshot,
+} from "../../shared/file-state";
 import { logInternalDetail, withInternalTiming } from "../../shared/timing";
 import {
-  hasErrorCode,
+  arrayOf,
+  isBoolean,
   isNumber,
   isObjectOf,
   isString,
   isStringArray,
-  parseJson,
+  optional,
+  recordOf,
 } from "../../shared/validation";
 import type {
+  BuildTypeMetadataSidecar,
   ChunkPlanChunk,
   LazyImport,
-  ResolvedBuildOptions,
   PackageAlias,
+  ResolvedBuildOptions,
+  ResolvedImport,
 } from "../types";
 import { collectFileStates, transpileSources } from "../../native/load";
+import type { NativeEmittedTypeMetadata } from "../../native/load";
 import {
-  type ClosureIrFileMetadata,
-  collectNativeClosureIrFromContext,
+  type ClosureTypeMetadataFile,
+  type TypeMetadataCounts,
+  type TypeMetadataDiagnostic,
+  collectNativeTypeMetadataFromContext,
   createNativeTypeAnalysisContext,
   scanNativeTypeAnalysisContext,
 } from "./closure-ir";
@@ -43,20 +55,26 @@ export interface NativeEmitStageResult {
   externsPath: string;
   outDir: string;
   supportFiles: string[];
+  typeMetadata: NativeEmittedTypeMetadata[];
+  typeMetadataDependencies: FileContentSnapshot;
 }
 
 interface NativeEmitMetadata {
+  artifacts: FileContentSnapshot;
   chunkSignature: string;
   dependencyModules: string[];
   dependencyRuntimeFiles: string[];
   emittedFiles: string[];
   externsPath: string;
   metadataPath: string;
+  optionsSignature: string;
   supportFiles: string[];
+  typeMetadata: NativeEmittedTypeMetadata[];
+  typeMetadataDependencies: FileContentSnapshot;
   version: number;
 }
 
-const NATIVE_EMIT_METADATA_VERSION = 10;
+const NATIVE_EMIT_METADATA_VERSION = 13;
 
 /**
  * Hoisted bundler-runtime emission depends on chunk membership, so the native
@@ -85,10 +103,13 @@ export async function emitNativeStage({
   fileNames,
   lazyImports,
   metadataPath,
+  optionsSignature,
   options,
   packageAliases,
   packageJsonFiles,
+  resolvedImports,
   tsxRuntimeSourceFiles,
+  typeInferenceDisabled,
   tsConfigPath,
   workspaceDir,
 }: {
@@ -97,10 +118,13 @@ export async function emitNativeStage({
   fileNames: string[];
   lazyImports: LazyImport[];
   metadataPath: string;
+  optionsSignature: string;
   options: ResolvedBuildOptions;
   packageAliases: PackageAlias[];
   packageJsonFiles: string[];
+  resolvedImports: ResolvedImport[];
   tsxRuntimeSourceFiles: string[];
+  typeInferenceDisabled: boolean;
   tsConfigPath: string;
   workspaceDir: string;
 }): Promise<NativeEmitStageResult> {
@@ -127,6 +151,7 @@ export async function emitNativeStage({
     dependencyModules,
     dependencyRuntimeFiles,
     metadataPath,
+    optionsSignature,
     outDir: paths.outDir,
     runtimeModuleSourceMapFile:
       process.env.GCC_VITE_RUNTIME_SOURCE_MAP_FILE || undefined,
@@ -140,7 +165,7 @@ export async function emitNativeStage({
   }
 
   const missingInputDiagnostics = await getMissingInputDiagnostics({
-    externFileNames: options.externs,
+    externFileNames: [...options.externs, ...options.typedExterns],
     fileNames: combinedFileNames,
     preflight: options.diagnostics.preflight,
     tsConfigPath,
@@ -155,17 +180,21 @@ export async function emitNativeStage({
       externsPath: paths.externsPath,
       outDir: paths.outDir,
       supportFiles: [],
+      typeMetadata: [],
+      typeMetadataDependencies: {},
     };
   }
 
   await resetNativeEmitOutDir(paths.outDir);
 
-  const analysis = await collectNativeAnalysis({
-    fileNames: combinedFileNames,
-    options,
-    tsConfigPath,
-    workspaceDir,
-  });
+  const analysis = options.typeMetadata
+    ? analysisFromSidecar(options.typeMetadata, options.srcDir, workspaceDir)
+    : await collectNativeAnalysis({
+        fileNames: combinedFileNames,
+        options,
+        tsConfigPath,
+        workspaceDir,
+      });
   const analysisDiagnostics = [
     ...analysis.preflightDiagnostics,
     ...analysis.diagnostics,
@@ -180,8 +209,18 @@ export async function emitNativeStage({
       externsPath: paths.externsPath,
       outDir: paths.outDir,
       supportFiles: [],
+      typeMetadata: [],
+      typeMetadataDependencies: {},
     };
   }
+  const typeMetadataDependencies = await collectExistingContentSnapshot(
+    analysis.dependencies,
+  );
+  logTypeMetadataCounts(
+    "native-emit:type-metadata-extracted",
+    analysis.extractedCounts,
+    analysis.typeMetadataDiagnostics.length,
+  );
 
   await fs.promises.writeFile(
     paths.metadataPathForNative,
@@ -195,24 +234,6 @@ export async function emitNativeStage({
         chunkPlan,
         classMapCalls: options.compat.classMapCalls,
         pureCallees: options.compat.pureCallees,
-        // Annotations are keyed by authored srcDir paths, but native emit
-        // walks the workspace overlay that mirrors srcDir at
-        // `<workspaceDir>/src`; remap so the per-file lookup can hit.
-        // Annotations without type inference are a measured net regression
-        // (+76 B gz), so the inference escape hatch disables them too.
-        typedAnnotations: (process.env["GCC_DISABLE_TYPE_INFERENCE"] === "1"
-          ? []
-          : options.typedAnnotations
-        ).map((file) => ({
-          ...file,
-          filePath: file.filePath.startsWith(options.srcDir)
-            ? path.join(
-                workspaceDir,
-                "src",
-                path.relative(options.srcDir, file.filePath),
-              )
-            : file.filePath,
-        })),
         combinedFileNames,
         explicitExternPaths: options.externs,
         externsPath: paths.externsPath,
@@ -221,6 +242,8 @@ export async function emitNativeStage({
         outDir: paths.outDir,
         packageAliases,
         packageJsonFiles,
+        resolvedImports,
+        typeInferenceDisabled,
         workspaceDir,
       }),
     ),
@@ -233,17 +256,30 @@ export async function emitNativeStage({
     "native-emit:extern-preserved-properties",
     `${result.explicitExternPropertyCount}`,
   );
+  logDeliveredTypeMetadata(result.typeMetadata);
 
   if (usesPersistentCache) {
     await persistNativeEmitMetadata({
+      artifacts: await collectFileContentSnapshot([
+        result.externsPath,
+        paths.metadataPathForNative,
+        ...result.emittedFiles,
+        ...finalSupportFiles,
+        ...(process.env.GCC_VITE_RUNTIME_SOURCE_MAP_FILE
+          ? [process.env.GCC_VITE_RUNTIME_SOURCE_MAP_FILE]
+          : []),
+      ]),
       chunkSignature,
       dependencyModules,
       dependencyRuntimeFiles,
       emittedFiles: result.emittedFiles,
       externsPath: result.externsPath,
       metadataPath,
+      optionsSignature,
       metadataPathForNative: paths.metadataPathForNative,
       supportFiles: finalSupportFiles,
+      typeMetadata: result.typeMetadata,
+      typeMetadataDependencies,
     });
   }
 
@@ -256,6 +292,8 @@ export async function emitNativeStage({
     externsPath: result.externsPath,
     outDir: paths.outDir,
     supportFiles: finalSupportFiles,
+    typeMetadata: result.typeMetadata,
+    typeMetadataDependencies,
   };
 }
 
@@ -300,16 +338,23 @@ async function collectNativeAnalysis({
     );
     const analysis = await withInternalTiming("native-emit:closure-ir", () =>
       Promise.resolve(
-        collectNativeClosureIrFromContext({
+        collectNativeTypeMetadataFromContext({
           context: analysisContext,
           scan: analysisScan,
         }),
       ),
     );
     return {
+      dependencies: collectAnalysisDependencies(
+        analysisContext.program,
+        fileNames,
+        tsConfigPath,
+      ),
       diagnostics: analysis.diagnostics,
+      extractedCounts: analysis.extractedCounts,
       files: analysis.files,
       preflightDiagnostics,
+      typeMetadataDiagnostics: analysis.typeMetadataDiagnostics,
     };
   }
 
@@ -379,32 +424,142 @@ async function collectNativeAnalysis({
 
   const checkerAnalysis: {
     diagnostics: ts.Diagnostic[];
-    files: ClosureIrFileMetadata[];
+    extractedCounts: TypeMetadataCounts;
+    files: ClosureTypeMetadataFile[];
+    typeMetadataDiagnostics: TypeMetadataDiagnostic[];
   } =
     analysisContext && analysisScan && checkerRequiredFileNames.length > 0
       ? await withInternalTiming("native-emit:closure-ir", () =>
           Promise.resolve(
-            collectNativeClosureIrFromContext({
+            collectNativeTypeMetadataFromContext({
               context: analysisContext,
               scan: analysisScan,
             }),
           ),
         )
-      : { diagnostics: [], files: [] };
+      : {
+          diagnostics: [],
+          extractedCounts: emptyTypeMetadataCounts(),
+          files: [],
+          typeMetadataDiagnostics: [],
+        };
   const checkerFileMap = new Map(
     checkerAnalysis.files.map(
-      (file): readonly [string, ClosureIrFileMetadata] => [file.filePath, file],
+      (file): readonly [string, ClosureTypeMetadataFile] => [
+        file.filePath,
+        file,
+      ],
     ),
   );
 
   return {
+    dependencies: collectAnalysisDependencies(
+      analysisContext?.program,
+      fileNames,
+      tsConfigPath,
+    ),
     diagnostics: checkerAnalysis.diagnostics,
+    extractedCounts: checkerAnalysis.extractedCounts,
     files: fileNames.map(
       (fileName) =>
-        checkerFileMap.get(fileName) ?? createTrivialClosureIrFile(fileName),
+        checkerFileMap.get(fileName) ?? createTrivialTypeMetadataFile(fileName),
     ),
     preflightDiagnostics,
+    typeMetadataDiagnostics: checkerAnalysis.typeMetadataDiagnostics,
   };
+}
+function analysisFromSidecar(
+  sidecar: BuildTypeMetadataSidecar,
+  srcDir: string,
+  workspaceDir: string,
+) {
+  const diagnostics: ts.Diagnostic[] = [];
+  const preflightDiagnostics: ts.Diagnostic[] = [];
+  return {
+    dependencies: sidecar.dependencies,
+    diagnostics,
+    extractedCounts: sidecar.extractedCounts,
+    files: sidecar.files.map((file) => ({
+      ...file,
+      filePath: remapMetadataFilePath(file.filePath, srcDir, workspaceDir),
+    })),
+    preflightDiagnostics,
+    typeMetadataDiagnostics: sidecar.diagnostics,
+  };
+}
+
+function remapMetadataFilePath(
+  filePath: string,
+  srcDir: string,
+  workspaceDir: string,
+) {
+  const relativePath = path.relative(srcDir, filePath);
+  return relativePath !== ".." &&
+    !relativePath.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relativePath)
+    ? path.join(workspaceDir, "src", relativePath)
+    : filePath;
+}
+
+function collectAnalysisDependencies(
+  program: ts.Program | undefined,
+  fileNames: string[],
+  tsConfigPath: string,
+) {
+  return uniqueSortedStrings([
+    ...fileNames,
+    tsConfigPath,
+    ...(program?.getSourceFiles() ?? [])
+      .filter((sourceFile) => !program?.isSourceFileDefaultLibrary(sourceFile))
+      .map((sourceFile) => sourceFile.fileName),
+  ]);
+}
+
+async function collectExistingContentSnapshot(filePaths: string[]) {
+  const existing = collectFileStates(filePaths)
+    .filter((state) => state.exists)
+    .map((state) => state.filePath);
+  return collectFileContentSnapshot(existing);
+}
+
+function emptyTypeMetadataCounts(): TypeMetadataCounts {
+  return {
+    annotationCount: 0,
+    enumDeclarationCount: 0,
+    memberAnnotationCount: 0,
+    typeDeclarationCount: 0,
+    unresolvedTypeReferenceCount: 0,
+  };
+}
+
+function logTypeMetadataCounts(
+  label: string,
+  counts: TypeMetadataCounts,
+  diagnostics: number,
+) {
+  logInternalDetail(
+    label,
+    `annotations=${counts.annotationCount} members=${counts.memberAnnotationCount} declarations=${counts.typeDeclarationCount} enums=${counts.enumDeclarationCount} unresolved=${counts.unresolvedTypeReferenceCount} diagnostics=${diagnostics}`,
+  );
+}
+
+function logDeliveredTypeMetadata(metadata: NativeEmittedTypeMetadata[]) {
+  const counts = emptyTypeMetadataCounts();
+  let diagnostics = 0;
+  for (const file of metadata) {
+    counts.annotationCount += file.counts.annotationCount;
+    counts.enumDeclarationCount += file.counts.enumDeclarationCount;
+    counts.memberAnnotationCount += file.counts.memberAnnotationCount;
+    counts.typeDeclarationCount += file.counts.typeDeclarationCount;
+    counts.unresolvedTypeReferenceCount +=
+      file.counts.unresolvedTypeReferenceCount;
+    diagnostics += file.diagnostics.length;
+  }
+  logTypeMetadataCounts(
+    "native-emit:type-metadata-delivered",
+    counts,
+    diagnostics,
+  );
 }
 
 function createNativeEmitPaths({
@@ -428,6 +583,7 @@ function createNativeEmitPaths({
 }
 
 async function restoreCachedNativeEmitResult({
+  optionsSignature,
   chunkSignature,
   dependencyModules,
   dependencyRuntimeFiles,
@@ -436,6 +592,7 @@ async function restoreCachedNativeEmitResult({
   runtimeModuleSourceMapFile,
   usesPersistentCache,
 }: {
+  optionsSignature: string;
   chunkSignature: string;
   dependencyModules: string[];
   dependencyRuntimeFiles: string[];
@@ -451,18 +608,21 @@ async function restoreCachedNativeEmitResult({
   const cachedMetadata = await readMetadata(metadataPath);
   if (
     !cachedMetadata ||
+    cachedMetadata.optionsSignature !== optionsSignature ||
     cachedMetadata.chunkSignature !== chunkSignature ||
-    !(await filesExist([
+    !(await fileContentSnapshotMatches(cachedMetadata.artifacts, [
       cachedMetadata.externsPath,
       cachedMetadata.metadataPath,
       ...cachedMetadata.emittedFiles,
       ...cachedMetadata.supportFiles,
       ...(runtimeModuleSourceMapFile ? [runtimeModuleSourceMapFile] : []),
-    ]))
+    ])) ||
+    !(await fileContentSnapshotMatches(cachedMetadata.typeMetadataDependencies))
   ) {
     return null;
   }
 
+  logDeliveredTypeMetadata(cachedMetadata.typeMetadata);
   return {
     dependencyModules:
       cachedMetadata.dependencyModules.length > 0
@@ -478,6 +638,8 @@ async function restoreCachedNativeEmitResult({
     externsPath: cachedMetadata.externsPath,
     outDir,
     supportFiles: cachedMetadata.supportFiles,
+    typeMetadata: cachedMetadata.typeMetadata,
+    typeMetadataDependencies: cachedMetadata.typeMetadataDependencies,
   } satisfies NativeEmitStageResult;
 }
 
@@ -491,7 +653,6 @@ function runNativeTranspile({
   chunkPlan,
   classMapCalls,
   pureCallees,
-  typedAnnotations,
   combinedFileNames,
   explicitExternPaths,
   externsPath,
@@ -500,20 +661,14 @@ function runNativeTranspile({
   outDir,
   packageAliases,
   packageJsonFiles,
+  resolvedImports,
+  typeInferenceDisabled,
   workspaceDir,
 }: {
   chunkMode: string;
   chunkPlan: ChunkPlanChunk[];
   classMapCalls: CompatClassMapCall[];
   pureCallees: string[];
-  typedAnnotations: ReadonlyArray<{
-    bindings: ReadonlyArray<{
-      jsdoc: string;
-      members?: ReadonlyArray<{ jsdoc: string; name: string }> | undefined;
-      name: string;
-    }>;
-    filePath: string;
-  }>;
   combinedFileNames: string[];
   explicitExternPaths: string[];
   externsPath: string;
@@ -522,27 +677,19 @@ function runNativeTranspile({
   outDir: string;
   packageAliases: PackageAlias[];
   packageJsonFiles: string[];
+  resolvedImports: ResolvedImport[];
+  typeInferenceDisabled: boolean;
   workspaceDir: string;
 }) {
   return transpileSources({
     chunkGraph: chunkPlan.map((chunk) => ({
+      dependencies: chunk.dependencies,
       files: chunk.files,
       name: chunk.name,
     })),
     chunkMode,
     classMapCalls,
     pureCallees,
-    typedAnnotations: typedAnnotations.map((file) => ({
-      bindings: file.bindings.map((binding) => ({
-        jsdoc: binding.jsdoc,
-        members: (binding.members ?? []).map((member) => ({
-          jsdoc: member.jsdoc,
-          name: member.name,
-        })),
-        name: binding.name,
-      })),
-      filePath: file.filePath,
-    })),
     explicitExternPaths,
     metadataPath,
     externsPath,
@@ -551,49 +698,55 @@ function runNativeTranspile({
     outDir,
     packageAliases,
     packageJsonFiles,
+    resolvedImports,
     runtimeModuleSourceMapFile:
       process.env.GCC_VITE_RUNTIME_SOURCE_MAP_FILE || undefined,
+    typeInferenceDisabled,
     workspaceDir,
   });
 }
 
 async function persistNativeEmitMetadata({
+  artifacts,
   chunkSignature,
   dependencyModules,
   dependencyRuntimeFiles,
   emittedFiles,
   externsPath,
   metadataPath,
+  optionsSignature,
   metadataPathForNative,
   supportFiles,
+  typeMetadata,
+  typeMetadataDependencies,
 }: {
+  artifacts: FileContentSnapshot;
   chunkSignature: string;
   dependencyModules: string[];
   dependencyRuntimeFiles: string[];
   emittedFiles: string[];
   externsPath: string;
   metadataPath: string;
+  optionsSignature: string;
   metadataPathForNative: string;
   supportFiles: string[];
+  typeMetadata: NativeEmittedTypeMetadata[];
+  typeMetadataDependencies: FileContentSnapshot;
 }) {
-  await fs.promises.writeFile(
-    metadataPath,
-    JSON.stringify(
-      {
-        chunkSignature,
-        dependencyModules,
-        dependencyRuntimeFiles,
-        emittedFiles,
-        externsPath,
-        metadataPath: metadataPathForNative,
-        supportFiles,
-        version: NATIVE_EMIT_METADATA_VERSION,
-      } satisfies NativeEmitMetadata,
-      null,
-      2,
-    ),
-    "utf-8",
-  );
+  await writeJson(metadataPath, {
+    artifacts,
+    chunkSignature,
+    dependencyModules,
+    dependencyRuntimeFiles,
+    emittedFiles,
+    externsPath,
+    metadataPath: metadataPathForNative,
+    optionsSignature,
+    supportFiles,
+    typeMetadata,
+    typeMetadataDependencies,
+    version: NATIVE_EMIT_METADATA_VERSION,
+  } satisfies NativeEmitMetadata);
 }
 
 async function getMissingInputDiagnostics({
@@ -644,20 +797,8 @@ function createSimpleDiagnostic(messageText: string): ts.Diagnostic {
 async function readMetadata(
   metadataPath: string,
 ): Promise<NativeEmitMetadata | null> {
-  try {
-    const raw = await fs.promises.readFile(metadataPath, "utf-8");
-    const parsed = parseJson(raw, isNativeEmitMetadata, metadataPath);
-    if (parsed.version !== NATIVE_EMIT_METADATA_VERSION) {
-      return null;
-    }
-    return parsed;
-  } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) {
-      return null;
-    }
-
-    throw error;
-  }
+  const parsed = await readJsonIfExists(metadataPath, isNativeEmitMetadata);
+  return parsed?.version === NATIVE_EMIT_METADATA_VERSION ? parsed : null;
 }
 
 function toEmittedPath(
@@ -730,13 +871,18 @@ function canUseJsAnalysisFastPath(fileNames: string[]) {
   return fileNames.every((fileName) => /\.(?:[cm]?jsx?)$/u.test(fileName));
 }
 
-function createTrivialClosureIrFile(filePath: string): ClosureIrFileMetadata {
+function createTrivialTypeMetadataFile(
+  filePath: string,
+): ClosureTypeMetadataFile {
   return {
+    annotations: [],
+    declarations: [],
     decoratedOutputText: undefined,
-    enumDeclarations: [],
+    diagnostics: [],
+    enums: [],
     filePath,
-    topLevelDocs: [],
-    typeDeclarations: [],
+    sourceFilePath: filePath,
+    symbols: [],
   };
 }
 
@@ -747,14 +893,52 @@ function resolveScriptKind(fileName: string) {
   return ts.ScriptKind.JS;
 }
 
+const isContentIdentity = isObjectOf<FileContentSnapshot[string]>({
+  digest: isString,
+  size: isNumber,
+});
+
+const isNativeTypeMetadataCounts = isObjectOf<
+  NativeEmittedTypeMetadata["counts"]
+>({
+  annotationCount: isNumber,
+  enumDeclarationCount: isNumber,
+  memberAnnotationCount: isNumber,
+  typeDeclarationCount: isNumber,
+  unresolvedTypeReferenceCount: isNumber,
+});
+
+const isNativeTypeMetadataDiagnostic = isObjectOf<
+  NativeEmittedTypeMetadata["diagnostics"][number]
+>({
+  declarationFilePath: optional(isString),
+  phase: isString,
+  reason: isString,
+  sourceFilePath: isString,
+  symbolId: optional(isString),
+  symbolName: optional(isString),
+  target: optional(isString),
+});
+
+const isNativeEmittedTypeMetadata = isObjectOf<NativeEmittedTypeMetadata>({
+  counts: isNativeTypeMetadataCounts,
+  diagnostics: arrayOf(isNativeTypeMetadataDiagnostic),
+  emittedFile: isString,
+  hasTypeMetadata: isBoolean,
+});
+
 const isNativeEmitMetadata = isObjectOf<NativeEmitMetadata>({
+  artifacts: recordOf(isContentIdentity),
   chunkSignature: isString,
   dependencyModules: isStringArray,
   dependencyRuntimeFiles: isStringArray,
   emittedFiles: isStringArray,
   externsPath: isString,
   metadataPath: isString,
+  optionsSignature: isString,
   supportFiles: isStringArray,
+  typeMetadata: arrayOf(isNativeEmittedTypeMetadata),
+  typeMetadataDependencies: recordOf(isContentIdentity),
   version: isNumber,
 });
 

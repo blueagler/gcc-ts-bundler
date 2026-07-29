@@ -20,6 +20,12 @@ test("rejects deprecated extern flag aliases", () => {
   ).toThrow(/Unknown option/);
 });
 
+test("rejects the removed fatal-warnings flag", () => {
+  expect(() =>
+    parseCliArgs(["--entry", "./main.ts", "--fatal-warnings"]),
+  ).toThrow(/Unknown option/);
+});
+
 test("parses repeated typed build options", () => {
   const parsed = parseCliArgs([
     "--entry",
@@ -28,12 +34,15 @@ test("parses repeated typed build options", () => {
     "./worker.ts",
     "--extern",
     "./browser.externs.js",
+    "--typed-extern",
+    "./runtime.typed.externs.js",
     "--cache-mode",
     "temp",
   ]);
 
   expect(parsed.options.entries).toEqual(["./main.ts", "./worker.ts"]);
   expect(parsed.options.externs).toEqual(["./browser.externs.js"]);
+  expect(parsed.options.typedExterns).toEqual(["./runtime.typed.externs.js"]);
   expect(parsed.options.cache?.mode).toBe("temp");
   expect(parsed.options.packages).toBeUndefined();
 });

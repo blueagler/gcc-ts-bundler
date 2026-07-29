@@ -1,5 +1,31 @@
 use super::*;
 
+/// `export = x` has no ES module spelling, so SWC's TypeScript strip lowers it
+/// to `module.exports = x`. Every output shape this bundler emits is a
+/// `goog.module`, where `module` is not bound, so the lowering produced a
+/// reference to an undeclared global and Closure rejected the file
+/// (`JSC_UNDEFINED_VARIABLE: module`) — for *any* source using `export =`.
+///
+/// `export = x` means "this module's single export is x", which is exactly
+/// `export default x` in the module system we emit into; the CommonJS interop
+/// that consumers go through already maps a default export onto
+/// `module.exports`.
+fn rewrite_ts_export_assignment(mut module: Module) -> Module {
+    for item in &mut module.body {
+        let ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::TsExportAssignment(assignment)) =
+            item
+        else {
+            continue;
+        };
+        let expr = assignment.expr.clone();
+        let span = assignment.span;
+        *item = ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDefaultExpr(
+            swc_core::ecma::ast::ExportDefaultExpr { span, expr },
+        ));
+    }
+    module
+}
+
 pub(super) fn transform_program(
     module: swc_core::ecma::ast::Module,
     file_path: &Path,
@@ -9,15 +35,39 @@ pub(super) fn transform_program(
     let safe_enums = file_metadata
         .map(|metadata| {
             metadata
-                .enum_declarations
+                .enums
                 .iter()
-                .map(|enum_decl| enum_decl.name.clone())
+                .map(|enum_decl| enum_decl.binding_name.clone())
+                .chain(metadata.erased_const_enums.iter().cloned())
                 .collect::<HashSet<_>>()
         })
         .unwrap_or_default();
+    let erased_const_enums = file_metadata
+        .map(|metadata| {
+            metadata
+                .erased_const_enums
+                .iter()
+                .cloned()
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    // An erased const enum has no replacement object, so the inliner is the
+    // only thing that can resolve its members — and it has to read them before
+    // the declaration is dropped. A `@enum`-backed enum is deliberately not
+    // collected here: its reads resolve against the emitted object instead.
+    let erased_enum_values = if erased_const_enums.is_empty() {
+        HashMap::new()
+    } else {
+        collect_ts_enum_literal_values(&module)
+            .into_iter()
+            .filter(|(name, _)| erased_const_enums.contains(name))
+            .collect()
+    };
+    let module = rewrite_ts_export_assignment(module);
     let module = remove_closure_safe_enums(module, &safe_enums);
     let mut enum_literal_values = collect_ts_enum_literal_values(&module);
     enum_literal_values.extend(collect_imported_ts_enum_literal_values(&module, file_path));
+    enum_literal_values.extend(erased_enum_values);
     let mut program = Program::Module(module);
     let cm: Lrc<SourceMap> = Default::default();
     let resolver_marks =
@@ -38,6 +88,9 @@ pub(super) fn transform_program(
             .process(&mut program);
         }
         strip(unresolved_mark, top_level_mark).process(&mut program);
+        // `strip` lowers TS namespaces into an IIFE the printer then emits
+        // without the parentheses it requires; see `precedence`.
+        crate::transpile::precedence::normalize_expression_parens(&mut program);
     }
     if !enum_literal_values.is_empty() {
         program.visit_mut_with(&mut EnumValueInlineVisitor::new(enum_literal_values));
@@ -110,4 +163,14 @@ pub(super) fn print_expression(expression: Expr) -> std::result::Result<String, 
         span: Default::default(),
     }))?;
     Ok(printed.trim().trim_end_matches(';').to_string())
+}
+
+#[cfg(test)]
+pub(crate) fn print_program_for_test(program: &Program) -> std::result::Result<String, String> {
+    print_program(program)
+}
+
+#[cfg(test)]
+pub(crate) fn print_module_item_for_test(item: ModuleItem) -> std::result::Result<String, String> {
+    print_module_item(item)
 }

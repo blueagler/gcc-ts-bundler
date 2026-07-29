@@ -6,6 +6,8 @@ use super::*;
 
 pub(super) use self::analysis::collect_extern_property_names_with_externs;
 #[cfg(test)]
+pub(super) use self::analysis::collect_program_declared_names_for_test;
+#[cfg(test)]
 pub(super) use self::analysis::{
     collect_extern_property_names, collect_preserved_property_names,
     collect_static_property_names_from_text,

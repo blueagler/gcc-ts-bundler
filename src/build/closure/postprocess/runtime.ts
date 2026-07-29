@@ -1,103 +1,16 @@
-export function injectBundlerRuntimeEs5HelperBag(
-  code: string,
-  helperBag: string,
-) {
-  if (!helperBag) {
-    return code;
-  }
-  // The runtime preamble closes with this literal call, which Closure
-  // preserves verbatim. Helpers must be installed right after it: before any
-  // hoisted module code in the base chunk runs and before lazy chunks load.
-  const preambleMarker = ").call(this,globalThis);";
-  const preambleIndex = code.indexOf(preambleMarker);
-  if (preambleIndex !== -1) {
-    const insertAt = preambleIndex + preambleMarker.length;
-    return `${code.slice(0, insertAt)}\n${helperBag}${code.slice(insertAt)}`;
-  }
-  const runtimeAlias = findBundlerRuntimeFinalizeAlias(code);
-  const markers = runtimeAlias
-    ? [`${runtimeAlias}.u(`, `${runtimeAlias}.n(`]
-    : ["G.u(", "globalThis.__g.u(", 'globalThis["__g"].u('];
-  for (const marker of markers) {
-    const markerIndex = code.lastIndexOf(marker);
-    if (markerIndex !== -1) {
-      return `${code.slice(0, markerIndex)}${helperBag}${code.slice(markerIndex)}`;
-    }
-  }
-  return `${code}${helperBag}`;
-}
-
-export function canonicalizeBundlerRuntimeRootAccess(code: string) {
-  if (!code.includes("var G=globalThis.__g,_=G._")) {
-    return code;
-  }
-  let next = code
-    .replaceAll("globalThis.__g.", "G.")
-    .replaceAll('globalThis["__g"].', "G.");
-  for (const runtimeAlias of findBundlerRuntimeRootAliases(next)) {
-    if (runtimeAlias === "G") {
-      continue;
-    }
-    next = next.replaceAll(`${runtimeAlias}.`, "G.");
-    next = stripStandaloneRuntimeAlias(next, runtimeAlias);
-  }
-  return next;
-}
-
-export function findBundlerRuntimeFinalizeAlias(code: string) {
-  const aliases = findBundlerRuntimeRootAliases(code);
-  for (const alias of aliases) {
-    if (code.includes(`${alias}.u(`) || code.includes(`${alias}.n(`)) {
-      return alias;
-    }
-  }
-  return undefined;
-}
-
+/**
+ * Script-mode chunks reference Closure's `--rename_prefix_namespace` symbols
+ * through `$gcc`; every wrapped chunk shares the object via `globalThis`.
+ *
+ * This is the only bundler-runtime output rewrite left. The alias
+ * canonicalisation that used to run beside it ran `String.replaceAll` over
+ * minified JavaScript and rewrote string literals and unrelated property
+ * accesses along with the aliases it was aiming at (`"tab.js"` -> `"taG.js"`,
+ * `o.b.c` -> `o.G.c`). It only ever fired for the post-Closure ES5 helper bag,
+ * which no longer exists: helper pooling happens before Closure, so no chunk
+ * grows a second runtime-root alias to collapse.
+ */
 export function wrapBundlerRuntimeOutputFile(code: string) {
   const trimmed = code.trimEnd();
-  // Closure's --rename_prefix_namespace output references top-level symbols
-  // through $gcc; every wrapped chunk shares the object via globalThis.
   return `!function(){\nvar $gcc=globalThis.$gcc=globalThis.$gcc||{};\n${trimmed}\n}();\n`;
-}
-
-function findBundlerRuntimeRootAliases(code: string) {
-  const aliases = new Set<string>();
-  for (const pattern of [
-    /\bvar\s+([A-Za-z_$][\w$]*)=globalThis(?:\.__g|\["__g"\])(?=[,;])/g,
-    /,([A-Za-z_$][\w$]*)=globalThis(?:\.__g|\["__g"\])(?=[,;])/g,
-    /(?:^|[;(])([A-Za-z_$][\w$]*)=globalThis(?:\.__g|\["__g"\])(?=;)/gm,
-  ]) {
-    for (const match of code.matchAll(pattern)) {
-      const alias = match[1];
-      if (alias !== undefined) {
-        aliases.add(alias);
-      }
-    }
-  }
-  return [...aliases];
-}
-
-function stripStandaloneRuntimeAlias(code: string, runtimeAlias: string) {
-  const escapedAlias = escapeRegex(runtimeAlias);
-  return code
-    .replace(
-      new RegExp(
-        `\\bvar ${escapedAlias}=globalThis(?:\\.__g|\\["__g"\\]);(?=G\\.)`,
-        "g",
-      ),
-      "",
-    )
-    .replace(
-      new RegExp(
-        `(^|[;\\n])${escapedAlias}=globalThis(?:\\.__g|\\["__g"\\]);(?=G\\.)`,
-        "gm",
-      ),
-      "$1",
-    )
-    .replace(/\n{3,}/g, "\n\n");
-}
-
-function escapeRegex(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

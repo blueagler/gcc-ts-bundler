@@ -51,6 +51,8 @@ interface NativeClosureCompileJob {
   renamePrefixNamespace?: string;
   rewritePolyfills: boolean;
   warningLevel: string;
+  hasTypeMetadata: boolean;
+  typeMetadataCounts: NativeTypeMetadataCounts;
 }
 
 interface NativeGeneratedAsset {
@@ -58,20 +60,21 @@ interface NativeGeneratedAsset {
   text: string;
 }
 
-interface NativeEs5HelperRewriteOutput {
+interface NativeGccExportsRewrite {
   code: string;
-  helperKeys: string[];
+  /** Fail-closed telemetry: export slots this rewrite actually converted. */
+  rewrittenExportCount: number;
 }
 
 interface NativePostprocessAction {
   inputPath: string;
-  kind:
-    | "copy"
-    | "rewrite-decorator-metadata"
-    | "rewrite-gcc-exports"
-    | "rewrite-gcc-exports-and-decorator-metadata";
+  /**
+   * What postprocess has to do to the chunk beyond publishing it. `"copy"`
+   * still goes through the runtime wrapper and base-specifier rewrites; those
+   * are decided from the chunk mode, not from the kind.
+   */
+  kind: "copy" | "rewrite-gcc-exports";
   outputPath: string;
-  propertyRenamingReportPath?: string;
 }
 
 interface NativePrepareClosureJobsInput {
@@ -90,10 +93,13 @@ interface NativePrepareClosureJobsInput {
   languageOut: string;
   manifestFile: string;
   nativeExternPath: string;
+  /** Whether CSS rows can be attached to the manifest after the compile. */
+  needsCssRuntime: boolean;
   outDir: string;
   packageRoot: string;
   publicPath: string;
   supportFiles: string[];
+  typeMetadata: NativeEmittedTypeMetadata[];
 }
 
 interface NativePrepareClosureJobsOutput {
@@ -110,6 +116,13 @@ interface NativePackageAliasEntry {
   targetPath: string;
 }
 
+interface NativeResolvedImportEntry {
+  importerFilePath: string;
+  moduleId: string;
+  specifier: string;
+  targetPath: string;
+}
+
 interface NativeLazyImportEntry {
   importerFilePath: string;
   moduleId: string;
@@ -123,6 +136,7 @@ interface NativeResolveGraphOutput {
   graph: NativeDependencyGraphEntry[];
   lazyImports: NativeLazyImportEntry[];
   packageAliases: NativePackageAliasEntry[];
+  resolvedImports: NativeResolvedImportEntry[];
   packageJsonFiles: string[];
   sourceFiles: string[];
   trackedFiles: string[];
@@ -147,12 +161,38 @@ interface NativeShimEntry {
   shimPath: string;
 }
 
+export interface NativeTypeMetadataCounts {
+  annotationCount: number;
+  enumDeclarationCount: number;
+  memberAnnotationCount: number;
+  typeDeclarationCount: number;
+  unresolvedTypeReferenceCount: number;
+}
+
+export interface NativeTypeMetadataDiagnostic {
+  declarationFilePath?: string;
+  phase: string;
+  reason: string;
+  sourceFilePath: string;
+  symbolId?: string;
+  symbolName?: string;
+  target?: string;
+}
+
+export interface NativeEmittedTypeMetadata {
+  counts: NativeTypeMetadataCounts;
+  diagnostics: NativeTypeMetadataDiagnostic[];
+  emittedFile: string;
+  hasTypeMetadata: boolean;
+}
+
 interface NativeTranspileOutput {
   emittedFiles: string[];
   explicitExternPropertyCount: number;
   externsPath: string;
   preservedPropertyCount: number;
   supportFiles: string[];
+  typeMetadata: NativeEmittedTypeMetadata[];
 }
 
 interface NativeLazyImportInput {
@@ -169,6 +209,8 @@ interface NativeTranspilePackageAlias {
 }
 
 interface NativeTranspileChunkInput {
+  /** Chunks the loader guarantees have executed before this one. */
+  dependencies: string[];
   files: string[];
   name: string;
 }
@@ -179,16 +221,6 @@ interface NativeClassMapCallInput {
   keyExcludePattern?: string | undefined;
   keyPattern?: string | undefined;
   stringLiteralArgIndex?: number | undefined;
-}
-
-/** Mirrors `TypedAnnotationFile`; napi object passed to `transpile_sources`. */
-interface NativeTypedAnnotationFileInput {
-  bindings: Array<{
-    jsdoc: string;
-    members: Array<{ jsdoc: string; name: string }>;
-    name: string;
-  }>;
-  filePath: string;
 }
 
 interface NativeBinding {
@@ -221,12 +253,7 @@ interface NativeBinding {
     workspaceDir: string,
     packageMode: string,
   ): NativeResolveGraphOutput;
-  rewriteDecoratorMetadata(
-    code: string,
-    propertyRenamingReport: string,
-  ): string;
-  rewriteBundlerRuntimeEs5Helpers(code: string): NativeEs5HelperRewriteOutput;
-  rewriteGccExports(code: string): string;
+  rewriteGccExports(code: string): NativeGccExportsRewrite;
   transpileSources(
     fileNames: string[],
     explicitExternPaths: string[],
@@ -237,12 +264,13 @@ interface NativeBinding {
     runtimeModuleSourceMapFile: string | null,
     workspaceDir: string,
     packageAliases: NativeTranspilePackageAlias[],
+    resolvedImports: NativeResolvedImportEntry[],
     packageJsonFiles: string[],
     lazyImports: NativeLazyImportInput[],
     chunkGraph: NativeTranspileChunkInput[],
     classMapCalls: NativeClassMapCallInput[],
     pureCallees: string[],
-    typedAnnotations: NativeTypedAnnotationFileInput[],
+    typeInferenceDisabled: boolean,
   ): NativeTranspileOutput;
   writeEntryShims(entries: NativeShimEntry[]): string[];
 }
@@ -261,8 +289,6 @@ const NATIVE_BINDING_METHOD_FLAGS: Record<keyof NativeBinding, true> = {
   publishedOutputSnapshotMatches: true,
   publishedOutputsMatch: true,
   resolveGraph: true,
-  rewriteBundlerRuntimeEs5Helpers: true,
-  rewriteDecoratorMetadata: true,
   rewriteGccExports: true,
   transpileSources: true,
   writeEntryShims: true,
@@ -319,6 +345,7 @@ export function resolveGraph(input: {
     ),
     lazyImports: result.lazyImports,
     packageAliases: result.packageAliases,
+    resolvedImports: result.resolvedImports,
     packageJsonFiles: result.packageJsonFiles,
     sourceFiles: result.sourceFiles,
     trackedFiles: result.trackedFiles,
@@ -352,25 +379,19 @@ export function rewriteGccExports(code: string) {
   return loadBinding().rewriteGccExports(code);
 }
 
-export function rewriteDecoratorMetadata(
-  code: string,
-  propertyRenamingReport: string,
-) {
-  return loadBinding().rewriteDecoratorMetadata(code, propertyRenamingReport);
-}
-
 export function transpileSources(input: {
   chunkGraph: NativeTranspileChunkInput[];
   chunkMode: string;
   classMapCalls: NativeClassMapCallInput[];
   pureCallees: string[];
-  typedAnnotations: NativeTypedAnnotationFileInput[];
+  typeInferenceDisabled: boolean;
   explicitExternPaths: string[];
   externsPath: string;
   fileNames: string[];
   metadataPath: string;
   outDir: string;
   packageAliases: NativeTranspilePackageAlias[];
+  resolvedImports: NativeResolvedImportEntry[];
   packageJsonFiles: string[];
   lazyImports: NativeLazyImportInput[];
   runtimeModuleSourceMapFile: string | undefined;
@@ -386,21 +407,18 @@ export function transpileSources(input: {
     input.runtimeModuleSourceMapFile ?? null,
     input.workspaceDir,
     input.packageAliases,
+    input.resolvedImports,
     input.packageJsonFiles,
     input.lazyImports,
     input.chunkGraph,
     input.classMapCalls,
     input.pureCallees,
-    input.typedAnnotations,
+    input.typeInferenceDisabled,
   );
 }
 
 export function prepareClosureJobs(input: NativePrepareClosureJobsInput) {
   return loadBinding().prepareClosureJobs(input);
-}
-
-export function rewriteBundlerRuntimeEs5Helpers(code: string) {
-  return loadBinding().rewriteBundlerRuntimeEs5Helpers(code);
 }
 
 export function writeEntryShims(input: {

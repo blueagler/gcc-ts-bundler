@@ -1,8 +1,14 @@
 use super::*;
 
-#[derive(Default)]
-pub(crate) struct ObjectPatternParamVisitor;
+pub(crate) struct ObjectPatternParamVisitor {
+    fresh_names: FreshNameAllocator,
+}
 
+impl ObjectPatternParamVisitor {
+    pub(crate) fn new(fresh_names: FreshNameAllocator) -> Self {
+        Self { fresh_names }
+    }
+}
 impl VisitMut for ObjectPatternParamVisitor {
     fn visit_mut_module_items(&mut self, items: &mut Vec<ModuleItem>) {
         items.visit_mut_children_with(self);
@@ -18,7 +24,10 @@ impl VisitMut for ObjectPatternParamVisitor {
                 swc_core::ecma::ast::Decl::Fn(function_decl)
                     if is_component_like_name(function_decl.ident.sym.as_ref()) =>
                 {
-                    rewrite_function_like_component(&mut function_decl.function);
+                    rewrite_function_like_component(
+                        &mut function_decl.function,
+                        &mut self.fresh_names,
+                    );
                 }
                 swc_core::ecma::ast::Decl::Var(var_decl) => {
                     for declarator in &mut var_decl.decls {
@@ -30,10 +39,13 @@ impl VisitMut for ObjectPatternParamVisitor {
                         }
                         if let Some(init) = &mut declarator.init {
                             match &mut **init {
-                                Expr::Arrow(arrow) => rewrite_arrow_component(arrow),
-                                Expr::Fn(function_expr) => {
-                                    rewrite_function_like_component(&mut function_expr.function)
+                                Expr::Arrow(arrow) => {
+                                    rewrite_arrow_component(arrow, &mut self.fresh_names)
                                 }
+                                Expr::Fn(function_expr) => rewrite_function_like_component(
+                                    &mut function_expr.function,
+                                    &mut self.fresh_names,
+                                ),
                                 _ => {}
                             }
                         }
@@ -50,7 +62,10 @@ impl VisitMut for ObjectPatternParamVisitor {
         match stmt {
             Stmt::Decl(swc_core::ecma::ast::Decl::Fn(function_decl)) => {
                 if is_component_like_name(function_decl.ident.sym.as_ref()) {
-                    rewrite_function_like_component(&mut function_decl.function);
+                    rewrite_function_like_component(
+                        &mut function_decl.function,
+                        &mut self.fresh_names,
+                    );
                 }
             }
             Stmt::Decl(swc_core::ecma::ast::Decl::Var(var_decl)) => {
@@ -63,10 +78,13 @@ impl VisitMut for ObjectPatternParamVisitor {
                     }
                     if let Some(init) = &mut declarator.init {
                         match &mut **init {
-                            Expr::Arrow(arrow) => rewrite_arrow_component(arrow),
-                            Expr::Fn(function_expr) => {
-                                rewrite_function_like_component(&mut function_expr.function)
+                            Expr::Arrow(arrow) => {
+                                rewrite_arrow_component(arrow, &mut self.fresh_names)
                             }
+                            Expr::Fn(function_expr) => rewrite_function_like_component(
+                                &mut function_expr.function,
+                                &mut self.fresh_names,
+                            ),
                             _ => {}
                         }
                     }
@@ -85,7 +103,10 @@ fn is_component_like_name(value: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn rewrite_function_like_component(function: &mut swc_core::ecma::ast::Function) {
+fn rewrite_function_like_component(
+    function: &mut swc_core::ecma::ast::Function,
+    fresh_names: &mut FreshNameAllocator,
+) {
     let Some(first_param) = function.params.first_mut() else {
         return;
     };
@@ -93,13 +114,14 @@ fn rewrite_function_like_component(function: &mut swc_core::ecma::ast::Function)
         return;
     };
 
-    let props_ident = create_ident("__props");
-    let setup_stmts = build_component_prop_setup(object_pat, "__props").unwrap_or_else(|| {
-        vec![create_props_destructure_stmt(
-            quote_object_pattern_keys(object_pat.clone()),
-            &props_ident,
-        )]
-    });
+    let props_ident = create_ident(&fresh_names.fresh("__props"));
+    let setup_stmts = build_component_prop_setup(object_pat, props_ident.sym.as_ref())
+        .unwrap_or_else(|| {
+            vec![create_props_destructure_stmt(
+                quote_object_pattern_keys(object_pat.clone()),
+                &props_ident,
+            )]
+        });
     first_param.pat = Pat::Ident(BindingIdent {
         id: props_ident.clone(),
         type_ann: None,
@@ -110,7 +132,7 @@ fn rewrite_function_like_component(function: &mut swc_core::ecma::ast::Function)
     }
 }
 
-fn rewrite_arrow_component(arrow: &mut ArrowExpr) {
+fn rewrite_arrow_component(arrow: &mut ArrowExpr, fresh_names: &mut FreshNameAllocator) {
     let Some(first_param) = arrow.params.first_mut() else {
         return;
     };
@@ -118,13 +140,14 @@ fn rewrite_arrow_component(arrow: &mut ArrowExpr) {
         return;
     };
 
-    let props_ident = create_ident("__props");
-    let setup_stmts = build_component_prop_setup(object_pat, "__props").unwrap_or_else(|| {
-        vec![create_props_destructure_stmt(
-            quote_object_pattern_keys(object_pat.clone()),
-            &props_ident,
-        )]
-    });
+    let props_ident = create_ident(&fresh_names.fresh("__props"));
+    let setup_stmts = build_component_prop_setup(object_pat, props_ident.sym.as_ref())
+        .unwrap_or_else(|| {
+            vec![create_props_destructure_stmt(
+                quote_object_pattern_keys(object_pat.clone()),
+                &props_ident,
+            )]
+        });
     *first_param = Pat::Ident(BindingIdent {
         id: props_ident.clone(),
         type_ann: None,

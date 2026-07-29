@@ -6,13 +6,16 @@
  *
  * These match standard web-worker globals from TypeScript's
  * `lib.webworker.d.ts` and fill gaps in Closure's shipped browser externs.
+ *
+ * A gap-filling extern must declare only names the platform externs do NOT
+ * already own. `self` and `navigator` used to be declared here as well, and
+ * Closure's own `externs.zip//window.js` declares both: any job compiled
+ * against the default browser environment (rather than `--env CUSTOM` with a
+ * typed slice) failed outright with JSC_VAR_MULTIPLY_DECLARED_ERROR. They are
+ * not listed here any more because the platform already declares them, and
+ * `test/platform-externs.test.mjs` now proves no bundled extern re-declares a
+ * platform global, so the rule cannot silently regress.
  */
-
-/** @type {!WorkerGlobalScope|!Window} */
-var self;
-
-/** @type {!WorkerNavigator|!Navigator} */
-var navigator;
 
 /** @type {!WorkerLocation|!Location} */
 var location;
@@ -98,7 +101,7 @@ var CookieStoreDeleteOptions;
  */
 var CookieStoreGetOptions;
 
-/** @constructor @extends {EventTarget} */
+/** @constructor @implements {EventTarget} */
 function CookieStore() {}
 
 /** @return {!Promise<void>} */

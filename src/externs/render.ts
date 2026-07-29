@@ -3,9 +3,8 @@ import { analyzeRuntimeUsage } from "./runtime-analysis";
 import {
   collectBoundaryAwareExternLines,
   collectBoundaryAwareUsageMemberNames,
-  collectCandidateExternLines,
 } from "./contracts";
-import { renderStructuralExternLine } from "./shared";
+import { renderStructuralExternLine } from "./barriers";
 
 /** How the app reads members, split by the syntax Closure sees. */
 export interface AppUsageMembers {
@@ -23,15 +22,22 @@ function createEmptyAppUsageMembers(): AppUsageMembers {
  *
  * ```
  * extern = protocolMembers
+ *        ∪ selfReferentialKeys
  *        ∪ (stringDefined ∩ dotAccessed)
  *        ∪ (dotDefined    ∩ stringLiteralRead)
  *        ∪ (dotAccessed   ∩ constructedKeyPrefix match)
+ *        ∪ (dotAccessed   ∩ constructedKeyFragment match)
  * ```
  *
  * The last class covers keys assembled at runtime from an identifier-shaped
  * `$`/`_` template head (`` node[`$evt${type}`] `` in vue vapor's event
  * delegation): the read is statically invisible, but a dot-defined member
  * starting with a collected prefix is reached through it.
+ *
+ * The fragment class is the `+`-concatenation form of the same hazard, and the
+ * one that broke jQuery: `deferred[tuple[0] + "With"] = list.fireWith` defines
+ * `resolveWith` through an invisible key, `readyList.resolveWith(…)` reads it
+ * with a dot, and only the dot side renames.
  *
  * A member that is dot-defined *and* dot-accessed renames consistently inside
  * one Closure invocation and must NOT be externed — externing it (and the
@@ -40,10 +46,12 @@ function createEmptyAppUsageMembers(): AppUsageMembers {
  */
 export function collectRuntimeUsageExternLines(
   runtimeUsage: {
+    constructedKeyFragments: ReadonlySet<string>;
     constructedKeyPrefixes: ReadonlySet<string>;
     dotAccessed: ReadonlySet<string>;
     dotDefined: Iterable<string>;
     protocolMembers: Iterable<string>;
+    selfReferentialKeys: Iterable<string>;
     stringDefined: Iterable<string>;
     stringLiteralRead: ReadonlySet<string>;
   },
@@ -51,6 +59,13 @@ export function collectRuntimeUsageExternLines(
 ): Set<string> {
   const emittedLines = new Set<string>();
   for (const member of runtimeUsage.protocolMembers) {
+    emittedLines.add(renderStructuralExternLine(member));
+  }
+  // Self-referential keys are unconditional: the string that names the key is
+  // the whole evidence, and it is already narrow enough that intersecting it
+  // with a read class would only lose the hazard it exists to catch (the read
+  // goes through a variable and is statically invisible).
+  for (const member of runtimeUsage.selfReferentialKeys) {
     emittedLines.add(renderStructuralExternLine(member));
   }
   for (const member of runtimeUsage.stringDefined) {
@@ -74,17 +89,29 @@ export function collectRuntimeUsageExternLines(
   // compiled templates assign handlers to plain locals) matching a
   // collected `$`/`_` template prefix must keep its literal name.
   const prefixes = [...runtimeUsage.constructedKeyPrefixes];
-  if (prefixes.length > 0) {
+  const fragments = [...runtimeUsage.constructedKeyFragments].map(
+    (fragment) => {
+      const separator = fragment.indexOf(":");
+      return {
+        side: fragment.slice(0, separator),
+        text: fragment.slice(separator + 1),
+      };
+    },
+  );
+  if (prefixes.length > 0 || fragments.length > 0) {
     for (const member of [
       ...runtimeUsage.dotAccessed,
       ...appUsage.dotAccessed,
     ]) {
-      if (
-        prefixes.some(
-          (prefix) =>
-            member.length > prefix.length && member.startsWith(prefix),
-        )
-      ) {
+      const matchesPrefix = prefixes.some(
+        (prefix) => member.length > prefix.length && member.startsWith(prefix),
+      );
+      const matchesFragment = fragments.some(
+        ({ side, text }) =>
+          member.length > text.length &&
+          (side === "prefix" ? member.startsWith(text) : member.endsWith(text)),
+      );
+      if (matchesPrefix || matchesFragment) {
         emittedLines.add(renderStructuralExternLine(member));
       }
     }
@@ -92,22 +119,7 @@ export function collectRuntimeUsageExternLines(
   return emittedLines;
 }
 
-type GenerateExternsMode = "boundary-aware" | "candidates" | "runtime-aware";
-
-export function renderCandidateExterns({
-  analysis,
-  modules,
-}: {
-  analysis: ExternAnalysisContext;
-  modules: string[];
-}) {
-  return renderExternText({
-    emittedLines: collectCandidateExternLines(analysis.registry),
-    mode: "candidates",
-    modules,
-    scannedFiles: analysis.scannedFiles,
-  });
-}
+type GenerateExternsMode = "boundary-aware" | "runtime-aware";
 
 export function renderBoundaryAwareExterns({
   analysis,

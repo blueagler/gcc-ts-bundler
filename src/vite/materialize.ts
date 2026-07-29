@@ -16,6 +16,11 @@ import {
   toRelativeImportSpecifier,
   type CapturedModuleResolutionCache,
 } from "./capture";
+import {
+  resolveRuntimeResolutionIdentity,
+  runtimeResolutionKey,
+} from "./type-metadata/resolution-provenance";
+import type { RuntimeResolutionIdentity } from "./type-metadata/types";
 import type {
   CapturedModule,
   CapturedRuntimeModule,
@@ -76,6 +81,7 @@ export async function materializeCapturedGraph(
   const filePathByModuleId = new Map<string, string>();
   const modules: CapturedRuntimeModule[] = [];
   const authoredFiles: string[] = [];
+  const runtimeResolutionByKey = new Map<string, RuntimeResolutionIdentity>();
   for (const moduleId of materializedModuleIds) {
     const relativePath = toMaterializedRelativePath(
       input.config.root,
@@ -110,14 +116,26 @@ export async function materializeCapturedGraph(
           this.error(`Missing materialized output path for ${moduleId}.`);
         }
 
+        const rewritten = await rewriteModuleImports.call(this, {
+          code: record.code,
+          conditions: [
+            "browser",
+            "import",
+            ...(input.config.resolve?.conditions ?? []),
+          ],
+          filePathByModuleId,
+          importerId: moduleId,
+          metrics: input.metrics,
+          resolutionCache: input.resolutionCache,
+        });
+        for (const resolution of rewritten.runtimeResolutions) {
+          runtimeResolutionByKey.set(
+            runtimeResolutionKey(resolution),
+            resolution,
+          );
+        }
         return {
-          content: await rewriteModuleImports.call(this, {
-            code: record.code,
-            filePathByModuleId,
-            importerId: moduleId,
-            metrics: input.metrics,
-            resolutionCache: input.resolutionCache,
-          }),
+          content: rewritten.code,
           relativePath: path
             .relative(input.srcDir, outputPath)
             .replace(/\\/g, "/"),
@@ -163,6 +181,10 @@ export async function materializeCapturedGraph(
         return `./${path.relative(input.srcDir, filePath).replace(/\\/g, "/")}`;
       })
       .sort((left, right) => left.localeCompare(right)),
+    runtimeResolutions: [...runtimeResolutionByKey.values()].sort(
+      (left, right) =>
+        runtimeResolutionKey(left).localeCompare(runtimeResolutionKey(right)),
+    ),
     srcDir: input.srcDir,
   };
 }
@@ -171,6 +193,7 @@ async function rewriteModuleImports(
   this: PluginContext,
   input: {
     code: string;
+    conditions: string[];
     filePathByModuleId: Map<string, string>;
     importerId: string;
     metrics?: ViteBuildMetrics | undefined;
@@ -185,6 +208,7 @@ async function rewriteModuleImports(
     ts.ScriptKind.JS,
   );
   const edits: Array<{ end: number; start: number; text: string }> = [];
+  const runtimeResolutions = new Map<string, RuntimeResolutionIdentity>();
   const pendingEdits: Promise<void>[] = [];
 
   const addSpecifierEdit = async (
@@ -198,6 +222,20 @@ async function rewriteModuleImports(
       resolutionCache: input.resolutionCache,
       specifier,
     });
+    if (resolved && !resolved.external) {
+      const runtimeResolution = await resolveRuntimeResolutionIdentity({
+        conditions: input.conditions,
+        importerModuleId: input.importerId,
+        resolvedModuleId: resolved.id,
+        specifier,
+      });
+      if (runtimeResolution) {
+        runtimeResolutions.set(
+          runtimeResolutionKey(runtimeResolution),
+          runtimeResolution,
+        );
+      }
+    }
     if (!resolved || resolved.external) {
       if (isSupportedExternalSpecifier(specifier)) {
         return;
@@ -261,11 +299,10 @@ async function rewriteModuleImports(
   visit(sourceFile);
   await Promise.all(pendingEdits);
 
-  if (edits.length === 0) {
-    return input.code;
-  }
-
-  return applyTextEdits(input.code, edits);
+  return {
+    code: edits.length === 0 ? input.code : applyTextEdits(input.code, edits),
+    runtimeResolutions: [...runtimeResolutions.values()],
+  };
 }
 
 function shouldOmitPrunedImport(

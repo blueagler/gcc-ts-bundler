@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use napi_derive::napi;
 
+use crate::closure_metadata::{EmittedTypeMetadata, TypeMetadataCounts};
 use crate::pathing::{
     bundler_runtime_ids_are_readable, to_bundler_runtime_chunk_id, to_bundler_runtime_module_id,
     to_goog_module_id,
@@ -55,10 +56,16 @@ pub struct PrepareClosureJobsInput {
     pub languageOut: String,
     pub manifestFile: String,
     pub nativeExternPath: String,
+    /// Whether the consumer can attach CSS rows to the runtime manifest after
+    /// the compile. Standalone builds never do; the Vite plugin does, and
+    /// answers from its pre-compile CSS-ownership scan. Gates the `<link>`
+    /// loader and the per-chunk CSS fan-out out of the runtime preamble.
+    pub needsCssRuntime: bool,
     pub outDir: String,
     pub packageRoot: String,
     pub publicPath: String,
     pub supportFiles: Vec<String>,
+    pub typeMetadata: Vec<EmittedTypeMetadata>,
 }
 
 #[allow(non_snake_case)]
@@ -91,6 +98,8 @@ pub struct ClosureCompileJob {
     pub renamePrefixNamespace: Option<String>,
     pub rewritePolyfills: bool,
     pub warningLevel: String,
+    pub hasTypeMetadata: bool,
+    pub typeMetadataCounts: TypeMetadataCounts,
 }
 
 #[allow(non_snake_case)]
@@ -100,7 +109,6 @@ pub struct PostprocessAction {
     pub inputPath: String,
     pub kind: String,
     pub outputPath: String,
-    pub propertyRenamingReportPath: Option<String>,
 }
 
 #[allow(non_snake_case)]
@@ -114,11 +122,18 @@ pub struct PrepareClosureJobsOutput {
     pub publishedOutputs: Vec<String>,
 }
 
+/// Emission shape for chunked output.
+///
+/// `split` is deliberately absent: it names the same emission shape as
+/// `bundler-runtime` (shared chunk graph, graph-derived renameable module ids,
+/// shared capability-gated runtime, envelope chosen by the output-type gate) and
+/// is folded into it at the parse boundary. Keeping one variant per shape rather
+/// than one per public mode name is what stops a shape decision from silently
+/// applying to only one of the two.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChunkMode {
     BundlerRuntime,
     Off,
-    Split,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -138,9 +153,9 @@ pub fn prepare_closure_jobs(
 ) -> std::result::Result<PrepareClosureJobsOutput, String> {
     let chunk_mode = parse_chunk_mode(&input.chunkMode)?;
     let chunk_output_type = parse_chunk_output_type(&input.chunkOutputType)?;
-    if chunk_output_type.is_esm() && chunk_mode != ChunkMode::BundlerRuntime {
+    if chunk_output_type.is_esm() && chunk_mode == ChunkMode::Off {
         return Err(format!(
-            "chunks.outputType \"esm\" requires chunks.mode \"bundler-runtime\", got {:?}.",
+            "chunks.outputType \"esm\" requires a chunked mode, got {:?}.",
             input.chunkMode
         ));
     }
@@ -164,19 +179,7 @@ pub fn prepare_closure_jobs(
             &warning_level,
             chunk_output_type,
         ),
-        // Split confines globals to one namespace object so plain-script
-        // chunks cannot collide with renamed globalThis.* properties; the
-        // split prelude declares the namespace before any chunk runs.
-        ChunkMode::Off => {
-            prepare_off_mode_jobs(&input, &resolved_chunks, &raw_dir, &warning_level, None)
-        }
-        ChunkMode::Split => prepare_off_mode_jobs(
-            &input,
-            &resolved_chunks,
-            &raw_dir,
-            &warning_level,
-            Some("$gcc".to_string()),
-        ),
+        ChunkMode::Off => prepare_off_mode_jobs(&input, &resolved_chunks, &raw_dir, &warning_level),
     }
 }
 
@@ -190,8 +193,7 @@ fn parse_chunk_output_type(value: &str) -> std::result::Result<ChunkOutputType, 
 
 fn parse_chunk_mode(value: &str) -> std::result::Result<ChunkMode, String> {
     match value {
-        "split" => Ok(ChunkMode::Split),
-        "bundler-runtime" => Ok(ChunkMode::BundlerRuntime),
+        "split" | "bundler-runtime" => Ok(ChunkMode::BundlerRuntime),
         "off" => Ok(ChunkMode::Off),
         _ => Err(format!("Unsupported chunk mode: {value}")),
     }

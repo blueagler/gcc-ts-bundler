@@ -11,13 +11,43 @@ type ClosureCompilerInstance = InstanceType<
   typeof closureCompilerPackage.compiler
 >;
 
-function applyInternalClosureDebugOptions(
-  closureOptions: ClosureCompilerOptions,
-) {
+const MANAGED_CLOSURE_FLAGS = new Set(
+  [
+    "assumeFunctionWrapper",
+    "chunk",
+    "chunkOutputPathPrefix",
+    "chunkOutputType",
+    "compilationLevel",
+    "dependencyMode",
+    "entryPoint",
+    "env",
+    "externs",
+    "js",
+    "jsOutputFile",
+    "languageIn",
+    "languageOut",
+    "propertyMapInputFile",
+    "propertyRenamingReport",
+    "renamePrefixNamespace",
+    "rewritePolyfills",
+    "variableMapInputFile",
+    "variableRenamingReport",
+    "warningLevel",
+  ].map(normalizeClosureFlagName),
+);
+
+export interface ClosureCompilerEnvironment {
+  options: ClosureCompilerOptions;
+  typeInferenceDisabled: boolean;
+}
+
+export function resolveClosureCompilerEnvironment(): ClosureCompilerEnvironment {
+  const options: ClosureCompilerOptions = {};
   if (process.env["GCC_CLOSURE_DEBUG"] === "1") {
-    closureOptions["debug"] = true;
-    closureOptions["formatting"] = "PRETTY_PRINT";
+    options["debug"] = true;
+    options["formatting"] = "PRETTY_PRINT";
   }
+
   // Space-separated `--flag[=value]` pairs appended verbatim, for measuring
   // candidate Closure flags without a rebuild (see docs/development.md).
   const extraFlags = process.env["GCC_CLOSURE_EXTRA_FLAGS"];
@@ -27,13 +57,31 @@ function applyInternalClosureDebugOptions(
         continue;
       }
       const separator = flag.indexOf("=");
-      if (separator === -1) {
-        closureOptions[flag.slice(2)] = true;
-      } else {
-        closureOptions[flag.slice(2, separator)] = flag.slice(separator + 1);
+      const name = flag.slice(2, separator === -1 ? undefined : separator);
+      if (MANAGED_CLOSURE_FLAGS.has(normalizeClosureFlagName(name))) {
+        throw new TypeError(
+          `GCC_CLOSURE_EXTRA_FLAGS may not override managed Closure flag --${name}.`,
+        );
       }
+      const value = separator === -1 ? true : flag.slice(separator + 1);
+      const previous = options[name];
+      options[name] =
+        previous === undefined
+          ? value
+          : Array.isArray(previous)
+            ? [...previous, value]
+            : [previous, value];
     }
   }
+
+  return {
+    options,
+    typeInferenceDisabled: process.env["GCC_DISABLE_TYPE_INFERENCE"] === "1",
+  };
+}
+
+function normalizeClosureFlagName(name: string) {
+  return name.replace(/[-_]/gu, "").toLowerCase();
 }
 
 /**
@@ -48,19 +96,17 @@ function applyInternalClosureDebugOptions(
  * never the user's to fix. Measured on a real chunk job with untyped input:
  * -38 B gzip, +183 ms.
  *
- * Restricted to bundler-runtime ADVANCED: that is the only combination whose
- * input carries the typed annotations this exists to feed and that runs the
- * passes consuming them. `GCC_DISABLE_TYPE_INFERENCE=1` is the escape hatch
- * for bisecting a suspected inference-induced break.
+ * Restricted to ADVANCED jobs whose native inputs actually delivered type
+ * metadata. `GCC_DISABLE_TYPE_INFERENCE=1` is the escape hatch for bisecting
+ * a suspected inference-induced break.
  */
 export function shouldEnableTypeInference(
-  chunkMode: string,
   compilationLevel: string,
+  hasTypeMetadata: boolean,
+  typeInferenceDisabled = process.env["GCC_DISABLE_TYPE_INFERENCE"] === "1",
 ) {
   return (
-    chunkMode === "bundler-runtime" &&
-    compilationLevel === "ADVANCED" &&
-    process.env["GCC_DISABLE_TYPE_INFERENCE"] !== "1"
+    compilationLevel === "ADVANCED" && hasTypeMetadata && !typeInferenceDisabled
   );
 }
 
@@ -70,10 +116,19 @@ export const TYPE_INFERENCE_OPTIONS: ClosureCompilerOptions = {
   jscompWarning: ["checkTypes"],
 };
 
+export function hasStrictCheckTypes(options: ClosureCompilerOptions) {
+  return Object.entries(options).some(
+    ([name, value]) =>
+      normalizeClosureFlagName(name) === "jscomperror" &&
+      (Array.isArray(value) ? value : [value]).includes("checkTypes"),
+  );
+}
+
 export function configureClosureCompilerOptions(
   closureOptions: ClosureCompilerOptions,
+  environmentOptions = resolveClosureCompilerEnvironment().options,
 ) {
-  applyInternalClosureDebugOptions(closureOptions);
+  Object.assign(closureOptions, environmentOptions);
 }
 
 /**
@@ -97,8 +152,15 @@ export function annotateClosureDiagnostics(stdErr: string) {
   );
 }
 
+/**
+ * `onStderr` observes the diagnostics without changing how they are reported.
+ * The platform-extern slice needs to tell "the slice was incomplete" (retry
+ * with the full browser externs) apart from "the program is broken" (report
+ * it), and the exit code alone cannot: both are non-zero.
+ */
 export async function runClosureCompiler(
   options: ClosureCompilerOptions,
+  onStderr?: (stdErr: string) => void,
 ): Promise<number> {
   return new Promise((resolve) => {
     const compilerProcess = configureClosureCompilerInstance(
@@ -109,6 +171,7 @@ export async function runClosureCompiler(
         console.log(stdOut);
       }
       if (stdErr) {
+        onStderr?.(stdErr);
         console.error(annotateClosureDiagnostics(stdErr));
       }
       resolve(exitCode);

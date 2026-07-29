@@ -1,9 +1,14 @@
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 
 import { hashContent, hashJson } from "../../shared/hash";
 import { getPackageRootFromBundle } from "../../shared/bundle-location";
 import type { ResolvedBuildOptions } from "../types";
+import {
+  resolveClosureCompilerEnvironment,
+  type ClosureCompilerEnvironment,
+} from "../closure/compiler";
 
 export async function hashTsConfig(configPath: string): Promise<string> {
   return hashContent(await fs.promises.readFile(configPath, "utf-8"));
@@ -25,43 +30,32 @@ export function getPackageRoot() {
   return getPackageRootFromBundle();
 }
 
-let packageSignaturePromises: Map<string, Promise<string>> | undefined;
-
 export async function getPackageSignature(packageRoot = getPackageRoot()) {
-  const cache = (packageSignaturePromises ??= new Map<
-    string,
-    Promise<string>
-  >());
-  let packageSignaturePromise = cache.get(packageRoot);
-  if (!packageSignaturePromise) {
-    packageSignaturePromise = (async () => {
-      const packageJsonStat = await fs.promises.stat(
-        path.join(packageRoot, "package.json"),
-      );
-      const runtimeSignature = await readRuntimeSignature(packageRoot);
-      const nativeSignature = await readNativeSignature(packageRoot);
-      return hashContent(
-        JSON.stringify({
-          nativeSignature,
-          packageJson: {
-            mtimeMs: packageJsonStat.mtimeMs,
-            size: packageJsonStat.size,
-          },
-          runtimeSignature,
-        }),
-      );
-    })();
-    cache.set(packageRoot, packageSignaturePromise);
-  }
-
-  return packageSignaturePromise;
+  const [packageJsonSignature, runtimeSignature, nativeSignature] =
+    await Promise.all([
+      hashFile(path.join(packageRoot, "package.json")),
+      hashOptionalFile(path.join(packageRoot, "dist", "index.mjs")),
+      hashOptionalFile(path.join(packageRoot, "native", "index.node")),
+    ]);
+  return hashJson({
+    nativeSignature,
+    packageJsonSignature,
+    runtimeSignature,
+  });
 }
 
-export function getOptionsSignature(options: ResolvedBuildOptions) {
+export function getOptionsSignature(
+  options: ResolvedBuildOptions,
+  compilerEnvironment: ClosureCompilerEnvironment = resolveClosureCompilerEnvironment(),
+) {
   return hashJson({
+    compilerEnvironment,
     compat: options.compat,
     compilationLevel: options.compilationLevel,
     chunks: options.chunks,
+    // Decides whether the runtime preamble carries the CSS loader, so two
+    // otherwise identical builds produce different bytes.
+    cssRuntime: options.cssRuntime,
     diagnostics: options.diagnostics,
     entries: options.entries.map((entry) => ({
       name: entry.name,
@@ -75,54 +69,22 @@ export function getOptionsSignature(options: ResolvedBuildOptions) {
     platformExterns: options.platformExterns,
     projectRoot: options.projectRoot,
     srcDir: options.srcDir,
-    // Content-hashed: the annotations are derived from app types, so a type
-    // change with no source-text change still has to miss the cache.
-    typedAnnotations: hashJson(
-      [...options.typedAnnotations]
-        .map((file) => ({
-          bindings: [...file.bindings]
-            .map(
-              (binding) =>
-                [
-                  binding.name,
-                  binding.jsdoc,
-                  [...(binding.members ?? [])]
-                    .map((member) => [member.name, member.jsdoc] as const)
-                    .sort((left, right) => left[0].localeCompare(right[0])),
-                ] as const,
-            )
-            .sort((left, right) => left[0].localeCompare(right[0])),
-          filePath: path.relative(options.srcDir, file.filePath),
-        }))
-        .sort((left, right) => left.filePath.localeCompare(right.filePath)),
-    ),
+    typeMetadata: hashJson(options.typeMetadata ?? null),
+    typedExterns: [...options.typedExterns].sort(),
   });
 }
 
-async function readRuntimeSignature(packageRoot: string) {
+async function hashOptionalFile(filePath: string) {
   try {
-    const stat = await fs.promises.stat(
-      path.join(packageRoot, "dist", "index.mjs"),
-    );
-    return JSON.stringify({
-      mtimeMs: stat.mtimeMs,
-      size: stat.size,
-    });
+    return await hashFile(filePath);
   } catch {
     return "";
   }
 }
 
-async function readNativeSignature(packageRoot: string) {
-  try {
-    const stat = await fs.promises.stat(
-      path.join(packageRoot, "native", "index.node"),
-    );
-    return JSON.stringify({
-      mtimeMs: stat.mtimeMs,
-      size: stat.size,
-    });
-  } catch {
-    return "";
-  }
+async function hashFile(filePath: string) {
+  return crypto
+    .createHash("sha256")
+    .update(await fs.promises.readFile(filePath))
+    .digest("hex");
 }

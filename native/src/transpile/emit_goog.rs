@@ -1,4 +1,7 @@
 use super::*;
+use crate::transpile::pure_calls::{
+    collect_pure_annotated_binding_names, pure_annotation_for_statement,
+};
 
 pub(super) fn emit_goog_module_program(
     file_path: &Path,
@@ -6,25 +9,33 @@ pub(super) fn emit_goog_module_program(
     context: &TranspileContext,
     file_metadata: Option<&ClosureFileMetadata>,
     commonjs_export_name: Option<&str>,
-) -> std::result::Result<String, String> {
+) -> std::result::Result<EmittedProgram, String> {
     let Program::Module(module) = program else {
         return Err("Expected module program".to_string());
     };
+    let bound = BoundTypeMetadata::bind(&module, file_metadata, context.type_metadata_enabled);
+    let runtime_type_names = runtime_type_names_from_module(&module, &bound);
+    let mut fresh_names = FreshNameAllocator::from_module(&module);
+    let mut type_metadata = bound.prepare(&mut fresh_names, &runtime_type_names, None);
     let module_id = to_goog_module_id(file_path, &context.workspace_dir);
     let mut output = vec![format!("goog.module({module_id:?});")];
-
-    if let Some(metadata) = file_metadata {
-        for type_decl in &metadata.type_declarations {
-            output.push(type_decl.snippet.trim().to_string());
-        }
-        for enum_decl in &metadata.enum_declarations {
-            output.push(render_closure_enum(enum_decl));
-            if enum_decl.exported {
-                output.push(format!("exports.{} = {};", enum_decl.name, enum_decl.name));
-            }
+    output.extend(type_metadata.take_declaration_lines());
+    let enum_declarations = type_metadata.enum_declarations().to_vec();
+    for enum_decl in enum_declarations {
+        let emitted_name = type_metadata.enum_name(&enum_decl).to_string();
+        output.push(render_closure_enum(&enum_decl, &emitted_name));
+        type_metadata.count_enum();
+        if enum_decl.exported {
+            output.push(format!(
+                "exports.{} = {};",
+                enum_decl.binding_name, emitted_name
+            ));
         }
     }
 
+    let pure_names = std::fs::read_to_string(file_path)
+        .map(|source| collect_pure_annotated_binding_names(&source))
+        .unwrap_or_default();
     let mut import_counter = 0usize;
     let mut export_counter = 0usize;
     for item in module.body {
@@ -35,11 +46,17 @@ pub(super) fn emit_goog_module_program(
                     &import_decl,
                     context,
                     &mut import_counter,
+                    &mut fresh_names,
                 )?);
             }
             ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDecl(export_decl)) => {
                 let exported_names = exported_decl_names(&export_decl.decl);
-                output.push(print_statement(Stmt::Decl(export_decl.decl))?);
+                output.push(render_statement(
+                    &mut type_metadata,
+                    Stmt::Decl(export_decl.decl),
+                    &pure_names,
+                    context,
+                )?);
                 for export_name in exported_names {
                     output.push(format!("exports.{export_name} = {export_name};"));
                 }
@@ -50,12 +67,14 @@ pub(super) fn emit_goog_module_program(
                     &named_export,
                     context,
                     &mut export_counter,
+                    &mut fresh_names,
                 )?);
             }
             ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDefaultExpr(
                 default_expr,
             )) => {
-                let local_name = format!("__goog_default_export_{export_counter}");
+                let local_name =
+                    fresh_names.fresh(&format!("__goog_default_export_{export_counter}"));
                 export_counter += 1;
                 output.push(format!(
                     "const {local_name} = {};",
@@ -67,24 +86,27 @@ pub(super) fn emit_goog_module_program(
                 default_decl,
             )) => match default_decl.decl {
                 swc_core::ecma::ast::DefaultDecl::Fn(function_expr) => {
-                    let local_name = function_expr
-                        .ident
+                    let original_ident = function_expr.ident.clone();
+                    let local_name = original_ident
                         .as_ref()
                         .map(|ident| ident.sym.to_string())
-                        .unwrap_or_else(|| format!("__goog_default_export_{export_counter}"));
+                        .unwrap_or_else(|| {
+                            fresh_names.fresh(&format!("__goog_default_export_{export_counter}"))
+                        });
                     export_counter += 1;
-                    if function_expr.ident.is_some() {
-                        output.push(print_statement(Stmt::Decl(swc_core::ecma::ast::Decl::Fn(
-                            swc_core::ecma::ast::FnDecl {
-                                declare: false,
-                                function: function_expr.function,
-                                ident: Ident::new(
-                                    local_name.clone().into(),
-                                    Default::default(),
-                                    Default::default(),
-                                ),
-                            },
-                        )))?);
+                    if let Some(ident) = original_ident {
+                        output.push(render_statement(
+                            &mut type_metadata,
+                            Stmt::Decl(swc_core::ecma::ast::Decl::Fn(
+                                swc_core::ecma::ast::FnDecl {
+                                    declare: false,
+                                    function: function_expr.function,
+                                    ident,
+                                },
+                            )),
+                            &pure_names,
+                            context,
+                        )?);
                     } else {
                         output.push(format!(
                             "const {local_name} = {};",
@@ -94,24 +116,27 @@ pub(super) fn emit_goog_module_program(
                     output.push(format!("exports.default = {local_name};"));
                 }
                 swc_core::ecma::ast::DefaultDecl::Class(class_expr) => {
-                    let local_name = class_expr
-                        .ident
+                    let original_ident = class_expr.ident.clone();
+                    let local_name = original_ident
                         .as_ref()
                         .map(|ident| ident.sym.to_string())
-                        .unwrap_or_else(|| format!("__goog_default_export_{export_counter}"));
+                        .unwrap_or_else(|| {
+                            fresh_names.fresh(&format!("__goog_default_export_{export_counter}"))
+                        });
                     export_counter += 1;
-                    if class_expr.ident.is_some() {
-                        output.push(print_statement(Stmt::Decl(
-                            swc_core::ecma::ast::Decl::Class(swc_core::ecma::ast::ClassDecl {
-                                class: class_expr.class,
-                                declare: false,
-                                ident: Ident::new(
-                                    local_name.clone().into(),
-                                    Default::default(),
-                                    Default::default(),
-                                ),
-                            }),
-                        ))?);
+                    if let Some(ident) = original_ident {
+                        output.push(render_statement(
+                            &mut type_metadata,
+                            Stmt::Decl(swc_core::ecma::ast::Decl::Class(
+                                swc_core::ecma::ast::ClassDecl {
+                                    class: class_expr.class,
+                                    declare: false,
+                                    ident,
+                                },
+                            )),
+                            &pure_names,
+                            context,
+                        )?);
                     } else {
                         output.push(format!(
                             "const {local_name} = {};",
@@ -123,7 +148,8 @@ pub(super) fn emit_goog_module_program(
                 _ => {}
             },
             ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportAll(export_all)) => {
-                let require_name = format!("__goog_export_all_{export_counter}");
+                let require_name =
+                    fresh_names.fresh(&format!("__goog_export_all_{export_counter}"));
                 export_counter += 1;
                 let export_module_id = resolve_module_id_for_specifier(
                     file_path,
@@ -137,9 +163,12 @@ pub(super) fn emit_goog_module_program(
                     "for (const key in {require_name}) {{ if (key !== \"default\") {{ exports[key] = {require_name}[key]; }} }}"
                 ));
             }
-            ModuleItem::Stmt(statement) => {
-                output.push(print_statement(statement)?);
-            }
+            ModuleItem::Stmt(statement) => output.push(render_statement(
+                &mut type_metadata,
+                statement,
+                &pure_names,
+                context,
+            )?),
             _ => {}
         }
     }
@@ -149,13 +178,32 @@ pub(super) fn emit_goog_module_program(
         output.push(format!("exports.default = {export_name};"));
     }
 
-    let mut source_text = output
+    let source_text = output
         .into_iter()
         .filter(|line| !line.trim().is_empty())
         .collect::<Vec<_>>()
         .join("\n");
-    if let Some(metadata) = file_metadata {
-        source_text = attach_top_level_docs(source_text, &metadata.top_level_docs);
-    }
-    Ok(apply_js_compat_text_fixes(source_text))
+    Ok(EmittedProgram {
+        code: apply_js_compat_text_fixes(source_text),
+        reflective_property_names: Default::default(),
+        shared_helpers: Vec::new(),
+        type_metadata: type_metadata.finish(),
+    })
+}
+
+fn render_statement(
+    type_metadata: &mut PreparedTypeMetadata,
+    statement: Stmt,
+    pure_names: &HashSet<String>,
+    context: &TranspileContext,
+) -> std::result::Result<String, String> {
+    let tags =
+        if pure_annotation_for_statement(&statement, pure_names, &context.pure_callees, |_| None)
+            .is_empty()
+        {
+            Vec::new()
+        } else {
+            vec![PURE_TAG]
+        };
+    type_metadata.render_statement(statement, &tags)
 }

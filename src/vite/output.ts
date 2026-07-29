@@ -1,10 +1,13 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import type { ResolvedConfig } from "vite";
+
 import type {
   OutputAsset,
   OutputBundle,
   OutputChunk,
+  NormalizedOutputOptions,
   PluginContext,
   ViteChunkOutputType,
 } from "./internal-types";
@@ -17,7 +20,7 @@ export function listJavaScriptChunks(bundle: OutputBundle) {
 
 export function removeRollupJavaScript(bundle: OutputBundle) {
   for (const [fileName, item] of Object.entries(bundle)) {
-    if (item.type === "chunk" || fileName.endsWith(".js")) {
+    if (item.type === "chunk") {
       delete bundle[fileName];
     }
   }
@@ -37,6 +40,84 @@ export async function emitCompiledOutputs(
       type: "asset",
     });
   }
+}
+
+export async function resolveViteAssetUrls(input: {
+  chunkOutputType: ViteChunkOutputType;
+  config: ResolvedConfig;
+  jsChunks: OutputChunk[];
+  outDir: string;
+  outputFiles: string[];
+  outputOptions: NormalizedOutputOptions;
+  pluginContext: PluginContext;
+}) {
+  const filesWithPlaceholders: Array<{
+    fileName: string;
+    filePath: string;
+    source: string;
+  }> = [];
+  for (const filePath of input.outputFiles) {
+    if (!filePath.endsWith(".js")) {
+      continue;
+    }
+    const source = await fs.readFile(filePath, "utf8");
+    if (!hasViteAssetPlaceholder(source)) {
+      continue;
+    }
+    filesWithPlaceholders.push({
+      fileName: path.relative(input.outDir, filePath).replace(/\\/g, "/"),
+      filePath,
+      source,
+    });
+  }
+  if (filesWithPlaceholders.length === 0) {
+    return false;
+  }
+
+  const renderChunk = findViteAssetRenderHook(input.config);
+  const templateChunk = input.jsChunks[0];
+  if (!renderChunk || !templateChunk) {
+    throw new Error(
+      "gccTsBundler() found unresolved Vite asset URLs but could not find Vite's asset renderer.",
+    );
+  }
+  const outputOptions = {
+    ...input.outputOptions,
+    format:
+      input.chunkOutputType === "script" ? "iife" : input.outputOptions.format,
+  };
+
+  for (const file of filesWithPlaceholders) {
+    const rendered = await renderChunk.call(
+      input.pluginContext,
+      file.source,
+      {
+        ...templateChunk,
+        fileName: file.fileName,
+        viteMetadata: {
+          __modules: {},
+          importedAssets: new Set<string>(),
+          importedCss: new Set<string>(),
+        },
+      },
+      outputOptions,
+      { chunks: {} },
+    );
+    const source =
+      typeof rendered === "string"
+        ? rendered
+        : rendered && typeof rendered === "object" && "code" in rendered
+          ? rendered.code.toString()
+          : file.source;
+    if (hasViteAssetPlaceholder(source)) {
+      throw new Error(
+        `gccTsBundler() could not resolve Vite asset URLs in ${file.fileName}.`,
+      );
+    }
+    await fs.writeFile(file.filePath, source, "utf8");
+  }
+
+  return true;
 }
 
 export async function collectOutputByteBreakdown(input: {
@@ -112,7 +193,11 @@ export function rewriteHtmlAssets(input: {
         endsWithAnyFileName(src, input.removedChunkFileNames) ? "" : match,
     );
 
-    const entryUrl = joinPublicPath(input.publicPath, input.baseScriptFileName);
+    const entryUrl = joinPublicPath(
+      input.publicPath,
+      input.baseScriptFileName,
+      asset.fileName,
+    );
     // Module scripts are deferred by definition, and are always fetched in
     // CORS mode: a cross-origin publicPath now needs Access-Control-Allow-Origin
     // headers that a classic `defer` script never required.
@@ -132,9 +217,20 @@ export function rewriteHtmlAssets(input: {
   }
 }
 
-export function joinPublicPath(base: string, fileName: string) {
+export function joinPublicPath(
+  base: string,
+  fileName: string,
+  hostFileName?: string,
+) {
   if (base === "./") {
-    return `./${fileName}`;
+    if (!hostFileName) {
+      return `./${fileName}`;
+    }
+    const relativePath = path.posix.relative(
+      path.posix.dirname(hostFileName.replace(/\\/g, "/")),
+      fileName.replace(/\\/g, "/"),
+    );
+    return relativePath.startsWith(".") ? relativePath : `./${relativePath}`;
   }
   return `${base}${fileName}`;
 }
@@ -162,4 +258,24 @@ function endsWithAnyFileName(value: string, fileNames: Set<string>) {
     }
   }
   return false;
+}
+
+function findViteAssetRenderHook(config: ResolvedConfig) {
+  const hook = config.plugins.find(
+    (plugin) => plugin.name === "vite:asset",
+  )?.renderChunk;
+  if (typeof hook === "function") {
+    return hook;
+  }
+  if (hook && typeof hook === "object") {
+    return hook.handler;
+  }
+  return null;
+}
+
+function hasViteAssetPlaceholder(source: string) {
+  return (
+    source.includes("__VITE_ASSET__") ||
+    source.includes("__VITE_PUBLIC_ASSET__")
+  );
 }

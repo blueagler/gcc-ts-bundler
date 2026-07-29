@@ -1,5 +1,6 @@
 import path from "path";
 
+import { resolveClosureCompilerEnvironment } from "../closure/compiler";
 import { planChunks, resolveGraph } from "../../native/load";
 import { zipExact } from "../../shared/arrays";
 import {
@@ -22,9 +23,9 @@ import type {
   LazyImport,
   PackageAlias,
   ResolvedBuild,
+  ResolvedImport,
   ResolvedBuildOptions,
 } from "../types";
-import { patchSplitChunkPlan } from "../split-chunks";
 import type { ResolveMetadata, ResolveSnapshot } from "./cache";
 import { isResolveMetadata, isResolveSnapshot, readChunkPlan } from "./cache";
 import {
@@ -36,6 +37,7 @@ import {
 import {
   collectTsxRuntimeSupport,
   mergePackageAliases,
+  mergeResolvedImports,
   mergeRuntimePackageJsonFiles,
   mergeTsxRuntimeTrackedFiles,
 } from "./jsx-runtime";
@@ -52,7 +54,9 @@ import {
   resolveTsConfigPath,
 } from "./workspace";
 
-export { normalizeBuildOptions } from "./options";
+import { normalizeBuildOptions, validateOutputPathBoundaries } from "./options";
+
+export { normalizeBuildOptions };
 interface ResolveEnv {
   cacheStore: Awaited<ReturnType<typeof createCacheStore>>;
   compilerOptionsHash: string;
@@ -66,26 +70,40 @@ interface FreshGraph {
   outputNames: string[];
   packageAliases: PackageAlias[];
   packageJsonFiles: string[];
+  resolvedImports: ResolvedImport[];
   resolveKey: string;
   tsxRuntimeSupport: Awaited<ReturnType<typeof collectTsxRuntimeSupport>>;
 }
 
 export async function createBuildContext(
   options: ResolvedBuildOptions,
-): Promise<BuildContext> {
+): Promise<
+  BuildContext & {
+    closureCompilerEnvironment: ReturnType<
+      typeof resolveClosureCompilerEnvironment
+    >;
+  }
+> {
   const packageRoot = getPackageRoot();
   const usesPersistentCache = options.cache.mode === "persistent";
-  return {
+  const closureCompilerEnvironment = resolveClosureCompilerEnvironment();
+  const projectCacheDir = getProjectCacheDir(
+    path.resolve(options.cache.dir || getDefaultPersistentCacheRoot()),
+    options.projectRoot,
+  );
+  await validateOutputPathBoundaries(
     options,
-    optionsSignature: getOptionsSignature(options),
+    usesPersistentCache ? path.join(projectCacheDir, "workspace") : null,
+  );
+  return {
+    closureCompilerEnvironment,
+    options,
+    optionsSignature: getOptionsSignature(options, closureCompilerEnvironment),
     packageRoot,
     packageSignature: usesPersistentCache
       ? await getPackageSignature(packageRoot)
       : "",
-    projectCacheDir: getProjectCacheDir(
-      path.resolve(options.cache.dir || getDefaultPersistentCacheRoot()),
-      options.projectRoot,
-    ),
+    projectCacheDir,
   };
 }
 
@@ -99,12 +117,15 @@ export async function resolveBuild(
   const env = await prepareResolveWorkspace(context);
   const restored = await restoreResolveSnapshot(context, env);
   if (restored) {
+    await validateResolvedOutputPaths(context, restored);
     return restored;
   }
 
   const fresh = await resolveFreshGraph(context, env);
   const metadata = await loadOrCreateResolveMetadata(context, env, fresh);
-  return finalizeResolvedBuild(context, env, fresh, metadata);
+  const resolved = await finalizeResolvedBuild(context, env, fresh, metadata);
+  await validateResolvedOutputPaths(context, resolved);
+  return resolved;
 }
 
 async function prepareResolveWorkspace(
@@ -156,11 +177,17 @@ async function restoreResolveSnapshot(
     return null;
   }
 
+  const chunkPlan = await readChunkPlan(
+    env.cacheStore.projectCacheDir,
+    snapshot.resolveKey,
+    context.optionsSignature,
+  );
+  if (!chunkPlan) {
+    return null;
+  }
+
   return assembleResolvedBuild(env, {
-    chunkPlan: await readChunkPlan(
-      env.cacheStore.projectCacheDir,
-      snapshot.resolveKey,
-    ),
+    chunkPlan,
     entryFiles: snapshot.entryFiles.map(
       (entry): BuildEntry => toBuildEntry(entry, env.sourceRoot),
     ),
@@ -169,6 +196,7 @@ async function restoreResolveSnapshot(
     nativeEmitKey: snapshot.nativeEmitKey,
     packageAliases: snapshot.packageAliases,
     packageJsonFiles: snapshot.packageJsonFiles,
+    resolvedImports: snapshot.resolvedImports,
     sourceFiles: snapshot.sourceFiles,
     trackedFiles: snapshot.trackedFiles,
     tsxRuntimeSourceFiles: snapshot.tsxRuntimeSourceFiles,
@@ -212,8 +240,13 @@ async function resolveFreshGraph(
       graphResult.packageJsonFiles,
       tsxRuntimeSupport.packageJsonFiles,
     ),
+    resolvedImports: mergeResolvedImports([
+      ...graphResult.resolvedImports,
+      ...tsxRuntimeSupport.resolvedImports,
+    ]),
     resolveKey: env.usesPersistentCache
       ? hashJson({
+          optionsSignature: context.optionsSignature,
           compilerOptionsHash: env.compilerOptionsHash,
           entries: entryRelativePaths,
           files: graphResult.fileHashes,
@@ -238,15 +271,17 @@ async function loadOrCreateResolveMetadata(
   const cached = env.usesPersistentCache
     ? await readJsonIfExists(resolveMetadataPath, isResolveMetadata)
     : null;
-  if (cached) {
+  if (cached?.optionsSignature === context.optionsSignature) {
     const needsUpgrade =
       !Array.isArray(cached.packageAliases) ||
       !Array.isArray(cached.packageJsonFiles) ||
+      !Array.isArray(cached.resolvedImports) ||
       !Array.isArray(cached.tsxRuntimeSourceFiles);
     const metadata = {
       ...cached,
       packageAliases: cached.packageAliases ?? fresh.packageAliases,
       packageJsonFiles: cached.packageJsonFiles ?? fresh.packageJsonFiles,
+      resolvedImports: cached.resolvedImports ?? fresh.resolvedImports,
       tsxRuntimeSourceFiles:
         cached.tsxRuntimeSourceFiles ?? fresh.tsxRuntimeSupport.sourceFiles,
     };
@@ -315,10 +350,8 @@ function createResolveMetadata(
     workspaceDir: env.cacheStore.workspaceDir,
   });
   return {
-    chunkPlan:
-      options.chunks.mode === "split"
-        ? patchSplitChunkPlan(chunkPlan)
-        : chunkPlan,
+    optionsSignature: context.optionsSignature,
+    chunkPlan,
     entryFiles: entryFiles.map((entry) => ({
       chunkName: entry.chunkName,
       exportNames: entry.exportNames,
@@ -329,6 +362,7 @@ function createResolveMetadata(
     lazyImports: fresh.graphResult.lazyImports,
     packageAliases: fresh.packageAliases,
     packageJsonFiles: fresh.packageJsonFiles,
+    resolvedImports: fresh.resolvedImports,
     tsxRuntimeSourceFiles: fresh.tsxRuntimeSupport.sourceFiles,
   };
 }
@@ -343,6 +377,7 @@ async function finalizeResolvedBuild(
   const tsxRuntimeSourceFiles = metadata.tsxRuntimeSourceFiles ?? [];
   const nativeEmitKey = env.usesPersistentCache
     ? hashJson({
+        optionsSignature: context.optionsSignature,
         compilerOptionsHash: env.compilerOptionsHash,
         diagnostics: options.diagnostics,
         externInputHash: await hashExternalInputs(options.externs),
@@ -353,10 +388,12 @@ async function finalizeResolvedBuild(
     : "active";
   const finalKey = env.usesPersistentCache
     ? hashJson({
+        optionsSignature: context.optionsSignature,
         compilationLevel: options.compilationLevel,
         externalInputHash: await hashExternalInputs([
           ...options.externs,
           ...options.js,
+          ...options.typedExterns,
         ]),
         languageOut: options.languageOut,
         packageSignature: context.packageSignature,
@@ -373,6 +410,7 @@ async function finalizeResolvedBuild(
         env.tsConfigPath,
         ...options.externs,
         ...options.js,
+        ...options.typedExterns,
       ])
     : {};
   if (env.usesPersistentCache) {
@@ -385,6 +423,7 @@ async function finalizeResolvedBuild(
       optionsSignature: context.optionsSignature,
       packageAliases: fresh.packageAliases,
       packageJsonFiles: fresh.packageJsonFiles,
+      resolvedImports: fresh.resolvedImports,
       packageSignature: context.packageSignature,
       resolveKey: fresh.resolveKey,
       sourceFiles: fresh.graphResult.sourceFiles,
@@ -403,6 +442,7 @@ async function finalizeResolvedBuild(
     nativeEmitKey,
     packageAliases: fresh.packageAliases,
     packageJsonFiles: fresh.packageJsonFiles,
+    resolvedImports: fresh.resolvedImports,
     sourceFiles: fresh.graphResult.sourceFiles,
     trackedFiles,
     tsxRuntimeSourceFiles,
@@ -419,6 +459,7 @@ function assembleResolvedBuild(
     nativeEmitKey: string;
     packageAliases: PackageAlias[];
     packageJsonFiles: string[];
+    resolvedImports: ResolvedImport[];
     sourceFiles: string[];
     trackedFiles: ResolveSnapshot["trackedFiles"];
     tsxRuntimeSourceFiles: string[];
@@ -432,6 +473,7 @@ function assembleResolvedBuild(
     lazyImports: parts.lazyImports,
     packageAliases: parts.packageAliases,
     packageJsonFiles: parts.packageJsonFiles,
+    resolvedImports: parts.resolvedImports,
     finalCacheDir: path.join(
       env.cacheStore.projectCacheDir,
       "final",
@@ -455,4 +497,14 @@ function assembleResolvedBuild(
 
 function resolveSnapshotPath(env: ResolveEnv) {
   return path.join(env.cacheStore.projectCacheDir, "resolve", "latest.json");
+}
+
+async function validateResolvedOutputPaths(
+  context: BuildContext,
+  resolved: ResolvedBuild,
+) {
+  await validateOutputPathBoundaries(context.options, resolved.workspaceDir, [
+    ...resolved.sourceFiles,
+    resolved.tsConfigPath,
+  ]);
 }

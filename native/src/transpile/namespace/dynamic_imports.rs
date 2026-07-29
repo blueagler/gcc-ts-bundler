@@ -16,31 +16,33 @@ pub(crate) fn group_lazy_imports_by_file(
     grouped
 }
 
-fn lazy_lookup_key(importer_file_path: &str, specifier: &str) -> String {
-    format!("{importer_file_path}\0{specifier}")
+pub(crate) fn no_substitution_template_value(
+    template: &swc_core::ecma::ast::Tpl,
+) -> Option<String> {
+    if !template.exprs.is_empty() || template.quasis.len() != 1 {
+        return None;
+    }
+    let quasi = &template.quasis[0];
+    Some(
+        quasi
+            .cooked
+            .as_ref()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_else(|| quasi.raw.to_string()),
+    )
 }
 
-/// How rewritten `import()` calls address the lazy module at runtime.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DynamicImportTarget {
-    /// `__dynamicImport("<bundler runtime id>")` (registry-per-module model).
-    BundlerRuntime,
-    /// `gccImportLazy("<goog module id>")` (split-chunk registry model).
-    SplitRegistry,
+fn lazy_lookup_key(importer_file_path: &str, specifier: &str) -> String {
+    format!("{importer_file_path}\0{specifier}")
 }
 
 pub(crate) struct DynamicImportRewriteVisitor {
     importer_file_path: String,
     lazy_imports: HashMap<String, LazyImportInput>,
-    target: DynamicImportTarget,
 }
 
 impl DynamicImportRewriteVisitor {
-    pub(crate) fn new(
-        file_path: &Path,
-        lazy_imports: &[LazyImportInput],
-        target: DynamicImportTarget,
-    ) -> Self {
+    pub(crate) fn new(file_path: &Path, lazy_imports: &[LazyImportInput]) -> Self {
         Self {
             importer_file_path: file_path.to_string_lossy().to_string(),
             lazy_imports: lazy_imports
@@ -53,7 +55,6 @@ impl DynamicImportRewriteVisitor {
                     )
                 })
                 .collect(),
-            target,
         }
     }
 }
@@ -73,22 +74,18 @@ impl VisitMut for DynamicImportRewriteVisitor {
         }
         let specifier = match &*call_expr.args[0].expr {
             Expr::Lit(Lit::Str(string)) => string.value.to_string_lossy().to_string(),
-            Expr::Tpl(template) if template.exprs.is_empty() && template.quasis.len() == 1 => {
-                template.quasis[0].raw.to_string()
-            }
+            Expr::Tpl(template) => match no_substitution_template_value(template) {
+                Some(value) => value,
+                None => return,
+            },
             _ => return,
         };
         let key = lazy_lookup_key(&self.importer_file_path, &specifier);
         let Some(lazy_import) = self.lazy_imports.get(&key) else {
             return;
         };
-        let (callee_name, module_key) = match self.target {
-            DynamicImportTarget::BundlerRuntime => (
-                "__dynamicImport",
-                to_bundler_runtime_module_id(&lazy_import.moduleId),
-            ),
-            DynamicImportTarget::SplitRegistry => ("gccImportLazy", lazy_import.moduleId.clone()),
-        };
+        let callee_name = "__dynamicImport";
+        let module_key = to_bundler_runtime_module_id(&lazy_import.moduleId);
         *expr = Expr::Call(CallExpr {
             span: Default::default(),
             ctxt: Default::default(),

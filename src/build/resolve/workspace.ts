@@ -9,24 +9,33 @@ export async function ensureDirectorySymlink(
   linkPath: string,
   targetPath: string,
 ) {
-  try {
-    const currentTarget = await fs.promises.readlink(linkPath);
-    if (path.resolve(path.dirname(linkPath), currentTarget) === targetPath) {
+  const resolvedTargetPath = path.resolve(targetPath);
+  await fs.promises.mkdir(path.dirname(linkPath), { recursive: true });
+
+  // ponytail: bound retries so conflicting targets cannot livelock the build.
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    if (await symlinkTargetsPath(linkPath, resolvedTargetPath)) {
       return;
     }
-    await fs.promises.rm(linkPath, { force: true, recursive: true });
-  } catch (error) {
-    if (!hasErrorCode(error, "ENOENT")) {
-      await fs.promises.rm(linkPath, { force: true, recursive: true });
+    await removePathIfExists(linkPath);
+    try {
+      await fs.promises.symlink(
+        resolvedTargetPath,
+        linkPath,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      return;
+    } catch (error) {
+      if (!hasErrorCode(error, "EEXIST")) {
+        throw error;
+      }
+      if (await symlinkTargetsPath(linkPath, resolvedTargetPath)) {
+        return;
+      }
     }
   }
 
-  await fs.promises.mkdir(path.dirname(linkPath), { recursive: true });
-  await fs.promises.symlink(
-    targetPath,
-    linkPath,
-    process.platform === "win32" ? "junction" : "dir",
-  );
+  throw new Error(`Unable to create directory symlink ${linkPath}`);
 }
 
 export async function ensureWorkspaceNodeModules(
@@ -39,12 +48,8 @@ export async function ensureWorkspaceNodeModules(
     return;
   }
 
-  const nodeModulesPath = path.join(options.projectRoot, "node_modules");
-  const hasNodeModules = await fs.promises
-    .access(nodeModulesPath)
-    .then(() => true)
-    .catch(() => false);
-  if (!hasNodeModules) {
+  const nodeModulesPath = await findNearestNodeModules(options.projectRoot);
+  if (!nodeModulesPath) {
     await removePathIfExists(linkPath);
     return;
   }
@@ -65,6 +70,40 @@ export async function resolveTsConfigPath(
   }
 
   return configPath;
+}
+
+async function findNearestNodeModules(projectRoot: string) {
+  let currentDir = path.resolve(projectRoot);
+  while (true) {
+    const nodeModulesPath = path.join(currentDir, "node_modules");
+    try {
+      if ((await fs.promises.stat(nodeModulesPath)).isDirectory()) {
+        return nodeModulesPath;
+      }
+    } catch (error) {
+      if (!hasErrorCode(error, "ENOENT") && !hasErrorCode(error, "ENOTDIR")) {
+        throw error;
+      }
+    }
+
+    const parentDir = path.dirname(currentDir);
+    if (parentDir === currentDir) {
+      return null;
+    }
+    currentDir = parentDir;
+  }
+}
+
+async function symlinkTargetsPath(linkPath: string, targetPath: string) {
+  try {
+    const currentTarget = await fs.promises.readlink(linkPath);
+    return path.resolve(path.dirname(linkPath), currentTarget) === targetPath;
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "EINVAL")) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 async function removePathIfExists(targetPath: string) {

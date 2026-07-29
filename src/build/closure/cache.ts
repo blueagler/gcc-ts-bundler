@@ -1,27 +1,44 @@
+import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
 
-import { hashJson } from "../../shared/hash";
 import { readJsonIfExists, writeJson } from "../../shared/cache-store";
 import { zipExact } from "../../shared/arrays";
-import { ensureDirectory, hashFilesInOrder } from "../../shared/files";
-import { isNumber, isObjectOf, isStringArray } from "../../shared/validation";
+import { ensureDirectory } from "../../shared/files";
+import {
+  collectFileContentSnapshot,
+  fileContentSnapshotMatches,
+  type FileContentSnapshot,
+} from "../../shared/file-state";
+import { hashJson } from "../../shared/hash";
+import {
+  isNumber,
+  isObjectOf,
+  isString,
+  isStringArray,
+  recordOf,
+} from "../../shared/validation";
+import type { NativeTypeMetadataCounts } from "../../native/load";
+import type { ClosureCompilerOptions } from "./compiler";
 
 interface ClosureJobCacheMetadata {
+  artifacts: FileContentSnapshot;
   artifactFiles: string[];
   version: number;
 }
 
-const CLOSURE_JOB_CACHE_VERSION = 3;
+const CLOSURE_JOB_CACHE_VERSION = 5;
 
 export interface ClosureCompileJobConfig {
   assumeFunctionWrapper: boolean;
   chunk?: string[] | null;
   chunkOutputType?: string | null;
+  compilerEnvironment?: ClosureCompilerOptions;
   compilationLevel: string;
   dependencyMode?: string | null;
   entryPoint?: string[] | null;
   env?: string | null;
+  hasTypeMetadata: boolean;
   externs: string[];
   js: string[];
   jsOutputFile?: string | null;
@@ -36,6 +53,7 @@ export interface ClosureCompileJobConfig {
   /** Silent `checkTypes` inference; see `applyTypeInference`. Not derivable
    * from any hashed file, so it has to be keyed explicitly. */
   typeInference?: boolean;
+  typeMetadataCounts: NativeTypeMetadataCounts;
   warningLevel: string;
 }
 
@@ -104,15 +122,7 @@ export async function tryRestoreCachedClosureJob({
   const cachedFiles = metadata.artifactFiles.map((fileName) =>
     path.join(jobCacheDir, fileName),
   );
-  const filesReady = await Promise.all(
-    cachedFiles.map((filePath) =>
-      fs
-        .stat(filePath)
-        .then(() => true)
-        .catch(() => false),
-    ),
-  );
-  if (filesReady.some((ready) => !ready)) {
+  if (!(await fileContentSnapshotMatches(metadata.artifacts, cachedFiles))) {
     return false;
   }
 
@@ -130,6 +140,12 @@ export async function tryRestoreCachedClosureJob({
 }
 
 const isClosureJobCacheMetadata = isObjectOf<ClosureJobCacheMetadata>({
+  artifacts: recordOf(
+    isObjectOf<FileContentSnapshot[string]>({
+      digest: isString,
+      size: isNumber,
+    }),
+  ),
   artifactFiles: isStringArray,
   version: isNumber,
 });
@@ -164,7 +180,11 @@ export async function persistCachedClosureJob({
       fs.copyFile(artifactFile, path.join(jobCacheDir, artifactName)),
     ),
   );
+  const artifacts = await collectFileContentSnapshot(
+    artifactNames.map((artifactName) => path.join(jobCacheDir, artifactName)),
+  );
   await writeJson(path.join(jobCacheDir, "meta.json"), {
+    artifacts,
     artifactFiles: artifactNames,
     version: CLOSURE_JOB_CACHE_VERSION,
   } satisfies ClosureJobCacheMetadata);
@@ -184,6 +204,7 @@ async function getClosureJobCacheDir(
     ),
   );
   const cacheKey = hashJson({
+    compilerEnvironment: job.compilerEnvironment ?? {},
     compilerVersion,
     externHash,
     renamingMapHash,
@@ -196,6 +217,7 @@ async function getClosureJobCacheDir(
       entryPoint: job.entryPoint ?? null,
       env: job.env ?? null,
       hasPropertyRenamingReport: Boolean(job.propertyRenamingReportPath),
+      hasTypeMetadata: job.hasTypeMetadata,
       hasRenamingMapInputs: [
         Boolean(job.propertyMapInputFile),
         Boolean(job.variableMapInputFile),
@@ -206,10 +228,22 @@ async function getClosureJobCacheDir(
       languageOut: job.languageOut,
       rewritePolyfills: job.rewritePolyfills,
       typeInference: job.typeInference ?? false,
+      typeMetadataCounts: job.typeMetadataCounts,
       warningLevel: job.warningLevel,
     },
     jsHash,
     version: CLOSURE_JOB_CACHE_VERSION,
   });
   return path.join(cacheDir, cacheKey);
+}
+
+async function hashFilesInOrder(filePaths: string[]) {
+  return Promise.all(
+    filePaths.map(async (filePath) =>
+      crypto
+        .createHash("sha256")
+        .update(await fs.readFile(filePath))
+        .digest("hex"),
+    ),
+  );
 }

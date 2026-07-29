@@ -25,7 +25,11 @@
         min-height: 100vh;
       }
     </style>
-    <script defer src="./dist/main.js?v=svelte5"></script>
+    <!-- bundler-runtime chunks default to ES module output, so the entry is a
+         module script and the lazy chunks arrive through import(). No query
+         string: lazy chunks import "./main.js", and a module URL that differs
+         by even a query is a second module instance with its own state. -->
+    <script type="module" src="./dist/main.js"></script>
   </head>
   <body>
     <div id="app"></div>

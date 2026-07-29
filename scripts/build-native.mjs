@@ -135,16 +135,21 @@ function writeNativePackage(
   rmSync(packageDir, { force: true, recursive: true });
   mkdirSync(packageDir, { recursive: true });
   copyFileSync(builtLibraryPath, path.join(packageDir, "index.node"));
+  copyFileSync(
+    path.join(packageRoot, "LICENSE"),
+    path.join(packageDir, "LICENSE"),
+  );
   writeFileSync(
     path.join(packageDir, "package.json"),
     JSON.stringify(
       {
         name: target.packageName,
         version: packageJson.version,
+        license: packageJson.license,
         os: [target.platform],
         cpu: [target.arch],
         ...(target.libc ? { libc: [target.libc] } : {}),
-        files: ["index.node"],
+        files: ["index.node", "LICENSE"],
         main: "index.node",
         publishConfig: {
           access: "public",

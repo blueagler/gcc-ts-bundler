@@ -29,6 +29,7 @@ test("object schemas accept an explicitly undefined optional property", () => {
 
 function resolveMetadata(chunk) {
   return {
+    optionsSignature: "test",
     chunkPlan: [{ dependencies: [], files: ["a.js"], name: "main", ...chunk }],
     entryFiles: [],
     lazyImports: [],
@@ -45,8 +46,19 @@ test("cached chunk plans reject unknown chunk kinds", () => {
 
 test("cached resolve metadata rejects a malformed chunk plan", () => {
   expect(
-    isResolveMetadata({ chunkPlan: [], entryFiles: [], lazyImports: [] }),
+    isResolveMetadata({
+      optionsSignature: "test",
+      chunkPlan: [],
+      entryFiles: [],
+      lazyImports: [],
+    }),
   ).toBe(true);
-  expect(isResolveMetadata({ chunkPlan: [], entryFiles: [] })).toBe(false);
+  expect(
+    isResolveMetadata({
+      optionsSignature: "test",
+      chunkPlan: [],
+      entryFiles: [],
+    }),
+  ).toBe(false);
   expect(isResolveMetadata(resolveMetadata({ files: "a.js" }))).toBe(false);
 });

@@ -3,8 +3,7 @@ use super::*;
 pub(super) fn parse_chunk_mode(value: &str) -> std::result::Result<ChunkMode, String> {
     match value {
         "off" => Ok(ChunkMode::Off),
-        "bundler-runtime" => Ok(ChunkMode::BundlerRuntime),
-        "split" => Ok(ChunkMode::Split),
+        "bundler-runtime" | "split" => Ok(ChunkMode::BundlerRuntime),
         _ => Err(format!("Unsupported chunk mode: {value}")),
     }
 }
@@ -19,19 +18,22 @@ pub(super) struct TranspileContext {
     /// movable across chunks. Supplied by framework presets.
     pub(super) pure_callees: HashSet<String>,
     pub(super) commonjs_specifiers: HashSet<String>,
+    /// Shared verdict for the three CommonJS export-ABI emission sites; see
+    /// `cjs_opacity::OpaqueCommonJs`.
+    pub(super) opaque_commonjs: std::sync::Arc<OpaqueCommonJs>,
     pub(super) file_metadata: HashMap<String, ClosureFileMetadata>,
     pub(super) hoist_plan: Option<std::sync::Arc<HoistPlan>>,
     pub(super) lazy_imports_by_file: HashMap<String, Vec<LazyImportInput>>,
-    /// Logical module ids that are dynamic-import targets; their facades
-    /// expose ESM interop markers for host-library namespace unwrapping.
+    /// Logical module ids that are dynamic-import targets. They require numeric
+    /// registry slots plus a named namespace facade for external consumers.
     pub(super) lazy_target_module_ids: HashSet<String>,
     pub(super) package_aliases: Vec<PackageAliasInput>,
+    pub(super) resolved_module_ids: HashMap<String, String>,
     pub(super) preserved_property_names: HashSet<String>,
     pub(super) static_property_names: HashSet<String>,
-    /// Checker-derived JSDoc per source file, keyed by
-    /// `typed_annotations::annotation_key`. Consumed by hoisted emission
-    /// only; `Off`/`Split` carry their JSDoc through `closure-ir` metadata.
-    pub(super) typed_annotations: HashMap<String, TypedAnnotationsByName>,
+    /// Optional optimization metadata is omitted under the inference escape hatch;
+    /// semantic enum/decorator lowering remains enabled.
+    pub(super) type_metadata_enabled: bool,
     /// Module ids that the chunk plan placed in the vendor chunk. Empty
     /// unless `chunks.vendorChunk` produced one; see `transpile::assigners`.
     pub(super) vendor_module_ids: HashSet<String>,
@@ -79,16 +81,18 @@ pub(super) struct RawBundlerExportInfo {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ChunkMode {
     Off,
+    /// Every chunked build. The public `split` mode name parses to this: it
+    /// names the same emission shape, so there is one variant per shape rather
+    /// than one per mode name.
     BundlerRuntime,
-    /// Split: goog.module emission compiled as one Closure program with
-    /// --chunk, plus a lazy-namespace registry for dynamic import.
-    Split,
 }
 
 pub(super) fn collect_bundler_module_slots(
     file_names: &[String],
     workspace_dir: &Path,
     package_aliases: &[PackageAliasInput],
+    resolved_module_ids: &HashMap<String, String>,
+    file_metadata: &HashMap<String, ClosureFileMetadata>,
 ) -> std::result::Result<HashMap<String, BundlerModuleSlots>, String> {
     let resolution_context = TranspileContext {
         bundler_module_slots: HashMap::new(),
@@ -97,14 +101,16 @@ pub(super) fn collect_bundler_module_slots(
         class_map_calls: Vec::new(),
         pure_callees: HashSet::new(),
         commonjs_specifiers: HashSet::new(),
+        opaque_commonjs: Default::default(),
         file_metadata: HashMap::new(),
         hoist_plan: None,
         lazy_imports_by_file: HashMap::new(),
         lazy_target_module_ids: HashSet::new(),
         package_aliases: package_aliases.to_vec(),
+        resolved_module_ids: resolved_module_ids.clone(),
         preserved_property_names: HashSet::new(),
         static_property_names: HashSet::new(),
-        typed_annotations: HashMap::new(),
+        type_metadata_enabled: false,
         vendor_module_ids: HashSet::new(),
         workspace_dir: workspace_dir.to_path_buf(),
     };
@@ -118,7 +124,7 @@ pub(super) fn collect_bundler_module_slots(
         let module_id = to_goog_module_id(&file_path, workspace_dir);
         let module = get_or_parse_cached_module(&file_path)?;
         let commonjs_analysis = analyze_commonjs_module(&module);
-        let raw_exports = if should_normalize_commonjs(&file_path, &commonjs_analysis) {
+        let mut raw_exports = if should_normalize_commonjs(&file_path, &commonjs_analysis) {
             RawBundlerExportInfo {
                 explicit_exports: BTreeSet::from([
                     "__cjsExports".to_string(),
@@ -129,6 +135,15 @@ pub(super) fn collect_bundler_module_slots(
         } else {
             collect_raw_bundler_exports(&module, &file_path, &resolution_context)?
         };
+        if let Some(metadata) = file_metadata.get(&closure_metadata_key(&file_path)) {
+            raw_exports.explicit_exports.extend(
+                metadata
+                    .enums
+                    .iter()
+                    .filter(|enum_decl| enum_decl.exported)
+                    .map(|enum_decl| enum_decl.binding_name.clone()),
+            );
+        }
         raw_exports_by_module.insert(module_id, raw_exports);
     }
 

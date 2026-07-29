@@ -1,23 +1,28 @@
 #![allow(non_snake_case)]
 
 pub(crate) mod assigners;
+mod cjs_opacity;
 mod commonjs;
 pub(crate) mod compat;
 mod context;
 mod emit;
 mod emit_goog;
+mod emit_helpers;
 mod emit_hoist;
+mod emit_reflective;
 pub(crate) mod emit_runtime;
 mod enums;
 mod externs;
+pub(crate) mod fresh;
 mod global_this;
 mod hoist;
 mod imports_exports;
 mod js_compat;
 mod namespace;
+mod precedence;
 mod print;
 mod pure_calls;
-mod typed_annotations;
+mod type_metadata;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -40,7 +45,8 @@ use swc_ecma_transforms_react::{jsx, Options as ReactOptions, Runtime as ReactRu
 use swc_ecma_transforms_typescript::strip;
 
 use crate::closure_metadata::{
-    load_closure_metadata, ClosureEnumDeclaration, ClosureFileMetadata, ClosureTopLevelDoc,
+    closure_metadata_key, load_closure_metadata, ClosureEnumDeclaration, ClosureFileMetadata,
+    EmittedTypeMetadata,
 };
 use crate::commonjs::{analyze_commonjs_module, evaluate_boolean_expr};
 use crate::module_cache::{get_or_parse_cached_module, parse_module};
@@ -49,6 +55,7 @@ use crate::pathing::{
 };
 use crate::support_files::{collect_commonjs_specifiers, emit_package_support_files};
 
+use self::cjs_opacity::*;
 use self::commonjs::*;
 use self::compat::*;
 pub(crate) use self::context::ChunkMode;
@@ -59,13 +66,15 @@ use self::emit_hoist::*;
 use self::emit_runtime::*;
 use self::enums::*;
 use self::externs::*;
+use self::fresh::*;
 use self::global_this::*;
 use self::hoist::*;
 use self::imports_exports::*;
 use self::js_compat::*;
+pub(crate) use self::namespace::no_substitution_template_value;
 use self::namespace::*;
 use self::print::*;
-use self::typed_annotations::*;
+use self::type_metadata::*;
 
 #[allow(non_snake_case)]
 #[napi(object)]
@@ -75,6 +84,7 @@ pub struct TranspileOutput {
     pub externsPath: String,
     pub preservedPropertyCount: u32,
     pub supportFiles: Vec<String>,
+    pub typeMetadata: Vec<EmittedTypeMetadata>,
 }
 
 #[allow(non_snake_case)]
@@ -83,6 +93,16 @@ pub struct TranspileOutput {
 pub struct PackageAliasInput {
     pub packageName: String,
     pub subpath: String,
+    pub targetPath: String,
+}
+
+#[allow(non_snake_case)]
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct ResolvedImportInput {
+    pub importerFilePath: String,
+    pub moduleId: String,
+    pub specifier: String,
     pub targetPath: String,
 }
 
@@ -100,6 +120,10 @@ pub struct LazyImportInput {
 #[napi(object)]
 #[derive(Clone, Debug)]
 pub struct TranspileChunkInput {
+    /// Names of the chunks the loader guarantees have executed before this
+    /// one. Read by `build_hoist_plan` to decide whether a cross-chunk direct
+    /// binding is legal.
+    pub dependencies: Vec<String>,
     pub files: Vec<String>,
     pub name: String,
 }
@@ -118,46 +142,10 @@ pub struct ClassMapCallInput {
     pub keyExcludePattern: Option<String>,
     pub keyPattern: Option<String>,
     /// When set, the rule applies only if the argument at this index is a
-    /// string literal. Element factories take the element type as their
-    /// first argument, and only the literal (host/DOM) form dispatches on
-    /// literal prop keys — component props stay renamable because the
-    /// creation site and the component body rename together.
+    /// string literal or an immutable value produced by another matching
+    /// literal-gated call. This lets element transforms such as cloneElement
+    /// inherit proven host-element provenance without freezing component props.
     pub stringLiteralArgIndex: Option<u32>,
-}
-
-/// One top-level binding's Closure JSDoc, rendered by the TypeScript-checker
-/// driven emitter in the JS layer. `name` is the pre-hoist binding name (no
-/// `$$<ordinal>` suffix); `jsdoc` is a complete block ending in a newline.
-#[allow(non_snake_case)]
-#[napi(object)]
-#[derive(Clone, Debug)]
-pub struct TypedAnnotationBindingInput {
-    pub jsdoc: String,
-    /// Per-member JSDoc when this binding is a class: rendered immediately
-    /// before the matching class-body member, or before the matching
-    /// `this.<name> = ...` assignment. Empty/absent for non-classes.
-    pub members: Option<Vec<TypedAnnotationMemberInput>>,
-    pub name: String,
-}
-
-/// One class member's Closure JSDoc. `name` is the member key as authored;
-/// computed and quoted keys are never matched.
-#[allow(non_snake_case)]
-#[napi(object)]
-#[derive(Clone, Debug)]
-pub struct TypedAnnotationMemberInput {
-    pub jsdoc: String,
-    pub name: String,
-}
-
-/// Typed JSDoc for one materialized module fed to native emit. See
-/// `transpile::typed_annotations` and docs/research/typed-input.md.
-#[allow(non_snake_case)]
-#[napi(object)]
-#[derive(Clone, Debug)]
-pub struct TypedAnnotationFileInput {
-    pub bindings: Vec<TypedAnnotationBindingInput>,
-    pub filePath: String,
 }
 
 // napi positional contract: the TS side calls these by argument
@@ -173,13 +161,15 @@ pub fn transpile_sources(
     runtime_module_source_map_file: Option<String>,
     workspace_dir: String,
     package_aliases: Vec<PackageAliasInput>,
+    resolved_imports: Vec<ResolvedImportInput>,
     package_json_files: Vec<String>,
     lazy_imports: Vec<LazyImportInput>,
     chunk_graph: Vec<TranspileChunkInput>,
     class_map_calls: Vec<ClassMapCallInput>,
     pure_callees: Vec<String>,
-    typed_annotations: Vec<TypedAnnotationFileInput>,
+    type_inference_disabled: bool,
 ) -> std::result::Result<TranspileOutput, String> {
+    validate_class_map_calls(&class_map_calls)?;
     fs::create_dir_all(&out_dir).map_err(|error| error.to_string())?;
     if let Some(parent) = PathBuf::from(&externs_path).parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -187,8 +177,24 @@ pub fn transpile_sources(
     let workspace_dir = PathBuf::from(workspace_dir);
     let out_dir = PathBuf::from(out_dir);
     let chunk_mode = parse_chunk_mode(&chunk_mode)?;
+    let resolved_module_ids = resolved_imports
+        .into_iter()
+        .map(|resolved| {
+            (
+                resolved_import_key(Path::new(&resolved.importerFilePath), &resolved.specifier),
+                resolved.moduleId,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let file_metadata = load_closure_metadata(&metadata_path)?;
     let bundler_module_slots = if chunk_mode == ChunkMode::BundlerRuntime {
-        collect_bundler_module_slots(&file_names, &workspace_dir, &package_aliases)?
+        collect_bundler_module_slots(
+            &file_names,
+            &workspace_dir,
+            &package_aliases,
+            &resolved_module_ids,
+            &file_metadata,
+        )?
     } else {
         HashMap::new()
     };
@@ -196,12 +202,12 @@ pub fn transpile_sources(
         .keys()
         .map(|module_id| (to_bundler_runtime_module_id(module_id), module_id.clone()))
         .collect::<HashMap<_, _>>();
-    let file_metadata = load_closure_metadata(&metadata_path)?;
     let hoist_plan = if chunk_mode == ChunkMode::BundlerRuntime {
         build_hoist_plan(
             &file_names,
             &workspace_dir,
             &package_aliases,
+            &resolved_module_ids,
             &chunk_graph,
             &lazy_imports,
             &file_metadata,
@@ -210,10 +216,27 @@ pub fn transpile_sources(
         None
     };
     let ExternPropertyAnalysis {
+        program_declared_names,
         explicit_extern_property_names,
-        preserved_property_names,
+        mut preserved_property_names,
         static_property_names,
     } = collect_extern_property_names_with_externs(&file_names, &explicit_extern_paths)?;
+    // Decorator metadata carries property keys as string literals; preserving
+    // those keys keeps the literals valid instead of rewriting Closure output.
+    preserved_property_names.extend(collect_decorated_metadata_property_names(&file_metadata)?);
+    if type_inference_disabled {
+        // The escape hatch omits @enum metadata, so keep emitted TS enum keys stable.
+        preserved_property_names.extend(
+            file_metadata
+                .values()
+                .flat_map(|metadata| metadata.enums.iter())
+                .flat_map(|enum_decl| enum_decl.members.iter())
+                .map(|member| member.name.clone()),
+        );
+    }
+    let commonjs_specifiers = collect_commonjs_specifiers(&package_aliases)?
+        .into_iter()
+        .collect::<HashSet<_>>();
     let lazy_target_module_ids = lazy_imports
         .iter()
         .map(|lazy_import| lazy_import.moduleId.clone())
@@ -224,17 +247,21 @@ pub fn transpile_sources(
         chunk_mode,
         class_map_calls,
         pure_callees: pure_callees.into_iter().collect(),
-        commonjs_specifiers: collect_commonjs_specifiers(&package_aliases)?
-            .into_iter()
-            .collect(),
+        commonjs_specifiers: commonjs_specifiers.clone(),
+        opaque_commonjs: std::sync::Arc::new(collect_opaque_commonjs(
+            &file_names,
+            &commonjs_specifiers,
+            &package_aliases,
+        )?),
         file_metadata,
         hoist_plan: hoist_plan.map(std::sync::Arc::new),
         lazy_imports_by_file: group_lazy_imports_by_file(lazy_imports),
         lazy_target_module_ids,
         package_aliases,
+        resolved_module_ids,
         preserved_property_names,
         static_property_names,
-        typed_annotations: index_typed_annotations(typed_annotations),
+        type_metadata_enabled: !type_inference_disabled,
         vendor_module_ids: collect_vendor_module_ids(&chunk_graph, &workspace_dir),
         workspace_dir: workspace_dir.clone(),
     };
@@ -246,27 +273,57 @@ pub fn transpile_sources(
             let relative_path = file_path.strip_prefix(&workspace_dir).unwrap_or(&file_path);
             let output_path = out_dir.join(relative_path).with_extension("js");
 
-            let code = GLOBALS.set(&Globals::new(), || {
-                let code = transform_source_file(&file_path, &context)?;
-                Ok::<_, String>(code)
+            let emitted = GLOBALS.set(&Globals::new(), || {
+                let emitted = transform_source_file(&file_path, &context)?;
+                Ok::<_, String>(emitted)
             })?;
 
-            Ok::<_, String>((file_path, output_path, code))
+            Ok::<_, String>((file_path, output_path, emitted))
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
+    // Reflective `for...in` keys are property names read as data. Preserving
+    // them is what replaces the post-Closure string rewrite that used to
+    // respell them (and everything that looked like them) from the
+    // property-renaming report.
+    let mut preserved_property_names = context.preserved_property_names.clone();
+    for (_, _, emitted) in &emitted_outputs {
+        preserved_property_names.extend(emitted.reflective_property_names.iter().cloned());
+    }
+    // Ambient globals ride the metadata channel: an ambient `.d.ts` that
+    // nothing imports never enters the module graph, so this is the only place
+    // both the declaration and the extern writer are in scope. Names the
+    // program declares itself are excluded — those are program code.
+    let ambient_global_names = context
+        .file_metadata
+        .values()
+        .flat_map(|metadata| metadata.ambient_globals.iter().cloned())
+        .filter(|name| !program_declared_names.contains(name))
+        .collect::<HashSet<_>>();
     fs::write(
         &externs_path,
-        render_generated_externs(&context.static_property_names),
+        render_generated_externs(
+            &preserved_property_names,
+            &context.static_property_names,
+            &ambient_global_names,
+        ),
     )
     .map_err(|error| error.to_string())?;
 
+    let shared_helper_prefixes =
+        plan_shared_helper_placement(&emitted_outputs, &chunk_graph, &out_dir, &workspace_dir);
+
     let mut runtime_module_source_map = BTreeMap::new();
     let mut emitted_files = Vec::with_capacity(emitted_outputs.len());
-    for (file_path, output_path, code) in emitted_outputs {
+    let mut emitted_type_metadata = Vec::with_capacity(emitted_outputs.len());
+    for (file_path, output_path, emitted) in emitted_outputs {
         if let Some(parent) = output_path.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
+        let code = match shared_helper_prefixes.get(&output_path) {
+            Some(prefix) => format!("{prefix}\n{}", emitted.code),
+            None => emitted.code,
+        };
         fs::write(&output_path, code).map_err(|error| error.to_string())?;
         if runtime_module_source_map_file.is_some() {
             let runtime_module_id =
@@ -276,7 +333,13 @@ pub fn transpile_sources(
                 normalize_path(&file_path).to_string_lossy().to_string(),
             );
         }
-        emitted_files.push(output_path.to_string_lossy().to_string());
+        let emitted_file = output_path.to_string_lossy().to_string();
+        emitted_type_metadata.push(EmittedTypeMetadata::new(
+            emitted_file.clone(),
+            emitted.type_metadata.counts,
+            emitted.type_metadata.diagnostics,
+        ));
+        emitted_files.push(emitted_file);
     }
 
     if let Some(mapping_file) = runtime_module_source_map_file {
@@ -294,6 +357,7 @@ pub fn transpile_sources(
     }
 
     emitted_files.sort();
+    emitted_type_metadata.sort_by(|left, right| left.emittedFile.cmp(&right.emittedFile));
     let support_files = emit_package_support_files(
         &out_dir,
         &workspace_dir,
@@ -305,9 +369,91 @@ pub fn transpile_sources(
         emittedFiles: emitted_files,
         explicitExternPropertyCount: explicit_extern_property_names.len() as u32,
         externsPath: externs_path,
-        preservedPropertyCount: context.preserved_property_names.len() as u32,
+        preservedPropertyCount: preserved_property_names.len() as u32,
         supportFiles: support_files,
+        typeMetadata: emitted_type_metadata,
     })
+}
+
+/// Places each pooled lowering-helper declaration exactly once.
+///
+/// A helper claimed by a single module stays in that module, where Closure can
+/// still inline it locally. A helper claimed by two or more modules moves to
+/// the first file of the first chunk — the chunk every other chunk transitively
+/// depends on — so one definition dominates every use. Closure compiles all
+/// chunks as one job and sinks the definition again if only one chunk uses it.
+fn plan_shared_helper_placement(
+    emitted_outputs: &[(PathBuf, PathBuf, EmittedProgram)],
+    chunk_graph: &[TranspileChunkInput],
+    out_dir: &Path,
+    workspace_dir: &Path,
+) -> HashMap<PathBuf, String> {
+    let mut claims: BTreeMap<String, (String, BTreeSet<PathBuf>)> = BTreeMap::new();
+    for (_, output_path, emitted) in emitted_outputs {
+        for helper in &emitted.shared_helpers {
+            let entry = claims
+                .entry(helper.canonical_name.clone())
+                .or_insert_with(|| (helper.text.clone(), BTreeSet::new()));
+            entry.1.insert(output_path.clone());
+        }
+    }
+    if claims.is_empty() {
+        return HashMap::new();
+    }
+
+    let program_owner = chunk_graph
+        .first()
+        .and_then(|chunk| chunk.files.first())
+        .map(|relative_file| {
+            out_dir
+                .join(
+                    Path::new(relative_file)
+                        .strip_prefix(workspace_dir)
+                        .unwrap_or(Path::new(relative_file)),
+                )
+                .with_extension("js")
+        });
+
+    let mut prefixes: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    for (_, (text, claimants)) in claims {
+        let owner = if claimants.len() == 1 {
+            claimants.into_iter().next()
+        } else {
+            program_owner
+                .clone()
+                .or_else(|| claimants.into_iter().next())
+        };
+        if let Some(owner) = owner {
+            prefixes.entry(owner).or_default().push(text);
+        }
+    }
+    prefixes
+        .into_iter()
+        .map(|(path, texts)| (path, texts.join("\n")))
+        .collect()
+}
+
+/// Property keys embedded as string literals by TypeScript decorator lowering.
+///
+/// Collected from the lowered text TypeScript produced, keyed on the helper
+/// name TypeScript emitted, before any optimization runs.
+fn collect_decorated_metadata_property_names(
+    file_metadata: &HashMap<String, ClosureFileMetadata>,
+) -> std::result::Result<BTreeSet<String>, String> {
+    let mut names = BTreeSet::new();
+    for (metadata_key, metadata) in file_metadata {
+        let Some(lowered_source) = metadata.decorated_output_text.as_deref() else {
+            continue;
+        };
+        let module = parse_module(
+            &PathBuf::from(metadata_key).with_extension("js"),
+            lowered_source,
+        )?;
+        names.extend(emit_helpers::collect_decorator_metadata_property_names(
+            &module,
+        ));
+    }
+    Ok(names)
 }
 
 /// Module ids the chunk plan placed in the vendor chunk.
@@ -330,11 +476,11 @@ fn collect_vendor_module_ids(
 fn transform_source_file(
     file_path: &Path,
     context: &TranspileContext,
-) -> std::result::Result<String, String> {
+) -> std::result::Result<EmittedProgram, String> {
     let source_text = fs::read_to_string(file_path).map_err(|error| error.to_string())?;
     let file_metadata = context
         .file_metadata
-        .get(&file_path.to_string_lossy().to_string())
+        .get(&closure_metadata_key(file_path))
         .cloned();
     let module = if let Some(decorated_output_text) = file_metadata
         .as_ref()
@@ -381,6 +527,9 @@ fn should_run_react_transform(file_path: &Path) -> bool {
         Some("tsx") | Some("jsx")
     )
 }
+
+#[cfg(test)]
+mod regression_tests;
 
 #[cfg(test)]
 mod tests;

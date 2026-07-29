@@ -1,5 +1,5 @@
 import type { BuildOptions, BuildResult, CleanCacheOptions } from "./types";
-import { generateExterns } from "../externs";
+import { auditExternFiles, generateExterns } from "../externs";
 import { usage } from "../cli/usage";
 import { parseCliArgs } from "../cli/parse-options";
 import { parseExternsCliArgs } from "../cli/parse-externs-options";
@@ -16,6 +16,14 @@ export async function cleanCache(
 }
 
 export const build = async (options: BuildOptions): Promise<BuildResult> => {
+  // Explicit extern files are barriers too, and hand-written ones are the
+  // least likely to have been counted. Non-fatal: this is a cost signal.
+  for (const warning of await auditExternFiles(
+    options.externs ?? [],
+    options.projectRoot,
+  )) {
+    console.warn(`gcc-ts-bundler: ${warning.message}`);
+  }
   const pipeline = await loadBuildPipeline();
   return pipeline.build(options);
 };
@@ -50,6 +58,9 @@ export async function runCli(args: string[]): Promise<number> {
     }
 
     const result = await generateExterns(options);
+    for (const warning of result.barrierWarnings) {
+      console.warn(`gcc-ts-bundler: ${warning.message}`);
+    }
     if (!result.outputFile) {
       process.stdout.write(result.text);
     }

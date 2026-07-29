@@ -37,11 +37,58 @@ export interface RuntimeRenameHazards {
    * message templates and URL builders out of the evidence.
    */
   constructedKeyPrefixes: Set<string>;
+  /**
+   * Literal fragments of property keys assembled with `+` *in element-access
+   * position*: `deferred[tuple[0] + "With"]` contributes the suffix `With`.
+   *
+   * This is the other half of the constructed-key hazard and the one that
+   * actually bites in the wild. jQuery defines its Deferred API entirely
+   * through concatenated keys (`deferred[tuple[0] + "With"] = list.fireWith`,
+   * jquery.js:3705) and reads it back with a plain dot
+   * (`readyList.resolveWith(...)`, jquery.js:3844). The definition is invisible
+   * to Closure, so the runtime property keeps its literal name, while the dot
+   * read renames — `TypeError: Fb.ga is not a function` on first paint.
+   *
+   * Unlike `constructedKeyPrefixes`, position is *required*: only an
+   * `obj[… + …]` argument counts. A bare `"a" + b` anywhere in a file is a
+   * message, not a key, and treating it as evidence would pin most of the
+   * program.
+   */
+  constructedKeyFragments: Set<string>;
   /** `o.x` read anywhere. */
   dotAccessed: Set<string>;
   /** `this.x = v`, class members, object-literal keys. */
   dotDefined: Set<string>;
   protocolMembers: Set<string>;
+  /**
+   * Keys of an object literal that a *sibling* property of the same literal
+   * names with a string-literal value — a self-referential key.
+   *
+   * ```js
+   * jQuery.easing = {                       // jquery.js:7135
+   *   linear:   function (p) { … },
+   *   swing:    function (p) { … },
+   *   _default: "swing"                     // VALUE naming a sibling KEY
+   * };
+   * this.easing = easing || jQuery.easing._default;   // :7045
+   * this.pos = jQuery.easing[this.easing](…);         // :7063
+   * ```
+   *
+   * No other evidence class sees this. The key is dot-defined, so
+   * `stringDefined ∩ dotAccessed` misses it; the read goes through a variable,
+   * so `dotDefined ∩ stringLiteralRead` misses it; nothing is concatenated, so
+   * the constructed-key classes miss it. Closure renames `swing`, the string
+   * does not follow, and `jQuery.easing[…]` yields `undefined` — `.animate()`
+   * silently produces no tween, inside a `requestAnimationFrame` tick where
+   * nothing surfaces the error.
+   *
+   * The rule is deliberately narrow: the value must be a plain string literal,
+   * the key it names must be a sibling *identifier* key of the **same** literal
+   * (a quoted key never renames, so it needs no pin), and nesting does not
+   * cross literal boundaries. Audited over all 12 `_default` sites in
+   * `jquery.js`: fires exactly once.
+   */
+  selfReferentialKeys: Set<string>;
   /**
    * `__publicField(this, "x")`, `defineProperty`, `this["x"] =`, `"x" = v`.
    * Hyphenated keys also record their camelCase alias: framework prop
@@ -53,6 +100,14 @@ export interface RuntimeRenameHazards {
   stringLiteralRead: Set<string>;
 }
 
+/**
+ * A literal piece of a concatenated key, encoded as `prefix:<text>` or
+ * `suffix:<text>`. Kept as a plain string so the hazard sets stay homogeneous
+ * and `mergeRuntimeHazards` can loop over them generically.
+ */
+export const KEY_FRAGMENT_PREFIX = "prefix:";
+export const KEY_FRAGMENT_SUFFIX = "suffix:";
+
 export interface RuntimeProtocolHelpers {
   keyExclusionListCallees: string[];
   keyReadCallees: string[];
@@ -60,10 +115,12 @@ export interface RuntimeProtocolHelpers {
 
 function createEmptyRuntimeHazards(): RuntimeRenameHazards {
   return {
+    constructedKeyFragments: new Set(),
     constructedKeyPrefixes: new Set(),
     dotAccessed: new Set(),
     dotDefined: new Set(),
     protocolMembers: new Set(),
+    selfReferentialKeys: new Set(),
     stringDefined: new Set(),
     stringLiteralRead: new Set(),
   };
@@ -75,19 +132,20 @@ export function mergeRuntimeHazards(
   const merged = createEmptyRuntimeHazards();
   for (const hazards of hazardsList) {
     for (const key of RUNTIME_HAZARD_KEYS) {
-      for (const member of hazards[key]) {
-        merged[key].add(member);
-      }
+      const target = merged[key];
+      for (const member of hazards[key]) target.add(member);
     }
   }
   return merged;
 }
 
 export const RUNTIME_HAZARD_KEYS = [
+  "constructedKeyFragments",
   "constructedKeyPrefixes",
   "dotAccessed",
   "dotDefined",
   "protocolMembers",
+  "selfReferentialKeys",
   "stringDefined",
   "stringLiteralRead",
 ] as const satisfies ReadonlyArray<keyof RuntimeRenameHazards>;
@@ -123,6 +181,10 @@ function collectFileHazards(
     if (ts.isPropertyAccessExpression(node)) {
       addMember(hazards.dotAccessed, node.name.text);
     } else if (ts.isElementAccessExpression(node)) {
+      // Position matters here and only here: an `obj[…]` argument is a
+      // property key by construction, so a literal piece of it is evidence
+      // even though the whole key is not statically known.
+      collectConstructedKeyFragments(node.argumentExpression, hazards);
       if (!isAssignmentTarget(node)) {
         addMember(
           hazards.stringLiteralRead,
@@ -153,6 +215,60 @@ function collectFileHazards(
   };
 
   visit(sourceFile);
+}
+
+/** Shortest literal fragment worth pinning on; below this it matches noise. */
+const MIN_KEY_FRAGMENT_LENGTH = 3;
+
+/**
+ * Literal pieces of a `+`-concatenated property key.
+ *
+ * `deferred[tuple[0] + "With"]` yields `suffix:With`; `cache["evt" + type]`
+ * yields `prefix:evt`. Only the outermost operands are read, because those are
+ * the ones anchored to a key boundary: an inner fragment (`a + "x" + b`) is
+ * neither a prefix nor a suffix of the finished key and cannot be matched
+ * against a member name.
+ *
+ * Fragments shorter than `MIN_KEY_FRAGMENT_LENGTH` are dropped — a one- or
+ * two-character anchor (`o[k + "s"]`) matches a large share of any program's
+ * member names, which is a barrier explosion, not evidence.
+ */
+function collectConstructedKeyFragments(
+  argument: ts.Expression | undefined,
+  hazards: RuntimeRenameHazards,
+) {
+  if (!argument || !ts.isBinaryExpression(argument)) return;
+  if (argument.operatorToken.kind !== ts.SyntaxKind.PlusToken) return;
+
+  const leading = leftmostOperand(argument);
+  const trailing = rightmostOperand(argument);
+  const prefix = getStringLiteralMemberName(leading);
+  const suffix = getStringLiteralMemberName(trailing);
+  if (prefix && prefix.length >= MIN_KEY_FRAGMENT_LENGTH) {
+    hazards.constructedKeyFragments.add(`${KEY_FRAGMENT_PREFIX}${prefix}`);
+  }
+  // A key that is entirely one literal is not concatenated evidence.
+  if (
+    suffix &&
+    suffix.length >= MIN_KEY_FRAGMENT_LENGTH &&
+    trailing !== leading
+  ) {
+    hazards.constructedKeyFragments.add(`${KEY_FRAGMENT_SUFFIX}${suffix}`);
+  }
+}
+
+function leftmostOperand(expression: ts.Expression): ts.Expression {
+  return ts.isBinaryExpression(expression) &&
+    expression.operatorToken.kind === ts.SyntaxKind.PlusToken
+    ? leftmostOperand(expression.left)
+    : expression;
+}
+
+function rightmostOperand(expression: ts.Expression): ts.Expression {
+  return ts.isBinaryExpression(expression) &&
+    expression.operatorToken.kind === ts.SyntaxKind.PlusToken
+    ? rightmostOperand(expression.right)
+    : expression;
 }
 
 /**
@@ -225,11 +341,17 @@ function collectClassMemberDefinitions(
  * Object-literal keys are dot-definitions: generous here is safe, because the
  * set only ever matters intersected with a literal string read of the same
  * name — which is exactly the hazard.
+ *
+ * The same pass records self-referential keys (see `selfReferentialKeys`):
+ * identifier keys of this literal that a sibling property names with a plain
+ * string-literal value.
  */
 function collectObjectLiteralDefinitions(
   node: ts.ObjectLiteralExpression,
   hazards: RuntimeRenameHazards,
 ) {
+  const identifierKeys = new Set<string>();
+  const stringValues = new Set<string>();
   for (const property of node.properties) {
     const { name } = property;
     if (!name) {
@@ -237,10 +359,39 @@ function collectObjectLiteralDefinitions(
     }
     if (ts.isIdentifier(name)) {
       addMember(hazards.dotDefined, name.text);
-      continue;
+      identifierKeys.add(name.text);
+    } else {
+      addMember(hazards.stringDefined, getDeclarationStringName(name));
     }
-    addMember(hazards.stringDefined, getDeclarationStringName(name));
+    const value = siblingStringValue(property);
+    if (value !== null) {
+      stringValues.add(value);
+    }
   }
+  for (const value of stringValues) {
+    if (identifierKeys.has(value)) {
+      addMember(hazards.selfReferentialKeys, value);
+    }
+  }
+}
+
+/**
+ * The plain string-literal value of `key: "text"`, or null.
+ *
+ * Only a direct property assignment with a bare string literal qualifies.
+ * Shorthand, spread, accessors, methods and template substitutions carry no
+ * key-naming evidence, and admitting expressions would turn every literal
+ * holding a message string into a pin.
+ */
+function siblingStringValue(property: ts.ObjectLiteralElementLike) {
+  if (!ts.isPropertyAssignment(property)) {
+    return null;
+  }
+  const { initializer } = property;
+  return ts.isStringLiteral(initializer) ||
+    ts.isNoSubstitutionTemplateLiteral(initializer)
+    ? initializer.text
+    : null;
 }
 
 /** Quoted member name of a class member or object-literal property. */

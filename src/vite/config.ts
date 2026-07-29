@@ -1,14 +1,11 @@
 import type { ResolvedConfig, UserConfig } from "vite";
 
 import { DEFAULT_BUILD_OPTIONS } from "../api/types";
-import type {
-  BuildOptions,
-  LanguageOut,
-  TypedAnnotationFile,
-} from "../api/types";
+import type { BuildOptions, LanguageOut } from "../api/types";
 import { isRecord } from "../shared/validation";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type { ManifestFileSettings } from "./internal-types";
+import type { ViteTypeMetadataSidecar } from "./type-metadata";
 
 const INTERNAL_VITE_MANIFEST_FILE = ".gcc-ts-bundler-vite-manifest.json";
 export const INTERNAL_VITE_RUNTIME_MODULE_SOURCES_FILE =
@@ -34,9 +31,11 @@ export function applyViteBuildGuards(userConfig: UserConfig): UserConfig {
     throw new Error("gccTsBundler() does not support Vite sourcemaps.");
   }
 
+  const captureTarget = resolveViteCaptureTarget(userConfig.build?.target);
   return {
     build: {
       modulePreload: false,
+      ...(captureTarget ? { target: captureTarget } : {}),
     },
   };
 }
@@ -77,8 +76,13 @@ export function resolvePublicPath(
   return value.endsWith("/") ? value : `${value}/`;
 }
 
+export type ViteCompilerOptions = BuildOptions & {
+  typeMetadata: ViteTypeMetadataSidecar | undefined;
+};
+
 export function createCompilerOptions(input: {
   config: ResolvedConfig;
+  languageOut?: LanguageOut | undefined;
   entries: string[];
   externs: string[];
   manifestFile: string;
@@ -87,10 +91,11 @@ export function createCompilerOptions(input: {
   projectRoot: string;
   publicPath: string;
   srcDir: string;
-  typedAnnotations?: readonly TypedAnnotationFile[] | undefined;
-}): BuildOptions {
+  typeMetadata?: ViteTypeMetadataSidecar | undefined;
+  typedExterns?: string[] | undefined;
+}): ViteCompilerOptions {
   assertNoViteLanguageOut(input.options);
-  const compiler = input.options.compiler ?? {};
+  const compiler = { ...(input.options.compiler ?? {}) };
   const compilerChunks = compiler.chunks ?? {};
 
   return {
@@ -101,8 +106,9 @@ export function createCompilerOptions(input: {
     packages: "off",
     projectRoot: input.projectRoot,
     srcDir: input.srcDir,
-    languageOut: resolveViteLanguageOut(input.config),
-    typedAnnotations: input.typedAnnotations ?? [],
+    languageOut: input.languageOut ?? resolveViteLanguageOut(input.config),
+    typeMetadata: input.typeMetadata,
+    typedExterns: input.typedExterns,
     chunks: {
       ...compilerChunks,
       baseChunkName:
@@ -113,7 +119,11 @@ export function createCompilerOptions(input: {
       // The Vite plugin owns HTML emission and chunk naming, so module
       // output is safe by default here. Standalone builds default to script
       // output because the bundler does not own their HTML.
-      outputType: compilerChunks.outputType ?? "esm",
+      outputType:
+        compilerChunks.outputType === undefined ||
+        compilerChunks.outputType === "auto"
+          ? "esm"
+          : compilerChunks.outputType,
       publicPath: input.publicPath,
     },
   };
@@ -132,7 +142,13 @@ export function assertNoViteLanguageOut(
 }
 
 export function resolveViteLanguageOut(config: ResolvedConfig): LanguageOut {
-  const targets = normalizeViteTargets(config.build.target);
+  return resolveViteLanguageOutTarget(config.build.target);
+}
+
+export function resolveViteLanguageOutTarget(
+  target: ResolvedConfig["build"]["target"] | undefined,
+): LanguageOut {
+  const targets = normalizeViteTargets(target);
   if (targets.length === 0) {
     return "ECMASCRIPT6";
   }
@@ -157,8 +173,17 @@ export function resolveViteLanguageOut(config: ResolvedConfig): LanguageOut {
   return resolvedLanguageOut ?? "ECMASCRIPT6";
 }
 
+function resolveViteCaptureTarget(
+  target: ResolvedConfig["build"]["target"] | undefined,
+) {
+  const languageOut = resolveViteLanguageOutTarget(target);
+  return languageOut === "ECMASCRIPT3" || languageOut === "ECMASCRIPT5"
+    ? "es2015"
+    : undefined;
+}
+
 function normalizeViteTargets(
-  target: ResolvedConfig["build"]["target"],
+  target: ResolvedConfig["build"]["target"] | undefined,
 ): Array<string | false> {
   if (target === undefined) {
     return ["baseline-widely-available"];

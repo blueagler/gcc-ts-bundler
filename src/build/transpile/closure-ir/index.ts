@@ -1,14 +1,25 @@
+import path from "path";
 import ts from "typescript";
 
 import { logInternalDetail } from "../../../shared/timing";
-import { loadCompilerOptions } from "../compiler-options";
-import { collectClosureIrFiles, scanClosureIrFiles } from "./metadata";
+import {
+  loadCompilerOptions,
+  loadTsConfigDeclarationFiles,
+} from "../compiler-options";
+import { collectTypeMetadataFiles, scanTypeMetadataFiles } from "./metadata";
 import type { ClosureIrScanResult } from "./metadata/scan";
+import type { TypeMetadataTarget } from "./types";
 export type {
-  ClosureIrEnumDeclaration,
-  ClosureIrFileMetadata,
-  ClosureIrTopLevelDoc,
-  ClosureIrTypeDeclaration,
+  ClosureAnnotation,
+  ClosureEnumDeclaration,
+  ClosureTypeDeclaration,
+  ClosureTypeMetadataFile,
+  ClosureTypeReference,
+  ClosureTypeSymbol,
+  NativeTypeAnalysisResult,
+  TypeMetadataCounts,
+  TypeMetadataDiagnostic,
+  TypeMetadataTarget,
 } from "./types";
 
 interface NativeTypeAnalysisContext {
@@ -37,10 +48,34 @@ export async function createNativeTypeAnalysisContext({
     skipLibCheck: true,
     target: ts.ScriptTarget.ESNext,
   });
+  // Program parity with `tsc`: the checker must see the same files `tsc`
+  // would. Graph roots cover everything reachable by import; ambient
+  // declarations are reachable by nobody and come from the config instead.
+  // `typeRoots`/`types` packages and triple-slash references are resolved by
+  // `ts.createProgram` itself once the roots are right.
+  const declarationRoots = await loadTsConfigDeclarationFiles(tsConfigPath);
+  const rootNames = [...fileNames];
+  const seen = new Set(fileNames.map((fileName) => path.resolve(fileName)));
+  for (const declarationFile of declarationRoots) {
+    if (seen.has(declarationFile)) {
+      continue;
+    }
+    seen.add(declarationFile);
+    rootNames.push(declarationFile);
+  }
+  if (rootNames.length !== fileNames.length) {
+    logInternalDetail(
+      "native-emit:program-parity",
+      `${rootNames.length - fileNames.length} ambient declaration file(s)`,
+    );
+  }
+
   return {
     compilerOptions,
+    // `fileNames` stays the analysis set: parity widens what the checker can
+    // see, never what we emit metadata for.
     fileNames,
-    program: ts.createProgram(fileNames, compilerOptions),
+    program: ts.createProgram(rootNames, compilerOptions),
   };
 }
 
@@ -50,15 +85,17 @@ export function scanNativeTypeAnalysisContext({
   context: NativeTypeAnalysisContext;
 }): NativeTypeAnalysisScanResult {
   const { fileNames, program } = context;
-  return scanClosureIrFiles({ fileNames, program });
+  return scanTypeMetadataFiles({ fileNames, program });
 }
 
-export function collectNativeClosureIrFromContext({
+export function collectNativeTypeMetadataFromContext({
   context,
   scan,
+  targets,
 }: {
   context: NativeTypeAnalysisContext;
   scan: NativeTypeAnalysisScanResult | undefined;
+  targets?: TypeMetadataTarget[] | undefined;
 }) {
   const { compilerOptions, fileNames, program } = context;
   const closureIrScan = scan ?? scanNativeTypeAnalysisContext({ context });
@@ -66,10 +103,16 @@ export function collectNativeClosureIrFromContext({
     "native-emit:analysis-scan:files",
     `${closureIrScan.analyzedFileCount}/${closureIrScan.scannedFileCount}`,
   );
-  return collectClosureIrFiles({
+  const result = collectTypeMetadataFiles({
     compilerOptions,
     fileNames,
     program,
     scan: closureIrScan,
+    targets,
   });
+  logInternalDetail(
+    "native-emit:type-metadata:counts",
+    JSON.stringify(result.extractedCounts),
+  );
+  return result;
 }

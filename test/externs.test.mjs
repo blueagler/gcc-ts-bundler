@@ -53,21 +53,24 @@ test.serial(
 );
 
 test.serial(
-  "generateExterns candidates mode resolves package subpaths that ship sibling declaration files",
+  "generateExterns resolves package subpaths that ship sibling declaration files",
   async () => {
     const fixture = await createExternFixture();
 
     const result = await generateExterns({
+      appEntryFiles: ["./main.ts"],
       includeDependencies: false,
-      mode: "candidates",
+      mode: "boundary-aware",
       modules: ["contract-pkg/decorators.js"],
       projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
     });
 
+    // The subpath's own declaration file is the one that gets scanned — the
+    // package root's is not pulled in when dependencies are not followed.
     expect(result.scannedFiles).toHaveLength(1);
-    expect(result.mode).toBe("candidates");
-    expect(result.text).toContain("Object.prototype.attribute;");
-    expect(result.text).toContain("Object.prototype.reflect;");
+    expect(result.mode).toBe("boundary-aware");
+    expect(result.scannedFiles[0]).toContain("decorators.d.ts");
   },
 );
 
@@ -505,3 +508,226 @@ test.serial(
     expect(externFiles).toHaveLength(0);
   },
 );
+
+test("one extern-name predicate, two documented sources", async () => {
+  const { isExternPropertyName, isRuntimeExternPropertyName } = await import(
+    "../src/externs/shared.ts"
+  );
+
+  // Structural / unusable names are rejected by both sources.
+  for (const name of ["prototype", "constructor", "#priv", "a@b", "Map"]) {
+    expect(isExternPropertyName(name, "contract")).toBe(false);
+    expect(isExternPropertyName(name, "runtime")).toBe(false);
+  }
+
+  // The divergence that used to be silent, now explicit: framework-internal
+  // `_`/`$` protocol members are noise in a .d.ts and load-bearing in emitted
+  // runtime code. Dropping them from runtime evidence froze vue reactivity.
+  for (const name of ["__v_isRef", "$evtclick", "_value"]) {
+    expect(isExternPropertyName(name, "contract")).toBe(false);
+    expect(isExternPropertyName(name, "runtime")).toBe(true);
+  }
+
+  // Host-object members are already in Closure's browser externs; re-pinning
+  // them from runtime evidence is pure cost.
+  for (const name of ["addEventListener", "setAttribute", "removeAttribute"]) {
+    expect(isExternPropertyName(name, "contract")).toBe(true);
+    expect(isExternPropertyName(name, "runtime")).toBe(false);
+  }
+
+  expect(isExternPropertyName("clickCount")).toBe(true);
+  expect(isRuntimeExternPropertyName("clickCount")).toBe(true);
+});
+
+test("barrier accounting counts every extern property shape", async () => {
+  const { accountBarriers, collectBarrierPropertyNames, formatBarrierWarning } =
+    await import("../src/externs/barriers.ts");
+
+  const text = [
+    "/** @externs */",
+    "// Generated for: react — this comment must not be scanned",
+    "Object.prototype.flatOne;",
+    'Function.prototype["flat two"];',
+    "Owner.prototype.ownerOne;",
+    '/** @type {{"recordOne": string, "recordTwo": number}} */',
+    "Owner.prototype.typed;",
+  ].join("\n");
+
+  expect(collectBarrierPropertyNames(text)).toEqual([
+    "flat two",
+    "flatOne",
+    "ownerOne",
+    "recordOne",
+    "recordTwo",
+    "typed",
+  ]);
+
+  const accounting = accountBarriers({ label: "probe", text });
+  expect(accounting.byKind.flat).toBe(2);
+  expect(accounting.byKind.owner).toBe(2);
+  expect(accounting.byKind.record).toBe(2);
+  expect(formatBarrierWarning(accounting)).toBeNull();
+  expect(formatBarrierWarning(accounting, 1)).toContain("pins 6 property names");
+});
+
+// jQuery's Deferred API is defined entirely through concatenated keys
+// (`deferred[tuple[0] + "With"] = list.fireWith`) and read back with plain dots
+// (`readyList.resolveWith(document, [jQuery])`). Only the dot side renames, so
+// the page died with `TypeError: <x>.ga is not a function` on first paint. The
+// example used to hide this by pinning jQuery's whole 761-member type surface.
+test("concatenated element-access keys are rename evidence", async () => {
+  const { analyzeRuntimeUsage } = await import(
+    "../src/externs/runtime-analysis.ts"
+  );
+  const { collectRuntimeUsageExternLines } = await import(
+    "../src/externs/render.ts"
+  );
+  const fixture = await createFixture();
+  await fixture.write(
+    "runtime.js",
+    [
+      "const tuples = [['notify'], ['resolve'], ['reject']];",
+      "function Deferred() {",
+      "  const list = { fireWith: function () {} };",
+      "  const deferred = {};",
+      "  tuples.forEach(function (tuple) {",
+      "    deferred[tuple[0] + 'With'] = list.fireWith;",
+      "  });",
+      "  return deferred;",
+      "}",
+      "const readyList = Deferred();",
+      "export function go(doc) { return readyList.resolveWith(doc, []); }",
+      // A one-character anchor must NOT become evidence: it would match a
+      // large share of any program's member names.
+      "export function noisy(bag, k) { return bag[k + 's']; }",
+      "export function alsoNoisy(o) { return o.tags + o.things; }",
+    ].join("\n"),
+  );
+
+  const hazards = await analyzeRuntimeUsage(
+    [path.join(fixture.projectRoot, "runtime.js")],
+    { keyExclusionListCallees: [], keyReadCallees: [] },
+  );
+  expect([...hazards.constructedKeyFragments]).toContain("suffix:With");
+  expect([...hazards.constructedKeyFragments]).not.toContain("suffix:s");
+
+  const lines = collectRuntimeUsageExternLines(hazards, {
+    dotAccessed: new Set(),
+    stringLiteralRead: new Set(),
+  });
+  expect([...lines]).toContain("Object.prototype.resolveWith;");
+  expect([...lines]).toContain("Object.prototype.fireWith;");
+  // The short-anchor guard must keep unrelated members out.
+  expect([...lines]).not.toContain("Object.prototype.tags;");
+  expect([...lines]).not.toContain("Object.prototype.things;");
+});
+
+// jquery.js:7135-7143 defines `jQuery.easing = { linear, swing, _default: "swing" }`
+// and reads it back as `jQuery.easing[this.easing]` where `this.easing` holds the
+// string from `_default`. The key is dot-defined and the read goes through a
+// variable, so every other evidence class misses it: Closure renames `swing`, the
+// string does not follow, and `.animate()`/`.fadeIn()` silently produce no tween
+// inside a requestAnimationFrame tick that surfaces nothing.
+test("a string value naming a sibling key is rename evidence", async () => {
+  const { analyzeRuntimeUsage } = await import(
+    "../src/externs/runtime-analysis.ts"
+  );
+  const { collectRuntimeUsageExternLines } = await import(
+    "../src/externs/render.ts"
+  );
+  const fixture = await createFixture();
+  await fixture.write(
+    "runtime.js",
+    [
+      "export const easing = {",
+      "  linear: function (p) { return p; },",
+      "  swing: function (p) { return 0.5 - Math.cos(p * Math.PI) / 2; },",
+      "  _default: 'swing'",
+      "};",
+      "export function ease(name, p) { return easing[name || easing._default](p); }",
+      // Values that name nothing in their own literal stay out.
+      "export const labels = { title: 'Heading', mode: 'dark' };",
+      // A value naming a key of a DIFFERENT literal stays out: the rule does
+      // not cross literal boundaries.
+      "export const outer = { inner: { deep: 1 }, pick: 'deep' };",
+      // A quoted key never renames, so it needs no pin.
+      "export const quoted = { 'kept': 1, ref: 'kept' };",
+    ].join("\n"),
+  );
+
+  const hazards = await analyzeRuntimeUsage(
+    [path.join(fixture.projectRoot, "runtime.js")],
+    { keyExclusionListCallees: [], keyReadCallees: [] },
+  );
+  expect([...hazards.selfReferentialKeys]).toEqual(["swing"]);
+
+  const lines = collectRuntimeUsageExternLines(hazards, {
+    dotAccessed: new Set(),
+    stringLiteralRead: new Set(),
+  });
+  expect([...lines]).toContain("Object.prototype.swing;");
+  expect([...lines]).not.toContain("Object.prototype.Heading;");
+  expect([...lines]).not.toContain("Object.prototype.deep;");
+  expect([...lines]).not.toContain("Object.prototype.kept;");
+});
+
+// The audit that justified shipping the rule unconditionally: across all 12
+// `_default` sites in the real jquery.js, the sibling-key rule fires exactly
+// once. If a future change widens it, this count moves and the test fails.
+test("the sibling-key rule fires exactly once across real jquery.js", async () => {
+  const { analyzeRuntimeUsage } = await import(
+    "../src/externs/runtime-analysis.ts"
+  );
+  const jquerySource = path.join(
+    import.meta.dirname,
+    "..",
+    "examples",
+    "jquery-demo",
+    "node_modules",
+    "jquery",
+    "dist",
+    "jquery.js",
+  );
+  try {
+    await fs.access(jquerySource);
+  } catch {
+    return;
+  }
+  const hazards = await analyzeRuntimeUsage([jquerySource], {
+    keyExclusionListCallees: [],
+    keyReadCallees: [],
+  });
+  expect([...hazards.selfReferentialKeys]).toEqual(["swing"]);
+});
+
+// Regression lock for the example's posture: proven barriers only.
+test("jquery example pins proven barriers, not a type surface", async () => {
+  const exampleRoot = path.resolve(
+    import.meta.dirname,
+    "../examples/jquery-demo",
+  );
+  try {
+    await fs.access(path.join(exampleRoot, "node_modules/jquery"));
+  } catch {
+    return;
+  }
+
+  const runtime = await generateExternsFromSource({
+    appEntryFiles: ["./main.ts"],
+    mode: "runtime-aware",
+    modules: ["jquery"],
+    projectRoot: exampleRoot,
+    protocolHelpers: {
+      keyExclusionListCallees: [],
+      keyReadCallees: ["access", "data", "get"],
+    },
+    runtimeEntryFiles: ["./node_modules/jquery/dist/jquery.js"],
+    srcDir: ".",
+  });
+
+  // The name that broke the page, now proven rather than guessed.
+  expect(runtime.renameBarriers.propertyNames).toContain("resolveWith");
+  // Two orders of magnitude below the 761 the type surface produced.
+  expect(runtime.renameBarriers.propertyNames.length).toBeLessThan(60);
+  expect(runtime.barrierWarnings).toEqual([]);
+});

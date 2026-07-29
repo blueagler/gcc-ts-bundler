@@ -1,23 +1,21 @@
 import fs from "fs/promises";
 import path from "path";
 
-import {
-  publishFilesToDirectory,
-  ensureDirectory,
-  ensureParentDirectory,
-} from "../../shared/files";
+import { ensureDirectory, ensureParentDirectory } from "../../shared/files";
 import { logInternalDetail, withInternalTiming } from "../../shared/timing";
 import type { ChunkPlanChunk, ResolvedBuildOptions } from "../types";
 import { prepareClosureJobs } from "../../native/load";
-import { finalizeSplitChunks } from "../split-chunks";
+import type { NativeEmittedTypeMetadata } from "../../native/load";
 import {
   configureClosureCompilerOptions,
+  hasStrictCheckTypes,
   resolveClosureCompilerVersionTag,
   runClosureCompiler,
   shouldEnableTypeInference,
   TYPE_INFERENCE_OPTIONS,
+  type ClosureCompilerEnvironment,
+  type ClosureCompilerOptions,
 } from "./compiler";
-import type { ClosureCompilerOptions } from "./compiler";
 import {
   getCompileJobArtifactFiles,
   getCompileJobOutputFiles,
@@ -25,9 +23,13 @@ import {
   tryRestoreCachedClosureJob,
 } from "./cache";
 import { resolveChunkOutputType } from "../resolve/options";
-import { generatePlatformExternsText } from "./platform-externs";
+import {
+  generatePlatformExternsText,
+  isMissingPlatformExternFailure,
+} from "./platform-externs";
 import { determineClosureConcurrency, runWithConcurrency } from "./concurrency";
 import { runClosurePostprocess } from "./postprocess";
+import { pruneEmptyChunks } from "./prune-empty-chunks";
 
 export interface ClosureStageResult {
   cacheOutputFiles: string[];
@@ -36,6 +38,7 @@ export interface ClosureStageResult {
 }
 
 export async function runClosureStage({
+  closureCompilerEnvironment,
   chunkPlan,
   emittedOutDir,
   explicitExternPaths,
@@ -46,8 +49,10 @@ export async function runClosureStage({
   outDir,
   projectCacheDir,
   supportFiles,
+  typeMetadata,
   packageRoot,
 }: {
+  closureCompilerEnvironment: ClosureCompilerEnvironment;
   chunkPlan: ChunkPlanChunk[];
   emittedOutDir: string;
   explicitExternPaths: string[];
@@ -58,6 +63,7 @@ export async function runClosureStage({
   outDir: string;
   projectCacheDir: string;
   supportFiles: string[];
+  typeMetadata: NativeEmittedTypeMetadata[];
   packageRoot: string;
 }): Promise<ClosureStageResult> {
   const { cacheOutputDir } = await prepareClosureStageDirectories({
@@ -87,19 +93,22 @@ export async function runClosureStage({
     languageOut: options.languageOut,
     manifestFile: options.chunks.manifestFile,
     nativeExternPath,
+    needsCssRuntime: options.cssRuntime,
     outDir,
     packageRoot,
     publicPath: options.chunks.publicPath,
     supportFiles,
+    typeMetadata,
   });
 
   await writeGeneratedAssets(prepared.generatedAssets);
 
   const exitCodes = await withInternalTiming("closure:compile", () =>
     compilePreparedClosureJobs({
+      closureCompilerEnvironment,
       chunkMode: options.chunks.mode,
-      hasTypedInput: options.typedAnnotations.length > 0,
       platformExterns: options.platformExterns,
+      packageRoot,
       prepared,
       projectCacheDir,
       usesPersistentCache: options.cache.mode !== "off",
@@ -114,24 +123,28 @@ export async function runClosureStage({
     runClosurePostprocess({
       chunkMode: options.chunks.mode,
       chunkOutputType,
-      languageOut: options.languageOut,
       prepared,
     }),
   );
 
-  const publishedOutputs =
-    options.chunks.mode === "split"
-      ? await finalizeSplitChunks({
+  let publishedOutputs = prepared.publishedOutputs;
+
+  if (options.chunks.mode !== "off") {
+    publishedOutputs = await withInternalTiming(
+      "closure:prune-empty-chunks",
+      () =>
+        pruneEmptyChunks({
           chunkPlan,
-          manifestFile: options.chunks.manifestFile,
-          outDir,
-          publicPath: options.chunks.publicPath,
-          publishedOutputs: prepared.publishedOutputs,
-        })
-      : prepared.publishedOutputs;
+          manifestFilePath: options.chunks.manifestFile
+            ? path.join(outDir, options.chunks.manifestFile)
+            : null,
+          outputFiles: publishedOutputs,
+        }),
+    );
+  }
 
   await withInternalTiming("closure:publish", () =>
-    publishPreparedClosureOutputs(publishedOutputs, cacheOutputDir),
+    publishPreparedClosureOutputs(publishedOutputs, outDir, cacheOutputDir),
   );
   const cacheOutputFiles = publishedOutputs.map((outputFile) =>
     path.join(cacheOutputDir, path.relative(outDir, outputFile)),
@@ -176,16 +189,18 @@ async function writeGeneratedAssets(
 }
 
 async function compilePreparedClosureJobs({
+  closureCompilerEnvironment,
   chunkMode,
-  hasTypedInput,
   platformExterns,
+  packageRoot,
   prepared,
   projectCacheDir,
   usesPersistentCache,
 }: {
+  closureCompilerEnvironment: ClosureCompilerEnvironment;
   chunkMode: string;
-  hasTypedInput: boolean;
   platformExterns: string;
+  packageRoot: string;
   prepared: ReturnType<typeof prepareClosureJobs>;
   projectCacheDir: string;
   usesPersistentCache: boolean;
@@ -194,20 +209,26 @@ async function compilePreparedClosureJobs({
     ? path.join(projectCacheDir, "closure-jobs")
     : null;
   const concurrency =
-    chunkMode === "bundler-runtime"
-      ? determineClosureConcurrency(prepared.compileJobs.length)
-      : 1;
+    chunkMode === "off"
+      ? 1
+      : determineClosureConcurrency(prepared.compileJobs.length);
   const results = await runWithConcurrency(
     prepared.compileJobs,
     concurrency,
     async (job) =>
       runPreparedClosureJob({
+        compilerEnvironment: closureCompilerEnvironment,
         cacheDir,
         job: await applyStableRenamingMaps(
           await applyMinimalPlatformExterns(
-            applyTypeInference(job, chunkMode),
+            applyTypeInference(
+              job,
+              closureCompilerEnvironment.typeInferenceDisabled,
+            ),
             platformExterns,
-            hasTypedInput,
+            packageRoot,
+            closureCompilerEnvironment.typeInferenceDisabled,
+            projectCacheDir,
           ),
           cacheDir,
         ),
@@ -225,9 +246,24 @@ async function compilePreparedClosureJobs({
 
 async function publishPreparedClosureOutputs(
   outputFiles: string[],
+  outDir: string,
   cacheOutputDir: string,
 ) {
-  await publishFilesToDirectory(outputFiles, cacheOutputDir, "copy");
+  await Promise.all(
+    outputFiles.map(async (outputFile) => {
+      const relativePath = path.relative(outDir, outputFile);
+      if (
+        relativePath === ".." ||
+        relativePath.startsWith(`..${path.sep}`) ||
+        path.isAbsolute(relativePath)
+      ) {
+        throw new Error(`Published output escaped outDir: ${outputFile}`);
+      }
+      const cacheFile = path.join(cacheOutputDir, relativePath);
+      await ensureParentDirectory(cacheFile);
+      await fs.copyFile(outputFile, cacheFile);
+    }),
+  );
 }
 
 type PreparedCompileJob = ReturnType<
@@ -244,11 +280,18 @@ type PreparedCompileJob = ReturnType<
  * as well as the compiler; see `shouldEnableTypeInference`. */
 function applyTypeInference(
   job: PreparedCompileJob,
-  chunkMode: string,
+  typeInferenceDisabled: boolean,
 ): PreparedCompileJob {
-  return shouldEnableTypeInference(chunkMode, job.compilationLevel)
-    ? { ...job, typeInference: true }
-    : job;
+  const enabled = shouldEnableTypeInference(
+    job.compilationLevel,
+    job.hasTypeMetadata,
+    typeInferenceDisabled,
+  );
+  logInternalDetail(
+    "closure:type-metadata-job",
+    `metadata=${job.hasTypeMetadata} annotations=${job.typeMetadataCounts.annotationCount} members=${job.typeMetadataCounts.memberAnnotationCount} declarations=${job.typeMetadataCounts.typeDeclarationCount} enums=${job.typeMetadataCounts.enumDeclarationCount} unresolved=${job.typeMetadataCounts.unresolvedTypeReferenceCount} inference=${enabled}`,
+  );
+  return enabled ? { ...job, typeInference: true } : job;
 }
 
 /**
@@ -331,27 +374,58 @@ async function persistRenamingMaps(
 }
 
 /**
- * Swaps Closure's full browser externs for a generated flat platform externs
- * file (`--env CUSTOM`); see `platform-externs.ts`. Applies only to ADVANCED
- * jobs without polyfill rewriting, because injected polyfills reference
- * platform names the input scan cannot see.
+ * Swaps Closure's full browser externs for a dependency-closed platform slice
+ * (`--env CUSTOM`) on ADVANCED jobs. Polyfill jobs stay on the full set because
+ * injected polyfills reference names absent from the program scan.
+ *
+ * Eligibility deliberately does *not* require type metadata. The slice is built
+ * by scanning the same program text Closure is about to compile, which is
+ * exactly as available for a JS-input job as for a typed one — the seeds
+ * collector parses with `ScriptKind.JS` and every failure path (unparseable
+ * file, unseedable property, unresolvable dependency) already returns null and
+ * falls back to the full browser set. Requiring metadata only mirrored
+ * `shouldEnableTypeInference`, and the cost of that coupling was measured: a
+ * JS-input job paid 903 ms of externs parsing against ~214 ms for a slice of
+ * comparable breadth, 74% of that example's whole closure phase
+ * (`/tmp/gcc-w2-closurejs.md`).
+ *
+ * What the slice does *not* do is change renaming: it declares the same names
+ * the program mentions, so an extern-pinned name stays pinned. The one hazard
+ * it cannot see is a platform property reached only through a runtime-computed
+ * key, and that hazard is identical under the full set — it is boundary D's
+ * job (runtime-aware externs), not this gate's, and it predates this change.
  */
 async function applyMinimalPlatformExterns(
   job: PreparedCompileJob,
   platformExterns: string,
-  hasTypedInput: boolean,
+  packageRoot: string,
+  typeInferenceDisabled: boolean,
+  projectCacheDir: string,
 ): Promise<PreparedCompileJob> {
   if (
     platformExterns !== "minimal" ||
     job.compilationLevel !== "ADVANCED" ||
+    typeInferenceDisabled ||
     job.rewritePolyfills ||
     job.env !== undefined
   ) {
     return job;
   }
-  const externsText = await generatePlatformExternsText(job.js, {
-    typedConstructors: hasTypedInput,
+  const closureLibDir = path.join(packageRoot, "closure-lib");
+  const closureLibFiles: string[] = [];
+  const programJs = job.js.filter((filePath) => {
+    const relative = path.relative(closureLibDir, path.resolve(filePath));
+    const isClosureLib =
+      !relative.startsWith("..") && !path.isAbsolute(relative);
+    if (isClosureLib) closureLibFiles.push(filePath);
+    return !isClosureLib;
   });
+  const externsText = await generatePlatformExternsText(
+    programJs,
+    [...closureLibFiles, ...job.externs],
+    // Program-keyed, so it belongs to the project rather than the machine.
+    { sliceCacheRoot: projectCacheDir },
+  );
   if (externsText === null) {
     logInternalDetail(
       "closure:platform-externs",
@@ -370,7 +444,10 @@ async function applyMinimalPlatformExterns(
   );
   await ensureParentDirectory(externsPath);
   await fs.writeFile(externsPath, externsText, "utf-8");
-  logInternalDetail("closure:platform-externs", `bytes=${externsText.length}`);
+  logInternalDetail(
+    "closure:platform-externs",
+    `bytes=${externsText.length} metadata=${job.hasTypeMetadata}`,
+  );
   return {
     ...job,
     env: "CUSTOM",
@@ -379,12 +456,18 @@ async function applyMinimalPlatformExterns(
 }
 
 async function runPreparedClosureJob({
+  compilerEnvironment,
   cacheDir,
   job,
 }: {
+  compilerEnvironment: ClosureCompilerEnvironment;
   cacheDir: string | null;
   job: PreparedCompileJob;
 }) {
+  const cacheJob = {
+    ...job,
+    compilerEnvironment: compilerEnvironment.options,
+  };
   const artifactFiles = getCompileJobArtifactFiles(job);
   const compilerVersion = resolveClosureCompilerVersionTag();
   const cached = cacheDir
@@ -392,7 +475,7 @@ async function runPreparedClosureJob({
         artifactFiles,
         cacheDir,
         compilerVersion,
-        job,
+        job: cacheJob,
       })
     : false;
   if (cached) {
@@ -403,6 +486,7 @@ async function runPreparedClosureJob({
     };
   }
 
+  const strictCheckTypes = hasStrictCheckTypes(compilerEnvironment.options);
   const closureOptions: ClosureCompilerOptions = {
     assumeFunctionWrapper: job.assumeFunctionWrapper,
     compilationLevel: job.compilationLevel,
@@ -411,7 +495,7 @@ async function runPreparedClosureJob({
     languageIn: job.languageIn,
     languageOut: job.languageOut,
     rewritePolyfills: job.rewritePolyfills,
-    warningLevel: job.warningLevel,
+    warningLevel: strictCheckTypes ? "DEFAULT" : job.warningLevel,
   };
   if (job.chunk) {
     closureOptions["chunk"] = job.chunk;
@@ -449,15 +533,22 @@ async function runPreparedClosureJob({
   if (job.env) {
     closureOptions["env"] = job.env;
   }
-  if (job.typeInference) {
+  if (job.typeInference && !strictCheckTypes) {
     Object.assign(closureOptions, TYPE_INFERENCE_OPTIONS);
   }
-  configureClosureCompilerOptions(closureOptions);
-  const exitCode = await runClosureCompiler(closureOptions);
+  configureClosureCompilerOptions(closureOptions, compilerEnvironment.options);
+  let capturedStdErr = "";
+  const exitCode = await runClosureCompiler(closureOptions, (stdErr) => {
+    capturedStdErr += stdErr;
+  });
   if (exitCode !== 0) {
-    if (job.env === "CUSTOM") {
-      // The generated platform externs missed a name; recompile with the
-      // full browser externs (slower but complete).
+    // Retry with the full browser externs only when the diagnostics say the
+    // slice was incomplete. Retrying on *any* non-zero exit made every real
+    // compile error cost two full Closure runs and print itself twice.
+    if (
+      job.env === "CUSTOM" &&
+      isMissingPlatformExternFailure(capturedStdErr)
+    ) {
       logInternalDetail(
         "closure:platform-externs",
         "fallback to full browser externs",
@@ -465,6 +556,7 @@ async function runPreparedClosureJob({
       const fullJob = { ...job };
       delete fullJob.env;
       return runPreparedClosureJob({
+        compilerEnvironment,
         cacheDir,
         job: {
           ...fullJob,
@@ -486,7 +578,7 @@ async function runPreparedClosureJob({
       artifactFiles,
       cacheDir,
       compilerVersion,
-      job,
+      job: cacheJob,
     });
   }
   await persistRenamingMaps(job, cacheDir);

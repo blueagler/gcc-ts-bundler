@@ -58,10 +58,10 @@ test.serial(
     await fixture.write(
       "src/index.ts",
       [
-        "const node = document.querySelector(\"#app\");",
+        'const node = document.querySelector("#app");',
         "if (node) {",
-        "  node.setAttribute(\"data-ready\", \"yes\");",
-        "  node.addEventListener(\"click\", () => {",
+        '  node.setAttribute("data-ready", "yes");',
+        '  node.addEventListener("click", () => {',
         "    queueMicrotask(() => console.log(node.textContent));",
         "  });",
         "}",
@@ -440,50 +440,40 @@ test.serial(
 );
 
 test.serial(
-  "platform externs declare typed constructors only when the build carries typed annotations",
+  "platform externs preserve upstream typed declarations",
   async () => {
-    const untyped = await generatePlatformExternsText([]);
-    const typed = await generatePlatformExternsText([], {
-      typedConstructors: true,
-    });
-
-    // An untyped `var HTMLElement;` leaves the platform type unknown, which
-    // makes every subclass unknown and silently disables all type-based
-    // passes for it (docs/research/typed-input.md §4c). The typed form costs
-    // +134 B gzip on untyped input, so it stays gated.
-    expect(untyped).toContain("var HTMLElement;");
-    expect(untyped).not.toContain("function HTMLElement()");
-    expect(typed).toContain("/** @constructor */ function HTMLElement() {}");
-    expect(typed).not.toContain("var HTMLElement;");
-    // Non-constructor globals are untouched by the gate.
-    expect(typed).toContain("var undefined;");
+    const fixture = await createFixture();
+    await fixture.write(
+      "input.js",
+      "const canvas = new HTMLCanvasElement(); canvas.captureStream();\n",
+    );
+    const input = path.join(fixture.projectRoot, "input.js");
+    const slice = await generatePlatformExternsText([input]);
+    expect(slice).toContain("function HTMLCanvasElement()");
+    expect(slice).toContain("@extends {HTMLElement}");
+    expect(slice).toContain("@return {!MediaStream}");
+    expect(slice).not.toContain("Object.prototype.captureStream;");
   },
 );
 
 test.serial(
-  "silent type inference is added to bundler-runtime ADVANCED jobs and removable by the escape hatch",
+  "silent type inference is job-local and removable by the escape hatch",
   async () => {
-    expect(shouldEnableTypeInference("bundler-runtime", "ADVANCED")).toBe(true);
-    // Only bundler-runtime carries the typed annotations inference exists to
-    // feed, and only ADVANCED runs the passes that consume them.
-    expect(shouldEnableTypeInference("split", "ADVANCED")).toBe(false);
-    expect(shouldEnableTypeInference("off", "ADVANCED")).toBe(false);
-    expect(shouldEnableTypeInference("bundler-runtime", "SIMPLE")).toBe(false);
+    expect(shouldEnableTypeInference("ADVANCED", true)).toBe(true);
+    expect(shouldEnableTypeInference("ADVANCED", false)).toBe(false);
+    expect(shouldEnableTypeInference("SIMPLE", true)).toBe(false);
 
     process.env.GCC_DISABLE_TYPE_INFERENCE = "1";
     try {
-      expect(shouldEnableTypeInference("bundler-runtime", "ADVANCED")).toBe(
-        false,
-      );
+      expect(shouldEnableTypeInference("ADVANCED", true)).toBe(false);
     } finally {
       delete process.env.GCC_DISABLE_TYPE_INFERENCE;
     }
 
     // The wrapper's camelCase keys must render the hidden-inference CLI pair;
     // a typo here is silent (the compiler simply keeps QUIET behaviour).
-    const { compiler: ClosureCompiler } = await import(
-      "google-closure-compiler"
-    );
+    const { compiler: ClosureCompiler } =
+      await import("google-closure-compiler");
     expect(
       new ClosureCompiler(TYPE_INFERENCE_OPTIONS).commandArguments,
     ).toEqual(["--hide_warnings_for=/", "--jscomp_warning=checkTypes"]);
@@ -502,11 +492,19 @@ test.serial(
       assumeFunctionWrapper: true,
       compilationLevel: "ADVANCED",
       externs: [],
+      hasTypeMetadata: true,
       js: [],
       jsOutputFile: outputFile,
       languageIn: "UNSTABLE",
       languageOut: "ECMASCRIPT_NEXT",
       rewritePolyfills: false,
+      typeMetadataCounts: {
+        annotationCount: 1,
+        enumDeclarationCount: 0,
+        memberAnnotationCount: 0,
+        typeDeclarationCount: 0,
+        unresolvedTypeReferenceCount: 0,
+      },
       warningLevel: "QUIET",
     };
     const restore = (job) =>

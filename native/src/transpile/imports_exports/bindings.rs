@@ -6,6 +6,35 @@ pub(super) struct NamedExportBinding {
     pub(super) local_name: String,
 }
 
+/// `export * as ns from "./m"` — the whole module namespace under one name.
+///
+/// This used to be dropped on the floor by `collect_named_export_bindings`'s
+/// `filter_map`, which produced a `goog.require` with no `exports.ns =` to go
+/// with it: the re-export silently vanished and every consumer read
+/// `undefined`. It is a distinct shape from a named re-export (there is no
+/// member to read off the required module — the module object *is* the value),
+/// so it gets its own type rather than being forced into `NamedExportBinding`.
+pub(super) struct NamespaceExportBinding {
+    pub(super) export_name: String,
+}
+
+pub(super) fn collect_namespace_export_bindings(
+    named_export: &swc_core::ecma::ast::NamedExport,
+) -> Vec<NamespaceExportBinding> {
+    named_export
+        .specifiers
+        .iter()
+        .filter_map(|specifier| {
+            let swc_core::ecma::ast::ExportSpecifier::Namespace(namespace) = specifier else {
+                return None;
+            };
+            Some(NamespaceExportBinding {
+                export_name: module_export_name_to_string(&namespace.name),
+            })
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 pub(crate) struct ImportBindingRewrite {
     pub(crate) binding_id: Id,
@@ -267,10 +296,21 @@ impl VisitMut for ImportBindingRewriteVisitor {
 }
 
 pub(crate) fn render_live_export_slot(slot: usize, value_expression: &str) -> String {
-    format!("__live(__exports,{slot},function(){{return {value_expression};}});")
+    render_live_export_slot_with("__live", "__exports", slot, value_expression)
 }
 
-pub(crate) fn render_packed_live_export_slots(
+pub(crate) fn render_live_export_slot_with(
+    live_name: &str,
+    exports_name: &str,
+    slot: usize,
+    value_expression: &str,
+) -> String {
+    format!("{live_name}({exports_name},{slot},function(){{return {value_expression};}});")
+}
+
+pub(crate) fn render_packed_live_export_slots_with(
+    live_name: &str,
+    exports_name: &str,
     source_object_name: &str,
     slot_pairs: &[(usize, usize)],
 ) -> String {
@@ -280,11 +320,40 @@ pub(crate) fn render_packed_live_export_slots(
         .map(|slot| slot.to_string())
         .collect::<Vec<_>>()
         .join(",");
-    format!("__live(__exports,{source_object_name},[{flat_pairs}]);")
+    format!("{live_name}({exports_name},{source_object_name},[{flat_pairs}]);")
+}
+
+pub(crate) fn render_namespace_export_slots_with(
+    exports_name: &str,
+    export_slots: &[(String, usize)],
+) -> String {
+    let descriptors = export_slots
+        .iter()
+        .map(|(export_name, slot)| {
+            let key = if is_valid_js_identifier(export_name) && export_name != "__cjsExports" {
+                export_name.clone()
+            } else {
+                format!("{export_name:?}")
+            };
+            format!(
+                "{key}:{{configurable:true,enumerable:true,get:function(){{return {exports_name}[{slot}];}}}}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("Object.defineProperties({exports_name},{{{descriptors}}});")
 }
 
 pub(crate) fn render_static_export_slot(slot: usize, value_expression: &str) -> String {
-    format!("__exports[{slot}]={value_expression};")
+    render_static_export_slot_with("__exports", slot, value_expression)
+}
+
+pub(crate) fn render_static_export_slot_with(
+    exports_name: &str,
+    slot: usize,
+    value_expression: &str,
+) -> String {
+    format!("{exports_name}[{slot}]={value_expression};")
 }
 
 pub(crate) fn module_export_name_to_string(name: &swc_core::ecma::ast::ModuleExportName) -> String {

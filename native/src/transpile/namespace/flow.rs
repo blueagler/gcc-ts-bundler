@@ -15,6 +15,7 @@ pub(crate) fn rewrite_hoisted_namespace_usage(
     plan: &HoistPlan,
     consumer_module_id: &str,
     direct_namespace_ids: &HashSet<Id>,
+    lexical_binding_names: &HashSet<String>,
 ) -> std::result::Result<(), String> {
     rewrite_namespace_usage_with_hoist(
         module,
@@ -24,6 +25,7 @@ pub(crate) fn rewrite_hoisted_namespace_usage(
             consumer_module_id: consumer_module_id.to_string(),
             direct_namespace_ids,
             plan,
+            lexical_binding_names,
         }),
     )
 }
@@ -58,6 +60,7 @@ pub(crate) struct HoistNamespaceInfo<'a> {
     pub(crate) consumer_module_id: String,
     pub(crate) direct_namespace_ids: &'a HashSet<Id>,
     pub(crate) plan: &'a HoistPlan,
+    pub(crate) lexical_binding_names: &'a HashSet<String>,
 }
 
 struct BundlerRuntimeNamespaceVisitor<'a> {
@@ -364,8 +367,10 @@ impl BundlerRuntimeNamespaceVisitor<'_> {
             .is_direct_binding(&hoist.consumer_module_id, binding)
         {
             if let Some(direct_name) = hoist.plan.direct_binding_name(binding) {
-                *expr = Expr::Ident(create_ident(&direct_name));
-                return true;
+                if !hoist.lexical_binding_names.contains(&direct_name) {
+                    *expr = Expr::Ident(create_ident(&direct_name));
+                    return true;
+                }
             }
         }
         let Some(owner_slots) = self
@@ -610,27 +615,59 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
 
     fn visit_mut_assign_expr(&mut self, assign_expr: &mut swc_core::ecma::ast::AssignExpr) {
         assign_expr.visit_mut_children_with(self);
-        if let Some(module_ids) = self.module_ids_for_promise_expr(&assign_expr.right) {
-            if let swc_core::ecma::ast::AssignTarget::Simple(
-                swc_core::ecma::ast::SimpleAssignTarget::Ident(binding),
-            ) = &assign_expr.left
-            {
-                self.promise_carriers.insert(binding.id.to_id(), module_ids);
-                return;
-            }
-        }
-        if matches!(&*assign_expr.right, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id()))
+        let stores_namespace = matches!(&*assign_expr.right, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id()));
+        if let swc_core::ecma::ast::AssignTarget::Simple(
+            swc_core::ecma::ast::SimpleAssignTarget::Ident(binding),
+        ) = &assign_expr.left
         {
+            let binding_id = binding.id.to_id();
+            self.namespace_bindings.remove(&binding_id);
+            let module_ids = matches!(assign_expr.op, swc_core::ecma::ast::AssignOp::Assign)
+                .then(|| self.module_ids_for_promise_expr(&assign_expr.right))
+                .flatten();
+            if let Some(module_ids) = module_ids {
+                self.promise_carriers.insert(binding_id, module_ids);
+            } else {
+                self.promise_carriers.remove(&binding_id);
+            }
+        } else {
+            remove_assign_target_carriers(&assign_expr.left, &mut self.namespace_bindings);
+            remove_assign_target_carriers(&assign_expr.left, &mut self.promise_carriers);
+        }
+        if stores_namespace {
             self.push_error(
                 "bundler-runtime does not support reassigning or storing module namespace values",
             );
         }
     }
 
+    fn visit_mut_update_expr(&mut self, update_expr: &mut swc_core::ecma::ast::UpdateExpr) {
+        update_expr.visit_mut_children_with(self);
+        if let Expr::Ident(binding) = &*update_expr.arg {
+            let binding_id = binding.to_id();
+            self.namespace_bindings.remove(&binding_id);
+            self.promise_carriers.remove(&binding_id);
+        }
+    }
+
     fn visit_mut_for_in_stmt(&mut self, for_in_stmt: &mut swc_core::ecma::ast::ForInStmt) {
         for_in_stmt.visit_mut_children_with(self);
-        if matches!(&*for_in_stmt.right, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id()))
-        {
+        let iterates_namespace = matches!(&*for_in_stmt.right, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id()));
+        remove_for_head_carriers(&for_in_stmt.left, &mut self.namespace_bindings);
+        remove_for_head_carriers(&for_in_stmt.left, &mut self.promise_carriers);
+        if iterates_namespace {
+            self.push_error(
+                "bundler-runtime does not support iterating over module namespace values",
+            );
+        }
+    }
+
+    fn visit_mut_for_of_stmt(&mut self, for_of_stmt: &mut swc_core::ecma::ast::ForOfStmt) {
+        for_of_stmt.visit_mut_children_with(self);
+        let iterates_namespace = matches!(&*for_of_stmt.right, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id()));
+        remove_for_head_carriers(&for_of_stmt.left, &mut self.namespace_bindings);
+        remove_for_head_carriers(&for_of_stmt.left, &mut self.promise_carriers);
+        if iterates_namespace {
             self.push_error(
                 "bundler-runtime does not support iterating over module namespace values",
             );

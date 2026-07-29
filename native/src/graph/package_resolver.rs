@@ -11,7 +11,9 @@ use self::parse::{
     parse_package_import, read_package_json,
 };
 pub(super) use self::paths::validate_commonjs_usage;
-use self::paths::{resolve_module_base, resolve_package_local_path, resolve_package_target};
+use self::paths::{
+    is_package_source_file, resolve_module_base, resolve_package_local_path, resolve_package_target,
+};
 
 pub(super) fn resolve_module_specifier(
     specifier: &str,
@@ -62,16 +64,34 @@ fn resolve_relative_module(
     };
     let allow_commonjs = !importer.starts_with(context.src_dir);
     let base = normalize_path(&importer_dir.join(specifier));
-    resolve_module_base(
-        &base,
-        allow_commonjs,
-        allowed_root,
-        &format!("import \"{specifier}\""),
-        importer,
-    )?
-    .map(|path| ResolvedModule {
+    let description = format!("import \"{specifier}\"");
+    let mut package_json_files = Vec::new();
+    let path = if let Some((package_dir, package_json_path, package_json)) =
+        find_browser_package_scope(importer, context)?
+    {
+        package_json_files.push(package_json_path);
+        let package_name = package_json
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("<anonymous package>");
+        resolve_relative_package_path(
+            &base,
+            allow_commonjs,
+            allowed_root,
+            &description,
+            importer,
+            &package_dir,
+            &package_json,
+            package_name,
+            context,
+        )?
+    } else {
+        resolve_module_base(&base, allow_commonjs, allowed_root, &description, importer)?
+    };
+
+    path.map(|path| ResolvedModule {
         package_alias: None,
-        package_json_files: Vec::new(),
+        package_json_files,
         path,
     })
     .ok_or_else(|| {
@@ -152,11 +172,23 @@ fn resolve_package_path(
         }
 
         if package_import.subpath == "." {
-            for field_name in ["browser", "module", "main"] {
+            if let Some(target) = package_json.get("browser").and_then(Value::as_str) {
+                if let Some(path) = resolve_package_target(
+                    target,
+                    package_dir,
+                    importer,
+                    &package_import.package_name,
+                    context,
+                )? {
+                    return Ok(path);
+                }
+            }
+            for field_name in ["module", "main"] {
                 if let Some(target) = package_json.get(field_name).and_then(Value::as_str) {
-                    if let Some(path) = resolve_package_target(
+                    if let Some(path) = resolve_package_target_with_browser(
                         target,
                         package_dir,
+                        package_json,
                         importer,
                         &package_import.package_name,
                         context,
@@ -165,32 +197,192 @@ fn resolve_package_path(
                     }
                 }
             }
-        } else if let Some(target) = resolve_browser_subpath(package_json, &package_import.subpath)?
-        {
-            if let Some(path) = resolve_package_target(
-                &target,
-                package_dir,
-                importer,
-                &package_import.package_name,
-                context,
-            )? {
-                return Ok(path);
-            }
         }
     }
 
-    resolve_package_local_path(
-        package_dir,
-        &package_import.subpath,
-        importer,
-        &package_import.package_name,
-        context,
-    )?
-    .ok_or_else(|| {
+    let resolved = if let Some(package_json) = package_json {
+        resolve_package_local_path_with_browser(
+            package_dir,
+            &package_import.subpath,
+            package_json,
+            importer,
+            &package_import.package_name,
+            context,
+        )?
+    } else {
+        resolve_package_local_path(
+            package_dir,
+            &package_import.subpath,
+            importer,
+            &package_import.package_name,
+            context,
+        )?
+    };
+    resolved.ok_or_else(|| {
         format!(
             "Failed to resolve package import \"{}\" from {}",
             format_package_specifier(package_import),
             importer.to_string_lossy()
         )
     })
+}
+
+fn resolve_package_target_with_browser(
+    target: &str,
+    package_dir: &Path,
+    package_json: &Value,
+    importer: &Path,
+    package_name: &str,
+    context: &ResolveContext,
+) -> std::result::Result<Option<PathBuf>, String> {
+    if let Some(browser_target) = resolve_browser_subpath(package_json, target)? {
+        return resolve_package_target(
+            &browser_target,
+            package_dir,
+            importer,
+            package_name,
+            context,
+        );
+    }
+    let resolved = resolve_package_target(target, package_dir, importer, package_name, context)?;
+    apply_browser_mapping_to_resolved_path(
+        resolved,
+        package_dir,
+        package_json,
+        importer,
+        package_name,
+        context,
+    )
+}
+
+fn resolve_package_local_path_with_browser(
+    package_dir: &Path,
+    subpath: &str,
+    package_json: &Value,
+    importer: &Path,
+    package_name: &str,
+    context: &ResolveContext,
+) -> std::result::Result<Option<PathBuf>, String> {
+    if subpath != "." {
+        if let Some(browser_target) = resolve_browser_subpath(package_json, subpath)? {
+            return resolve_package_target(
+                &browser_target,
+                package_dir,
+                importer,
+                package_name,
+                context,
+            );
+        }
+    }
+    let resolved =
+        resolve_package_local_path(package_dir, subpath, importer, package_name, context)?;
+    apply_browser_mapping_to_resolved_path(
+        resolved,
+        package_dir,
+        package_json,
+        importer,
+        package_name,
+        context,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_relative_package_path(
+    base: &Path,
+    allow_commonjs: bool,
+    allowed_root: &Path,
+    description: &str,
+    importer: &Path,
+    package_dir: &Path,
+    package_json: &Value,
+    package_name: &str,
+    context: &ResolveContext,
+) -> std::result::Result<Option<PathBuf>, String> {
+    if let Some(subpath) = package_subpath(base, package_dir) {
+        if let Some(browser_target) = resolve_browser_subpath(package_json, &subpath)? {
+            return resolve_package_target(
+                &browser_target,
+                package_dir,
+                importer,
+                package_name,
+                context,
+            );
+        }
+    }
+    let resolved = resolve_module_base(base, allow_commonjs, allowed_root, description, importer)?;
+    apply_browser_mapping_to_resolved_path(
+        resolved,
+        package_dir,
+        package_json,
+        importer,
+        package_name,
+        context,
+    )
+}
+
+fn apply_browser_mapping_to_resolved_path(
+    resolved: Option<PathBuf>,
+    package_dir: &Path,
+    package_json: &Value,
+    importer: &Path,
+    package_name: &str,
+    context: &ResolveContext,
+) -> std::result::Result<Option<PathBuf>, String> {
+    let Some(path) = resolved else {
+        return Ok(None);
+    };
+    let Some(subpath) = package_subpath(&path, package_dir) else {
+        return Ok(Some(path));
+    };
+    let Some(browser_target) = resolve_browser_subpath(package_json, &subpath)? else {
+        return Ok(Some(path));
+    };
+    resolve_package_target(
+        &browser_target,
+        package_dir,
+        importer,
+        package_name,
+        context,
+    )
+}
+
+fn package_subpath(path: &Path, package_dir: &Path) -> Option<String> {
+    let relative = path.strip_prefix(package_dir).ok()?;
+    Some(format!(
+        "./{}",
+        relative.to_string_lossy().replace('\\', "/")
+    ))
+}
+
+fn find_browser_package_scope(
+    importer: &Path,
+    context: &ResolveContext,
+) -> std::result::Result<Option<(PathBuf, PathBuf, Value)>, String> {
+    if !is_package_source_file(importer, context) {
+        return Ok(None);
+    }
+    let mut current = importer.parent();
+    while let Some(directory) = current {
+        if directory
+            .file_name()
+            .is_some_and(|name| name == "node_modules")
+        {
+            break;
+        }
+        let package_json_path = directory.join("package.json");
+        if package_json_path.exists() {
+            let package_json = read_package_json(&package_json_path)?;
+            return if matches!(package_json.get("browser"), Some(Value::Object(_))) {
+                Ok(Some((
+                    directory.to_path_buf(),
+                    package_json_path,
+                    package_json,
+                )))
+            } else {
+                Ok(None)
+            };
+        }
+        current = directory.parent();
+    }
+    Ok(None)
 }

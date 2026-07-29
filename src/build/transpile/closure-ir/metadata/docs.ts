@@ -10,10 +10,11 @@ import {
 } from "./closure-type-strings";
 import { getPropertyNameText, hasExportModifier } from "./modifiers";
 import {
-  buildRecordForObjectType,
   collectSignatureParamInfos,
   getTypedDeclarationClosureType,
   isWorthAnnotatingVariableType,
+  referencesForTemplate,
+  registerDeclaredTypeSymbol,
   signatureToClosureFunctionType,
   toClosureHeritageType,
   toClosureType,
@@ -24,10 +25,7 @@ import type {
   SignatureParamInfo,
 } from "./type-render";
 
-import type {
-  ClosureIrTypeDeclaration,
-  FunctionObjectParamRecord,
-} from "../types";
+import type { ClosureTypeDeclaration } from "../types";
 type JsDocTagInput = {
   name?: string | undefined;
   text?: string | undefined;
@@ -39,11 +37,20 @@ type ResolvedSignature = {
   signature: ts.Signature;
 };
 
+/**
+ * Tags we synthesize, which therefore must never be copied through from
+ * user JSDoc: Closure allows at most one of each per comment, and a duplicate
+ * is a hard parse error rather than a merge. `const`/`enum`/`nocollapse` joined
+ * the set when `@const` emission landed.
+ */
 const CONFLICTING_GENERATED_TAGS = new Set([
   "argument",
+  "const",
   "constructor",
+  "enum",
   "extends",
   "implements",
+  "nocollapse",
   "param",
   "return",
   "template",
@@ -56,23 +63,28 @@ export function buildInterfaceDeclarationSnippet(
   statement: ts.InterfaceDeclaration,
   checker: ts.TypeChecker,
   context: ClosureDocRenderContext,
-): ClosureIrTypeDeclaration {
+): ClosureTypeDeclaration {
   const name = statement.name.text;
-  context.usedRecordNames.add(name);
+  const symbol = checker.getSymbolAtLocation(statement.name);
+  const declaredSymbolId = registerDeclaredTypeSymbol(
+    symbol,
+    statement,
+    name,
+    context,
+  );
   const lines: string[] = ["/**"];
   lines.push(" * @record");
   appendTemplateTags(lines, statement.typeParameters);
   lines.push(" */");
   lines.push(`function ${name}() {}`);
-
   appendInterfaceMembers(lines, name, statement.members, checker, context);
-
-  if (hasExportModifier(statement)) {
-    lines.push(`exports.${name} = ${name};`);
-  }
-
+  const template = `${lines.join("\n")}\n`;
   return {
-    snippet: `${lines.join("\n")}\n`,
+    declaredSymbolId,
+    exported: hasExportModifier(statement),
+    id: `${declaredSymbolId}:declaration`,
+    references: referencesForTemplate(template, context),
+    template,
   };
 }
 
@@ -80,11 +92,17 @@ export function buildTypeAliasDeclarationSnippet(
   statement: ts.TypeAliasDeclaration,
   checker: ts.TypeChecker,
   context: ClosureDocRenderContext,
-): ClosureIrTypeDeclaration {
+): ClosureTypeDeclaration {
+  const name = statement.name.text;
+  const symbol = checker.getSymbolAtLocation(statement.name);
+  const declaredSymbolId = registerDeclaredTypeSymbol(
+    symbol,
+    statement,
+    name,
+    context,
+  );
+  const lines: string[] = ["/**"];
   if (ts.isTypeLiteralNode(statement.type)) {
-    const name = statement.name.text;
-    context.usedRecordNames.add(name);
-    const lines: string[] = ["/**"];
     lines.push(" * @record");
     appendTemplateTags(lines, statement.typeParameters);
     lines.push(" */");
@@ -96,26 +114,27 @@ export function buildTypeAliasDeclarationSnippet(
       checker,
       context,
     );
-    if (hasExportModifier(statement)) {
-      lines.push(`exports.${name} = ${name};`);
-    }
-    return {
-      snippet: `${lines.join("\n")}\n`,
-    };
+  } else {
+    const aliasType = checker.getTypeAtLocation(statement);
+    const closureType = toClosureType(
+      aliasType,
+      checker,
+      context,
+      new Set(),
+      statement.type,
+    );
+    appendTemplateTags(lines, statement.typeParameters);
+    lines.push(` * @typedef {${closureType}}`);
+    lines.push(" */");
+    lines.push(`let ${name};`);
   }
-
-  const aliasType = checker.getTypeAtLocation(statement);
-  const closureType = toClosureType(aliasType, checker, context);
-  const lines: string[] = ["/**"];
-  appendTemplateTags(lines, statement.typeParameters);
-  lines.push(` * @typedef {${closureType}}`);
-  lines.push(" */");
-  lines.push(`let ${statement.name.text};`);
-  if (hasExportModifier(statement)) {
-    lines.push(`exports.${statement.name.text} = ${statement.name.text};`);
-  }
+  const template = `${lines.join("\n")}\n`;
   return {
-    snippet: `${lines.join("\n")}\n`,
+    declaredSymbolId,
+    exported: hasExportModifier(statement),
+    id: `${declaredSymbolId}:declaration`,
+    references: referencesForTemplate(template, context),
+    template,
   };
 }
 
@@ -123,7 +142,6 @@ export function buildFunctionJsDoc(
   statement: ts.FunctionDeclaration,
   checker: ts.TypeChecker,
   context: ClosureDocRenderContext,
-  firstParamObjectRecordTypeName?: string | undefined,
 ) {
   if (!statement.body) {
     return null;
@@ -133,40 +151,7 @@ export function buildFunctionJsDoc(
     checker,
     context,
     declarations,
-    firstParamObjectRecordTypeName,
   });
-}
-
-export function buildFunctionObjectParamRecord(
-  statement: ts.FunctionDeclaration,
-  checker: ts.TypeChecker,
-  context: ClosureDocRenderContext,
-): FunctionObjectParamRecord | null {
-  const firstParameter = statement.parameters[0];
-  if (
-    statement.name === undefined ||
-    firstParameter === undefined ||
-    !ts.isObjectBindingPattern(firstParameter.name) ||
-    hasRestElement(firstParameter.name)
-  ) {
-    return null;
-  }
-
-  const parameterType = checker.getTypeAtLocation(firstParameter);
-  const recordTypeName = buildRecordForObjectType({
-    checker,
-    context,
-    preferredName: `${statement.name.text}$Param0`,
-    type: parameterType,
-  });
-  if (!recordTypeName) {
-    return null;
-  }
-
-  return {
-    snippet: "",
-    typeName: recordTypeName,
-  };
 }
 
 export function buildClassJsDoc(
@@ -236,7 +221,9 @@ export function buildVariableJsDoc({
     return null;
   }
 
-  return buildTypeJsDoc(toClosureType(type, checker, context));
+  return buildTypeJsDoc(
+    toClosureType(type, checker, context, new Set(), typeNode),
+  );
 }
 
 export function buildClassMemberDoc({
@@ -260,9 +247,106 @@ export function buildClassMemberDoc({
   if (!ts.isPropertyDeclaration(member) || !member.type) {
     return null;
   }
-  return buildTypeJsDoc(
-    getTypedDeclarationClosureType(member, checker, context),
+  const tags: JsDocTagInput[] = [
+    {
+      name: "type",
+      type: getTypedDeclarationClosureType(member, checker, context),
+    },
+  ];
+  if (isProvenConstProperty(member)) {
+    tags.push({ name: "const" });
+  }
+  return renderJsDoc(tags);
+}
+
+/**
+ * `@const` for a `readonly` property the checker proves is never reassigned.
+ *
+ * tsickle deliberately does not do this in code emission (only in externs);
+ * we do, because `@const` is what lets Closure collapse the property. The rule
+ * fails closed at every step, because a wrong `@const` licenses a collapse
+ * that changes behaviour:
+ *
+ * - the declaration must be `readonly` (so TS itself rejects reassignment);
+ * - it must have an initializer at the declaration site (a constructor-assigned
+ *   `readonly` is written after construction begins, which `@const` forbids);
+ * - it must not be `declare`d, `static`-merged or optional; and
+ * - the name must never appear as an assignment target anywhere in the file,
+ *   which catches the `as any` escape hatch that defeats `readonly`.
+ */
+function isProvenConstProperty(member: ts.PropertyDeclaration) {
+  const modifiers = ts.getModifiers(member) ?? [];
+  const isReadonly = modifiers.some(
+    (modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
   );
+  const isDeclared = modifiers.some(
+    (modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword,
+  );
+  if (
+    !isReadonly ||
+    isDeclared ||
+    member.questionToken ||
+    member.exclamationToken ||
+    !member.initializer ||
+    !ts.isIdentifier(member.name)
+  ) {
+    return false;
+  }
+  return !isAssignedAnywhereInFile(member.getSourceFile(), member.name.text);
+}
+
+function isAssignedAnywhereInFile(sourceFile: ts.SourceFile, name: string) {
+  let assigned = false;
+  const visit = (node: ts.Node) => {
+    if (assigned) {
+      return;
+    }
+    if (
+      ts.isBinaryExpression(node) &&
+      isAssignmentOperatorKind(node.operatorToken.kind) &&
+      isNamedMemberTarget(node.left, name)
+    ) {
+      assigned = true;
+      return;
+    }
+    if (
+      (ts.isPostfixUnaryExpression(node) || ts.isPrefixUnaryExpression(node)) &&
+      isNamedMemberTarget(node.operand, name)
+    ) {
+      assigned = true;
+      return;
+    }
+    if (
+      ts.isDeleteExpression(node) &&
+      isNamedMemberTarget(node.expression, name)
+    ) {
+      assigned = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return assigned;
+}
+
+function isAssignmentOperatorKind(kind: ts.SyntaxKind) {
+  return (
+    kind >= ts.SyntaxKind.FirstAssignment &&
+    kind <= ts.SyntaxKind.LastAssignment
+  );
+}
+
+function isNamedMemberTarget(node: ts.Node, name: string) {
+  if (ts.isPropertyAccessExpression(node)) {
+    return ts.isIdentifier(node.name) && node.name.text === name;
+  }
+  if (ts.isElementAccessExpression(node)) {
+    return (
+      ts.isStringLiteralLike(node.argumentExpression) &&
+      node.argumentExpression.text === name
+    );
+  }
+  return false;
 }
 
 export function buildObjectMemberDoc({
@@ -304,12 +388,10 @@ function buildSignaturesJsDoc({
   checker,
   context,
   declarations,
-  firstParamObjectRecordTypeName,
 }: {
   checker: ts.TypeChecker;
   context: ClosureDocRenderContext;
   declarations: FunctionLikeDeclaration[];
-  firstParamObjectRecordTypeName?: string | undefined;
 }) {
   const signatures = resolveSignatures(declarations, checker);
   const implementation = declarations.at(-1);
@@ -326,7 +408,6 @@ function buildSignaturesJsDoc({
       checker,
       context,
       declaration,
-      firstParamObjectRecordTypeName,
     }),
   );
   appendThisTag(tags, signatureParams);
@@ -460,6 +541,10 @@ function appendReturnTag(input: {
           input.checker.getReturnTypeOfSignature(signature),
           input.checker,
           input.context,
+          new Set(),
+          signature.declaration && "type" in signature.declaration
+            ? signature.declaration.type
+            : undefined,
         ),
       ),
     ),
@@ -477,6 +562,7 @@ function appendInterfaceMembers(
   checker: ts.TypeChecker,
   context: ClosureDocRenderContext,
 ) {
+  const memberLines: string[] = [];
   for (const member of members) {
     const memberName = getPropertyNameText(member.name);
     if (!memberName) {
@@ -488,8 +574,8 @@ function appendInterfaceMembers(
         checker,
         context,
       );
-      lines.push(`/** @type {${propertyType}} */`);
-      lines.push(renderPrototypeProperty(typeName, memberName));
+      memberLines.push(`/** @type {${propertyType}} */`);
+      memberLines.push(renderPrototypeProperty(typeName, memberName));
       continue;
     }
     if (ts.isMethodSignature(member)) {
@@ -502,9 +588,12 @@ function appendInterfaceMembers(
         checker,
         context,
       );
-      lines.push(`/** @type {${functionType}} */`);
-      lines.push(renderPrototypeProperty(typeName, memberName));
+      memberLines.push(`/** @type {${functionType}} */`);
+      memberLines.push(renderPrototypeProperty(typeName, memberName));
     }
+  }
+  if (memberLines.length > 0) {
+    lines.push("if (false) {", ...memberLines.map((line) => `  ${line}`), "}");
   }
 }
 
@@ -672,10 +761,6 @@ function getTemplateNames(
   return (typeParameters ?? []).map((parameter) =>
     sanitizeClosureName(parameter.name.text),
   );
-}
-
-function hasRestElement(pattern: ts.ObjectBindingPattern) {
-  return pattern.elements.some((element) => element.dotDotDotToken);
 }
 
 export function getClassMemberName(member: ts.ClassElement) {

@@ -22,6 +22,7 @@ pub(super) fn resolve_graph_impl(
     let mut lazy_imports = BTreeMap::<String, LazyImportEntry>::new();
     let mut module_cache = HashMap::new();
     let mut package_aliases = BTreeMap::<String, PackageAliasEntry>::new();
+    let mut resolved_imports = BTreeMap::<String, ResolvedImportEntry>::new();
     let mut pending = entries.clone();
     let mut visited = BTreeSet::new();
 
@@ -63,7 +64,20 @@ pub(super) fn resolve_graph_impl(
                         package_alias,
                     );
                 }
-                dependencies.insert(resolved.path);
+                let target_path = resolved.path;
+                let importer_file_path =
+                    normalize_path(&current_file).to_string_lossy().to_string();
+                let key = format!("{importer_file_path}\0{specifier}");
+                resolved_imports.insert(
+                    key,
+                    ResolvedImportEntry {
+                        importerFilePath: importer_file_path,
+                        moduleId: to_goog_module_id(&target_path, context.workspace_dir),
+                        specifier,
+                        targetPath: target_path.to_string_lossy().to_string(),
+                    },
+                );
+                dependencies.insert(target_path);
             }
         }
         for specifier in lazy_specifiers {
@@ -153,6 +167,7 @@ pub(super) fn resolve_graph_impl(
             .collect(),
         lazyImports: lazy_imports.into_values().collect(),
         packageAliases: package_aliases.into_values().collect(),
+        resolvedImports: resolved_imports.into_values().collect(),
         packageJsonFiles: package_json_files,
         sourceFiles: source_files,
         trackedFiles: tracked_files,

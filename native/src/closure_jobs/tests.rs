@@ -11,6 +11,17 @@ fn make_temp_dir(label: &str) -> PathBuf {
     dir
 }
 
+fn emitted_type_metadata(
+    path: &Path,
+    counts: crate::closure_metadata::TypeMetadataCounts,
+) -> crate::closure_metadata::EmittedTypeMetadata {
+    crate::closure_metadata::EmittedTypeMetadata::new(
+        path.to_string_lossy().to_string(),
+        counts,
+        Vec::new(),
+    )
+}
+
 #[test]
 fn prepares_bundler_runtime_jobs_with_runtime_assets() {
     let root = make_temp_dir("bundler-runtime-jobs");
@@ -84,16 +95,53 @@ fn prepares_bundler_runtime_jobs_with_runtime_assets() {
         generatedExternPaths: vec![],
         languageOut: "ECMASCRIPT_NEXT".to_string(),
         manifestFile: "chunk-map.json".to_string(),
+        needsCssRuntime: false,
         nativeExternPath: native_extern.to_string_lossy().to_string(),
         outDir: out_dir.to_string_lossy().to_string(),
         packageRoot: package_root.to_string_lossy().to_string(),
         publicPath: "./".to_string(),
         supportFiles: vec![],
+        typeMetadata: vec![
+            emitted_type_metadata(
+                &emitted_out_dir.join("src/main.js"),
+                crate::closure_metadata::TypeMetadataCounts {
+                    annotationCount: 1,
+                    ..Default::default()
+                },
+            ),
+            emitted_type_metadata(
+                &emitted_out_dir.join("src/feature.js"),
+                crate::closure_metadata::TypeMetadataCounts {
+                    enumDeclarationCount: 1,
+                    memberAnnotationCount: 2,
+                    unresolvedTypeReferenceCount: 2,
+                    ..Default::default()
+                },
+            ),
+            emitted_type_metadata(
+                &emitted_out_dir.join("src/not-in-job.js"),
+                crate::closure_metadata::TypeMetadataCounts {
+                    typeDeclarationCount: 9,
+                    ..Default::default()
+                },
+            ),
+        ],
     })
     .unwrap();
 
     assert_eq!(output.compileJobs.len(), 1);
     assert_eq!(output.postprocessActions.len(), 2);
+    assert!(output.compileJobs[0].hasTypeMetadata);
+    assert_eq!(
+        output.compileJobs[0].typeMetadataCounts,
+        crate::closure_metadata::TypeMetadataCounts {
+            annotationCount: 1,
+            enumDeclarationCount: 1,
+            memberAnnotationCount: 2,
+            typeDeclarationCount: 0,
+            unresolvedTypeReferenceCount: 2,
+        }
+    );
     assert!(output
         .publishedOutputs
         .iter()
@@ -108,8 +156,10 @@ fn prepares_bundler_runtime_jobs_with_runtime_assets() {
         asset.path.ends_with("main.linked.js")
             && !asset.text.contains("__gcc_runtime__")
             && !asset.text.contains("initialized")
+            // Neither fixture module preloads, so the preload alias is gated
+            // out of the line along with `r.x` itself.
             && asset.text.contains(
-                "var __runtime=globalThis[\"__g\"],__register=__runtime.r,__require=__runtime.q,__dynamicImport=__runtime.j,__preloadDynamicImport=__runtime.x;",
+                "var __runtime=globalThis[\"__g\"],__register=__runtime.r,__require=__runtime.q,__dynamicImport=__runtime.j;",
             )
             && !asset
                 .text
@@ -142,11 +192,7 @@ fn prepares_bundler_runtime_jobs_with_runtime_assets() {
     assert!(output
         .postprocessActions
         .iter()
-        .all(|action| action.kind == "rewrite-decorator-metadata"));
-    assert!(output.postprocessActions.iter().all(|action| action
-        .propertyRenamingReportPath
-        .as_deref()
-        .is_some_and(|path| path.ends_with("property-renaming-report.txt"))));
+        .all(|action| action.kind == "copy"));
 }
 
 #[test]
@@ -189,11 +235,20 @@ fn skips_es5_custom_elements_adapter_when_no_native_dom_subclasses_exist() {
         generatedExternPaths: vec![],
         languageOut: "ECMASCRIPT5".to_string(),
         manifestFile: "".to_string(),
+        needsCssRuntime: false,
         nativeExternPath: native_extern.to_string_lossy().to_string(),
         outDir: out_dir.to_string_lossy().to_string(),
         packageRoot: package_root.to_string_lossy().to_string(),
         publicPath: "./".to_string(),
         supportFiles: vec![],
+        typeMetadata: vec![emitted_type_metadata(
+            &emitted_out_dir.join("src/entry.js"),
+            crate::closure_metadata::TypeMetadataCounts {
+                annotationCount: 1,
+                typeDeclarationCount: 1,
+                ..Default::default()
+            },
+        )],
     })
     .unwrap();
 
@@ -201,6 +256,14 @@ fn skips_es5_custom_elements_adapter_when_no_native_dom_subclasses_exist() {
         .generatedAssets
         .iter()
         .any(|asset| { asset.path.ends_with("custom-elements-es5-adapter.js") }));
+    assert!(output.compileJobs[0].hasTypeMetadata);
+    assert_eq!(output.compileJobs[0].typeMetadataCounts.annotationCount, 1);
+    assert_eq!(
+        output.compileJobs[0]
+            .typeMetadataCounts
+            .typeDeclarationCount,
+        1
+    );
 }
 
 #[test]
@@ -286,11 +349,13 @@ fn prepares_off_mode_jobs_and_filters_empty_externs() {
         generatedExternPaths: vec![],
         languageOut: "ECMASCRIPT_NEXT".to_string(),
         manifestFile: "".to_string(),
+        needsCssRuntime: false,
         nativeExternPath: native_extern.to_string_lossy().to_string(),
         outDir: out_dir.to_string_lossy().to_string(),
         packageRoot: package_root.to_string_lossy().to_string(),
         publicPath: "./".to_string(),
         supportFiles: vec![],
+        typeMetadata: vec![],
     })
     .unwrap();
 
@@ -312,11 +377,7 @@ fn prepares_off_mode_jobs_and_filters_empty_externs() {
     assert!(output
         .postprocessActions
         .iter()
-        .all(|action| action.kind == "rewrite-gcc-exports-and-decorator-metadata"));
-    assert!(output.postprocessActions.iter().all(|action| action
-        .propertyRenamingReportPath
-        .as_deref()
-        .is_some_and(|path| path.ends_with("property-renaming-report.txt"))));
+        .all(|action| action.kind == "rewrite-gcc-exports"));
 }
 
 #[test]
@@ -381,11 +442,13 @@ fn prepares_esm_bundler_runtime_jobs() {
         generatedExternPaths: vec![],
         languageOut: "ECMASCRIPT_NEXT".to_string(),
         manifestFile: String::new(),
+        needsCssRuntime: false,
         nativeExternPath: native_extern.to_string_lossy().to_string(),
         outDir: out_dir.to_string_lossy().to_string(),
         packageRoot: package_root.to_string_lossy().to_string(),
         publicPath: "./".to_string(),
         supportFiles: vec![],
+        typeMetadata: vec![],
     })
     .unwrap();
 
@@ -439,7 +502,7 @@ fn prepares_esm_bundler_runtime_jobs() {
 }
 
 #[test]
-fn rejects_esm_output_outside_bundler_runtime_mode() {
+fn rejects_esm_output_for_unchunked_mode() {
     let root = make_temp_dir("esm-mode-guard");
     let error = prepare_closure_jobs(PrepareClosureJobsInput {
         chunkMode: "off".to_string(),
@@ -455,14 +518,16 @@ fn rejects_esm_output_outside_bundler_runtime_mode() {
         generatedExternPaths: vec![],
         languageOut: "ECMASCRIPT_NEXT".to_string(),
         manifestFile: String::new(),
+        needsCssRuntime: false,
         nativeExternPath: root.join("n.js").to_string_lossy().to_string(),
         outDir: root.join("dist").to_string_lossy().to_string(),
         packageRoot: root.to_string_lossy().to_string(),
         publicPath: "./".to_string(),
         supportFiles: vec![],
+        typeMetadata: vec![],
     })
-    .expect_err("esm requires bundler-runtime");
-    assert!(error.contains("bundler-runtime"), "{error}");
+    .expect_err("esm requires a chunked mode");
+    assert!(error.contains("requires a chunked mode"), "{error}");
 }
 
 // --- vendor chunk assembly ----------------------------------------------
@@ -571,11 +636,13 @@ fn prepare_vendor_jobs(label: &str, vendor: bool) -> PrepareClosureJobsOutput {
         generatedExternPaths: vec![],
         languageOut: "ECMASCRIPT_NEXT".to_string(),
         manifestFile: "manifest.json".to_string(),
+        needsCssRuntime: false,
         nativeExternPath: native_extern.to_string_lossy().to_string(),
         outDir: out_dir.to_string_lossy().to_string(),
         packageRoot: package_root.to_string_lossy().to_string(),
         publicPath: "./".to_string(),
         supportFiles: vec![],
+        typeMetadata: vec![],
     })
     .unwrap()
 }
@@ -735,4 +802,103 @@ fn non_vendor_chunks_are_never_pinned() {
     let split = prepare_vendor_jobs("vendor-pin-split", true);
     let panel = linked_chunk_text(&split, "src-panel-lazy");
     assert!(!panel.contains(".v=["), "{panel}");
+}
+
+#[test]
+fn split_jobs_aggregate_only_native_emitted_chunk_inputs() {
+    let root = make_temp_dir("split-type-metadata");
+    let emitted_out_dir = root.join("native-out");
+    let out_dir = root.join("dist");
+    let final_cache_dir = root.join("cache/final");
+    let package_root = root.join("pkg");
+    fs::create_dir_all(emitted_out_dir.join("src")).unwrap();
+    fs::create_dir_all(&out_dir).unwrap();
+    fs::create_dir_all(package_root.join("closure-lib")).unwrap();
+    fs::write(package_root.join("closure-lib/base.js"), "").unwrap();
+    let a = emitted_out_dir.join("src/a.js");
+    let b = emitted_out_dir.join("src/b.js");
+    let explicit = root.join("explicit.js");
+    fs::write(&a, "goog.module('gcc.src.a');\n").unwrap();
+    fs::write(&b, "goog.module('gcc.src.b');\n").unwrap();
+    fs::write(&explicit, "globalThis.explicit = true;\n").unwrap();
+    let native_extern = root.join("native.externs.js");
+    fs::write(&native_extern, "/** @externs */\n").unwrap();
+
+    let input = PrepareClosureJobsInput {
+        chunkMode: "split".to_string(),
+        chunkLoader: "script".to_string(),
+        chunkOutputType: "script".to_string(),
+        chunkPlan: vec![
+            ClosureJobChunkPlanChunkInput {
+                dependencies: vec![],
+                entryFiles: None,
+                files: vec!["src/a.ts".to_string()],
+                kind: Some("base".to_string()),
+                lazyModuleIds: None,
+                name: "a".to_string(),
+            },
+            ClosureJobChunkPlanChunkInput {
+                dependencies: vec!["a".to_string()],
+                entryFiles: None,
+                files: vec!["src/b.ts".to_string()],
+                kind: Some("lazy".to_string()),
+                lazyModuleIds: None,
+                name: "b".to_string(),
+            },
+        ],
+        compilationLevel: "ADVANCED".to_string(),
+        diagnosticsVerbose: false,
+        emittedOutDir: emitted_out_dir.to_string_lossy().to_string(),
+        explicitExternPaths: vec![],
+        explicitJsInputs: vec![explicit.to_string_lossy().to_string()],
+        finalCacheDir: final_cache_dir.to_string_lossy().to_string(),
+        generatedExternPaths: vec![],
+        languageOut: "ECMASCRIPT_NEXT".to_string(),
+        manifestFile: "".to_string(),
+        needsCssRuntime: false,
+        nativeExternPath: native_extern.to_string_lossy().to_string(),
+        outDir: out_dir.to_string_lossy().to_string(),
+        packageRoot: package_root.to_string_lossy().to_string(),
+        publicPath: "./".to_string(),
+        supportFiles: vec![],
+        typeMetadata: vec![
+            emitted_type_metadata(
+                &a,
+                crate::closure_metadata::TypeMetadataCounts {
+                    annotationCount: 2,
+                    ..Default::default()
+                },
+            ),
+            emitted_type_metadata(
+                &b,
+                crate::closure_metadata::TypeMetadataCounts {
+                    typeDeclarationCount: 1,
+                    unresolvedTypeReferenceCount: 3,
+                    ..Default::default()
+                },
+            ),
+            emitted_type_metadata(
+                &explicit,
+                crate::closure_metadata::TypeMetadataCounts {
+                    enumDeclarationCount: 7,
+                    ..Default::default()
+                },
+            ),
+        ],
+    };
+    let output = prepare_closure_jobs(input.clone()).unwrap();
+    let job = &output.compileJobs[0];
+    assert!(job.hasTypeMetadata);
+    assert_eq!(job.typeMetadataCounts.annotationCount, 2);
+    assert_eq!(job.typeMetadataCounts.typeDeclarationCount, 1);
+    assert_eq!(job.typeMetadataCounts.enumDeclarationCount, 0);
+    assert_eq!(job.typeMetadataCounts.unresolvedTypeReferenceCount, 3);
+
+    let mut invalid = input;
+    invalid.typeMetadata[0].hasTypeMetadata = false;
+    let error = prepare_closure_jobs(invalid).expect_err("derived boolean is authoritative");
+    assert!(
+        error.contains("Invalid emitted type metadata boolean"),
+        "{error}"
+    );
 }

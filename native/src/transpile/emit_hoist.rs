@@ -10,10 +10,6 @@ use crate::transpile::assigners::{assigner_function_name, NOINLINE_TAG};
 use crate::transpile::pure_calls::{
     collect_pure_annotated_binding_names, pure_annotation_for_statement,
 };
-use crate::transpile::typed_annotations::{
-    annotation_key, compose_annotations, insert_member_annotations, rewrite_type_names,
-    typed_annotation_for_statement, TypedAnnotationsByName, PURE_TAG,
-};
 use swc_core::ecma::ast::{KeyValueProp, ObjectPatProp, Prop};
 
 pub(super) fn emit_hoisted_module_program(
@@ -21,11 +17,13 @@ pub(super) fn emit_hoisted_module_program(
     program: Program,
     context: &TranspileContext,
     plan: &HoistPlan,
+    file_metadata: Option<&ClosureFileMetadata>,
     commonjs_export_name: Option<&str>,
-) -> std::result::Result<String, String> {
+) -> std::result::Result<EmittedProgram, String> {
     let Program::Module(mut module) = program else {
         return Err("Expected module program".to_string());
     };
+    let mut bound = BoundTypeMetadata::bind(&module, file_metadata, context.type_metadata_enabled);
     let module_id = to_goog_module_id(file_path, &context.workspace_dir);
     let ordinal = plan
         .ordinal_of(&module_id)
@@ -33,35 +31,33 @@ pub(super) fn emit_hoisted_module_program(
     let pure_names = std::fs::read_to_string(file_path)
         .map(|source| collect_pure_annotated_binding_names(&source))
         .unwrap_or_default();
-    static NO_TYPED_ANNOTATIONS: std::sync::LazyLock<TypedAnnotationsByName> =
-        std::sync::LazyLock::new(TypedAnnotationsByName::new);
-    let typed_annotations = context
-        .typed_annotations
-        .get(&annotation_key(file_path))
-        .unwrap_or(&NO_TYPED_ANNOTATIONS);
-    // Hoisting suffixes every top-level binding, but annotations are keyed by
-    // the name the checker saw, so both annotation lookups undo the suffix.
-    let to_original_name = |name: &str| {
-        name.strip_suffix(&format!("$${ordinal}"))
-            .map(str::to_string)
-    };
     let local_export_modes = collect_local_export_modes(&module);
 
-    // 1. Rename top-level bindings before any generated identifiers exist so
-    //    injected cross-module references can never be captured.
-    let renames = collect_top_level_renames(&module, ordinal);
-    // JSDoc type references (`@param {!Foo}`) must follow the same renames
-    // as the classes they name; see rewrite_same_module_type_names.
-    let suffixed_type_names: HashMap<String, String> = renames
-        .iter()
-        .map(|(id, suffixed)| (id.0.to_string(), suffixed.clone()))
-        .collect();
+    // Bind metadata first, then rename the exact same resolved ids that runtime
+    // emission uses. No authored/display name is used as post-transform evidence.
+    let TopLevelRenames {
+        renames,
+        shared_helper_names,
+    } = collect_top_level_renames(&module, ordinal)?;
+    bound.remap_binding_ids(&renames);
+    let module_bindings: HashSet<String> = if context.vendor_module_ids.contains(&module_id) {
+        renames.values().cloned().collect()
+    } else {
+        HashSet::new()
+    };
     if !renames.is_empty() {
-        module.visit_mut_with(&mut TopLevelRenameVisitor { renames });
+        module.visit_mut_with(&mut TopLevelRenameVisitor {
+            renames: renames.clone(),
+        });
     }
+    let shared_helpers = emit_helpers::take_shared_helper_declarations(
+        &mut module,
+        &shared_helper_names,
+        print_module_item,
+    )?;
+    let lexical_binding_names = collect_lexical_binding_names(&module);
+    let fresh_names = FreshNameAllocator::from_module(&module);
 
-    // 2. Rewrite namespace member accesses (static same-chunk namespaces go
-    //    direct, everything else keeps slot access).
     let direct_namespace_ids = collect_direct_safe_namespace_ids(&module, file_path, context, plan);
     rewrite_hoisted_namespace_usage(
         &mut module,
@@ -70,13 +66,18 @@ pub(super) fn emit_hoisted_module_program(
         plan,
         &module_id,
         &direct_namespace_ids,
+        &lexical_binding_names,
     )?;
 
-    // 3. Plan imports: direct binding rewrites or deduplicated require lines.
-    //    Bindings that are only re-exported (never referenced) are skipped so
-    //    they cannot keep unused exports alive.
     let used_binding_ids = collect_used_binding_ids(&module);
-    let mut import_planner = HoistedImportPlanner::new(context, plan, &module_id, ordinal);
+    let mut import_planner = HoistedImportPlanner::new(
+        context,
+        plan,
+        &module_id,
+        ordinal,
+        &lexical_binding_names,
+        fresh_names,
+    );
     let import_plans = module
         .body
         .iter()
@@ -92,84 +93,38 @@ pub(super) fn emit_hoisted_module_program(
             _ => None,
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut fresh_names = import_planner.into_fresh_names();
     let all_rewrites = import_plans
         .iter()
         .flat_map(|import_plan| import_plan.rewrites.iter().cloned())
         .collect::<Vec<_>>();
-    // A JSDoc type reference to an imported class must follow the same
-    // rewrite the code does, so the two maps are unioned: same-module
-    // bindings gained a `$$ordinal` suffix, and a *direct-binding* import now
-    // names the origin module's suffixed binding. Registry-slot imports
-    // (`__gcc_req_0[2]`) are deliberately excluded — a slot access is not a
-    // type name, so any annotation referencing one is dropped whole by
-    // `rewrite_type_names`.
-    //
-    // Only a vendor chunk needs its mutating functions pinned in place; motion
-    // out of base and lazy chunks is legal and is how they stay small (see
-    // `transpile::assigners`). An empty set makes the detector a no-op.
-    let module_bindings: HashSet<String> = if context.vendor_module_ids.contains(&module_id) {
-        suffixed_type_names.values().cloned().collect()
-    } else {
-        HashSet::new()
-    };
-    let mut jsdoc_type_names = suffixed_type_names;
-    jsdoc_type_names.extend(
-        all_rewrites
-            .iter()
-            .filter(|rewrite| rewrite.slot_alias.is_none())
-            .map(|rewrite| (rewrite.local_name.clone(), rewrite.replacement_code.clone())),
-    );
+    let mut runtime_type_names = runtime_type_names_from_module(&module, &bound);
+    for rewrite in &all_rewrites {
+        if !runtime_type_names.contains_key(&rewrite.binding_id) {
+            continue;
+        }
+        runtime_type_names.insert(
+            rewrite.binding_id.clone(),
+            if rewrite.slot_alias.is_some() {
+                RuntimeTypeName::Unresolved("registry-slot-is-not-a-type-name")
+            } else if is_valid_js_identifier(&rewrite.replacement_code) {
+                RuntimeTypeName::Name(rewrite.replacement_code.clone())
+            } else {
+                RuntimeTypeName::Unresolved("runtime-binding-not-found")
+            },
+        );
+    }
     apply_import_binding_rewrites(&mut module, &all_rewrites);
+    let mut type_metadata = bound.prepare(&mut fresh_names, &runtime_type_names, Some(ordinal));
 
-    let annotate = |statement: &Stmt| {
-        let annotation =
-            typed_annotation_for_statement(statement, typed_annotations, to_original_name);
-        let block = annotation
-            .map(|annotation| annotation.jsdoc.as_str())
-            .filter(|jsdoc| !jsdoc.is_empty())
-            .and_then(|jsdoc| rewrite_type_names(jsdoc, &jsdoc_type_names));
-        // Every leading tag merges into the one JSDoc block: Closure keeps
-        // only the block nearest the declaration and silently drops earlier
-        // ones, so two adjacent blocks would lose the first.
-        let mut tags = Vec::new();
-        if !pure_annotation_for_statement(
-            statement,
-            &pure_names,
-            &context.pure_callees,
-            to_original_name,
-        )
-        .is_empty()
-        {
-            tags.push(PURE_TAG);
-        }
-        if assigner_function_name(statement, &module_bindings).is_some() {
-            tags.push(NOINLINE_TAG);
-        }
-        let prefix = compose_annotations(&tags, block.as_deref());
-        let members = annotation
-            .map(|annotation| {
-                annotation
-                    .members
-                    .iter()
-                    .filter_map(|(name, jsdoc)| {
-                        Some((name.clone(), rewrite_type_names(jsdoc, &jsdoc_type_names)?))
-                    })
-                    .collect::<HashMap<_, _>>()
-            })
-            .unwrap_or_default();
-        (prefix, members)
-    };
-    let print_annotated = |statement: Stmt| -> std::result::Result<String, String> {
-        let (prefix, members) = annotate(&statement);
-        let printed = print_statement(statement)?;
-        Ok(format!(
-            "{prefix}{}",
-            insert_member_annotations(&printed, &members)
-        ))
-    };
+    let mut output = type_metadata.take_declaration_lines();
+    let enum_declarations = type_metadata.enum_declarations().to_vec();
+    for enum_decl in enum_declarations {
+        let emitted_name = type_metadata.enum_name(&enum_decl).to_string();
+        output.push(render_closure_enum(&enum_decl, &emitted_name));
+        type_metadata.count_enum();
+    }
 
-    // 4. Emit items.
-    let mut output = Vec::new();
     let mut import_plans = import_plans.into_iter();
     for item in module.body {
         match item {
@@ -180,9 +135,14 @@ pub(super) fn emit_hoisted_module_program(
                 output.extend(import_plan.lines);
             }
             ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDecl(export_decl)) => {
-                // An exported declaration is still a plain top-level
-                // declaration once hoisted, so it takes annotations too.
-                output.push(print_annotated(Stmt::Decl(export_decl.decl))?);
+                output.push(render_hoisted_statement(
+                    &mut type_metadata,
+                    Stmt::Decl(export_decl.decl),
+                    &pure_names,
+                    &module_bindings,
+                    context,
+                    ordinal,
+                )?);
             }
             ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportNamed(named_export)) => {
                 if let Some(src) = &named_export.src {
@@ -205,9 +165,9 @@ pub(super) fn emit_hoisted_module_program(
             ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDefaultExpr(
                 default_expr,
             )) => {
+                let local_name = fresh_names.fresh(&suffixed_name("__gcc_dflt", ordinal));
                 output.push(format!(
-                    "const {} = {};",
-                    suffixed_name("__gcc_dflt", ordinal),
+                    "const {local_name} = {};",
                     print_expression(*default_expr.expr)?
                 ));
             }
@@ -215,54 +175,67 @@ pub(super) fn emit_hoisted_module_program(
                 default_decl,
             )) => match default_decl.decl {
                 swc_core::ecma::ast::DefaultDecl::Fn(function_expr) => {
-                    if let Some(ident) = &function_expr.ident {
-                        output.push(print_statement(Stmt::Decl(swc_core::ecma::ast::Decl::Fn(
-                            swc_core::ecma::ast::FnDecl {
-                                declare: false,
-                                function: function_expr.function,
-                                ident: ident.clone(),
-                            },
-                        )))?);
+                    if let Some(ident) = function_expr.ident.clone() {
+                        output.push(render_hoisted_statement(
+                            &mut type_metadata,
+                            Stmt::Decl(swc_core::ecma::ast::Decl::Fn(
+                                swc_core::ecma::ast::FnDecl {
+                                    declare: false,
+                                    function: function_expr.function,
+                                    ident,
+                                },
+                            )),
+                            &pure_names,
+                            &module_bindings,
+                            context,
+                            ordinal,
+                        )?);
                     } else {
+                        let local_name = fresh_names.fresh(&suffixed_name("__gcc_dflt", ordinal));
                         output.push(format!(
-                            "const {} = {};",
-                            suffixed_name("__gcc_dflt", ordinal),
+                            "const {local_name} = {};",
                             print_expression(Expr::Fn(function_expr))?
                         ));
                     }
                 }
                 swc_core::ecma::ast::DefaultDecl::Class(class_expr) => {
-                    if let Some(ident) = &class_expr.ident {
-                        output.push(print_statement(Stmt::Decl(
-                            swc_core::ecma::ast::Decl::Class(swc_core::ecma::ast::ClassDecl {
-                                class: class_expr.class,
-                                declare: false,
-                                ident: ident.clone(),
-                            }),
-                        ))?);
+                    if let Some(ident) = class_expr.ident.clone() {
+                        output.push(render_hoisted_statement(
+                            &mut type_metadata,
+                            Stmt::Decl(swc_core::ecma::ast::Decl::Class(
+                                swc_core::ecma::ast::ClassDecl {
+                                    class: class_expr.class,
+                                    declare: false,
+                                    ident,
+                                },
+                            )),
+                            &pure_names,
+                            &module_bindings,
+                            context,
+                            ordinal,
+                        )?);
                     } else {
+                        let local_name = fresh_names.fresh(&suffixed_name("__gcc_dflt", ordinal));
                         output.push(format!(
-                            "const {} = {};",
-                            suffixed_name("__gcc_dflt", ordinal),
+                            "const {local_name} = {};",
                             print_expression(Expr::Class(class_expr))?
                         ));
                     }
                 }
                 _ => {}
             },
-            ModuleItem::Stmt(statement) => {
-                // Re-attach `/*#__PURE__*/` as Closure's `@pureOrBreakMyCode`
-                // so call-initialized declarations stay movable across chunks
-                // (`pure_calls`), plus the checker's JSDoc so type-based
-                // passes have types to consume (`typed_annotations`).
-                output.push(print_annotated(statement)?);
-            }
+            ModuleItem::Stmt(statement) => output.push(render_hoisted_statement(
+                &mut type_metadata,
+                statement,
+                &pure_names,
+                &module_bindings,
+                context,
+                ordinal,
+            )?),
             _ => {}
         }
     }
-    let _ = commonjs_export_name; // CommonJS exports are served by the facade.
 
-    // 5. Facade.
     if let Some(facade_slots) = plan.facade_slots_for(&module_id) {
         output.extend(render_facade(
             &module_id,
@@ -271,6 +244,7 @@ pub(super) fn emit_hoisted_module_program(
             plan,
             facade_slots,
             &local_export_modes,
+            commonjs_export_name,
         )?);
     }
 
@@ -279,7 +253,41 @@ pub(super) fn emit_hoisted_module_program(
         .filter(|line| !line.trim().is_empty())
         .collect::<Vec<_>>()
         .join("\n");
-    Ok(apply_js_compat_text_fixes(body))
+    Ok(EmittedProgram {
+        code: apply_js_compat_text_fixes(body),
+        reflective_property_names: Default::default(),
+        shared_helpers,
+        type_metadata: type_metadata.finish(),
+    })
+}
+
+fn render_hoisted_statement(
+    type_metadata: &mut PreparedTypeMetadata,
+    statement: Stmt,
+    pure_names: &HashSet<String>,
+    module_bindings: &HashSet<String>,
+    context: &TranspileContext,
+    ordinal: usize,
+) -> std::result::Result<String, String> {
+    let to_original_name = |name: &str| {
+        name.strip_suffix(&format!("$${ordinal}"))
+            .map(str::to_string)
+    };
+    let mut tags = Vec::new();
+    if !pure_annotation_for_statement(
+        &statement,
+        pure_names,
+        &context.pure_callees,
+        to_original_name,
+    )
+    .is_empty()
+    {
+        tags.push(PURE_TAG);
+    }
+    if assigner_function_name(&statement, module_bindings).is_some() {
+        tags.push(NOINLINE_TAG);
+    }
+    type_metadata.render_statement(statement, &tags)
 }
 
 fn render_execution_require(
@@ -303,6 +311,7 @@ fn render_facade(
     plan: &HoistPlan,
     facade_slots: &FacadeSlots,
     local_export_modes: &HashMap<String, BundlerExportSlotMode>,
+    commonjs_export_name: Option<&str>,
 ) -> std::result::Result<Vec<String>, String> {
     let slots = context
         .bundler_module_slots
@@ -341,7 +350,15 @@ fn render_facade(
             let value = plan
                 .direct_binding_name(binding)
                 .ok_or_else(|| format!("Missing hoist ordinal for {}", binding.owner_module_id))?;
-            lines.push(render_live_export_slot(slot, &value));
+            let mode = plan.direct_binding_slot_mode(module_id, binding);
+            match mode {
+                BundlerExportSlotMode::Static => {
+                    lines.push(render_static_export_slot(slot, &value));
+                }
+                BundlerExportSlotMode::Live => {
+                    lines.push(render_live_export_slot(slot, &value));
+                }
+            }
             continue;
         }
         let owner_slots = context
@@ -367,12 +384,42 @@ fn render_facade(
             &format!("__require({owner_runtime_id:?})[{owner_slot}]"),
         ));
     }
-    // Host libraries (e.g. `defineAsyncComponent`) unwrap dynamic-import
-    // namespaces via `.default`/`.__esModule`. Unquoted property names stay
-    // rename-consistent with those library accesses under ADVANCED.
-    if context.lazy_target_module_ids.contains(module_id) && slots.slot_for("default") == Some(0) {
-        lines.push("__exports.__esModule = true;".to_string());
-        lines.push("__exports.default = __exports[0];".to_string());
+    let is_exposed = |export_name: &str| match facade_slots {
+        FacadeSlots::All => true,
+        FacadeSlots::Named(needed) => needed.contains(export_name),
+    };
+    if let Some(export_name) = commonjs_export_name {
+        if is_exposed(export_name) {
+            let slot = slots.slot_for(export_name).ok_or_else(|| {
+                format!("Missing bundler-runtime export slot for {export_name} in {module_id}")
+            })?;
+            lines.push(format!(
+                "__live(__exports,{export_name:?},function(){{return __exports[{slot}];}});"
+            ));
+        }
+    }
+
+    // Dynamic imports expose a JavaScript module namespace, including through
+    // opaque framework loaders, so every lazy target keeps its named facade.
+    if context.lazy_target_module_ids.contains(module_id) {
+        let namespace_slots = slots
+            .export_names()
+            .filter(|export_name| export_name.as_str() != "__cjsExports" && is_exposed(export_name))
+            .filter_map(|export_name| {
+                slots
+                    .slot_for(export_name)
+                    .map(|slot| (export_name.clone(), slot))
+            })
+            .collect::<Vec<_>>();
+        if !namespace_slots.is_empty() {
+            lines.push(render_namespace_export_slots_with(
+                "__exports",
+                &namespace_slots,
+            ));
+        }
+        if slots.slot_for("default") == Some(0) {
+            lines.push("__exports.__esModule = true;".to_string());
+        }
     }
     let runtime_module_id = to_bundler_runtime_module_id(module_id);
     Ok(vec![format!(
@@ -396,14 +443,17 @@ struct HoistedImportPlanner<'a> {
     context: &'a TranspileContext,
     plan: &'a HoistPlan,
     require_bindings: HashMap<String, String>,
+    lexical_binding_names: &'a HashSet<String>,
+    fresh_names: FreshNameAllocator,
 }
-
 impl<'a> HoistedImportPlanner<'a> {
     fn new(
         context: &'a TranspileContext,
         plan: &'a HoistPlan,
         consumer_module_id: &'a str,
         consumer_ordinal: usize,
+        lexical_binding_names: &'a HashSet<String>,
+        fresh_names: FreshNameAllocator,
     ) -> Self {
         Self {
             consumer_module_id,
@@ -411,18 +461,25 @@ impl<'a> HoistedImportPlanner<'a> {
             context,
             plan,
             require_bindings: HashMap::new(),
+            lexical_binding_names,
+            fresh_names,
         }
+    }
+
+    fn into_fresh_names(self) -> FreshNameAllocator {
+        self.fresh_names
     }
 
     fn require_binding(&mut self, target_module_id: &str, lines: &mut Vec<String>) -> String {
         if let Some(existing) = self.require_bindings.get(target_module_id) {
             return existing.clone();
         }
-        let name = format!(
+        let preferred = format!(
             "__gcc_req_{}_{}",
             self.consumer_ordinal,
             self.require_bindings.len()
         );
+        let name = self.fresh_names.fresh(&preferred);
         let runtime_module_id = to_bundler_runtime_module_id(target_module_id);
         lines.push(format!("const {name} = __require({runtime_module_id:?});"));
         self.require_bindings
@@ -517,11 +574,15 @@ impl<'a> HoistedImportPlanner<'a> {
         rewrites: &mut Vec<ImportBindingRewrite>,
     ) -> std::result::Result<(), String> {
         if let Some(binding) = self.plan.resolve_export(target_module_id, imported_name) {
+            let direct_name = self.plan.direct_binding_name(binding);
             if self
                 .plan
                 .is_direct_binding(self.consumer_module_id, binding)
+                && direct_name
+                    .as_ref()
+                    .is_some_and(|name| !self.lexical_binding_names.contains(name))
             {
-                let direct_name = self.plan.direct_binding_name(binding).ok_or_else(|| {
+                let direct_name = direct_name.ok_or_else(|| {
                     format!("Missing hoist ordinal for {}", binding.owner_module_id)
                 })?;
                 rewrites.push(ImportBindingRewrite {
@@ -598,8 +659,46 @@ fn slot_rewrite(local: &Ident, object_name: &str, slot: usize) -> ImportBindingR
     }
 }
 
-fn collect_top_level_renames(module: &Module, ordinal: usize) -> HashMap<Id, String> {
+/// Top-level renaming plan for one hoisted module.
+pub(super) struct TopLevelRenames {
+    pub(super) renames: HashMap<Id, String>,
+    /// Canonical names assigned to poolable lowering helpers in this module.
+    pub(super) shared_helper_names: HashSet<String>,
+}
+
+fn collect_top_level_renames(
+    module: &Module,
+    ordinal: usize,
+) -> std::result::Result<TopLevelRenames, String> {
     let mut renames = HashMap::new();
+    let mut shared_helper_names = HashSet::new();
+    // A lowering helper is content-addressed instead of ordinal-suffixed, so
+    // byte-identical copies across modules collapse onto one declaration that
+    // the driver emits once. Nothing else about the module changes.
+    for item in &module.body {
+        let ModuleItem::Stmt(Stmt::Decl(swc_core::ecma::ast::Decl::Var(var_decl))) = item else {
+            continue;
+        };
+        let Some(initializer_source) =
+            emit_helpers::helper_initializer_source(var_decl, |expression| {
+                print_expression(expression.clone())
+            })
+        else {
+            continue;
+        };
+        let [declarator] = var_decl.decls.as_slice() else {
+            continue;
+        };
+        let swc_core::ecma::ast::Pat::Ident(binding) = &declarator.name else {
+            continue;
+        };
+        let canonical_name = emit_helpers::canonical_shared_helper_name(
+            binding.id.sym.as_ref(),
+            &initializer_source?,
+        );
+        renames.insert(binding.id.to_id(), canonical_name.clone());
+        shared_helper_names.insert(canonical_name);
+    }
     let add_decl = |decl: &swc_core::ecma::ast::Decl, renames: &mut HashMap<Id, String>| match decl
     {
         swc_core::ecma::ast::Decl::Fn(function_decl) => {
@@ -617,7 +716,11 @@ fn collect_top_level_renames(module: &Module, ordinal: usize) -> HashMap<Id, Str
         swc_core::ecma::ast::Decl::Var(var_decl) => {
             for declarator in &var_decl.decls {
                 for (binding_id, name) in export_binding_names_with_ids(&declarator.name) {
-                    renames.insert(binding_id, suffixed_name(&name, ordinal));
+                    // `or_insert` keeps a canonical helper name already chosen
+                    // above; every other binding still gets the ordinal suffix.
+                    renames
+                        .entry(binding_id)
+                        .or_insert_with(|| suffixed_name(&name, ordinal));
                 }
             }
         }
@@ -647,7 +750,10 @@ fn collect_top_level_renames(module: &Module, ordinal: usize) -> HashMap<Id, Str
             _ => {}
         }
     }
-    renames
+    Ok(TopLevelRenames {
+        renames,
+        shared_helper_names,
+    })
 }
 
 struct TopLevelRenameVisitor {

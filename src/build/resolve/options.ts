@@ -1,3 +1,4 @@
+import fs from "fs/promises";
 import path from "path";
 
 import {
@@ -13,17 +14,16 @@ import {
 } from "../../api/types";
 import type {
   BuildEntryOption,
-  BuildOptions,
   ChunkMode,
   ChunkOutputType,
   LanguageOut,
   ResolvedChunkOutputType,
 } from "../../api/types";
-import type { ResolvedBuildOptions } from "../types";
-import { requireChoice } from "../../shared/validation";
+import type { InternalBuildOptions, ResolvedBuildOptions } from "../types";
+import { hasErrorCode, requireChoice } from "../../shared/validation";
 
 export function normalizeBuildOptions(
-  options: BuildOptions,
+  options: InternalBuildOptions,
 ): ResolvedBuildOptions {
   const projectRoot = path.resolve(options.projectRoot ?? process.cwd());
   const srcDir = path.resolve(
@@ -37,7 +37,7 @@ export function normalizeBuildOptions(
   const chunkPublicPath = normalizeChunkPublicPath(
     options.chunks?.publicPath ?? DEFAULT_BUILD_OPTIONS.chunks.publicPath,
   );
-  const chunkManifestFile = path.basename(
+  const chunkManifestFile = normalizeManifestFile(
     options.chunks?.manifestFile ?? DEFAULT_BUILD_OPTIONS.chunks.manifestFile,
   );
   const chunkMode = requireChoice(
@@ -103,10 +103,8 @@ export function normalizeBuildOptions(
       COMPILATION_LEVELS,
       "compilationLevel",
     ),
+    cssRuntime: options.cssRuntime ?? false,
     diagnostics: {
-      fatalWarnings:
-        options.diagnostics?.fatalWarnings ??
-        DEFAULT_BUILD_OPTIONS.diagnostics.fatalWarnings,
       preflight: requireChoice(
         options.diagnostics?.preflight ??
           DEFAULT_BUILD_OPTIONS.diagnostics.preflight,
@@ -142,34 +140,34 @@ export function normalizeBuildOptions(
     ),
     projectRoot,
     srcDir,
-    typedAnnotations: (options.typedAnnotations ?? []).map((file) => ({
-      bindings: file.bindings.map((binding) => ({
-        jsdoc: binding.jsdoc,
-        members: (binding.members ?? []).map((member) => ({
-          jsdoc: member.jsdoc,
-          name: member.name,
-        })),
-        name: binding.name,
-      })),
-      filePath: file.filePath,
-    })),
+    typedExterns: [...(options.typedExterns ?? [])].map((filePath) =>
+      path.isAbsolute(filePath)
+        ? filePath
+        : path.resolve(projectRoot, filePath),
+    ),
+    typeMetadata: options.typeMetadata,
   };
 }
 
 /**
  * What `chunks.outputType: "auto"` resolves to once the gates below pass.
  *
- * Still `script`: ES_MODULES output needs placeholder-based chunk hashing and
- * `<script type="module">` HTML emission to be correct end to end, and neither
- * has landed. Flipping this constant to `"esm"` is the whole default flip.
+ * `esm`. Measured on the Svelte example: 120,762 -> 115,049 raw and
+ * 41,015 -> 40,262 gzip purely from dropping the per-chunk IIFE wrapper and
+ * the `$gcc.` namespace prefix on every cross-chunk reference. Chunk file
+ * names are derived from the chunk name, not from content, so the `import`
+ * specifiers a sibling chunk embeds are stable across app edits and need no
+ * placeholder pass; the Vite plugin owns its own hashing and HTML rewrite,
+ * and standalone consumers load the entry with `<script type="module">`.
  */
-const AUTO_CHUNK_OUTPUT_TYPE: ResolvedChunkOutputType = "script";
+const AUTO_CHUNK_OUTPUT_TYPE: ResolvedChunkOutputType = "esm";
 
 /**
  * Applies the gates for chunk output shape.
  *
- * `esm` needs all three of: the bundler-runtime chunk loader (the only mode
- * with a chunk graph and a manifest), an output level that can actually run
+ * `esm` needs all three of: a chunked mode (`bundler-runtime` or `split` — the
+ * ones with a chunk graph and a manifest; they share one emission path, so they
+ * resolve identically here), an output level that can actually run
  * `import`/`export` (Closure happily emits ES5 bodies *with* `import`
  * statements, so this gate is ours), and a consumer that loads the entry as a
  * module. Worker bundles and anything embedded with a plain `<script>` stay on
@@ -188,7 +186,7 @@ export function resolveChunkOutputType({
   worker?: boolean;
 }): ResolvedChunkOutputType {
   if (
-    chunkMode !== "bundler-runtime" ||
+    chunkMode === "off" ||
     worker ||
     languageOut === "ECMASCRIPT3" ||
     languageOut === "ECMASCRIPT5"
@@ -232,7 +230,7 @@ export function resolveVendorChunk({
   if (vendorChunk !== true) {
     return false;
   }
-  if (chunkMode !== "bundler-runtime") {
+  if (chunkMode === "off") {
     return false;
   }
   return (
@@ -255,4 +253,102 @@ function normalizeChunkPublicPath(publicPath: string) {
     return "./";
   }
   return publicPath.endsWith("/") ? publicPath : `${publicPath}/`;
+}
+
+function normalizeManifestFile(filePath: string) {
+  if (filePath.length === 0) {
+    return "";
+  }
+  const normalized = filePath.replace(/\\/gu, "/");
+  if (
+    path.posix.isAbsolute(normalized) ||
+    path.win32.isAbsolute(filePath) ||
+    normalized.endsWith("/") ||
+    normalized.split("/").includes("..")
+  ) {
+    throw new TypeError(
+      `chunks.manifestFile must be a safe relative file path. Received ${JSON.stringify(filePath)}.`,
+    );
+  }
+  const relativePath = path.posix.normalize(normalized).replace(/^\.\//u, "");
+  if (!relativePath || relativePath === ".") {
+    throw new TypeError(
+      `chunks.manifestFile must be a safe relative file path. Received ${JSON.stringify(filePath)}.`,
+    );
+  }
+  return relativePath;
+}
+
+export async function validateOutputPathBoundaries(
+  options: ResolvedBuildOptions,
+  cacheWorkspaceDir: string | null,
+  extraInputPaths: string[] = [],
+) {
+  const outDir = await canonicalPath(options.outDir);
+  const protectedInputs = [
+    ["projectRoot", options.projectRoot],
+    ["srcDir", options.srcDir],
+    ...options.entries.map(
+      (entry, index) => [`entries[${index}]`, entry.file] as const,
+    ),
+    ...options.externs.map(
+      (filePath, index) => [`externs[${index}]`, filePath] as const,
+    ),
+    ...options.js.map((filePath, index) => [`js[${index}]`, filePath] as const),
+    ...options.typedExterns.map(
+      (filePath, index) => [`typedExterns[${index}]`, filePath] as const,
+    ),
+    ...extraInputPaths.map(
+      (filePath, index) => [`resolved input ${index + 1}`, filePath] as const,
+    ),
+  ] as const;
+
+  for (const [label, inputPath] of protectedInputs) {
+    const canonicalInput = await canonicalPath(inputPath);
+    if (isSameOrDescendant(canonicalInput, outDir)) {
+      throw new TypeError(
+        `Unsafe outDir ${JSON.stringify(options.outDir)}: it contains ${label} ${JSON.stringify(inputPath)}.`,
+      );
+    }
+  }
+
+  if (cacheWorkspaceDir) {
+    const workspaceDir = await canonicalPath(cacheWorkspaceDir);
+    if (isSameOrDescendant(workspaceDir, outDir)) {
+      throw new TypeError(
+        `Unsafe outDir ${JSON.stringify(options.outDir)}: it contains the selected cache workspace ${JSON.stringify(cacheWorkspaceDir)}.`,
+      );
+    }
+  }
+}
+
+async function canonicalPath(filePath: string) {
+  const suffix: string[] = [];
+  let current = path.resolve(filePath);
+  for (;;) {
+    try {
+      const resolved = await fs.realpath(current);
+      return path.join(resolved, ...suffix);
+    } catch (error) {
+      if (!hasErrorCode(error, "ENOENT") && !hasErrorCode(error, "ENOTDIR")) {
+        throw error;
+      }
+      const parent = path.dirname(current);
+      if (parent === current) {
+        return path.resolve(filePath);
+      }
+      suffix.unshift(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+function isSameOrDescendant(candidatePath: string, parentPath: string) {
+  const relative = path.relative(parentPath, candidatePath);
+  return (
+    relative === "" ||
+    (relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative))
+  );
 }

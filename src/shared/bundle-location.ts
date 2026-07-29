@@ -8,13 +8,23 @@ declare const __gcc_current_module_url: string;
 let bundleRequire: NodeRequire | null = null;
 let packageRoot: string | null = null;
 
+function getCurrentModuleUrl() {
+  return typeof __gcc_current_module_url === "string"
+    ? __gcc_current_module_url
+    : import.meta.url;
+}
+
 function getBundleFilePath() {
-  return fileURLToPath(__gcc_current_module_url);
+  return fileURLToPath(getCurrentModuleUrl());
 }
 
 export function createBundleRequire(): NodeRequire {
-  bundleRequire ??= createRequire(__gcc_current_module_url);
+  bundleRequire ??= createRequire(getCurrentModuleUrl());
   return bundleRequire;
+}
+
+export function createCurrentWorkingDirectoryRequire(): NodeRequire {
+  return createRequire(path.join(process.cwd(), "package.json"));
 }
 
 export function getPackageRootFromBundle(): string {

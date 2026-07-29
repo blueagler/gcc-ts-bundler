@@ -1,7 +1,12 @@
 use super::super::*;
-use super::shared::property_renaming_report_path;
+use super::shared::{aggregate_type_metadata, property_renaming_report_path};
+use crate::module_cache::parse_module;
 use crate::transpile::assigners::collect_annotated_assigner_names;
-use regex::Regex;
+use std::collections::{HashMap, HashSet};
+use swc_core::common::{Globals, Mark, Spanned, SyntaxContext, GLOBALS};
+use swc_core::ecma::ast::{CallExpr, Callee, Expr, Id, Lit, Pass, Pat, Program};
+use swc_core::ecma::visit::{Visit, VisitWith};
+use swc_ecma_transforms_base::resolver;
 
 #[derive(Clone, Debug, serde::Serialize)]
 struct DebugBundlerRuntimeInitManifest(
@@ -24,6 +29,13 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         .find(|chunk| chunk.kind.as_deref() == Some("base"))
         .or_else(|| resolved_chunks.first())
         .ok_or_else(|| "Chunk plan must contain at least one chunk.".to_string())?;
+    let (type_metadata_counts, has_type_metadata) = aggregate_type_metadata(
+        input,
+        resolved_chunks
+            .iter()
+            .flat_map(|chunk| chunk.files.iter().cloned())
+            .collect::<Vec<_>>(),
+    )?;
 
     let mut generated_assets = Vec::new();
     let mut compile_jobs = Vec::new();
@@ -242,6 +254,23 @@ pub(crate) fn prepare_bundler_runtime_jobs(
     let include_custom_elements_es5_adapter =
         needs_custom_elements_es5_adapter(&input.languageOut, &all_module_contents);
 
+    // Every optional runtime block hangs off the global `__g` object, so
+    // Closure can never prove one dead. Deciding here is the only place the
+    // question can be answered, and every answer is a fail-closed
+    // over-approximation: a substring hit on the assembled module text is
+    // enough to keep a block.
+    //
+    // CSS is the one capability this side cannot see on its own: standalone
+    // builds never fill manifest CSS rows, and the Vite plugin fills them
+    // *after* the compile, so it passes its pre-compile CSS-ownership answer
+    // in through `needsCssRuntime`.
+    let capabilities = RuntimeCapabilities {
+        css: input.needsCssRuntime || manifest.chunks.values().any(|chunk| !chunk.css.is_empty()),
+        entry_runner: base_entry_points_json != "[]",
+        live_exports: calls_runtime_helper(&all_module_contents, "__live"),
+        preload: calls_runtime_helper(&all_module_contents, "__preloadDynamicImport"),
+    };
+
     // The plan puts a vendor chunk first precisely so base's generated
     // `import "./<vendor>.js"` edge executes it at startup. That inverts the
     // usual order: vendor runs before base's preamble would have created the
@@ -263,6 +292,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
                 runtime_debug,
                 chunk_output_type,
                 RuntimePreamblePart::Core,
+                capabilities,
             )
         })
         .transpose()?;
@@ -279,13 +309,11 @@ pub(crate) fn prepare_bundler_runtime_jobs(
             .then(|| rewrite_runtime_module_ids(module_text, &runtime_module_index_by_id))
             .transpose()?;
         let module_text = rewritten_module_text.as_deref().unwrap_or(module_text);
-        // Must run after the module-id rewrite, which matches on the unsuffixed
-        // callee names.
-        let suffixed_module_text = rename_runtime_aliases(
-            module_text,
-            &runtime_alias_suffix(chunk_index, chunk_output_type),
-        )?;
-        let module_text = suffixed_module_text.as_deref().unwrap_or(module_text);
+        // Module-id replacement runs first because it keys generated calls by
+        // resolver identity before their per-chunk aliases are renamed.
+        let requested_alias_suffix = runtime_alias_suffix(chunk_index, chunk_output_type);
+        let alias_rewrite = rename_runtime_aliases(module_text, &requested_alias_suffix)?;
+        let module_text = alias_rewrite.text.as_deref().unwrap_or(module_text);
         // The transpiler annotated these; reading the marker back out of the
         // assembled text is what carries the list across the per-module file
         // boundary, and keeps the pin exactly in step with what was annotated.
@@ -295,7 +323,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
             Vec::new()
         };
         let source_text = if chunk.name == base_chunk.name {
-            render_bundler_runtime_base_chunk(
+            render_bundler_runtime_base_chunk_with_alias_suffix(
                 base_chunk_index,
                 &base_entry_points_json,
                 &input.chunkLoader,
@@ -310,17 +338,20 @@ pub(crate) fn prepare_bundler_runtime_jobs(
                 } else {
                     RuntimePreamblePart::All
                 },
+                &alias_rewrite.suffix,
+                capabilities,
             )?
         } else {
-            render_bundler_runtime_lazy_chunk(
+            render_bundler_runtime_lazy_chunk_with_alias_suffix(
                 chunk_index,
                 module_text,
-                chunk_output_type,
                 runtime_core_chunk_name
                     .as_deref()
                     .filter(|name| *name == chunk.name)
                     .and(runtime_core.as_deref()),
                 &assigner_names,
+                &alias_rewrite.suffix,
+                capabilities,
             )
         };
         let source_path = runtime_asset_dir.join(format!("{}.linked.js", chunk.name));
@@ -427,6 +458,8 @@ pub(crate) fn prepare_bundler_runtime_jobs(
             .then(|| BUNDLER_RUNTIME_PREFIX_NAMESPACE.to_string()),
         rewritePolyfills: false,
         warningLevel: warning_level.to_string(),
+        hasTypeMetadata: has_type_metadata,
+        typeMetadataCounts: type_metadata_counts,
     });
 
     for chunk in resolved_chunks {
@@ -440,13 +473,11 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         let final_output_path = PathBuf::from(&input.outDir).join(final_chunk_file_name);
         postprocess_actions.push(PostprocessAction {
             inputPath: output_path.to_string_lossy().to_string(),
-            kind: if property_renaming_report_path.is_some() {
-                "rewrite-decorator-metadata".to_string()
-            } else {
-                "copy".to_string()
-            },
+            // Bundler-runtime chunks have no Closure wrapper exports to
+            // rewrite. Postprocess may still wrap the chunk or retarget the
+            // base specifier; both are decided from the chunk mode, not here.
+            kind: "copy".to_string(),
             outputPath: final_output_path.to_string_lossy().to_string(),
-            propertyRenamingReportPath: property_renaming_report_path.clone(),
         });
         published_outputs.push(final_output_path.to_string_lossy().to_string());
     }
@@ -463,6 +494,38 @@ pub(crate) fn prepare_bundler_runtime_jobs(
     })
 }
 
+/// Whether any module *calls* a generated runtime helper.
+///
+/// Every registry facade lists all five helpers in its parameter list whether
+/// or not it uses them, so a plain substring test is always true and gates
+/// nothing. Only a call site proves the helper is reachable. Collision-renamed
+/// spellings (`__live1`, `__live2`, ...) count too: `RuntimeBindingNames`
+/// allocates them by appending digits.
+fn calls_runtime_helper(text: &str, name: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut search_from = 0usize;
+    while let Some(offset) = text[search_from..].find(name) {
+        let start = search_from + offset;
+        let mut cursor = start + name.len();
+        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+            cursor += 1;
+        }
+        if bytes.get(cursor) == Some(&b'(') {
+            return true;
+        }
+        search_from = start + name.len();
+    }
+    false
+}
+
+const RUNTIME_ALIAS_DECL_NAMES: [&str; 5] = [
+    "__runtime",
+    "__register",
+    "__require",
+    "__dynamicImport",
+    "__preloadDynamicImport",
+];
+
 const RUNTIME_ALIAS_NAMES: [&str; 4] = [
     "__register",
     "__require",
@@ -470,71 +533,292 @@ const RUNTIME_ALIAS_NAMES: [&str; 4] = [
     "__preloadDynamicImport",
 ];
 
-/// Renames the loader alias identifiers a chunk's module code references, to
-/// match the per-chunk-unique declarations emitted by the alias line. Both the
-/// declaration and every reference live in this one chunk's text, so a
-/// whole-text rename stays scope-consistent (registry-form modules take these
-/// names as function parameters, which rename with their uses).
+struct RuntimeAliasRewrite {
+    text: Option<String>,
+    suffix: String,
+}
+
 fn rename_runtime_aliases(
     source_text: &str,
-    suffix: &str,
-) -> std::result::Result<Option<String>, String> {
-    if suffix.is_empty() {
-        return Ok(None);
+    requested_suffix: &str,
+) -> std::result::Result<RuntimeAliasRewrite, String> {
+    if requested_suffix.is_empty() {
+        return Ok(RuntimeAliasRewrite {
+            text: None,
+            suffix: String::new(),
+        });
     }
-    let mut current = source_text.to_string();
-    for name in RUNTIME_ALIAS_NAMES {
-        let regex = Regex::new(&format!(r"\b{name}\b")).map_err(|error| error.to_string())?;
-        current = regex
-            .replace_all(&current, format!("{name}{suffix}"))
-            .into_owned();
+    let (program, unresolved_ctxt) = resolved_runtime_program(source_text)?;
+    let target_ids = RUNTIME_ALIAS_NAMES
+        .into_iter()
+        .map(|name| (runtime_ident_id(name, unresolved_ctxt), name))
+        .collect::<HashMap<_, _>>();
+    let mut collector = RuntimeAliasCollector {
+        target_ids,
+        targets: Vec::new(),
+        used_names: HashSet::new(),
+    };
+    program.visit_with(&mut collector);
+
+    let mut suffix = requested_suffix.to_string();
+    let mut counter = 1usize;
+    while RUNTIME_ALIAS_DECL_NAMES
+        .iter()
+        .any(|name| collector.used_names.contains(&format!("{name}{suffix}")))
+    {
+        suffix = format!("{requested_suffix}_{counter}");
+        counter += 1;
     }
-    Ok(Some(current))
+    let edits = collector
+        .targets
+        .into_iter()
+        .map(|(start, end, name)| (start, end, format!("{name}{suffix}")))
+        .collect();
+    Ok(RuntimeAliasRewrite {
+        text: Some(apply_runtime_source_edits(source_text, edits)?),
+        suffix,
+    })
+}
+
+struct RuntimeAliasCollector {
+    target_ids: HashMap<Id, &'static str>,
+    targets: Vec<(usize, usize, &'static str)>,
+    used_names: HashSet<String>,
+}
+
+impl Visit for RuntimeAliasCollector {
+    fn visit_ident(&mut self, ident: &swc_core::ecma::ast::Ident) {
+        if let Some(name) = self.target_ids.get(&ident.to_id()).copied() {
+            self.targets.push((
+                ident.span.lo.0.saturating_sub(1) as usize,
+                ident.span.hi.0.saturating_sub(1) as usize,
+                name,
+            ));
+        } else {
+            self.used_names.insert(ident.sym.to_string());
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeCallKind {
+    Register,
+    Require,
+    DynamicImport,
+    PreloadDynamicImport,
 }
 
 fn rewrite_runtime_module_ids(
     source_text: &str,
     runtime_module_index_by_id: &BTreeMap<String, usize>,
 ) -> std::result::Result<String, String> {
-    let rewrites = [
+    let (program, unresolved_ctxt) = resolved_runtime_program(source_text)?;
+    let mut call_ids = HashMap::from([
         (
-            Regex::new(r#"__register\("([^"]+)"\s*,"#).map_err(|error| error.to_string())?,
-            "__register",
+            runtime_ident_id("__register", unresolved_ctxt),
+            RuntimeCallKind::Register,
         ),
         (
-            Regex::new(r#"__require\("([^"]+)"\)"#).map_err(|error| error.to_string())?,
-            "__require",
+            runtime_ident_id("__require", unresolved_ctxt),
+            RuntimeCallKind::Require,
         ),
         (
-            Regex::new(r#"__dynamicImport\("([^"]+)"\)"#).map_err(|error| error.to_string())?,
-            "__dynamicImport",
+            runtime_ident_id("__dynamicImport", unresolved_ctxt),
+            RuntimeCallKind::DynamicImport,
         ),
         (
-            Regex::new(r#"__preloadDynamicImport\("([^"]+)"\)"#)
-                .map_err(|error| error.to_string())?,
-            "__preloadDynamicImport",
+            runtime_ident_id("__preloadDynamicImport", unresolved_ctxt),
+            RuntimeCallKind::PreloadDynamicImport,
         ),
-    ];
-    let mut current = source_text.to_string();
-    for (regex, callee_name) in rewrites {
-        current = regex
-            .replace_all(&current, |captures: &regex::Captures| {
-                let runtime_module_id = captures
-                    .get(1)
-                    .map(|capture| capture.as_str())
-                    .unwrap_or_default();
-                let module_index = runtime_module_index_by_id
-                    .get(runtime_module_id)
-                    .copied()
-                    .unwrap_or_else(|| panic!("Missing module index for {}", runtime_module_id));
-                format!("{callee_name}({module_index}")
-                    + if callee_name == "__register" {
-                        ","
-                    } else {
-                        ")"
-                    }
-            })
-            .into_owned();
+    ]);
+    program.visit_with(&mut RegistryRuntimeParameterCollector {
+        register_id: runtime_ident_id("__register", unresolved_ctxt),
+        call_ids: &mut call_ids,
+    });
+    let mut collector = RuntimeModuleIdEditCollector {
+        call_ids: &call_ids,
+        edits: Vec::new(),
+        errors: Vec::new(),
+        runtime_module_index_by_id,
+    };
+    program.visit_with(&mut collector);
+    if !collector.errors.is_empty() {
+        return Err(collector.errors.join("\n"));
     }
-    Ok(current)
+    apply_runtime_source_edits(source_text, collector.edits)
+}
+
+struct RegistryRuntimeParameterCollector<'a> {
+    register_id: Id,
+    call_ids: &'a mut HashMap<Id, RuntimeCallKind>,
+}
+
+impl Visit for RegistryRuntimeParameterCollector<'_> {
+    fn visit_call_expr(&mut self, call: &CallExpr) {
+        if matches!(
+                    &call.callee,
+                    Callee::Expr(callee)
+                        if matches!(&**callee, Expr::Ident(ident) if ident.to_id() == self.register_id)
+        ) {
+            if let Some(callback) = call.args.get(1).map(|argument| argument.expr.as_ref()) {
+                match callback {
+                    Expr::Fn(function) => {
+                        self.collect_params(
+                            function.function.params.iter().map(|param| &param.pat),
+                        );
+                    }
+                    Expr::Arrow(arrow) => self.collect_params(arrow.params.iter()),
+                    _ => {}
+                }
+            }
+        }
+        call.visit_children_with(self);
+    }
+}
+
+impl RegistryRuntimeParameterCollector<'_> {
+    fn collect_params<'a>(&mut self, params: impl Iterator<Item = &'a Pat>) {
+        for (index, pattern) in params.enumerate() {
+            let Pat::Ident(binding) = pattern else {
+                continue;
+            };
+            let kind = match index {
+                0 => Some(RuntimeCallKind::Require),
+                2 => Some(RuntimeCallKind::DynamicImport),
+                3 => Some(RuntimeCallKind::PreloadDynamicImport),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                self.call_ids.insert(binding.id.to_id(), kind);
+            }
+        }
+    }
+}
+
+struct RuntimeModuleIdEditCollector<'a> {
+    call_ids: &'a HashMap<Id, RuntimeCallKind>,
+    edits: Vec<(usize, usize, String)>,
+    errors: Vec<String>,
+    runtime_module_index_by_id: &'a BTreeMap<String, usize>,
+}
+
+impl Visit for RuntimeModuleIdEditCollector<'_> {
+    fn visit_call_expr(&mut self, call: &CallExpr) {
+        call.visit_children_with(self);
+        let Callee::Expr(callee) = &call.callee else {
+            return;
+        };
+        let Expr::Ident(ident) = &**callee else {
+            return;
+        };
+        let Some(_kind) = self.call_ids.get(&ident.to_id()) else {
+            return;
+        };
+        let Some(argument) = call.args.first() else {
+            return;
+        };
+        let Expr::Lit(Lit::Str(module_id)) = &*argument.expr else {
+            return;
+        };
+        let module_id = module_id.value.to_string_lossy().to_string();
+        let Some(module_index) = self.runtime_module_index_by_id.get(&module_id) else {
+            self.errors
+                .push(format!("Missing module index for {module_id}"));
+            return;
+        };
+        let span = argument.expr.span();
+        self.edits.push((
+            span.lo.0.saturating_sub(1) as usize,
+            span.hi.0.saturating_sub(1) as usize,
+            module_index.to_string(),
+        ));
+    }
+}
+
+fn resolved_runtime_program(
+    source_text: &str,
+) -> std::result::Result<(Program, SyntaxContext), String> {
+    let module = parse_module(Path::new("bundler-runtime-linked.js"), source_text)?;
+    Ok(GLOBALS.set(&Globals::new(), || {
+        let mut program = Program::Module(module);
+        let unresolved_mark = Mark::new();
+        let top_level_mark = Mark::new();
+        resolver(unresolved_mark, top_level_mark, false).process(&mut program);
+        (program, SyntaxContext::empty().apply_mark(unresolved_mark))
+    }))
+}
+
+fn runtime_ident_id(name: &str, ctxt: SyntaxContext) -> Id {
+    swc_core::ecma::ast::Ident::new(name.into(), Default::default(), ctxt).to_id()
+}
+
+fn apply_runtime_source_edits(
+    source_text: &str,
+    mut edits: Vec<(usize, usize, String)>,
+) -> std::result::Result<String, String> {
+    edits.sort_by_key(|(start, _, _)| *start);
+    let mut output = source_text.to_string();
+    for (start, end, replacement) in edits.into_iter().rev() {
+        if start > end
+            || end > output.len()
+            || !output.is_char_boundary(start)
+            || !output.is_char_boundary(end)
+        {
+            return Err("Invalid bundler-runtime source edit span".to_string());
+        }
+        output.replace_range(start..end, &replacement);
+    }
+    Ok(output)
+}
+
+#[cfg(test)]
+mod identity_regressions {
+    use super::*;
+
+    #[test]
+    fn runtime_text_rewrites_skip_literals_and_authored_bindings() {
+        let source = concat!(
+            "function __require(id){return id;}\n",
+            "globalThis.label='__require';\n",
+            "globalThis.local=__require(\"user-value\");\n",
+            "__register(\"m0\",function(__require,__exports,__dynamicImport,__preloadDynamicImport,__live){",
+            "return __require(\"m1\");});\n",
+);
+        let rewritten = rewrite_runtime_module_ids(
+            source,
+            &BTreeMap::from([("m0".to_string(), 0), ("m1".to_string(), 1)]),
+        )
+        .expect("runtime ids");
+        assert!(rewritten.contains("label='__require'"), "{rewritten}");
+        assert!(
+            rewritten.contains("__require(\"user-value\")"),
+            "{rewritten}"
+        );
+        assert!(rewritten.contains("__register(0"), "{rewritten}");
+        assert!(rewritten.contains("return __require(1)"), "{rewritten}");
+    }
+
+    #[test]
+    fn missing_generated_runtime_module_id_is_an_error() {
+        let error = rewrite_runtime_module_ids("__dynamicImport(\"missing\");", &BTreeMap::new())
+            .expect_err("missing id");
+        assert_eq!(error, "Missing module index for missing");
+    }
+
+    #[test]
+    fn runtime_alias_plan_avoids_descendant_bindings() {
+        let source = concat!(
+            "globalThis.label='__require';",
+            "function use(__require_0){return __require_0;}",
+            "const __runtime_0=1;",
+            "__require(0);",
+        );
+        let rewritten = rename_runtime_aliases(source, "_0").expect("aliases");
+        assert_eq!(rewritten.suffix, "_0_1");
+        let code = rewritten.text.expect("rewritten text");
+        assert!(code.contains("label='__require'"), "{code}");
+        assert!(code.contains("function use(__require_0)"), "{code}");
+        assert!(code.contains("const __runtime_0=1"), "{code}");
+        assert!(code.contains("__require_0_1(0)"), "{code}");
+    }
 }

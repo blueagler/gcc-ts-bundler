@@ -163,6 +163,161 @@ fn falls_back_to_browser_then_module_then_main() {
 }
 
 #[test]
+fn applies_browser_object_mapping_to_package_main() {
+    let temp_dir = TestDir::new();
+    temp_dir.write(
+        "src/index.ts",
+        "import pkg from \"demo-pkg\";\nexport default pkg;\n",
+    );
+    temp_dir.write(
+        "node_modules/demo-pkg/package.json",
+        r#"{"name":"demo-pkg","main":"./node.js","browser":{"./node.js":"./browser.js"}}"#,
+    );
+    temp_dir.write(
+        "node_modules/demo-pkg/node.js",
+        "import fs from \"node:fs\";\nexport default fs;\n",
+    );
+    temp_dir.write("node_modules/demo-pkg/browser.js", "export default 1;\n");
+
+    let result = resolve_graph(
+        vec![temp_dir.join("src/index.ts").to_string_lossy().to_string()],
+        temp_dir.join("src").to_string_lossy().to_string(),
+        temp_dir.path.to_string_lossy().to_string(),
+        "esm-only".to_string(),
+    )
+    .unwrap();
+
+    assert!(result
+        .sourceFiles
+        .iter()
+        .any(|path| path.ends_with("node_modules/demo-pkg/browser.js")));
+    assert!(!result
+        .sourceFiles
+        .iter()
+        .any(|path| path.ends_with("node_modules/demo-pkg/node.js")));
+}
+
+#[test]
+fn applies_browser_object_mapping_to_package_module() {
+    let temp_dir = TestDir::new();
+    temp_dir.write(
+        "src/index.ts",
+        "import pkg from \"demo-pkg\";\nexport default pkg;\n",
+    );
+    temp_dir.write(
+        "node_modules/demo-pkg/package.json",
+        r#"{"name":"demo-pkg","module":"./node.js","main":"./fallback.js","browser":{"./node.js":"./browser.js"}}"#,
+    );
+    temp_dir.write(
+        "node_modules/demo-pkg/node.js",
+        "import fs from \"node:fs\";\nexport default fs;\n",
+    );
+    temp_dir.write("node_modules/demo-pkg/fallback.js", "export default 2;\n");
+    temp_dir.write("node_modules/demo-pkg/browser.js", "export default 1;\n");
+
+    let result = resolve_graph(
+        vec![temp_dir.join("src/index.ts").to_string_lossy().to_string()],
+        temp_dir.join("src").to_string_lossy().to_string(),
+        temp_dir.path.to_string_lossy().to_string(),
+        "esm-only".to_string(),
+    )
+    .unwrap();
+
+    assert!(result
+        .sourceFiles
+        .iter()
+        .any(|path| path.ends_with("node_modules/demo-pkg/browser.js")));
+    assert!(!result
+        .sourceFiles
+        .iter()
+        .any(|path| path.ends_with("node_modules/demo-pkg/fallback.js")));
+}
+
+#[test]
+fn applies_browser_object_mapping_to_relative_package_imports() {
+    let temp_dir = TestDir::new();
+    temp_dir.write(
+        "src/index.ts",
+        "import pkg from \"demo-pkg\";\nexport default pkg;\n",
+    );
+    temp_dir.write(
+        "node_modules/demo-pkg/package.json",
+        r#"{"name":"demo-pkg","main":"./index.js","browser":{"./feature.js":"./feature-browser.js"}}"#,
+    );
+    temp_dir.write(
+        "node_modules/demo-pkg/index.js",
+        "import feature from \"./feature\";\nexport default feature;\n",
+    );
+    temp_dir.write(
+        "node_modules/demo-pkg/feature.js",
+        "import fs from \"node:fs\";\nexport default fs;\n",
+    );
+    temp_dir.write(
+        "node_modules/demo-pkg/feature-browser.js",
+        "export default 1;\n",
+    );
+
+    let result = resolve_graph(
+        vec![temp_dir.join("src/index.ts").to_string_lossy().to_string()],
+        temp_dir.join("src").to_string_lossy().to_string(),
+        temp_dir.path.to_string_lossy().to_string(),
+        "esm-only".to_string(),
+    )
+    .unwrap();
+
+    assert!(result
+        .sourceFiles
+        .iter()
+        .any(|path| path.ends_with("node_modules/demo-pkg/feature-browser.js")));
+    assert!(!result
+        .sourceFiles
+        .iter()
+        .any(|path| path.ends_with("node_modules/demo-pkg/feature.js")));
+    let resolved = result
+        .resolvedImports
+        .iter()
+        .find(|entry| {
+            entry
+                .importerFilePath
+                .ends_with("node_modules/demo-pkg/index.js")
+                && entry.specifier == "./feature"
+        })
+        .expect("resolved relative import");
+    assert!(resolved
+        .targetPath
+        .ends_with("node_modules/demo-pkg/feature-browser.js"));
+    assert_eq!(
+        resolved.moduleId,
+        to_goog_module_id(
+            &temp_dir.join("node_modules/demo-pkg/feature-browser.js"),
+            &temp_dir.path,
+        )
+    );
+}
+
+#[test]
+fn dynamic_import_templates_use_cooked_specifiers_in_graph_resolution() {
+    let temp_dir = TestDir::new();
+    temp_dir.write(
+        "src/index.ts",
+        r#"globalThis.load = () => import(`./\u0066eature.js`);"#,
+    );
+    temp_dir.write("src/feature.js", "export const value = 1;\n");
+
+    let result = resolve_graph(
+        vec![temp_dir.join("src/index.ts").to_string_lossy().to_string()],
+        temp_dir.join("src").to_string_lossy().to_string(),
+        temp_dir.path.to_string_lossy().to_string(),
+        "esm-only".to_string(),
+    )
+    .unwrap();
+
+    assert_eq!(result.lazyImports.len(), 1);
+    assert_eq!(result.lazyImports[0].specifier, "./feature.js");
+    assert!(result.lazyImports[0].targetPath.ends_with("src/feature.js"));
+}
+
+#[test]
 fn resolves_package_relative_module_field_without_dot_prefix() {
     let temp_dir = TestDir::new();
     temp_dir.write(
@@ -527,6 +682,46 @@ fn vendor_chunk_partitions_dependency_originated_files_and_leads_the_plan() {
 }
 
 #[test]
+fn vendor_chunk_excludes_virtual_modules_with_authored_dependencies() {
+    let plan = plan_chunks(
+        "bundler-runtime".to_string(),
+        "main.js".to_string(),
+        "/workspace".to_string(),
+        vec![ChunkPlanEntryInput {
+            chunkName: "main".to_string(),
+            outputName: "main.js".to_string(),
+            sourcePath: "/workspace/src/main.ts".to_string(),
+        }],
+        vec![
+            DependencyGraphEntry {
+                filePath: "/workspace/src/main.ts".to_string(),
+                dependencies: vec!["/workspace/__virtual__/bridge.js".to_string()],
+            },
+            DependencyGraphEntry {
+                filePath: "/workspace/__virtual__/bridge.js".to_string(),
+                dependencies: vec!["/workspace/src/value.js".to_string()],
+            },
+            DependencyGraphEntry {
+                filePath: "/workspace/src/value.js".to_string(),
+                dependencies: vec![],
+            },
+        ],
+        vec![],
+        vec![],
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0].kind.as_deref(), Some("base"));
+    assert!(plan[0].dependencies.is_empty());
+    assert_eq!(
+        plan[0].files,
+        vec!["src/value.js", "__virtual__/bridge.js", "src/main.ts",],
+    );
+}
+
+#[test]
 fn vendor_chunk_never_claims_an_entry_file() {
     // A project whose entry itself sits under a vendor-looking path still
     // owns that file: it is app code by definition, and moving it would put
@@ -631,10 +826,20 @@ fn vendor_chunk_flag_off_leaves_the_plan_byte_identical() {
 }
 
 #[test]
-fn split_mode_ignores_the_vendor_chunk_flag() {
-    // Split emits plain scripts with no import edge to order vendor before
-    // base, so the partition would produce a chunk nothing loads first.
+fn split_partitions_the_vendor_chunk_exactly_like_bundler_runtime() {
+    // Split used to ignore the flag because plain-script chunks have no import
+    // edge to order vendor before base. It is on the shared import-edge chunk
+    // graph now, so the partition must be identical to `bundler-runtime` --
+    // and must still be opt-in.
     assert_eq!(
+        format!("{:?}", plan_vendor(true, "split")),
+        format!("{:?}", plan_vendor(true, "bundler-runtime")),
+    );
+    assert_eq!(
+        format!("{:?}", plan_vendor(false, "split")),
+        format!("{:?}", plan_vendor(false, "bundler-runtime")),
+    );
+    assert_ne!(
         format!("{:?}", plan_vendor(true, "split")),
         format!("{:?}", plan_vendor(false, "split")),
     );
@@ -680,4 +885,88 @@ fn vendor_chunk_coexists_with_shared_and_lazy_chunks() {
     // against the real compiler - a panel referencing a vendor symbol with
     // only a base dependency compiles clean and inlines correctly.
     assert_eq!(lazy.dependencies, vec!["main"]);
+}
+
+#[test]
+fn dotted_module_names_still_probe_extensions() {
+    // `enum.untyped.ts` imported as `./enum.untyped`: the trailing `untyped`
+    // segment is part of the name, not an extension, so the `.ts` candidate
+    // must still be produced.
+    let candidates = super::module_candidates(Path::new("/w/src/enum.untyped"))
+        .into_iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+
+    assert!(
+        candidates.contains(&"/w/src/enum.untyped.ts".to_string()),
+        "{candidates:?}"
+    );
+    assert!(
+        candidates.contains(&"/w/src/enum.untyped.tsx".to_string()),
+        "{candidates:?}"
+    );
+    // The literal path stays first, so a file that resolves today keeps
+    // resolving to exactly the same file.
+    assert_eq!(
+        candidates.first().map(String::as_str),
+        Some("/w/src/enum.untyped")
+    );
+}
+
+#[test]
+fn multi_dot_module_names_probe_extensions() {
+    let candidates = super::module_candidates(Path::new("/w/decorator_nested_scope.decorated"))
+        .into_iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+
+    assert!(
+        candidates.contains(&"/w/decorator_nested_scope.decorated.ts".to_string()),
+        "{candidates:?}"
+    );
+}
+
+#[test]
+fn a_real_js_extension_is_not_shadowed_by_an_appended_one() {
+    // The regression this guards: treating every trailing segment as a name
+    // would make `./x.js` probe `x.js.ts` and could shadow a real `x.js`.
+    // A known module extension must keep the exact-file-first behaviour and
+    // must never gain an appended-extension candidate.
+    let candidates = super::module_candidates(Path::new("/w/src/x.js"))
+        .into_iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(candidates.first().map(String::as_str), Some("/w/src/x.js"));
+    assert!(
+        !candidates
+            .iter()
+            .any(|candidate| candidate.ends_with("x.js.ts")),
+        "{candidates:?}"
+    );
+    // The established `.js` -> `.ts` substitution is untouched.
+    assert!(
+        candidates.contains(&"/w/src/x.ts".to_string()),
+        "{candidates:?}"
+    );
+}
+
+#[test]
+fn every_known_module_extension_suppresses_appending() {
+    for extension in [
+        "ts", "tsx", "js", "jsx", "mjs", "mts", "cjs", "cts", "json", "node",
+    ] {
+        let base = format!("/w/src/file.{extension}");
+        let candidates = super::module_candidates(Path::new(&base))
+            .into_iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(candidates.first().map(String::as_str), Some(base.as_str()));
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate == &format!("{base}.ts")),
+            "{extension}: {candidates:?}"
+        );
+    }
 }

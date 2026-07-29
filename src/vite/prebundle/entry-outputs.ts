@@ -26,6 +26,7 @@ import {
  */
 export async function rewriteAuthoredModules(input: {
   collapsedEntryOutputByPath: Map<string, CollapsibleBundleEntryOutput>;
+  dynamicRootRequestKeyByTargetFilePath: Map<string, string>;
   materialized: MaterializedGraph;
   outputByRequestKey: Map<string, string>;
   regionLabelsByAuthoredFile: Map<string, string>;
@@ -38,14 +39,6 @@ export async function rewriteAuthoredModules(input: {
       const regionKey =
         input.regionLabelsByAuthoredFile.get(normalizedFilePath);
       const sourceText = await fs.readFile(normalizedFilePath, "utf8");
-      if (!regionKey) {
-        return {
-          content: sourceText,
-          relativePath: path
-            .relative(input.materialized.srcDir, normalizedFilePath)
-            .replace(/\\/g, "/"),
-        };
-      }
       const sourceFile = ts.createSourceFile(
         normalizedFilePath,
         sourceText,
@@ -60,55 +53,90 @@ export async function rewriteAuthoredModules(input: {
         ),
       );
       const edits: Array<{ end: number; start: number; text: string }> = [];
+      const resolveBundledOutput = (requestKey: string) =>
+        input.outputByRequestKey.get(
+          input.requestGroupKeyByTarget.get(requestKey) ?? requestKey,
+        );
 
-      for (const statement of sourceFile.statements) {
-        if (
-          !(
-            (ts.isImportDeclaration(statement) ||
-              ts.isExportDeclaration(statement)) &&
-            statement.moduleSpecifier &&
-            ts.isStringLiteralLike(statement.moduleSpecifier) &&
-            statement.moduleSpecifier.text.startsWith(".")
-          )
-        ) {
-          continue;
-        }
-        const targetFilePath = normalizePath(
-          path.resolve(
-            path.dirname(normalizedFilePath),
-            statement.moduleSpecifier.text,
-          ),
-        );
-        const targetRequestKey = `${regionKey}\u0000${targetFilePath}`;
-        const bundledOutput = input.outputByRequestKey.get(
-          input.requestGroupKeyByTarget.get(targetRequestKey) ??
-            targetRequestKey,
-        );
-        if (!bundledOutput) {
-          continue;
-        }
-        const collapsedOutput =
-          input.collapsedEntryOutputByPath.get(bundledOutput);
-        if (!collapsedOutput) {
+      if (regionKey) {
+        for (const statement of sourceFile.statements) {
+          if (
+            !(
+              (ts.isImportDeclaration(statement) ||
+                ts.isExportDeclaration(statement)) &&
+              statement.moduleSpecifier &&
+              ts.isStringLiteralLike(statement.moduleSpecifier) &&
+              statement.moduleSpecifier.text.startsWith(".")
+            )
+          ) {
+            continue;
+          }
+          const targetFilePath = normalizePath(
+            path.resolve(
+              path.dirname(normalizedFilePath),
+              statement.moduleSpecifier.text,
+            ),
+          );
+          const bundledOutput = resolveBundledOutput(
+            `${regionKey}\u0000${targetFilePath}`,
+          );
+          if (!bundledOutput) {
+            continue;
+          }
+          const collapsedOutput =
+            input.collapsedEntryOutputByPath.get(bundledOutput);
+          if (!collapsedOutput) {
+            edits.push({
+              end: statement.moduleSpecifier.getEnd() - 1,
+              start: statement.moduleSpecifier.getStart() + 1,
+              text: toRelativeImportSpecifier(outputFilePath, bundledOutput),
+            });
+            continue;
+          }
+
           edits.push({
-            end: statement.moduleSpecifier.getEnd() - 1,
-            start: statement.moduleSpecifier.getStart() + 1,
-            text: toRelativeImportSpecifier(outputFilePath, bundledOutput),
+            end: statement.getEnd(),
+            start: statement.getStart(sourceFile),
+            text: renderCollapsedBundleImportStatement({
+              importerFilePath: outputFilePath,
+              sourceFile,
+              statement,
+              wrapperOutput: collapsedOutput,
+            }),
           });
-          continue;
         }
-
-        edits.push({
-          end: statement.getEnd(),
-          start: statement.getStart(sourceFile),
-          text: renderCollapsedBundleImportStatement({
-            importerFilePath: outputFilePath,
-            sourceFile,
-            statement,
-            wrapperOutput: collapsedOutput,
-          }),
-        });
       }
+
+      const visit = (node: ts.Node) => {
+        const firstArgument = ts.isCallExpression(node)
+          ? node.arguments[0]
+          : undefined;
+        if (
+          ts.isCallExpression(node) &&
+          node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+          firstArgument &&
+          ts.isStringLiteralLike(firstArgument) &&
+          firstArgument.text.startsWith(".")
+        ) {
+          const targetFilePath = normalizePath(
+            path.resolve(path.dirname(normalizedFilePath), firstArgument.text),
+          );
+          const requestKey =
+            input.dynamicRootRequestKeyByTargetFilePath.get(targetFilePath);
+          const bundledOutput = requestKey
+            ? resolveBundledOutput(requestKey)
+            : undefined;
+          if (bundledOutput) {
+            edits.push({
+              end: firstArgument.getEnd() - 1,
+              start: firstArgument.getStart() + 1,
+              text: toRelativeImportSpecifier(outputFilePath, bundledOutput),
+            });
+          }
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(sourceFile);
 
       return {
         content: dedupeAuthoredImportStatements(

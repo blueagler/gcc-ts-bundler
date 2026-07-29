@@ -21,6 +21,7 @@ import { joinPublicPath, readAssetText, stripPublicPathPrefix } from "./output";
 import {
   extractRuntimeInitManifest,
   parseGccRuntimeManifest,
+  replaceRuntimeInitManifest,
 } from "./runtime-manifest";
 
 export function analyzeViteCssOwnership(
@@ -105,6 +106,29 @@ export function analyzeViteCssOwnership(
   };
 }
 
+/**
+ * Whether the compiled runtime will ever need its `<link>` loader.
+ *
+ * Runs before the compile, because the runtime preamble is Closure *input* and
+ * the CSS rows are only written afterwards. A CSS file already linked from the
+ * HTML is subtracted: `collectRuntimeChunkCss` drops those from the base
+ * chunk, and for any other chunk the row would only re-request a stylesheet
+ * the document already has. Fail-closed: anything left means the loader ships.
+ */
+export function ownershipNeedsCssRuntime(ownership: ViteCssOwnership) {
+  if (!ownership.enabled) {
+    return false;
+  }
+  for (const cssFiles of ownership.moduleCssById.values()) {
+    for (const cssFile of cssFiles) {
+      if (!ownership.htmlLinkedCss.has(cssFile)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 export async function augmentCompiledViteCss(input: {
   baseChunkFilePath: string;
   manifestFilePath: string;
@@ -150,21 +174,18 @@ export async function augmentCompiledViteCss(input: {
   }
 
   const baseChunkSource = await fs.readFile(input.baseChunkFilePath, "utf8");
-  const cssByChunkIndex = buildRuntimeCssIndexPatch({
+  const runtimeManifest = applyRuntimeCssRows({
     baseChunkSource,
     manifest,
     runtimeCssByChunkId,
   });
-  if (!cssByChunkIndex.some((cssFiles) => cssFiles.length > 0)) {
-    return;
+  const patchedSource = replaceRuntimeInitManifest(
+    baseChunkSource,
+    runtimeManifest,
+  );
+  if (patchedSource !== baseChunkSource) {
+    await fs.writeFile(input.baseChunkFilePath, patchedSource, "utf8");
   }
-
-  const runtimeInitCall = extractRuntimeInitCall(baseChunkSource);
-  const patchedSource =
-    baseChunkSource.slice(0, runtimeInitCall.insertIndex) +
-    renderRuntimeCssPatch(cssByChunkIndex) +
-    baseChunkSource.slice(runtimeInitCall.insertIndex);
-  await fs.writeFile(input.baseChunkFilePath, patchedSource, "utf8");
 }
 
 function collectRuntimeChunkCss(input: {
@@ -249,12 +270,12 @@ function collectRuntimeChunkCss(input: {
   return runtimeCssByChunkId;
 }
 
-function buildRuntimeCssIndexPatch(input: {
+function applyRuntimeCssRows(input: {
   baseChunkSource: string;
   manifest: GccRuntimeManifest;
   runtimeCssByChunkId: Map<string, string[]>;
 }) {
-  const runtimeInitCall = extractRuntimeInitCall(input.baseChunkSource);
+  const runtimeInitCall = extractRuntimeInitManifest(input.baseChunkSource);
   if (!isUnknownArray(runtimeInitCall.manifest)) {
     throw new Error(
       "gccTsBundler() could not read runtime metadata from the base chunk.",
@@ -275,11 +296,7 @@ function buildRuntimeCssIndexPatch(input: {
     );
   }
 
-  const cssByChunkIndex = Array.from(
-    { length: runtimeChunkEntries.length },
-    (): string[] => [],
-  );
-  runtimeChunkEntries.forEach((entry, index) => {
+  runtimeChunkEntries.forEach((entry) => {
     if (!isUnknownArray(entry)) {
       return;
     }
@@ -299,22 +316,13 @@ function buildRuntimeCssIndexPatch(input: {
         `gccTsBundler() could not match runtime chunk ${relativeUrl} back to the manifest.`,
       );
     }
-    cssByChunkIndex[index] = input.runtimeCssByChunkId.get(chunkId) ?? [];
+    entry[2] =
+      chunkId === input.manifest.baseChunk
+        ? []
+        : (input.runtimeCssByChunkId.get(chunkId) ?? []);
   });
 
-  return cssByChunkIndex;
-}
-
-function renderRuntimeCssPatch(cssByChunkIndex: string[][]) {
-  return `;(function(r){if(!r||!r.k)return;var a=${JSON.stringify(cssByChunkIndex)};for(var i=0;i<a.length;i+=1){var b=a[i];if(!b||b.length===0)continue;var c=r.k[i];if(!c)continue;var d=c[2];if(!d||d.length===0){c[2]=b.slice();continue;}for(var e=0;e<b.length;e+=1)d.indexOf(b[e])<0&&d.push(b[e]);}})(globalThis.__g);`;
-}
-
-function extractRuntimeInitCall(sourceText: string) {
-  const payload = extractRuntimeInitManifest(sourceText);
-  return {
-    insertIndex: payload.insertIndex,
-    manifest: payload.manifest,
-  };
+  return runtimeInitCall.manifest;
 }
 
 function collectHtmlLinkedCss(bundle: OutputBundle) {

@@ -3,7 +3,7 @@ import ts from "typescript";
 
 import { resolveGraph } from "../../native/load";
 import { loadCompilerOptions } from "../transpile/compiler-options";
-import type { PackageAlias } from "../types";
+import type { PackageAlias, ResolvedImport } from "../types";
 import { uniqueSortedStrings } from "../../shared/files";
 import { createBundleRequire } from "../../shared/bundle-location";
 
@@ -13,6 +13,7 @@ export interface TsxRuntimeSupport {
   packageAliases: PackageAlias[];
   packageJsonFiles: string[];
   sourceFiles: string[];
+  resolvedImports: ResolvedImport[];
   trackedFiles: string[];
 }
 
@@ -56,6 +57,7 @@ export async function collectTsxRuntimeSupport({
       ...graph.packageAliases,
     ]),
     packageJsonFiles: graph.packageJsonFiles,
+    resolvedImports: graph.resolvedImports,
     sourceFiles: graph.sourceFiles,
     trackedFiles: graph.trackedFiles,
   };
@@ -70,6 +72,18 @@ export function mergePackageAliases(aliases: PackageAlias[]) {
   return [...merged.values()].sort((left, right) => {
     const leftKey = `${left.packageName}\0${left.subpath}`;
     const rightKey = `${right.packageName}\0${right.subpath}`;
+    return leftKey.localeCompare(rightKey);
+  });
+}
+
+export function mergeResolvedImports(imports: ResolvedImport[]) {
+  const merged = new Map<string, ResolvedImport>();
+  for (const resolved of imports) {
+    merged.set(`${resolved.importerFilePath}\0${resolved.specifier}`, resolved);
+  }
+  return [...merged.values()].sort((left, right) => {
+    const leftKey = `${left.importerFilePath}\0${left.specifier}`;
+    const rightKey = `${right.importerFilePath}\0${right.specifier}`;
     return leftKey.localeCompare(rightKey);
   });
 }
@@ -93,6 +107,7 @@ function emptyTsxRuntimeSupport(): TsxRuntimeSupport {
     packageAliases: [],
     packageJsonFiles: [],
     sourceFiles: [],
+    resolvedImports: [],
     trackedFiles: [],
   };
 }

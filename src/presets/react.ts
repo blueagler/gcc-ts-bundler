@@ -28,22 +28,23 @@ import type { GccTsBundlerVitePluginOptions } from "../vite/types";
  */
 const HOST_ELEMENT_EXCLUDED_KEYS = "^(?:children|key|ref)$";
 
-/** Element factories across the classic and automatic JSX runtimes. */
-const ELEMENT_FACTORIES = [
-  "createElement",
-  "cloneElement",
-  "jsx",
-  "jsxs",
-  "jsxDEV",
-] as const;
+/** Factories whose first argument is the element type. */
+const ELEMENT_FACTORIES = ["createElement", "jsx", "jsxs", "jsxDEV"] as const;
 
-export const REACT_ELEMENT_PROPS_CALLS: readonly CompatClassMapCall[] =
-  ELEMENT_FACTORIES.map((callee) => ({
-    argIndex: 1,
-    callee,
-    keyExcludePattern: HOST_ELEMENT_EXCLUDED_KEYS,
-    stringLiteralArgIndex: 0,
-  }));
+const hostPropsRule = (callee: string): CompatClassMapCall => ({
+  argIndex: 1,
+  callee,
+  keyExcludePattern: HOST_ELEMENT_EXCLUDED_KEYS,
+  stringLiteralArgIndex: 0,
+});
+
+export const REACT_ELEMENT_PROPS_CALLS: readonly CompatClassMapCall[] = [
+  ...ELEMENT_FACTORIES.map(hostPropsRule),
+  // cloneElement receives an element value rather than a tag. The generic
+  // literal-contract analysis follows immutable results from the configured
+  // factories above, so only clones proven to remain host elements qualify.
+  hostPropsRule("cloneElement"),
+];
 
 export interface ReactPresetOptions {
   /**

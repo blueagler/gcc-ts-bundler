@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import zlib from "node:zlib";
 import ts from "typescript";
 import { fileURLToPath } from "node:url";
 
@@ -8,10 +9,6 @@ import { build as bundleWithEsbuild } from "esbuild";
 import { functionsMixins } from "vite-plugin-functions-mixins";
 
 import { build, generateExterns } from "../../dist/index.mjs";
-import {
-  collectJsGraphStats,
-  collectOutputChunkStats,
-} from "../../dist/shared/lifecycle-size.mjs";
 
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.join(projectRoot, "src");
@@ -342,6 +339,55 @@ if (typeof document !== "undefined" && !document.getElementById(themeId)) {
 }
 `;
   await fs.writeFile(outputFile, themeModule, "utf8");
+}
+
+async function collectJsGraphStats(input) {
+  const totalBytes = (
+    await Promise.all(
+      input.filePaths.map(async (filePath) => {
+        try {
+          return (await fs.stat(filePath)).size;
+        } catch {
+          return 0;
+        }
+      }),
+    )
+  ).reduce((sum, size) => sum + size, 0);
+  return { moduleCount: input.filePaths.length, totalBytes };
+}
+
+async function collectOutputChunkStats({ entryFilePath, lazyFilePaths }) {
+  const entrySource = await fs.readFile(entryFilePath, "utf8");
+  const lazySources = await Promise.all(
+    lazyFilePaths.map((filePath) => fs.readFile(filePath, "utf8")),
+  );
+  const entryFactoryCount = countRegisteredModuleFactories(entrySource);
+  const lazyFactoryCount = lazySources.reduce(
+    (sum, source) => sum + countRegisteredModuleFactories(source),
+    0,
+  );
+  return {
+    entryFactoryCount,
+    entryGzipBytes: gzipByteLength(entrySource),
+    entryRawBytes: Buffer.byteLength(entrySource),
+    lazyFactoryCount,
+    lazyGzipBytes: lazySources.reduce(
+      (sum, source) => sum + gzipByteLength(source),
+      0,
+    ),
+    lazyRawBytes: lazySources.reduce(
+      (sum, source) => sum + Buffer.byteLength(source),
+      0,
+    ),
+  };
+}
+
+function countRegisteredModuleFactories(source) {
+  return [...source.matchAll(/\((\d+),function\(/gu)].length;
+}
+
+function gzipByteLength(source) {
+  return zlib.gzipSync(Buffer.from(source), { level: 9 }).byteLength;
 }
 
 async function logPureGraphSnapshot(label, roots, { lazyRootCount }) {

@@ -18,6 +18,8 @@ bun run build
 bun test ./test/*.test.mjs
 ```
 
+`bun run verify:package` performs a clean JavaScript/declaration build, packs the npm archive, verifies every `exports`, `types`, and `bin` target, type-checks a NodeNext consumer, and smoke-imports the packed package with Node and Bun.
+
 `bun run build` builds JavaScript and the host native addon in parallel. The native build also creates a platform package under `npm/`.
 
 For the complete check used by the package script:
@@ -62,8 +64,11 @@ Prefer types derived from value tuples, `satisfies`, and exact internal contract
 | `bun run typecheck`                            | Check source and declaration-build TypeScript configurations.    |
 | `cargo test --manifest-path native/Cargo.toml` | Run only Rust tests.                                             |
 | `bun test ./test/vite-plugin.test.mjs`         | Run one JavaScript integration test file.                        |
+| `bun run verify:package`                       | Build, pack, and validate the published package contract.        |
 
 Set `GCC_BUILD_TIMINGS=1` to print internal cache and stage timings during builds. `GCC_CLOSURE_CONCURRENCY` can force the number of concurrent Closure jobs in bundler-runtime mode; `1` is useful for deterministic comparison while debugging.
+
+Set `GCC_DISABLE_TYPE_INFERENCE=1` to bisect metadata-related regressions. It disables optional annotations, silent `checkTypes` inference, and typed platform slicing while preserving semantic enum/decorator lowering; cache identities keep this mode separate.
 
 ## Repository map
 
@@ -108,6 +113,7 @@ recursively into every example, exhausting inodes).
 - `test/vite-plugin.test.mjs` covers retained graph capture, dependency prebundling, CSS ownership, naming, target mapping, cache reuse, and plugin guards.
 - `test/cli-args.test.mjs` prevents deprecated option aliases from silently returning.
 - `test/validation.test.mjs` covers schema validation, including rejection of unknown chunk kinds and malformed cache records.
+- `scripts/verify-package.mjs` covers the packed exports/bin contract, NodeNext declarations, and Node/Bun import smoke tests.
 
 Prefer adding a focused case to the existing behavior file instead of creating a new test harness.
 
@@ -119,7 +125,7 @@ Prefer adding a focused case to the existing behavior file instead of creating a
 - Linux arm64/x64 with GNU or musl libc;
 - Windows arm64/x64 with MSVC.
 
-The script builds `native/src/lib.rs` as a `cdylib`, copies the host addon to `native/index.node` unless told not to, and writes an npm package containing `index.node` under `npm/<platform-package>`.
+The script builds `native/src/lib.rs` as a `cdylib`, copies the host addon to `native/index.node` unless told not to, and writes an npm package containing `index.node`, license metadata, and `LICENSE` under `npm/<platform-package>`.
 
 Musl cross-builds use `cargo-zigbuild`. The GitHub Actions workflow builds every native package independently and publishes them before the root package on a GitHub release.
 
@@ -128,11 +134,13 @@ Musl cross-builds use `cargo-zigbuild`. The GitHub Actions workflow builds every
 The root package publishes:
 
 - `bin/` for the CLI;
-- `dist/` for ESM, declarations, Vite, and native loader entries (the package is ESM-only);
+- `dist/` for the root, Vite, and preset ESM entries plus declarations (the package is ESM-only);
 - `closure-externs/` and `closure-lib/`;
-- `docs/` and the root README.
+- `docs/`, the root README, and `LICENSE`.
 
 Platform addons are optional dependencies. At runtime, `src/native/index.ts` prefers a local `native/index.node` development build, then loads the matching optional package for the current OS, architecture, and Linux libc.
+
+`npm publish` and `bun run publish:npm` both run the same `prepublishOnly` package verification hook before publishing.
 
 ## Generated files
 
@@ -144,6 +152,6 @@ These paths are build products and should not be edited by hand:
 - `native/target/`;
 - `npm/`;
 - example `dist/` directories;
-- `.gcc-ts-bundler-vite/` and debug capture directories.
+- `.gcc-ts-bundler-vite/`, `.gcc-debug/`, and `.investigate-*` capture directories.
 
 Make source changes under `src/` or `native/src/`, then rebuild before running integration tests because the tests import package outputs from `dist/`.

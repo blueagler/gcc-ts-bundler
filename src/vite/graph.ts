@@ -18,6 +18,21 @@ export function resolveEntryModuleIds(
   bundle: OutputBundle,
   chunks: OutputChunk[],
 ) {
+  const htmlEntryModuleIds = resolveHtmlEntryModuleIds(bundle, chunks);
+  if (htmlEntryModuleIds.length > 0) {
+    return htmlEntryModuleIds;
+  }
+
+  return chunks
+    .filter(hasFacadeModuleId)
+    .filter((chunk) => chunk.isEntry)
+    .map((chunk) => chunk.facadeModuleId);
+}
+
+export function resolveHtmlEntryModuleIds(
+  bundle: OutputBundle,
+  chunks: OutputChunk[],
+) {
   const chunkByFileName = new Map(
     chunks.map((chunk) => [chunk.fileName, chunk]),
   );
@@ -47,14 +62,7 @@ export function resolveEntryModuleIds(
     }
   }
 
-  if (moduleIds.size > 0) {
-    return [...moduleIds];
-  }
-
-  return chunks
-    .filter(hasFacadeModuleId)
-    .filter((chunk) => chunk.isEntry)
-    .map((chunk) => chunk.facadeModuleId);
+  return [...moduleIds].sort((left, right) => left.localeCompare(right));
 }
 
 export function resolveRetainedModuleIds(

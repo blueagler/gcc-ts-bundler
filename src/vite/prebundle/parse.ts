@@ -123,6 +123,19 @@ function collectLocalExportNames(
     return true;
   }
   if (
+    ts.isExportDeclaration(statement) &&
+    !statement.moduleSpecifier &&
+    statement.exportClause &&
+    ts.isNamedExports(statement.exportClause)
+  ) {
+    let hasDefaultExport = false;
+    for (const element of statement.exportClause.elements) {
+      exportedNames.add(element.name.text);
+      hasDefaultExport ||= element.name.text === "default";
+    }
+    return hasDefaultExport;
+  }
+  if (
     (ts.isFunctionDeclaration(statement) ||
       ts.isClassDeclaration(statement) ||
       ts.isVariableStatement(statement)) &&

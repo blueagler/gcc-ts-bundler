@@ -1,68 +1,96 @@
-//! Finds vendor-chunk functions that mutate their module's own state.
-//!
-//! Under ES module chunk output a cross-chunk reference becomes a real
-//! `import` binding, and an import binding is immutable. Closure is free to
-//! inline a small function into its caller and to cross-chunk-motion whatever
-//! survives, so a vendor function that assigns a module-top-level binding can
-//! end up executing *in the base chunk* while the binding it writes still
-//! lives in vendor — which the compiler then rejects outright:
-//!
-//! ```text
-//! ERROR - [JSC_IMPORT_ASSIGN] Imported symbol "Xa" in chunk "main.js"
-//!         cannot be assigned (defined in "vendor.js")
-//! ```
-//!
-//! Svelte's `update_version` is the canonical case. Neither half of the fix
-//! is sufficient alone, measured on the real failing job:
-//!
-//! | applied | result |
-//! |---|---|
-//! | `@noinline` only | still fails — `CrossChunkCodeMotion` moves the whole function |
-//! | runtime pin only | still fails — the function is inlined before motion runs |
-//! | both | exit 0 |
-//!
-//! So this module marks the functions and `closure_jobs` appends the pin.
-//! Both are scoped strictly to vendor chunks: motion out of base and lazy
-//! chunks is legal and is how those chunks stay small.
+//! Finds vendor-chunk callables that mutate their module's own state.
 
 use std::collections::HashSet;
+use std::path::Path;
 
-use swc_core::ecma::ast::{AssignTarget, Decl, Expr, SimpleAssignTarget, Stmt};
+use swc_core::common::Spanned;
+use swc_core::ecma::ast::{
+    ArrayPat, AssignTarget, AssignTargetPat, Decl, Expr, ForHead, Ident, ObjectPat, ObjectPatProp,
+    Pat, SimpleAssignTarget, Stmt,
+};
 use swc_core::ecma::visit::{Visit, VisitWith};
 
 /// The Closure annotation that keeps a function out of its call sites.
 pub(crate) const NOINLINE_TAG: &str = "@noinline";
 
-/// Returns the name of the top-level function `statement` declares when its
-/// body writes one of `module_bindings`.
-///
-/// `module_bindings` holds the *suffixed* top-level names of the module being
-/// emitted (`update_version$$10`), which is what makes a plain name match
-/// sound: hoisting has already given every top-level binding a per-module
-/// ordinal suffix, so a local variable cannot collide with one, and an
-/// assignment to a local therefore never matches.
+/// Returns the first top-level callable declared by `statement` whose body
+/// writes one of `module_bindings`.
 pub(crate) fn assigner_function_name(
     statement: &Stmt,
     module_bindings: &HashSet<String>,
 ) -> Option<String> {
-    let Stmt::Decl(Decl::Fn(fn_decl)) = statement else {
-        return None;
-    };
+    assigner_function_names(statement, module_bindings)
+        .into_iter()
+        .next()
+}
+
+pub(crate) fn assigner_function_names(
+    statement: &Stmt,
+    module_bindings: &HashSet<String>,
+) -> Vec<String> {
     if module_bindings.is_empty() {
-        return None;
+        return Vec::new();
     }
-    let mut visitor = ModuleStateAssignmentVisitor {
-        module_bindings,
-        found: false,
-    };
-    // Visits nested functions too, on purpose: a closure that writes the
-    // module's state carries its enclosing declaration into the caller when
-    // that declaration is inlined, so the enclosing one is what must be
-    // pinned.
-    fn_decl.function.visit_with(&mut visitor);
-    visitor
-        .found
-        .then(|| fn_decl.ident.sym.as_ref().to_string())
+    callable_declarations(statement)
+        .into_iter()
+        .filter_map(|callable| {
+            let mut visitor = ModuleStateAssignmentVisitor {
+                module_bindings,
+                found: false,
+            };
+            match callable.body {
+                CallableBody::Function(function) => function.visit_with(&mut visitor),
+                CallableBody::Arrow(arrow) => arrow.visit_with(&mut visitor),
+            }
+            visitor.found.then(|| callable.name.sym.to_string())
+        })
+        .collect()
+}
+
+struct CallableDeclaration<'a> {
+    name: &'a Ident,
+    body: CallableBody<'a>,
+}
+
+enum CallableBody<'a> {
+    Function(&'a swc_core::ecma::ast::Function),
+    Arrow(&'a swc_core::ecma::ast::ArrowExpr),
+}
+
+fn callable_declarations(statement: &Stmt) -> Vec<CallableDeclaration<'_>> {
+    match statement {
+        Stmt::Decl(Decl::Fn(declaration)) => vec![CallableDeclaration {
+            name: &declaration.ident,
+            body: CallableBody::Function(&declaration.function),
+        }],
+        Stmt::Decl(Decl::Var(declaration)) => declaration
+            .decls
+            .iter()
+            .filter_map(|declarator| {
+                let Pat::Ident(binding) = &declarator.name else {
+                    return None;
+                };
+                let initializer = declarator.init.as_deref()?;
+                let body = match peel_parens(initializer) {
+                    Expr::Fn(function) => CallableBody::Function(&function.function),
+                    Expr::Arrow(arrow) => CallableBody::Arrow(arrow),
+                    _ => return None,
+                };
+                Some(CallableDeclaration {
+                    name: &binding.id,
+                    body,
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn peel_parens(mut expression: &Expr) -> &Expr {
+    while let Expr::Paren(paren) = expression {
+        expression = &paren.expr;
+    }
+    expression
 }
 
 struct ModuleStateAssignmentVisitor<'a> {
@@ -76,75 +104,177 @@ impl ModuleStateAssignmentVisitor<'_> {
             self.found = true;
         }
     }
+
+    fn note_pattern(&mut self, pattern: &Pat) {
+        match pattern {
+            Pat::Ident(binding) => self.note(binding.id.sym.as_ref()),
+            Pat::Array(array) => self.note_array_pattern(array),
+            Pat::Object(object) => self.note_object_pattern(object),
+            Pat::Assign(assign) => self.note_pattern(&assign.left),
+            Pat::Rest(rest) => self.note_pattern(&rest.arg),
+            Pat::Expr(expression) => self.note_assignment_expression(expression),
+            _ => {}
+        }
+    }
+
+    fn note_array_pattern(&mut self, pattern: &ArrayPat) {
+        for element in pattern.elems.iter().flatten() {
+            self.note_pattern(element);
+        }
+    }
+
+    fn note_object_pattern(&mut self, pattern: &ObjectPat) {
+        for property in &pattern.props {
+            match property {
+                ObjectPatProp::KeyValue(property) => self.note_pattern(&property.value),
+                ObjectPatProp::Assign(property) => self.note(property.key.sym.as_ref()),
+                ObjectPatProp::Rest(property) => self.note_pattern(&property.arg),
+            }
+        }
+    }
+
+    fn note_assignment_expression(&mut self, expression: &Expr) {
+        match peel_parens(expression) {
+            Expr::Ident(ident) => self.note(ident.sym.as_ref()),
+            Expr::Array(array) => {
+                for element in array.elems.iter().flatten() {
+                    self.note_assignment_expression(&element.expr);
+                }
+            }
+            Expr::Object(object) => {
+                for property in &object.props {
+                    let swc_core::ecma::ast::PropOrSpread::Prop(property) = property else {
+                        continue;
+                    };
+                    match property.as_ref() {
+                        swc_core::ecma::ast::Prop::Shorthand(ident) => {
+                            self.note(ident.sym.as_ref())
+                        }
+                        swc_core::ecma::ast::Prop::KeyValue(property) => {
+                            self.note_assignment_expression(&property.value)
+                        }
+                        swc_core::ecma::ast::Prop::Assign(property) => {
+                            self.note(property.key.sym.as_ref())
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn note_simple_target(&mut self, target: &SimpleAssignTarget) {
+        match target {
+            SimpleAssignTarget::Ident(binding) => self.note(binding.id.sym.as_ref()),
+            SimpleAssignTarget::Paren(expression) => {
+                self.note_assignment_expression(&expression.expr)
+            }
+            SimpleAssignTarget::TsAs(expression) => {
+                self.note_assignment_expression(&expression.expr)
+            }
+            SimpleAssignTarget::TsSatisfies(expression) => {
+                self.note_assignment_expression(&expression.expr)
+            }
+            SimpleAssignTarget::TsNonNull(expression) => {
+                self.note_assignment_expression(&expression.expr)
+            }
+            SimpleAssignTarget::TsTypeAssertion(expression) => {
+                self.note_assignment_expression(&expression.expr)
+            }
+            SimpleAssignTarget::TsInstantiation(expression) => {
+                self.note_assignment_expression(&expression.expr)
+            }
+            _ => {}
+        }
+    }
+
+    fn note_target(&mut self, target: &AssignTarget) {
+        match target {
+            AssignTarget::Simple(target) => self.note_simple_target(target),
+            AssignTarget::Pat(AssignTargetPat::Array(pattern)) => self.note_array_pattern(pattern),
+            AssignTarget::Pat(AssignTargetPat::Object(pattern)) => {
+                self.note_object_pattern(pattern)
+            }
+            AssignTarget::Pat(AssignTargetPat::Invalid(_)) => {}
+        }
+    }
+
+    fn note_for_head(&mut self, head: &ForHead) {
+        if let ForHead::Pat(pattern) = head {
+            self.note_pattern(pattern);
+        }
+    }
 }
 
 impl Visit for ModuleStateAssignmentVisitor<'_> {
     fn visit_assign_expr(&mut self, node: &swc_core::ecma::ast::AssignExpr) {
         node.visit_children_with(self);
-        // Covers `=` and every compound form (`+=`, `??=`, ...): each one
-        // writes the binding, which is all `JSC_IMPORT_ASSIGN` cares about.
-        // A member write (`obj.x = 1`) mutates the object, not the binding,
-        // so only a bare identifier target counts.
-        if let AssignTarget::Simple(SimpleAssignTarget::Ident(ident)) = &node.left {
-            self.note(ident.id.sym.as_ref());
-        }
+        self.note_target(&node.left);
     }
 
     fn visit_update_expr(&mut self, node: &swc_core::ecma::ast::UpdateExpr) {
         node.visit_children_with(self);
-        if let Expr::Ident(ident) = node.arg.as_ref() {
-            self.note(ident.sym.as_ref());
-        }
+        self.note_assignment_expression(&node.arg);
+    }
+
+    fn visit_for_in_stmt(&mut self, node: &swc_core::ecma::ast::ForInStmt) {
+        node.visit_children_with(self);
+        self.note_for_head(&node.left);
+    }
+
+    fn visit_for_of_stmt(&mut self, node: &swc_core::ecma::ast::ForOfStmt) {
+        node.visit_children_with(self);
+        self.note_for_head(&node.left);
     }
 }
 
-/// Extracts the pin list from an assembled vendor chunk's text: every
-/// function this module annotated.
-///
-/// Reading the annotation back out of the text is deliberate. The transpiler
-/// writes one file per module and `closure_jobs` concatenates them, so the
-/// marker we already emit is the only thing that crosses that boundary — and
-/// it keeps the pin list exactly in step with what was annotated, which a
-/// second independent detection pass could not guarantee.
+/// Extracts every annotated callable from an assembled vendor chunk. Parsing
+/// keeps annotation and pin extraction on the same declaration-shape model as
+/// the detector above instead of maintaining a second text grammar.
 pub(crate) fn collect_annotated_assigner_names(chunk_text: &str) -> Vec<String> {
+    let Ok(module) = crate::module_cache::parse_module(Path::new("assigner-chunk.js"), chunk_text)
+    else {
+        return Vec::new();
+    };
     let mut names = Vec::new();
     let mut seen = HashSet::new();
-    for (index, _) in chunk_text.match_indices(NOINLINE_TAG) {
-        let Some(block_end) = chunk_text[index..].find("*/") else {
+    let mut previous_end = 0usize;
+    for item in &module.body {
+        let swc_core::ecma::ast::ModuleItem::Stmt(statement) = item else {
             continue;
         };
-        let after_block = chunk_text[index + block_end + 2..].trim_start();
-        let Some(rest) = after_block.strip_prefix("function") else {
+        let span = statement.span();
+        let start = span.lo.0.saturating_sub(1) as usize;
+        let end = span.hi.0.saturating_sub(1) as usize;
+        let leading = chunk_text
+            .get(previous_end.min(chunk_text.len())..start.min(chunk_text.len()))
+            .unwrap_or_default();
+        previous_end = end.min(chunk_text.len());
+        if !has_noinline_leading_comment(leading) {
             continue;
-        };
-        let name = identifier_prefix(rest.trim_start());
-        if let Some(name) = name {
-            if seen.insert(name.to_string()) {
-                names.push(name.to_string());
+        }
+        for callable in callable_declarations(statement) {
+            let name = callable.name.sym.to_string();
+            if seen.insert(name.clone()) {
+                names.push(name);
             }
         }
     }
     names
 }
 
-fn identifier_prefix(text: &str) -> Option<&str> {
-    let end = text
-        .find(|character: char| {
-            !(character.is_alphanumeric() || character == '_' || character == '$')
-        })
-        .unwrap_or(text.len());
-    (end > 0 && !text.starts_with(|character: char| character.is_ascii_digit()))
-        .then(|| &text[..end])
+fn has_noinline_leading_comment(leading: &str) -> bool {
+    let trimmed = leading.trim();
+    let Some(comment_start) = trimmed.rfind("/**") else {
+        return false;
+    };
+    let comment = &trimmed[comment_start..];
+    comment.ends_with("*/") && comment.contains(NOINLINE_TAG)
 }
 
 /// The statement appended to a vendor chunk that makes its mutating functions
 /// immovable.
-///
-/// A property write on the loader object is an effect Closure cannot prove
-/// away and cannot relocate, and naming the functions in it keeps live
-/// references in the chunk that defines them. It uses the chunk's own
-/// per-chunk runtime alias, so it is scoped exactly like the alias line above
-/// it.
 pub(crate) fn render_assigner_pin(runtime_alias: &str, names: &[String]) -> Option<String> {
     (!names.is_empty()).then(|| format!("{runtime_alias}.v=[{}];", names.join(",")))
 }

@@ -4,13 +4,16 @@
     "declaration": true,
     "declarationMap": false,
     "emitDeclarationOnly": true,
+    "stripInternal": true,
     "outDir": "./dist",
     "rootDir": "./src"
   },
   "include": [
     "src/index.ts",
-    "src/native/index.ts",
     "src/vite/index.ts",
+    "src/presets/react.ts",
+    "src/presets/svelte.ts",
+    "src/presets/vue.ts",
     "src/types/**/*.d.ts"
   ]
 }

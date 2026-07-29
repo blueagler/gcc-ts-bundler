@@ -1,4 +1,5 @@
 use super::*;
+use crate::transpile::no_substitution_template_value;
 
 pub(super) fn extract_dependencies(module: &Module) -> Vec<String> {
     let mut dependencies = Vec::new();
@@ -63,9 +64,12 @@ impl Visit for DynamicImportCallCollector {
                 self.specifiers
                     .push(string.value.to_string_lossy().to_string());
             }
-            Expr::Tpl(template) if template.exprs.is_empty() && template.quasis.len() == 1 => {
-                self.specifiers.push(template.quasis[0].raw.to_string());
-            }
+            Expr::Tpl(template) => match no_substitution_template_value(template) {
+                Some(specifier) => self.specifiers.push(specifier),
+                None => self
+                    .errors
+                    .push("import() requires a string literal module specifier".to_string()),
+            },
             _ => self
                 .errors
                 .push("import() requires a string literal module specifier".to_string()),

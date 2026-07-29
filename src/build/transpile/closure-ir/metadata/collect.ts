@@ -6,7 +6,6 @@ import {
   buildClassJsDoc,
   buildFunctionLikeDoc,
   buildFunctionJsDoc,
-  buildFunctionObjectParamRecord,
   buildInterfaceDeclarationSnippet,
   buildObjectMemberDoc,
   buildTypeAliasDeclarationSnippet,
@@ -15,12 +14,17 @@ import {
   getObjectPropertyName,
   hasStaticModifier,
 } from "./docs";
-import { createClosureDocRenderContext } from "./type-render";
-import { buildEnumDeclarationMetadata } from "./enums";
+import {
+  canonicalSymbolId,
+  createClosureDocRenderContext,
+  referencesForTemplate,
+} from "./type-render";
+import { buildEnumDeclarationMetadata, isErasableConstEnum } from "./enums";
 import type {
-  ClosureIrEnumDeclaration,
-  ClosureIrFileMetadata,
-  ClosureIrTypeDeclaration,
+  ClosureAnnotation,
+  ClosureEnumDeclaration,
+  ClosureTypeDeclaration,
+  ClosureTypeMetadataFile,
 } from "../types";
 import type { ClosureIrFileFeatures } from "./scan";
 
@@ -36,13 +40,13 @@ export function collectClosureIrFileMetadata({
   features: ClosureIrFileFeatures;
   sourceFile: ts.SourceFile;
   unsafeEnumSymbols: Set<ts.Symbol>;
-}): { diagnostics: ts.Diagnostic[]; file: ClosureIrFileMetadata } {
+}): { diagnostics: ts.Diagnostic[]; file: ClosureTypeMetadataFile } {
   const diagnostics: ts.Diagnostic[] = [];
   const renderContext = createClosureDocRenderContext(sourceFile);
   const explicitTypeDeclarations = features.hasTypeDeclarations
     ? collectTypeDeclarationsForSourceFile(sourceFile, checker, renderContext)
     : [];
-  const topLevelDocs = features.hasTopLevelDocs
+  const annotations = features.hasTopLevelDocs
     ? collectClosureDocsForSourceFile(
         sourceFile,
         checker,
@@ -50,17 +54,28 @@ export function collectClosureIrFileMetadata({
         renderContext,
       )
     : [];
-  const typeDeclarations = [
+  const declarations = [
     ...explicitTypeDeclarations,
     ...renderContext.typeDeclarations,
   ];
-  const enumDeclarations = features.hasEnumDeclarations
+  const { enumDeclarations, erasedConstEnums } = features.hasEnumDeclarations
     ? collectEnumDeclarationsForSourceFile(
         sourceFile,
         checker,
         unsafeEnumSymbols,
+        compilerOptions,
       )
-    : [];
+    : { enumDeclarations: [], erasedConstEnums: [] };
+  for (const enumDeclaration of enumDeclarations) {
+    if (!renderContext.symbolsById.has(enumDeclaration.symbolId)) {
+      renderContext.symbolsById.set(enumDeclaration.symbolId, {
+        diagnosticName: enumDeclaration.bindingName,
+        id: enumDeclaration.symbolId,
+        kind: "runtime",
+        localName: enumDeclaration.bindingName,
+      });
+    }
+  }
   const decoratedOutputText = features.hasDecorators
     ? collectDecoratedOutputText({
         compilerOptions,
@@ -73,11 +88,17 @@ export function collectClosureIrFileMetadata({
   return {
     diagnostics,
     file: {
+      annotations,
+      declarations,
       decoratedOutputText,
-      enumDeclarations,
+      diagnostics: renderContext.diagnostics,
+      enums: enumDeclarations,
+      erasedConstEnums,
       filePath: sourceFile.fileName,
-      topLevelDocs,
-      typeDeclarations,
+      sourceFilePath: sourceFile.fileName,
+      symbols: [...renderContext.symbolsById.values()].sort((left, right) =>
+        left.id.localeCompare(right.id),
+      ),
     },
   };
 }
@@ -87,20 +108,48 @@ function collectTypeDeclarationsForSourceFile(
   checker: ts.TypeChecker,
   renderContext: ReturnType<typeof createClosureDocRenderContext>,
 ) {
-  const typeDeclarations: ClosureIrTypeDeclaration[] = [];
+  const typeDeclarations: ClosureTypeDeclaration[] = [];
+  // One synthesised declaration per *merged symbol*, not per declaration site.
+  // TypeScript lets a type be reopened (`declare interface Reopen` twice, an
+  // interface merged with a namespace, a class merged with an interface), and
+  // emitting a `function Name() {}` record per site produced duplicates that
+  // Closure rejects outright with
+  // JSC_BLOCK_SCOPED_DECL_MULTIPLY_DECLARED_ERROR. The checker already gives
+  // us one symbol for all the sites, and `canonicalSymbolId` already reduces
+  // that symbol to a stable identity, so the merge is decided by the same
+  // identity the rest of the IR is keyed on rather than by name matching.
+  const seenSymbolIds = new Set<string>();
+  const isFirstDeclarationOfSymbol = (declaration: ts.NamedDeclaration) => {
+    const symbol = declaration.name
+      ? checker.getSymbolAtLocation(declaration.name)
+      : undefined;
+    if (!symbol) {
+      return true;
+    }
+    const id = canonicalSymbolId(symbol);
+    if (seenSymbolIds.has(id)) {
+      return false;
+    }
+    seenSymbolIds.add(id);
+    return true;
+  };
 
   for (const statement of sourceFile.statements) {
     if (ts.isInterfaceDeclaration(statement)) {
-      typeDeclarations.push(
-        buildInterfaceDeclarationSnippet(statement, checker, renderContext),
-      );
+      if (isFirstDeclarationOfSymbol(statement)) {
+        typeDeclarations.push(
+          buildInterfaceDeclarationSnippet(statement, checker, renderContext),
+        );
+      }
       continue;
     }
 
     if (ts.isTypeAliasDeclaration(statement)) {
-      typeDeclarations.push(
-        buildTypeAliasDeclarationSnippet(statement, checker, renderContext),
-      );
+      if (isFirstDeclarationOfSymbol(statement)) {
+        typeDeclarations.push(
+          buildTypeAliasDeclarationSnippet(statement, checker, renderContext),
+        );
+      }
     }
   }
 
@@ -113,7 +162,18 @@ function collectClosureDocsForSourceFile(
   features: ClosureIrFileFeatures,
   renderContext: ReturnType<typeof createClosureDocRenderContext>,
 ) {
-  const topLevelDocs: ClosureIrFileMetadata["topLevelDocs"] = [];
+  const annotations: ClosureAnnotation[] = [];
+  const pushAnnotation = (
+    template: string,
+    target: ClosureAnnotation["target"],
+  ) => {
+    annotations.push({
+      references: referencesForTemplate(template, renderContext),
+      target,
+      template,
+      typeBearing: hasTypeBearingTag(template),
+    });
+  };
   const shouldAnnotateJs =
     !features.docEligibility.isTypeScriptLike &&
     features.docEligibility.hasJsDocText;
@@ -122,22 +182,11 @@ function collectClosureDocsForSourceFile(
   const visit = (node: ts.Node) => {
     if (ts.isFunctionDeclaration(node) && node.name) {
       if (shouldAnnotateTypeScript || shouldAnnotateJs) {
-        const objectParamRecord = buildFunctionObjectParamRecord(
-          node,
-          checker,
-          renderContext,
-        );
-        const jsdoc = buildFunctionJsDoc(
-          node,
-          checker,
-          renderContext,
-          objectParamRecord?.typeName,
-        );
+        const jsdoc = buildFunctionJsDoc(node, checker, renderContext);
         if (jsdoc) {
-          topLevelDocs.push({
-            jsdoc,
-            kind: "function",
-            name: node.name.text,
+          pushAnnotation(jsdoc, {
+            bindingName: node.name.text,
+            kind: "binding",
           });
         }
       }
@@ -154,10 +203,9 @@ function collectClosureDocsForSourceFile(
           typeNode: node.type,
         });
         if (jsdoc) {
-          topLevelDocs.push({
-            jsdoc,
-            kind: "variable",
-            name: node.name.text,
+          pushAnnotation(jsdoc, {
+            bindingName: node.name.text,
+            kind: "binding",
           });
         }
         if (
@@ -175,11 +223,12 @@ function collectClosureDocsForSourceFile(
               member,
             });
             if (memberDoc) {
-              topLevelDocs.push({
-                jsdoc: memberDoc,
-                kind: objectDocKind(member),
-                name: memberName,
-                owner: node.name.text,
+              pushAnnotation(memberDoc, {
+                kind: "member",
+                memberKind: objectMemberKind(member),
+                memberName,
+                ownerBindingName: node.name.text,
+                static: false,
               });
             }
           }
@@ -193,10 +242,9 @@ function collectClosureDocsForSourceFile(
       const className = node.name.text;
       const jsdoc = buildClassJsDoc(node, checker, renderContext);
       if (jsdoc) {
-        topLevelDocs.push({
-          jsdoc,
-          kind: "class",
-          name: className,
+        pushAnnotation(jsdoc, {
+          bindingName: className,
+          kind: "binding",
         });
       }
 
@@ -211,11 +259,11 @@ function collectClosureDocsForSourceFile(
           member,
         });
         if (memberDoc) {
-          topLevelDocs.push({
-            jsdoc: memberDoc,
-            kind: classDocKind(member),
-            name: memberName,
-            owner: className,
+          pushAnnotation(memberDoc, {
+            kind: "member",
+            memberKind: classMemberKind(member),
+            memberName,
+            ownerBindingName: className,
             static: hasStaticModifier(member),
           });
         }
@@ -240,11 +288,7 @@ function collectClosureDocsForSourceFile(
       if (name) {
         const jsdoc = buildFunctionLikeDoc(node, checker, renderContext);
         if (jsdoc) {
-          topLevelDocs.push({
-            jsdoc,
-            kind: "method",
-            name,
-          });
+          pushAnnotation(jsdoc, { bindingName: name, kind: "binding" });
         }
       }
     }
@@ -254,21 +298,21 @@ function collectClosureDocsForSourceFile(
 
   visit(sourceFile);
 
-  return topLevelDocs;
+  return annotations;
 }
 
-function objectDocKind(
+function objectMemberKind(
   member: ts.ObjectLiteralElementLike,
-): ClosureIrFileMetadata["topLevelDocs"][number]["kind"] {
-  if (ts.isGetAccessorDeclaration(member)) return "objectGetter";
-  if (ts.isSetAccessorDeclaration(member)) return "objectSetter";
-  if (ts.isMethodDeclaration(member)) return "objectMethod";
-  return "objectProperty";
+): Extract<ClosureAnnotation["target"], { kind: "member" }>["memberKind"] {
+  if (ts.isGetAccessorDeclaration(member)) return "getter";
+  if (ts.isSetAccessorDeclaration(member)) return "setter";
+  if (ts.isMethodDeclaration(member)) return "method";
+  return "field";
 }
 
-function classDocKind(
+function classMemberKind(
   member: ts.ClassElement,
-): ClosureIrFileMetadata["topLevelDocs"][number]["kind"] {
+): Extract<ClosureAnnotation["target"], { kind: "member" }>["memberKind"] {
   if (ts.isConstructorDeclaration(member)) return "constructor";
   if (ts.isGetAccessorDeclaration(member)) return "getter";
   if (ts.isSetAccessorDeclaration(member)) return "setter";
@@ -280,11 +324,20 @@ function collectEnumDeclarationsForSourceFile(
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
   unsafeEnumSymbols: Set<ts.Symbol>,
+  compilerOptions: ts.CompilerOptions,
 ) {
-  const enumDeclarations: ClosureIrEnumDeclaration[] = [];
+  const enumDeclarations: ClosureEnumDeclaration[] = [];
+  const erasedConstEnums: string[] = [];
 
   for (const statement of sourceFile.statements) {
     if (!ts.isEnumDeclaration(statement)) {
+      continue;
+    }
+
+    if (isErasableConstEnum(statement, compilerOptions)) {
+      // Name only: there is nothing to emit. The declaration is dropped from
+      // the module and every read was already inlined from the TypeScript AST.
+      erasedConstEnums.push(statement.name.text);
       continue;
     }
 
@@ -292,13 +345,14 @@ function collectEnumDeclarationsForSourceFile(
       statement,
       checker,
       unsafeEnumSymbols,
+      compilerOptions,
     );
     if (enumDeclaration) {
       enumDeclarations.push(enumDeclaration);
     }
   }
 
-  return enumDeclarations;
+  return { enumDeclarations, erasedConstEnums };
 }
 
 function collectDecoratedOutputText({
@@ -323,4 +377,10 @@ function collectDecoratedOutputText({
     ),
   );
   return transpiled.outputText;
+}
+
+function hasTypeBearingTag(template: string) {
+  return /@(constructor|enum|extends|implements|param|return|template|this|type|typedef)\b/u.test(
+    template,
+  );
 }

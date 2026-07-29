@@ -22,6 +22,8 @@ The npm package uses a JS loader plus platform-specific optional native packages
 bun install gcc-ts-bundler
 ```
 
+Requires Node.js 18 or newer. Vite is an optional peer dependency and is only needed when importing `gcc-ts-bundler/vite`.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md)
@@ -65,6 +67,9 @@ const result = await generateExterns({
 });
 
 console.log(result.scannedFiles);
+// Pass result.renameBarriers.outputFile through build.externs.
+// Pass result.typedDeclarations.outputFile through build.typedExterns only for
+// runtimes intentionally kept outside the Closure job.
 ```
 
 Programmatic options:
@@ -78,8 +83,11 @@ Programmatic options:
 - `compilationLevel`
 - `chunks`
 - `cache`
+- `compat`
+- `platformExterns`
 - `diagnostics`
-- `externs`
+- `externs` (legacy explicit externs: Closure + native rename-barrier scan)
+- `typedExterns` (Closure-only typed external declarations)
 - `js`
 
 Defaults:
@@ -87,6 +95,9 @@ Defaults:
 - `cache.mode = "persistent"`
 - `chunks.mode = "off"`
 - `chunks.manifestFile` is off by default
+- `chunks.outputType = "auto"` (standalone builds resolve `auto` to classic script output)
+- `chunks.vendorChunk = false`
+- `platformExterns = "minimal"`
 - `packages = "esm-only"`
 - persistent cache lives outside the user project
 - `diagnostics.preflight = "errors-only"`
@@ -95,7 +106,7 @@ The runtime path uses a native Rust addon for graph resolution, shim emission, a
 
 `packages = "esm-only"` supports browser-safe ESM dependencies from `node_modules`, plus statically analyzable CommonJS package entrypoints and internal package modules. Dynamic `require()`, Node builtins, JSON modules, and native addons are still rejected.
 
-`chunks.mode = "bundler-runtime"` switches output to app-oriented script chunks owned by `gcc-ts-bundler`. In that mode entries are treated as bootstrap scripts, not exported library bundles.
+`chunks.mode = "split"` compiles one Closure chunk graph for the strongest cross-module optimization. `chunks.mode = "bundler-runtime"` compiles app-oriented chunks as separate cacheable jobs. Both modes treat entries as bootstrap scripts rather than exported library bundles.
 
 Use native `import()` for explicit lazy loading:
 
@@ -103,9 +114,9 @@ Use native `import()` for explicit lazy loading:
 const loadFeature = () => import("./feature");
 ```
 
-The specifier must be a string literal. In chunk mode the bundler rewrites lazy imports to its internal chunk-loader runtime. No manifest file is emitted unless `chunks.manifestFile` or `--chunk-manifest` is explicitly set.
+The specifier must be a string literal. `chunks.outputType = "script"` loads lazy chunks by injecting classic scripts; `"esm"` uses native dynamic `import()`. Standalone `"auto"` resolves to `"script"`; the Vite integration selects ESM when its target supports modules. No manifest file is emitted unless `chunks.manifestFile` or `--chunk-manifest` is explicitly set, and safe nested relative paths are preserved inside `outDir`.
 
-Compatibility stays generic and syntax-driven. The bundler preserves runtime contracts that are discoverable from emitted JavaScript patterns, and the core has no framework-specific special cases. Framework runtime knowledge lives in opt-in presets (`gcc-ts-bundler/presets/svelte`, `gcc-ts-bundler/presets/vue`) that configure two generic mechanisms: `compat.classMapCalls` (object-literal keys that must survive renaming at specific calls) and externs `protocolHelpers` (helpers that read or exclude property keys by string). See `docs/vite.md`.
+Compatibility stays generic and syntax-driven. The bundler preserves runtime contracts that are discoverable from emitted JavaScript patterns, and the core has no framework-specific special cases. Framework runtime knowledge lives in opt-in React, Svelte, and Vue presets (`gcc-ts-bundler/presets/react`, `gcc-ts-bundler/presets/svelte`, and `gcc-ts-bundler/presets/vue`) that configure two generic mechanisms: `compat.classMapCalls` (object-literal keys that must survive renaming at specific calls) and externs `protocolHelpers` (helpers that read or exclude property keys by string). See `docs/vite.md`.
 There is no separate lazy-loading helper package surface; chunked lazy loading is `import()`-driven.
 
 ## CLI
@@ -127,17 +138,17 @@ gcc-ts-bundler externs --project-root=. --src-dir=./src --entry=./main.ts --modu
 - `--language-out`: ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT3 | ECMASCRIPT_NEXT
 - `--compilation-level`: WHITESPACE_ONLY | SIMPLE | ADVANCED
 - `--packages`: `off | esm-only`
-- `--platform-externs`: `minimal | full`. Default `minimal` compiles with a generated flat externs file covering only referenced platform names instead of Closure's full browser externs (roughly halves Closure time; automatically falls back to `full` on compile errors)
-- `--extern`: Closure extern file. May be repeated
+- `--platform-externs`: `minimal | full`. Default `minimal` applies a typed, dependency-closed browser extern slice only to ADVANCED jobs with delivered type metadata, with safe full-browser fallback
+- `--extern`: Explicit extern file consumed by Closure and scanned by native for rename barriers. May be repeated
+- `--typed-extern`: Closure-only typed external declaration file. May be repeated
 - `--js`: Additional Closure JavaScript input. May be repeated
-- `--chunks`: `off | bundler-runtime`
+- `--chunks`: `off | split | bundler-runtime`
 - `--chunk-public-path`: public URL prefix used to load chunk files
 - `--chunk-base-name`: base chunk output name
-- `--chunk-manifest`: output filename for the generated chunk manifest
+- `--chunk-manifest`: safe relative path for the generated chunk manifest
 - `--cache-mode`: `off | temp | persistent`
 - `--cache-dir`: Explicit cache directory
 - `--preflight`: `off | errors-only | full`
-- `--fatal-warnings`: Whether typed transpile warnings should be fatal
 - `--verbose`: Print diagnostics to the console.
 - `-h, --help`: Show this help message.
 
@@ -160,7 +171,7 @@ Only the documented dashed CLI flags are supported. Unknown flags and deprecated
 - `examples/lit-playground` is a copied Lit motion playground with its own package and build wrapper.
 - `examples/react-spa` is a real React 19 SPA fixture with its own `package.json` and `node_modules`.
 - `examples/lazy-chunks-demo` is a minimal browser fixture that uses native `import()` to lazy load a feature chunk.
-- `examples/jquery-externs-demo` is a small browser fixture that uses `jquery` and `@types/jquery` to exercise boundary-aware extern generation.
+- `examples/jquery-demo` is a small browser fixture that uses `jquery` and `@types/jquery` to exercise both extern modes: boundary-aware for the app-to-library ABI, runtime-aware for jQuery's own internal rename hazards. Every pinned runtime name is executed by a user interaction, so a regression in either extern set breaks the page rather than passing silently.
 - `examples/svelte-spa` uses the latest Svelte compiler, then prebundles the Svelte runtime with `esbuild` before running the result through gcc-ts-bundler.
 - `examples/vue-vapor-spa` precompiles `.vue` single-file components through `vue/compiler-sfc` with Vapor mode enabled, then runs the generated ESM through gcc-ts-bundler with lazy async panels.
 

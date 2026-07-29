@@ -16,6 +16,8 @@ export default defineConfig({
 });
 ```
 
+Vite is an optional peer dependency of the core package; install it in projects that use this subpath.
+
 Place framework and source-transform plugins before `gccTsBundler()`. The plugin has `enforce: "post"` and only applies to `vite build`; Vite's development server remains unchanged.
 
 ## Framework presets
@@ -71,9 +73,9 @@ Presets are plain option builders on top of two generic core mechanisms:
 
 - `compiler.compat.classMapCalls` — calls whose object-literal argument keys
   must survive property renaming. A rule may be limited by `keyPattern` /
-  `keyExcludePattern`, and gated on another argument being a string literal
-  via `stringLiteralArgIndex` (element factories dispatch on literal prop
-  keys only for host elements, whose type argument is a string);
+  `keyExcludePattern`, and gated via `stringLiteralArgIndex` on a literal or
+  an immutable value produced by another matching literal-gated call (so host
+  provenance can flow through transforms such as React `cloneElement`);
 - `externs.generate.protocolHelpers` — helper callees that read or exclude
   property keys by string at runtime.
 
@@ -92,12 +94,11 @@ It then removes Rollup JavaScript chunks, emits the compiled files through Rollu
 
 ## Build speed
 
-By default the compiler runs Closure with `platformExterns: "minimal"`: a
-generated flat externs file covering only the platform globals and
-properties the program references, instead of Closure's full browser
-externs. This roughly halves Closure compile time; the build automatically
-retries with the full externs if the minimal set misses a name. Set
-`compiler: { platformExterns: "full" }` to opt out.
+By default, typed ADVANCED jobs use `platformExterns: "minimal"`: a
+dependency-closed slice of the exact typed browser declarations shipped with
+Closure. Untyped jobs, `GCC_DISABLE_TYPE_INFERENCE=1`, archive/index failures,
+and failed custom-environment compiles safely use Closure's full browser
+externs. Set `compiler: { platformExterns: "full" }` to always use the full set.
 
 Warm builds reuse the persistent cache in `~/.cache/gcc-ts-bundler` and skip
 Closure entirely; persist that directory in CI.
@@ -116,7 +117,10 @@ gccTsBundler({
     cache: { mode: "persistent" },
     compilationLevel: "ADVANCED",
     diagnostics: { preflight: "errors-only" },
+    // Legacy explicit externs: Closure + native rename-barrier scan.
     externs: ["./closure-externs/custom.js"],
+    // Typed declarations for Closure only; native never scans these.
+    typedExterns: ["./closure-externs/runtime.typed.externs.js"],
   },
   runtime: {
     publicPath: "/assets/",
@@ -162,7 +166,9 @@ Selects the shape Closure gives the emitted chunks.
 | ---------- | -------------------------------------------------------------------- | ----------------------------------------- |
 | `"script"` | Classic scripts sharing one renamed global namespace                   | `<script defer src="...">`                |
 | `"esm"`    | Native modules; cross-chunk edges are `import`/`export`                | `<script type="module" crossorigin src="...">` |
-| `"auto"`   | Default. `esm` when the resolved language level and chunk mode allow it | follows the resolved value                |
+| `"auto"`   | Default, and resolves to `esm` unless a gate forces script             | follows the resolved value                |
+
+Omitting `outputType` and setting it explicitly to `"auto"` are equivalent in the Vite integration.
 
 ES module output is roughly 7% smaller raw and 3% smaller gzipped on the
 reference app, and drops the renamed-namespace prefix, the per-chunk function
@@ -252,7 +258,7 @@ gccTsBundler({
 });
 ```
 
-`"auto"` (the default) resolves to `false`. Even an explicit `true` is gated to
+`false` is the default, and `"auto"` also resolves to `false`. An explicit `true` is gated to
 where the split can work at all: `bundler-runtime` chunks whose resolved
 `outputType` is `"esm"`. Script output addresses chunks through the runtime
 manifest rather than by embedded name, so there is nothing to stabilise and the
@@ -281,7 +287,9 @@ externs: {
 }
 ```
 
-`runtime-aware` is the Vite default when generation is enabled. Package runtime facts are cached separately in persistent cache mode. `boundary-aware` and `candidates` delegate to the root `generateExterns()` API.
+`runtime-aware` is the Vite default when generation is enabled. Package runtime facts are cached separately in persistent cache mode. `boundary-aware` delegates to the root `generateExterns()` API.
+
+Generated Vite externs are rename barriers only because Vite materializes ordinary dependencies into the Closure job. External-runtime typed declarations require a real host loader and compiled bridge, so the plugin rejects attempts to invent that placement. Generate such declarations separately, provide the bridge/`__gccExternalRuntimeLoad` contract yourself, and pass only the declaration artifact through `compiler.typedExterns`.
 
 `appendLines` adds explicit extern statements after generated content. Use it only for contracts that cannot be discovered from declarations, runtime code, or application usage.
 
@@ -314,8 +322,10 @@ passes objects between the resulting bundles: two jobs can rename the same
 member differently, and the older, broader rule used to hide that by externing
 any defined-and-accessed member. If you exchange structured objects across
 separately compiled entry bundles, name that contract explicitly with
-`externs.generate.appendLines` (or a hand-written externs file) rather than
-relying on incidental preservation.
+`externs.generate.appendLines` (or a hand-written `compiler.externs` file) rather
+than relying on incidental preservation. Hand-written `compiler.externs` keeps
+the historical dual semantics; use `compiler.typedExterns` when declarations
+must reach Closure without becoming native rename barriers.
 
 ### HTML and debug options
 

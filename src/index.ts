@@ -18,10 +18,18 @@ export type {
   DiagnosticsPreflight,
   LanguageOut,
   PackageMode,
-  ResolvedBuildOptions,
 } from "./api/types";
 export type {
+  ExternModuleInput,
+  ExternRuntimePlacement,
   ExternsProtocolHelpers,
+  ExternTypeDiagnostic,
+  GeneratedExternArtifact,
+  GeneratedExternExport,
+  GeneratedExternModule,
+  GeneratedRenameBarrierArtifact,
+  GeneratedTypedExternArtifact,
+  GenerateExternsMode,
   GenerateExternsOptions,
   GenerateExternsResult,
 } from "./externs";

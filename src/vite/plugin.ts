@@ -9,7 +9,8 @@ import {
   normalizeBuildOptions,
   resolveChunkOutputType,
 } from "../build/resolve/options";
-import type { BuildOptions, TypedAnnotationFile } from "../api/types";
+import type { BuildOptions, LanguageOut } from "../api/types";
+import type { InternalBuildOptions } from "../build/types";
 import { withEnvironment } from "../shared/environment";
 import { collectOutputChunkStats } from "../shared/lifecycle-size";
 import { logInternalDetail, logInternalTiming } from "../shared/timing";
@@ -27,12 +28,20 @@ import {
   resolveBaseChunkName,
   resolveManifestFileSettings,
   resolvePublicPath,
+  resolveViteLanguageOut,
+  resolveViteLanguageOutTarget,
 } from "./config";
-import { analyzeViteCssOwnership, augmentCompiledViteCss } from "./css";
+import {
+  analyzeViteCssOwnership,
+  augmentCompiledViteCss,
+  ownershipNeedsCssRuntime,
+} from "./css";
 import { resolveCompilerExterns } from "./externs";
+import type { CompilerExternArtifacts } from "./externs";
 import {
   resolveDynamicRootModuleIds,
   resolveEntryModuleIds,
+  resolveHtmlEntryModuleIds,
   resolveNormalizedBridgeModuleIds,
   resolveRetainedCapturedModuleIds,
   resolveRetainedModuleIds,
@@ -61,16 +70,14 @@ import {
   emitCompiledOutputs,
   listJavaScriptChunks,
   removeRollupJavaScript,
+  resolveViteAssetUrls,
   rewriteHtmlAssets,
 } from "./output";
 import { prebundleMaterializedDependencies } from "./prebundle";
 import { parseGccRuntimeManifest } from "./runtime-manifest";
 import { collectMaterializedGraphStats } from "./size";
-import {
-  extractTypedAnnotations,
-  isTypedAnnotationSource,
-} from "./typed-annotations";
-import type { TypedAnnotationCandidate } from "./typed-annotations";
+import { collectViteTypeMetadata } from "./type-metadata";
+import type { ViteTypeMetadataSidecar } from "./type-metadata";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import { prepareViteWorkspace, stageCompiledCoreOutputs } from "./workspace";
 
@@ -85,7 +92,7 @@ interface ViteTimingTotals {
   normalizeRetainedMs: number;
   retainedResolutionMs: number;
   transformCaptureMs: number;
-  typedAnnotationsMs: number;
+  typeMetadataMs: number;
 }
 
 interface PreparedViteGraph {
@@ -93,13 +100,13 @@ interface PreparedViteGraph {
   coreOutDir: string;
   cssOwnership: ViteCssOwnership;
   dynamicRootModuleIds: string[];
-  externs: string[];
+  externs: CompilerExternArtifacts;
   finalOutDir: string;
   jsChunks: OutputChunk[];
   manifestSettings: ManifestFileSettings;
   materialized: MaterializedGraph;
   publicPath: string;
-  typedAnnotations: TypedAnnotationFile[];
+  typeMetadata: ViteTypeMetadataSidecar;
 }
 
 interface CompiledViteGraph extends PreparedViteGraph {
@@ -134,6 +141,7 @@ export function gccTsBundler(options: GccTsBundlerVitePluginOptions = {}): {
   const resolutionCache: CapturedModuleResolutionCache = new Map();
   const buildMetrics = createBuildMetrics();
   const timingTotals = createTimingTotals();
+  let requestedLanguageOut: LanguageOut | null = null;
   let resolvedConfig: ResolvedConfig | null = null;
   let workerImportDetected = false;
 
@@ -143,6 +151,9 @@ export function gccTsBundler(options: GccTsBundlerVitePluginOptions = {}): {
     enforce: "post",
     config(userConfig: UserConfig) {
       assertNoViteLanguageOut(options);
+      requestedLanguageOut = resolveViteLanguageOutTarget(
+        userConfig.build?.target,
+      );
       return applyViteBuildGuards(userConfig);
     },
     configResolved(config) {
@@ -181,11 +192,14 @@ export function gccTsBundler(options: GccTsBundlerVitePluginOptions = {}): {
       });
       const compiled = await compileViteGraph.call(this, {
         config: resolvedConfig,
+        languageOut:
+          requestedLanguageOut ?? resolveViteLanguageOut(resolvedConfig),
         options,
         prepared,
       });
       await emitViteGraph.call(this, {
         bundle,
+        config: resolvedConfig,
         compiled,
         options,
         outputOptions,
@@ -214,7 +228,17 @@ async function prepareViteGraph(
     this.error("gccTsBundler() could not find Vite JS chunks to replace.");
   }
 
-  const entryModuleIds = resolveEntryModuleIds(input.bundle, jsChunks);
+  const htmlEntryModuleIds = resolveHtmlEntryModuleIds(input.bundle, jsChunks);
+  if (htmlEntryModuleIds.length > 1) {
+    this.error(
+      "gccTsBundler() does not yet support multiple distinct HTML entry facades. " +
+        `Found:\n${htmlEntryModuleIds.join("\n")}`,
+    );
+  }
+  const entryModuleIds =
+    htmlEntryModuleIds.length > 0
+      ? htmlEntryModuleIds
+      : resolveEntryModuleIds(input.bundle, jsChunks);
   const dynamicRootModuleIds = resolveDynamicRootModuleIds(jsChunks);
   const retainedModuleIds = resolveRetainedModuleIds(jsChunks, entryModuleIds);
   const retainedCaptured = await measureAsync(
@@ -321,21 +345,19 @@ async function prepareViteGraph(
     "vite:prebundled-runtime-modules",
     `${materialized.modules.length}`,
   );
-  const typedAnnotations = await measureAsync(
+  const typeMetadata = await measureAsync(
     input.timingTotals,
-    "typedAnnotationsMs",
+    "typeMetadataMs",
     () =>
-      extractTypedAnnotations({
-        candidates: collectTypedAnnotationCandidates(
-          materialized,
-          input.config.root,
-        ),
+      collectViteTypeMetadata({
+        materialized,
         projectRoot: input.config.root,
+        sourceGraph: materializedBeforePrebundle,
       }),
   );
   logInternalDetail(
-    "vite:typed-annotations",
-    `files=${typedAnnotations.files.length} bindings=${typedAnnotations.bindingCount}`,
+    "vite:type-metadata",
+    `files=${typeMetadata.files.length} annotations=${typeMetadata.extractedCounts.annotationCount} members=${typeMetadata.extractedCounts.memberAnnotationCount} declarations=${typeMetadata.extractedCounts.typeDeclarationCount} enums=${typeMetadata.extractedCounts.enumDeclarationCount} diagnostics=${typeMetadata.diagnostics.length}`,
   );
   await logCapturedGraph({
     buildMetrics: input.buildMetrics,
@@ -359,35 +381,8 @@ async function prepareViteGraph(
     manifestSettings,
     materialized,
     publicPath,
-    typedAnnotations: typedAnnotations.files,
+    typeMetadata,
   };
-}
-
-/**
- * Pairs each materialized module back with the authored `.ts`/`.tsx` file it
- * came from. Modules fused from several sources (prebundled dependencies) and
- * anything that is not plain TypeScript are skipped.
- */
-function collectTypedAnnotationCandidates(
-  materialized: MaterializedGraph,
-  projectRoot: string,
-): TypedAnnotationCandidate[] {
-  const candidates: TypedAnnotationCandidate[] = [];
-  for (const module of materialized.modules) {
-    const sourceModuleId = module.sourceModuleIds[0];
-    if (
-      module.sourceModuleIds.length !== 1 ||
-      sourceModuleId === undefined ||
-      !isTypedAnnotationSource(sourceModuleId, projectRoot)
-    ) {
-      continue;
-    }
-    candidates.push({
-      materializedFilePath: module.filePath,
-      sourceFilePath: sourceModuleId,
-    });
-  }
-  return candidates;
 }
 
 async function normalizeCapturedGraph(
@@ -506,6 +501,7 @@ async function compileViteGraph(
   this: PluginContext,
   input: {
     config: ResolvedConfig;
+    languageOut: LanguageOut;
     options: GccTsBundlerVitePluginOptions;
     prepared: PreparedViteGraph;
   },
@@ -514,14 +510,16 @@ async function compileViteGraph(
   const compilerOptions = createCompilerOptions({
     config: input.config,
     entries: prepared.materialized.entries,
-    externs: prepared.externs,
+    externs: prepared.externs.renameBarriers,
     manifestFile: prepared.manifestSettings.fileName,
+    languageOut: input.languageOut,
     options: input.options,
     outDir: prepared.coreOutDir,
     projectRoot: input.config.root,
     publicPath: prepared.publicPath,
     srcDir: prepared.materialized.srcDir,
-    typedAnnotations: prepared.typedAnnotations,
+    typeMetadata: prepared.typeMetadata,
+    typedExterns: prepared.externs.typedDeclarations,
   });
   const runtimeModuleSourceMapFilePath = path.join(
     prepared.captureRoot,
@@ -536,12 +534,19 @@ async function compileViteGraph(
     JSON.stringify(prepared.materialized.authoredFiles, null, 2),
     "utf8",
   );
+  // The runtime preamble is Closure input, but CSS rows are attached after the
+  // compile, so the compiler cannot see for itself whether it will ever need
+  // the `<link>` loader. This is the only place the answer exists in time.
+  const buildOptions: InternalBuildOptions = {
+    ...compilerOptions,
+    cssRuntime: ownershipNeedsCssRuntime(prepared.cssOwnership),
+  };
   const result = await withEnvironment(
     {
       GCC_VITE_AUTHORED_FILES_FILE: authoredFilesFilePath,
       GCC_VITE_RUNTIME_SOURCE_MAP_FILE: runtimeModuleSourceMapFilePath,
     },
-    () => build(compilerOptions),
+    () => build(buildOptions),
   );
   if (!result.ok) {
     this.error(
@@ -572,6 +577,7 @@ async function emitViteGraph(
   input: {
     bundle: OutputBundle;
     compiled: CompiledViteGraph;
+    config: ResolvedConfig;
     options: GccTsBundlerVitePluginOptions;
     outputOptions: NormalizedOutputOptions;
     timingTotals: ViteTimingTotals;
@@ -610,7 +616,11 @@ async function emitViteGraph(
       }),
     );
   }
-  const finalizedBaseOutput = await finalizeBaseJsOutputName({
+  // Vite resolves relative asset URLs against the host chunk's shipped path.
+  // Name once to establish that path, render the URLs, then hash/name again
+  // over the resolved bytes so asset changes invalidate the JavaScript name.
+
+  const preliminaryBaseOutput = await finalizeBaseJsOutputName({
     baseChunkFilePath: renamedNonBaseOutputs.baseChunkFilePath,
     baseSeed: renamedNonBaseOutputs.baseSeed,
     chunkOutputType: compiled.chunkOutputType,
@@ -621,6 +631,42 @@ async function emitViteGraph(
     outDir: compiled.compiledCoreOutputs.finalOutDir,
     publicPath: compiled.publicPath,
   });
+  const resolvedAssetUrls = await resolveViteAssetUrls({
+    chunkOutputType: compiled.chunkOutputType,
+    config: input.config,
+    jsChunks: compiled.jsChunks,
+    outDir: compiled.compiledCoreOutputs.finalOutDir,
+    outputFiles: preliminaryBaseOutput.emittedOutputFiles,
+    outputOptions: input.outputOptions,
+    pluginContext: this,
+  });
+  let finalizedBaseOutput = preliminaryBaseOutput;
+  if (resolvedAssetUrls) {
+    const finalRenamedOutputs = await renameCompiledNonBaseJsOutputs({
+      baseChunkName: resolveBaseChunkName(input.options),
+      chunkOutputType: compiled.chunkOutputType,
+      dynamicRootModuleIds: compiled.dynamicRootModuleIds,
+      jsChunks: compiled.jsChunks,
+      manifestFilePath: compiled.manifestFilePath,
+      materialized: compiled.materialized,
+      outDir: compiled.compiledCoreOutputs.finalOutDir,
+      outputFiles: preliminaryBaseOutput.emittedOutputFiles,
+      outputOptions: input.outputOptions,
+      publicPath: compiled.publicPath,
+      runtimeModuleSourceMapFilePath: compiled.runtimeModuleSourceMapFilePath,
+    });
+    finalizedBaseOutput = await finalizeBaseJsOutputName({
+      baseChunkFilePath: finalRenamedOutputs.baseChunkFilePath,
+      baseSeed: finalRenamedOutputs.baseSeed,
+      chunkOutputType: compiled.chunkOutputType,
+      deferredChunkSeeds: finalRenamedOutputs.deferredChunkSeeds,
+      emittedOutputFiles: finalRenamedOutputs.emittedOutputFiles,
+      manifestFilePath: compiled.manifestFilePath,
+      outputOptions: input.outputOptions,
+      outDir: compiled.compiledCoreOutputs.finalOutDir,
+      publicPath: compiled.publicPath,
+    });
+  }
 
   removeRollupJavaScript(input.bundle);
   const emittedOutputFiles = filterInternalOutputs(
@@ -730,7 +776,7 @@ function createTimingTotals(): ViteTimingTotals {
     normalizeRetainedMs: 0,
     retainedResolutionMs: 0,
     transformCaptureMs: 0,
-    typedAnnotationsMs: 0,
+    typeMetadataMs: 0,
   };
 }
 
@@ -772,7 +818,7 @@ function logViteTimings(timings: ViteTimingTotals) {
     ["normalizeRetainedMs", "vite:normalize-retained"],
     ["retainedResolutionMs", "vite:retained-resolution"],
     ["transformCaptureMs", "vite:transform-capture"],
-    ["typedAnnotationsMs", "vite:typed-annotations"],
+    ["typeMetadataMs", "vite:type-metadata"],
   ];
   for (const [key, label] of labels) {
     const durationMs = timings[key];

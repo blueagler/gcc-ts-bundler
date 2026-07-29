@@ -2,6 +2,10 @@
   "name": "gcc-ts-bundler",
   "version": "0.2.0",
   "description": "A TypeScript bundler that uses a native Rust front-end with Google Closure Compiler for aggressive optimization.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  },
   "type": "module",
   "types": "./dist/index.d.ts",
   "bin": {
@@ -15,10 +19,6 @@
     "./vite": {
       "types": "./dist/vite/index.d.ts",
       "default": "./dist/vite/index.mjs"
-    },
-    "./native": {
-      "types": "./dist/native/index.d.ts",
-      "default": "./dist/native/index.mjs"
     },
     "./presets/react": {
       "types": "./dist/presets/react.d.ts",
@@ -49,6 +49,11 @@
   "peerDependencies": {
     "vite": "^7.0.0 || ^8.0.0"
   },
+  "peerDependenciesMeta": {
+    "vite": {
+      "optional": true
+    }
+  },
   "scripts": {
     "build:native": "node ./scripts/build-native.mjs",
     "build:native:cross": "node ./scripts/build-native.mjs --targets linux-x64-gnu,win32-x64-msvc",
@@ -56,9 +61,13 @@
     "build:js": "node ./scripts/build-js.mjs",
     "build": "node ./scripts/build.mjs",
     "typecheck": "bun --bun tsc --noEmit && bun --bun tsc -p tsconfig.types.json --noEmit",
-    "lint": "bun run typecheck && bun --bun ./scripts/format.ts && bun --bun eslint -c eslint.config.ts \"src/**/*.ts\" --fix",
+    "ledger": "bun --bun ./scripts/property-ledger.ts",
+    "lint": "bun run typecheck && bun --bun ./scripts/format.ts --check && bun --bun eslint -c eslint.config.ts \"src/**/*.ts\"",
+    "fix": "bun --bun ./scripts/format.ts && bun --bun eslint -c eslint.config.ts \"src/**/*.ts\" --fix",
     "test": "cargo test --manifest-path native/Cargo.toml && bun run build && bun test ./test/*.test.mjs",
-    "publish:npm": "npm publish --access public --ignore-scripts"
+    "verify:package": "node ./scripts/verify-package.mjs",
+    "prepublishOnly": "bun run verify:package",
+    "publish:npm": "node ./scripts/publish-npm.mjs"
   },
   "keywords": [
     "typescript",
@@ -84,7 +93,8 @@
     "docs",
     "closure-externs",
     "closure-lib",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "publishConfig": {
     "access": "public"

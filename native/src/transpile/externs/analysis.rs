@@ -1,10 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 
 use swc_core::ecma::ast::{
-    BinExpr, CallExpr, Callee, ClassMember, Expr, ExprOrSpread, MemberExpr, MemberProp, Pat,
-    PropName, SuperProp, SuperPropExpr, VarDeclarator,
+    Accessibility, BinExpr, CallExpr, Callee, Class, ClassMember, Decl, Expr, ExprOrSpread,
+    ImportSpecifier, Key, MemberExpr, MemberProp, Module, ModuleDecl, ModuleExportName, ModuleItem,
+    Pat, Prop, PropName, PropOrSpread, SuperProp, SuperPropExpr, VarDeclarator,
 };
 use swc_core::ecma::visit::{Visit, VisitWith};
 
@@ -32,6 +33,10 @@ fn is_hard_static_interop_name(name: &str) -> bool {
 
 #[derive(Default)]
 pub(crate) struct ExternPropertyAnalysis {
+    /// Names the emitted program declares itself. An ambient global that
+    /// collides with one of these is program code, not environment, and must
+    /// not be re-declared in externs.
+    pub(crate) program_declared_names: HashSet<String>,
     pub(crate) explicit_extern_property_names: HashSet<String>,
     pub(crate) preserved_property_names: HashSet<String>,
     pub(crate) static_property_names: HashSet<String>,
@@ -69,6 +74,7 @@ pub(crate) fn collect_extern_property_names_with_externs(
 ) -> std::result::Result<ExternPropertyAnalysis, String> {
     let mut preserved_property_names = HashSet::new();
     let mut static_property_names = HashSet::new();
+    let mut parsed_modules = Vec::new();
 
     for file_name in file_names {
         if file_name.ends_with(".d.ts") {
@@ -95,6 +101,7 @@ pub(crate) fn collect_extern_property_names_with_externs(
                         .intersection(&analysis.static_assigned_names)
                         .cloned(),
                 );
+                parsed_modules.push(module);
             }
             Err(_) => {
                 let source_text =
@@ -104,10 +111,15 @@ pub(crate) fn collect_extern_property_names_with_externs(
         }
     }
 
+    preserved_property_names.extend(collect_custom_element_surface_names(&parsed_modules));
     let explicit_extern_property_names = collect_explicit_extern_property_names(extern_file_names)?;
     preserved_property_names.extend(explicit_extern_property_names.iter().cloned());
     preserved_property_names.extend(static_property_names.iter().cloned());
+    // A name the program itself declares is program code, not an ambient, and
+    // re-declaring it in externs would collide.
+    let ambient_global_names = collect_program_declared_names(&parsed_modules);
     Ok(ExternPropertyAnalysis {
+        program_declared_names: ambient_global_names,
         explicit_extern_property_names,
         preserved_property_names,
         static_property_names,
@@ -297,6 +309,11 @@ impl Visit for ExternPropertyCollector {
             ClassMember::ClassProp(prop) => {
                 let prop_name = prop_name_to_string(&prop.key);
                 self.insert_platform_callback_name(prop_name.clone());
+                if !prop.decorators.is_empty() && is_public_accessibility(prop.accessibility) {
+                    if let Some(property_name) = &prop_name {
+                        self.insert_reflective_name(property_name);
+                    }
+                }
                 if prop.is_static {
                     self.insert_static_name(prop_name.clone());
                     if let Some(prop_name) = prop_name {
@@ -310,12 +327,42 @@ impl Visit for ExternPropertyCollector {
             ClassMember::Method(method) => {
                 let prop_name = prop_name_to_string(&method.key);
                 self.insert_platform_callback_name(prop_name.clone());
+                if !method.function.decorators.is_empty()
+                    && is_public_accessibility(method.accessibility)
+                {
+                    if let Some(property_name) = &prop_name {
+                        self.insert_reflective_name(property_name);
+                    }
+                }
                 if method.is_static {
                     self.insert_static_name(prop_name);
                     self.with_static_context(|collector| method.function.visit_with(collector));
                 } else {
                     method.visit_children_with(self);
                 }
+            }
+            ClassMember::AutoAccessor(accessor) => {
+                let prop_name = match &accessor.key {
+                    Key::Public(key) => prop_name_to_string(key),
+                    Key::Private(_) => None,
+                };
+                self.insert_platform_callback_name(prop_name.clone());
+                if !accessor.decorators.is_empty()
+                    && is_public_accessibility(accessor.accessibility)
+                {
+                    if let Some(property_name) = &prop_name {
+                        self.insert_reflective_name(property_name);
+                    }
+                }
+                if accessor.is_static {
+                    self.insert_static_name(prop_name.clone());
+                    if let Some(prop_name) = prop_name {
+                        if is_valid_js_identifier(&prop_name) {
+                            self.static_assigned_names.insert(prop_name);
+                        }
+                    }
+                }
+                accessor.visit_children_with(self);
             }
             ClassMember::PrivateMethod(method) => {
                 if method.is_static {
@@ -346,8 +393,8 @@ impl Visit for ExternPropertyCollector {
                 }
             }
             MemberProp::Computed(computed) => {
-                if let Expr::Lit(swc_core::ecma::ast::Lit::Str(value)) = &*computed.expr {
-                    self.insert_reflective_name(&value.value.to_string_lossy());
+                if let Some(property_name) = string_literal_expr_name(&computed.expr) {
+                    self.insert_reflective_name(&property_name);
                 }
             }
             MemberProp::PrivateName(_) => {}
@@ -377,10 +424,9 @@ impl Visit for ExternPropertyCollector {
                 self.insert_accessed_hazard_name(property_name);
             }
             SuperProp::Computed(computed) => {
-                if let Expr::Lit(swc_core::ecma::ast::Lit::Str(value)) = &*computed.expr {
-                    self.insert_platform_callback_name(Some(
-                        value.value.to_string_lossy().to_string(),
-                    ));
+                if let Some(property_name) = string_literal_expr_name(&computed.expr) {
+                    self.insert_platform_callback_name(Some(property_name.clone()));
+                    self.insert_reflective_name(&property_name);
                 }
             }
         }
@@ -451,6 +497,7 @@ impl Visit for ExternPropertyCollector {
     }
 
     fn visit_call_expr(&mut self, call_expr: &CallExpr) {
+        collect_call_record_contract_names(call_expr, &mut self.reflective_property_names);
         if let Callee::Expr(callee_expr) = &call_expr.callee {
             match &**callee_expr {
                 Expr::Ident(ident) if ident.sym == *"JSCompiler_renameProperty" => {
@@ -520,8 +567,15 @@ fn string_literal_expr_name(expr: &Expr) -> Option<String> {
             Some(value.value.to_string_lossy().to_string())
         }
         Expr::Tpl(template) if template.exprs.is_empty() && template.quasis.len() == 1 => {
-            template.quasis.first().map(|quasi| quasi.raw.to_string())
+            template.quasis.first().map(|quasi| {
+                quasi
+                    .cooked
+                    .as_ref()
+                    .map(|value| value.to_string_lossy().to_string())
+                    .unwrap_or_else(|| quasi.raw.to_string())
+            })
         }
+        Expr::Paren(parenthesized) => string_literal_expr_name(&parenthesized.expr),
         _ => None,
     }
 }
@@ -529,14 +583,590 @@ fn string_literal_expr_name(expr: &Expr) -> Option<String> {
 fn member_prop_name(prop: &MemberProp) -> Option<String> {
     match prop {
         MemberProp::Ident(ident) => Some(ident.sym.to_string()),
-        MemberProp::Computed(computed) => match &*computed.expr {
-            Expr::Lit(swc_core::ecma::ast::Lit::Str(value)) => {
-                Some(value.value.to_string_lossy().to_string())
-            }
-            _ => None,
-        },
+        MemberProp::Computed(computed) => string_literal_expr_name(&computed.expr),
         MemberProp::PrivateName(_) => None,
     }
+}
+fn is_public_accessibility(accessibility: Option<Accessibility>) -> bool {
+    !matches!(
+        accessibility,
+        Some(Accessibility::Private | Accessibility::Protected)
+    )
+}
+
+/// A call argument shaped like `{ schema: { key: ... }, use(value) {
+/// return value.key; } }` proves that `key` crosses a runtime record boundary.
+/// Vue's compiled `defineComponent({ props: { msg: {} }, setup(props) {
+/// props.msg } })` is one instance of this framework-neutral evidence.
+fn collect_call_record_contract_names(call: &CallExpr, names: &mut HashSet<String>) {
+    for argument in &call.args {
+        let Expr::Object(object) = unwrap_parenthesized_expr(&argument.expr) else {
+            continue;
+        };
+        let declared = collect_nested_record_names(object);
+        if declared.is_empty() {
+            continue;
+        }
+        let accessed = collect_object_callback_parameter_accesses(object);
+        names.extend(declared.intersection(&accessed).cloned());
+    }
+}
+
+fn collect_nested_record_names(object: &swc_core::ecma::ast::ObjectLit) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for property in &object.props {
+        let PropOrSpread::Prop(property) = property else {
+            continue;
+        };
+        let Prop::KeyValue(property) = property.as_ref() else {
+            continue;
+        };
+        match unwrap_parenthesized_expr(&property.value) {
+            Expr::Object(record) => names.extend(object_literal_direct_keys(record)),
+            Expr::Array(record) => {
+                for element in record.elems.iter().flatten() {
+                    if let Some(name) = string_literal_expr_name(&element.expr) {
+                        if is_valid_js_identifier(&name) {
+                            names.insert(name);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+fn object_literal_direct_keys(object: &swc_core::ecma::ast::ObjectLit) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for property in &object.props {
+        let PropOrSpread::Prop(property) = property else {
+            continue;
+        };
+        let name = match property.as_ref() {
+            Prop::Shorthand(ident) => Some(ident.sym.to_string()),
+            Prop::KeyValue(property) => public_prop_name(&property.key),
+            Prop::Getter(property) => public_prop_name(&property.key),
+            Prop::Setter(property) => public_prop_name(&property.key),
+            Prop::Method(property) => public_prop_name(&property.key),
+            Prop::Assign(property) => Some(property.key.sym.to_string()),
+        };
+        if let Some(name) = name {
+            if is_valid_js_identifier(&name) {
+                names.insert(name);
+            }
+        }
+    }
+    names
+}
+
+fn collect_object_callback_parameter_accesses(
+    object: &swc_core::ecma::ast::ObjectLit,
+) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for property in &object.props {
+        let PropOrSpread::Prop(property) = property else {
+            continue;
+        };
+        match property.as_ref() {
+            Prop::Method(method) => {
+                let parameters = method
+                    .function
+                    .params
+                    .iter()
+                    .flat_map(|parameter| pattern_binding_names(&parameter.pat))
+                    .collect::<HashSet<_>>();
+                let mut collector = CallbackParameterMemberCollector {
+                    names: HashSet::new(),
+                    parameters,
+                };
+                method.function.visit_with(&mut collector);
+                names.extend(collector.names);
+            }
+            Prop::KeyValue(property) => match unwrap_parenthesized_expr(&property.value) {
+                Expr::Fn(function) => {
+                    let parameters = function
+                        .function
+                        .params
+                        .iter()
+                        .flat_map(|parameter| pattern_binding_names(&parameter.pat))
+                        .collect::<HashSet<_>>();
+                    let mut collector = CallbackParameterMemberCollector {
+                        names: HashSet::new(),
+                        parameters,
+                    };
+                    function.function.visit_with(&mut collector);
+                    names.extend(collector.names);
+                }
+                Expr::Arrow(function) => {
+                    let parameters = function
+                        .params
+                        .iter()
+                        .flat_map(pattern_binding_names)
+                        .collect::<HashSet<_>>();
+                    let mut collector = CallbackParameterMemberCollector {
+                        names: HashSet::new(),
+                        parameters,
+                    };
+                    function.visit_with(&mut collector);
+                    names.extend(collector.names);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    names
+}
+
+fn pattern_binding_names(pattern: &Pat) -> Vec<String> {
+    match pattern {
+        Pat::Ident(binding) => vec![binding.id.sym.to_string()],
+        Pat::Array(array) => array
+            .elems
+            .iter()
+            .flatten()
+            .flat_map(pattern_binding_names)
+            .collect(),
+        Pat::Object(object) => object
+            .props
+            .iter()
+            .flat_map(|property| match property {
+                swc_core::ecma::ast::ObjectPatProp::KeyValue(property) => {
+                    pattern_binding_names(&property.value)
+                }
+                swc_core::ecma::ast::ObjectPatProp::Assign(property) => {
+                    vec![property.key.sym.to_string()]
+                }
+                swc_core::ecma::ast::ObjectPatProp::Rest(property) => {
+                    pattern_binding_names(&property.arg)
+                }
+            })
+            .collect(),
+        Pat::Assign(assign) => pattern_binding_names(&assign.left),
+        Pat::Rest(rest) => pattern_binding_names(&rest.arg),
+        _ => Vec::new(),
+    }
+}
+
+struct CallbackParameterMemberCollector {
+    names: HashSet<String>,
+    parameters: HashSet<String>,
+}
+
+impl Visit for CallbackParameterMemberCollector {
+    fn visit_member_expr(&mut self, member: &MemberExpr) {
+        let object_matches = match unwrap_parenthesized_expr(&member.obj) {
+            Expr::Ident(ident) => self.parameters.contains(ident.sym.as_ref()),
+            Expr::This(_) => true,
+            _ => false,
+        };
+        if object_matches {
+            if let Some(name) = member_prop_name(&member.prop) {
+                if is_valid_js_identifier(&name) {
+                    self.names.insert(name);
+                }
+            }
+        }
+        member.visit_children_with(self);
+    }
+}
+
+fn unwrap_parenthesized_expr(mut expression: &Expr) -> &Expr {
+    while let Expr::Paren(parenthesized) = expression {
+        expression = &parenthesized.expr;
+    }
+    expression
+}
+
+#[derive(Default)]
+struct ClassSurfaceFact {
+    names: HashSet<String>,
+    properties: HashSet<String>,
+    registered: bool,
+    super_name: Option<String>,
+}
+
+/// Custom-element instances are acquired by tag name outside the compiled
+/// program, so their public instance/prototype surface cannot safely rename.
+/// Follow named superclass aliases across the input graph; ordinary
+/// unregistered classes remain fully renamable.
+fn collect_custom_element_surface_names(modules: &[Module]) -> HashSet<String> {
+    let mut facts = Vec::new();
+    for module in modules {
+        collect_module_class_surface_facts(module, &mut facts);
+    }
+
+    let mut facts_by_name: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut pending = VecDeque::new();
+    for (index, fact) in facts.iter().enumerate() {
+        if fact.registered {
+            pending.push_back(index);
+        }
+        for name in &fact.names {
+            if name != "default" {
+                facts_by_name.entry(name.clone()).or_default().push(index);
+            }
+        }
+    }
+
+    let mut visited = HashSet::new();
+    let mut properties = HashSet::new();
+    while let Some(index) = pending.pop_front() {
+        if !visited.insert(index) {
+            continue;
+        }
+        let fact = &facts[index];
+        properties.extend(fact.properties.iter().cloned());
+        if let Some(super_name) = &fact.super_name {
+            if let Some(super_facts) = facts_by_name.get(super_name) {
+                pending.extend(super_facts.iter().copied());
+            }
+        }
+    }
+    properties
+}
+
+fn collect_module_class_surface_facts(module: &Module, facts: &mut Vec<ClassSurfaceFact>) {
+    let import_aliases = collect_module_import_aliases(module);
+    let export_aliases = collect_module_export_aliases(module);
+    let mut registrations = CustomElementRegistrationCollector::default();
+    module.visit_with(&mut registrations);
+
+    for item in &module.body {
+        match item {
+            ModuleItem::Stmt(swc_core::ecma::ast::Stmt::Decl(declaration)) => {
+                collect_decl_class_surface_facts(
+                    declaration,
+                    &import_aliases,
+                    &export_aliases,
+                    &registrations.class_names,
+                    facts,
+                );
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+                collect_decl_class_surface_facts(
+                    &export.decl,
+                    &import_aliases,
+                    &export_aliases,
+                    &registrations.class_names,
+                    facts,
+                );
+            }
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) => {
+                if let swc_core::ecma::ast::DefaultDecl::Class(class) = &export.decl {
+                    let local_name = class
+                        .ident
+                        .as_ref()
+                        .map(|ident| ident.sym.to_string())
+                        .unwrap_or_else(|| "default".to_string());
+                    push_class_surface_fact(
+                        local_name,
+                        &class.class,
+                        &import_aliases,
+                        &export_aliases,
+                        &registrations.class_names,
+                        Some("default"),
+                        facts,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_decl_class_surface_facts(
+    declaration: &Decl,
+    import_aliases: &HashMap<String, String>,
+    export_aliases: &HashMap<String, HashSet<String>>,
+    registrations: &HashSet<String>,
+    facts: &mut Vec<ClassSurfaceFact>,
+) {
+    match declaration {
+        Decl::Class(class) => push_class_surface_fact(
+            class.ident.sym.to_string(),
+            &class.class,
+            import_aliases,
+            export_aliases,
+            registrations,
+            None,
+            facts,
+        ),
+        Decl::Var(declaration) => {
+            for declarator in &declaration.decls {
+                let (Pat::Ident(binding), Some(initializer)) = (&declarator.name, &declarator.init)
+                else {
+                    continue;
+                };
+                let Expr::Class(class) = unwrap_parenthesized_expr(initializer) else {
+                    continue;
+                };
+                push_class_surface_fact(
+                    binding.id.sym.to_string(),
+                    &class.class,
+                    import_aliases,
+                    export_aliases,
+                    registrations,
+                    None,
+                    facts,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_class_surface_fact(
+    local_name: String,
+    class: &Class,
+    import_aliases: &HashMap<String, String>,
+    export_aliases: &HashMap<String, HashSet<String>>,
+    registrations: &HashSet<String>,
+    extra_export: Option<&str>,
+    facts: &mut Vec<ClassSurfaceFact>,
+) {
+    let mut names = HashSet::from([local_name.clone()]);
+    if let Some(aliases) = export_aliases.get(&local_name) {
+        names.extend(aliases.iter().cloned());
+    }
+    if let Some(extra_export) = extra_export {
+        names.insert(extra_export.to_string());
+    }
+    let super_name = class
+        .super_class
+        .as_deref()
+        .and_then(class_reference_name)
+        .map(|name| import_aliases.get(&name).cloned().unwrap_or(name));
+    facts.push(ClassSurfaceFact {
+        names,
+        properties: collect_class_surface_properties(class),
+        registered: registrations.contains(&local_name)
+            || class.decorators.iter().any(is_custom_element_decorator),
+        super_name,
+    });
+}
+
+fn collect_module_import_aliases(module: &Module) -> HashMap<String, String> {
+    let mut aliases = HashMap::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else {
+            continue;
+        };
+        for specifier in &import.specifiers {
+            match specifier {
+                ImportSpecifier::Named(named) => {
+                    aliases.insert(
+                        named.local.sym.to_string(),
+                        named
+                            .imported
+                            .as_ref()
+                            .map(module_export_name)
+                            .unwrap_or_else(|| named.local.sym.to_string()),
+                    );
+                }
+                ImportSpecifier::Default(default) => {
+                    aliases.insert(default.local.sym.to_string(), "default".to_string());
+                }
+                ImportSpecifier::Namespace(namespace) => {
+                    aliases.insert(
+                        namespace.local.sym.to_string(),
+                        namespace.local.sym.to_string(),
+                    );
+                }
+            }
+        }
+    }
+    aliases
+}
+
+fn collect_module_export_aliases(module: &Module) -> HashMap<String, HashSet<String>> {
+    let mut aliases: HashMap<String, HashSet<String>> = HashMap::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else {
+            continue;
+        };
+        if export.src.is_some() {
+            continue;
+        }
+        for specifier in &export.specifiers {
+            let swc_core::ecma::ast::ExportSpecifier::Named(named) = specifier else {
+                continue;
+            };
+            let local_name = module_export_name(&named.orig);
+            let exported_name = named
+                .exported
+                .as_ref()
+                .map(module_export_name)
+                .unwrap_or_else(|| local_name.clone());
+            aliases.entry(local_name).or_default().insert(exported_name);
+        }
+    }
+    aliases
+}
+
+fn module_export_name(name: &ModuleExportName) -> String {
+    match name {
+        ModuleExportName::Ident(ident) => ident.sym.to_string(),
+        ModuleExportName::Str(value) => value.value.to_string_lossy().to_string(),
+    }
+}
+
+fn class_reference_name(expression: &Expr) -> Option<String> {
+    match unwrap_parenthesized_expr(expression) {
+        Expr::Ident(ident) => Some(ident.sym.to_string()),
+        Expr::Member(member) => member_prop_name(&member.prop),
+        _ => None,
+    }
+}
+
+fn collect_class_surface_properties(class: &Class) -> HashSet<String> {
+    let mut properties = HashSet::new();
+    let mut non_public = HashSet::new();
+    for member in &class.body {
+        match member {
+            ClassMember::ClassProp(property) => {
+                if let Some(name) = public_prop_name(&property.key) {
+                    if is_public_accessibility(property.accessibility) {
+                        properties.insert(name);
+                    } else {
+                        non_public.insert(name);
+                    }
+                }
+                if property.is_static {
+                    if let Some(value) = &property.value {
+                        if let Expr::Object(metadata) = unwrap_parenthesized_expr(value) {
+                            properties.extend(object_literal_direct_keys(metadata));
+                        }
+                    }
+                }
+            }
+            ClassMember::Method(method) => {
+                if let Some(name) = public_prop_name(&method.key) {
+                    if is_public_accessibility(method.accessibility) {
+                        properties.insert(name);
+                    } else {
+                        non_public.insert(name);
+                    }
+                }
+            }
+            ClassMember::AutoAccessor(accessor) => {
+                if let Key::Public(key) = &accessor.key {
+                    if let Some(name) = public_prop_name(key) {
+                        if is_public_accessibility(accessor.accessibility) {
+                            properties.insert(name);
+                        } else {
+                            non_public.insert(name);
+                        }
+                    }
+                }
+                if accessor.is_static {
+                    if let Some(value) = &accessor.value {
+                        if let Expr::Object(metadata) = unwrap_parenthesized_expr(value) {
+                            properties.extend(object_literal_direct_keys(metadata));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut collector = ThisMemberCollector::default();
+    for member in &class.body {
+        member.visit_with(&mut collector);
+    }
+    properties.extend(collector.names);
+    properties.retain(|name| is_public_surface_name(name) && !non_public.contains(name));
+    properties
+}
+
+fn public_prop_name(name: &PropName) -> Option<String> {
+    match name {
+        PropName::Ident(ident) => Some(ident.sym.to_string()),
+        PropName::Str(value) => Some(value.value.to_string_lossy().to_string()),
+        PropName::Computed(computed) => string_literal_expr_name(&computed.expr),
+        _ => None,
+    }
+}
+
+fn is_public_surface_name(name: &str) -> bool {
+    name != "constructor"
+        && !name.starts_with('_')
+        && !name.starts_with('$')
+        && is_valid_js_identifier(name)
+}
+
+#[derive(Default)]
+struct ThisMemberCollector {
+    names: HashSet<String>,
+}
+
+impl Visit for ThisMemberCollector {
+    fn visit_class(&mut self, _class: &Class) {
+        // A nested class has its own `this` surface.
+    }
+
+    fn visit_member_expr(&mut self, member: &MemberExpr) {
+        if matches!(unwrap_parenthesized_expr(&member.obj), Expr::This(_)) {
+            if let Some(name) = member_prop_name(&member.prop) {
+                self.names.insert(name);
+            }
+        }
+        member.visit_children_with(self);
+    }
+}
+
+#[derive(Default)]
+struct CustomElementRegistrationCollector {
+    class_names: HashSet<String>,
+}
+
+impl Visit for CustomElementRegistrationCollector {
+    fn visit_call_expr(&mut self, call: &CallExpr) {
+        if is_custom_elements_define_call(call)
+            && call
+                .args
+                .first()
+                .and_then(|argument| string_literal_expr_name(&argument.expr))
+                .is_some_and(|name| name.contains('-'))
+        {
+            if let Some(ExprOrSpread { expr, .. }) = call.args.get(1) {
+                if let Expr::Ident(class_name) = unwrap_parenthesized_expr(expr) {
+                    self.class_names.insert(class_name.sym.to_string());
+                }
+            }
+        }
+        call.visit_children_with(self);
+    }
+}
+
+fn is_custom_elements_define_call(call: &CallExpr) -> bool {
+    let Callee::Expr(callee) = &call.callee else {
+        return false;
+    };
+    let Expr::Member(define) = unwrap_parenthesized_expr(callee) else {
+        return false;
+    };
+    if member_prop_name(&define.prop).as_deref() != Some("define") {
+        return false;
+    }
+    match unwrap_parenthesized_expr(&define.obj) {
+        Expr::Ident(ident) => ident.sym == *"customElements",
+        Expr::Member(member) => member_prop_name(&member.prop).as_deref() == Some("customElements"),
+        _ => false,
+    }
+}
+
+fn is_custom_element_decorator(decorator: &swc_core::ecma::ast::Decorator) -> bool {
+    let Expr::Call(call) = unwrap_parenthesized_expr(&decorator.expr) else {
+        return false;
+    };
+    call.args
+        .first()
+        .and_then(|argument| string_literal_expr_name(&argument.expr))
+        .is_some_and(|name| name.contains('-'))
 }
 
 #[derive(Default)]
@@ -600,4 +1230,45 @@ fn collect_pattern_property_reads(pattern: &Pat, names: &mut HashSet<String>) {
         Pat::Rest(rest) => collect_pattern_property_reads(&rest.arg, names),
         _ => {}
     }
+}
+
+#[cfg(test)]
+pub(crate) fn collect_program_declared_names_for_test(
+    modules: &[swc_core::ecma::ast::Module],
+) -> HashSet<String> {
+    collect_program_declared_names(modules)
+}
+
+fn collect_program_declared_names(modules: &[swc_core::ecma::ast::Module]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for module in modules {
+        for item in &module.body {
+            let swc_core::ecma::ast::ModuleItem::Stmt(swc_core::ecma::ast::Stmt::Decl(declaration)) =
+                item
+            else {
+                continue;
+            };
+            match declaration {
+                // `declare` emits no runtime binding, so an ambient
+                // declaration does not make the name program-declared: a
+                // reference to it still has to resolve from the environment.
+                // Counting it here suppressed the extern the reference needs.
+                swc_core::ecma::ast::Decl::Var(var_decl) if !var_decl.declare => {
+                    for declarator in &var_decl.decls {
+                        if let swc_core::ecma::ast::Pat::Ident(binding) = &declarator.name {
+                            names.insert(binding.id.sym.to_string());
+                        }
+                    }
+                }
+                swc_core::ecma::ast::Decl::Fn(fn_decl) if !fn_decl.declare => {
+                    names.insert(fn_decl.ident.sym.to_string());
+                }
+                swc_core::ecma::ast::Decl::Class(class_decl) if !class_decl.declare => {
+                    names.insert(class_decl.ident.sym.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+    names
 }

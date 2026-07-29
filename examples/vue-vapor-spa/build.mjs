@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import ts from "typescript";
 import { fileURLToPath } from "node:url";
 
 import { parse, compileScript } from "vue/compiler-sfc";
@@ -11,7 +10,6 @@ import { build, generateExterns } from "../../dist/index.mjs";
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.join(projectRoot, "src");
 const compiledDir = path.join(projectRoot, ".vue-compiled");
-const externsFile = path.join(projectRoot, "vue.generated.externs.js");
 const vendorDir = path.join(compiledDir, "vendor");
 const runtimeCompiledFile = path.join(
   vendorDir,
@@ -23,14 +21,6 @@ const runtimeSource = path.join(
 );
 
 await compileVueProject(srcDir, compiledDir);
-await generateExterns({
-  mode: "candidates",
-  modules: ["vue"],
-  outputFile: externsFile,
-  projectRoot,
-  srcDir: "./.vue-compiled",
-});
-await augmentGeneratedExterns(compiledDir, externsFile);
 
 // Runtime-aware externs over the compiled app plus the vendored vapor
 // runtime: vapor reaches DOM handlers through constructed keys
@@ -52,7 +42,7 @@ const result = await build({
   chunks: { mode: "split", publicPath: "./dist/" },
   diagnostics: { preflight: "full" },
   entries: ["./main.js"],
-  externs: ["./vue.generated.externs.js", "./vue.runtime.externs.js"],
+  externs: ["./vue.runtime.externs.js"],
   outDir: "./dist",
   projectRoot,
   srcDir: "./.vue-compiled",
@@ -74,7 +64,9 @@ console.log(
 console.log(
   `Compiled Vue SFCs into ${path.relative(projectRoot, compiledDir)}`,
 );
-console.log(`Generated externs at ${path.relative(projectRoot, externsFile)}`);
+console.log(
+  `Generated runtime externs at ${path.relative(projectRoot, runtimeExternsFile)}`,
+);
 
 async function compileVueProject(sourceDir, outDir) {
   await fs.rm(outDir, { force: true, recursive: true });
@@ -193,139 +185,6 @@ function toImportSpecifier(value) {
 async function writeVendoredVueRuntimeFiles() {
   await fs.mkdir(vendorDir, { recursive: true });
   await fs.copyFile(runtimeSource, runtimeCompiledFile);
-}
-
-async function augmentGeneratedExterns(rootDir, outputFile) {
-  const protocolKeys = await collectVueProtocolKeys(rootDir);
-  if (protocolKeys.length === 0) {
-    return;
-  }
-
-  const existing = await fs.readFile(outputFile, "utf8");
-  const existingLines = new Set(existing.split("\n"));
-  const additions = [];
-  for (const key of protocolKeys) {
-    const line = `Object.prototype.${key};`;
-    if (!existingLines.has(line)) {
-      additions.push(line);
-    }
-  }
-
-  if (additions.length === 0) {
-    return;
-  }
-
-  const suffix = `\n// Preserved Vue Vapor runtime protocol keys.\n${additions.join("\n")}\n`;
-  await fs.writeFile(outputFile, `${existing.trimEnd()}${suffix}`, "utf8");
-}
-
-async function collectVueProtocolKeys(rootDir) {
-  const delegatedEventKeys = new Set();
-  const dotAccessKeys = new Set();
-  const propKeys = new Set();
-  const stringAccessKeys = new Set();
-  const blockedKeys = new Set(["this"]);
-  await walkCompiledFiles(rootDir, async (filePath) => {
-    if (!filePath.endsWith(".js")) {
-      return;
-    }
-    const source = await fs.readFile(filePath, "utf8");
-    collectVueComponentPropKeys(source, propKeys, blockedKeys);
-    for (const match of source.matchAll(/\$evt[A-Za-z][A-Za-z0-9_$]*/g)) {
-      delegatedEventKeys.add(match[0]);
-    }
-    for (const match of source.matchAll(/\.([$_A-Za-z][$_0-9A-Za-z]*)/g)) {
-      if (!blockedKeys.has(match[1])) {
-        dotAccessKeys.add(match[1]);
-      }
-    }
-    for (const match of source.matchAll(
-      /\[\s*["']([$_A-Za-z][$_0-9A-Za-z]*)["']\s*\]/g,
-    )) {
-      if (!blockedKeys.has(match[1])) {
-        stringAccessKeys.add(match[1]);
-      }
-    }
-    for (const match of source.matchAll(
-      /["']([$_A-Za-z][$_0-9A-Za-z]*)["']\s+in\b/g,
-    )) {
-      if (!blockedKeys.has(match[1])) {
-        stringAccessKeys.add(match[1]);
-      }
-    }
-  });
-
-  const hazardKeys = new Set(delegatedEventKeys);
-  for (const key of propKeys) {
-    hazardKeys.add(key);
-  }
-  for (const key of stringAccessKeys) {
-    if (dotAccessKeys.has(key)) {
-      hazardKeys.add(key);
-    }
-  }
-
-  return [...hazardKeys].sort();
-}
-
-function collectVueComponentPropKeys(sourceText, target, blockedKeys) {
-  const sourceFile = ts.createSourceFile(
-    "compiled-vue.js",
-    sourceText,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.JS,
-  );
-
-  const visit = (node) => {
-    if (
-      ts.isPropertyAssignment(node) &&
-      propertyNameText(node.name) === "props"
-    ) {
-      if (ts.isObjectLiteralExpression(node.initializer)) {
-        for (const property of node.initializer.properties) {
-          if (
-            !ts.isPropertyAssignment(property) &&
-            !ts.isShorthandPropertyAssignment(property)
-          ) {
-            continue;
-          }
-          const key = propertyNameText(property.name);
-          if (key && !blockedKeys.has(key)) {
-            target.add(key);
-          }
-        }
-      }
-    }
-    ts.forEachChild(node, visit);
-  };
-
-  ts.forEachChild(sourceFile, visit);
-}
-
-function propertyNameText(name) {
-  if (
-    ts.isIdentifier(name) ||
-    ts.isStringLiteral(name) ||
-    ts.isNumericLiteral(name)
-  ) {
-    return name.text;
-  }
-  return null;
-}
-
-async function walkCompiledFiles(rootDir, visitFile) {
-  const entries = await fs.readdir(rootDir, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = path.join(rootDir, entry.name);
-    if (entry.isDirectory()) {
-      await walkCompiledFiles(fullPath, visitFile);
-      continue;
-    }
-    if (entry.isFile()) {
-      await visitFile(fullPath);
-    }
-  }
 }
 
 async function collectCompiledJsFiles(rootDir) {

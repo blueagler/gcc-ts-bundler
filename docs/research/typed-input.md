@@ -40,7 +40,8 @@ Emission catalog:
 | variable / field type | `@type {T}` | yes (`docs.ts`) |
 | function signature | `@param {T} x`, `@return {T}` | yes |
 | `this` param | `@this {T}` | yes |
-| interface | `@record` + `if (false)` member decls | yes |
+| interface (authored) | `@record` + `if (false)` member decls | yes |
+| inferred structural shape | synthesized `@record` | **no, deleted — see §7** |
 | type alias | `var X;` + `@typedef {...}` | yes |
 | generics | `@template T` | yes |
 | `extends` / `implements` | `@extends`, `@implements` | yes |
@@ -379,55 +380,22 @@ typed input. The 8.7%-of-input argument stands for this demo app but not for
 app-logic-heavy codebases, and per-property poisoning means framework interop
 does not erase the wins.
 
-## v1 shipped scope and the v2 follow-ups
+## Unified sidecar implementation
 
-The Vite stage (`src/vite/typed-annotations.ts`) re-reads authored `.ts`/`.tsx`
-through a `ts.Program` and attaches Closure JSDoc to the materialized modules
-native emit consumes. v1 is deliberately narrow, because a wrong type changes
-output silently while a missing type only costs optimisation:
+The initial Vite-only positional JSDoc prototype has been replaced. Standalone
+and Vite now use the same TypeScript checker/extractor and serialize structured,
+tokenized facts through `closure-ir.json`: binding/member targets, declarations,
+safe enums, canonical symbol identities, provenance, and degradation diagnostics.
+Native resolves those facts after its final import/hoist/registry plan and reports
+the exact delivered counts for every emitted JavaScript file.
 
-- **function declarations** get `@param`/`@return`, but only when *every*
-  parameter and the return type is a primitive (`number`/`string`/`boolean`,
-  plus `void` for returns) or a **non-generic class declared in the same
-  module**; otherwise the whole signature is omitted;
-- **single-declarator top-level `const`/`let`/`var`** get `@type` under the same
-  type rule;
-- **classes get no JSDoc of their own.** Measured against our shipped compiler:
-  `/** @constructor */ class Foo {}` is a `JSC_MISPLACED_ANNOTATION` (the
-  annotation is discarded) and `@extends {!Foo}` is a `JSC_TYPE_PARSE_ERROR`
-  (`@extends` requires a bare name). ES6 `class` already reports 100.0% typed
-  with no annotation, so the tsickle-era `@constructor`/`@extends` rules are
-  dead weight on modern output. Classes are useful only as *nominal types*
-  inside other signatures.
-
-Type references inside a JSDoc block use **pre-suffix** names; hoisted emission
-renames every top-level binding to `name$$ordinal`
-(`native/src/transpile/hoist.rs`), and native rewrites same-module references
-inside the block to match. That is exactly why v1 stops at same-module classes.
-
-Two follow-ups, both blocked on a payload/native change rather than on type
-extraction:
-
-1. **Field-level `@type`** (v2). The payload is `{ name, jsdoc }` per *top-level
-   binding* and native prepends the block before the declaring statement, so
-   there is no location for a per-member annotation. Unlocking it needs a
-   per-member payload plus member-level native emission — and it is what
-   completes the E2 dead-field-removal mechanism above. The `@param` half of
-   that mechanism ships in v1.
-2. **Cross-module class types** (v2). A signature referencing an *imported*
-   class is omitted today, because the referenced name is not a binding of the
-   emitting module and native cannot map it to the right `$$` ordinal. Needs an
-   import-origin mapping from the extractor through to native emission.
-
-## Addendum 2: v1 shipped; measured outcome and the real blocker
-
-Shipped: Vite-stage extraction (`src/vite/typed-annotations.ts`, lazy
-`ts.Program`, conservative v1 scope), `typedAnnotations` build option, native
-JSDoc re-attachment in hoisted emission with same-module type-name rewriting
-(`{!Foo}` → `{!Foo$$N}`), silent checkTypes inference on bundler-runtime
-ADVANCED jobs (`GCC_DISABLE_TYPE_INFERENCE=1` disables inference *and*
-annotations — annotations without inference measured +76 B gz), typed
-constructor platform externs gated on typed input.
+Closure decisions are derived per compile job from native-delivered counts.
+ADVANCED jobs with delivered metadata enable silent `checkTypes` inference and
+the typed platform extern slice; untyped jobs retain the full browser externs.
+`GCC_DISABLE_TYPE_INFERENCE=1` removes optional annotations/declarations and the
+typed platform slice while keeping semantic enum and decorator lowering. Vite
+declaration overlays and fused prebundle facades attach metadata only where final
+runtime binding provenance is proven.
 
 Validation on a purpose-built 520-line typed domain app: mechanism fully
 functional (45 JSDoc blocks, correct suffixed refs, zero runtime errors), size
@@ -443,3 +411,61 @@ Also fixed while validating: preserved-property quoting produced valueless
 quoted class fields (`"id";`), an INTERNAL COMPILER ERROR in Closure's
 ConvertToDottedProperties; quoting now emits `= void 0` (semantically
 identical under define semantics).
+
+---
+
+## 7. Structural record synthesis: measured at zero, deleted
+
+The unified sidecar originally synthesized a `@record` declaration for any
+object-shaped type it could not name: intersections, `.d.ts` interfaces the
+compiled file did not declare, destructured object parameters, and every
+structural type reached through inference. That subsystem is gone.
+
+### Why
+
+A one-line kill switch (`buildRecordForObjectType` returning `null`) was
+compared against the shipped artifacts. Output was **SHA-256 identical** on
+every typed example:
+
+| Example | Output files | SHA-256 vs shipped `dist` | closure-ir bytes before → after | generated records |
+|---|---:|---|---:|---:|
+| react-spa | 1 | identical | 2,683,905 → 319,744 (**−88.1%**) | 1,769 → 0 |
+| lit-playground | 4 | identical | 190,316 → 94,901 (**−50.1%**) | 76 → 0 |
+| vue-vapor-spa | 4 | identical | 852,120 → 682,158 (**−19.9%**) | 161 → 0 |
+
+React build time (median of 3, cold persistent cache): **9,029 ms → 7,723 ms
+(−1,306 ms, −14.5%)**.
+
+Delivered value was therefore exactly zero bytes, while the cost was ~2.4 MB of
+compiler-input IR per React build, ~14% of build wall time, a fixed 160-record
+per-file budget keyed by `ts.Type` identity, a name-reservation/interning table,
+and the malformed-`!?` class of JSDoc that shipped 45,420 dead bytes to
+production before it was contained by an `if (false)` wrapper. Ranking item 3 in
+§4 already said the type graph is a prerequisite with "zero direct size effect";
+the measurement says a *synthesized* graph over third-party `.d.ts` closures is
+prerequisite for nothing.
+
+### What replaced it
+
+Nothing. An object atom with no faithful Closure spelling degrades to `?`
+through the pre-existing unsupported-atom path, which records a nonfatal
+`unsupported-type-atom` diagnostic and increments
+`unresolvedTypeReferenceCount`. Intersections render `!Object`.
+
+### What is unchanged
+
+Everything authored is still lowered exactly as before:
+
+- `interface` / type-literal `type` → `@record` + `if (false)` member
+  declarations (`docs.ts`), including `@template` parameters;
+- non-literal `type` aliases → `@typedef`;
+- class/member annotations, `@param`/`@return`/`@this`, variable `@type`;
+- enums (`@enum` const objects) and decorator lowering;
+- silent `checkTypes` inference on ADVANCED jobs with delivered metadata;
+- `GCC_DISABLE_TYPE_INFERENCE=1` semantics;
+- native declared-symbol renaming for those declarations.
+
+The invariant is now structural rather than defensive: **the pipeline never
+invents a type declaration the source did not write**, so an unbounded
+third-party type graph can no longer be walked into the compiler input, and a
+recursive shape can no longer render an unparseable `!?` atom.

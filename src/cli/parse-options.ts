@@ -30,7 +30,7 @@ export function parseCliArgs(args: string[]): CliParseResult {
       "compilation-level": { type: "string" },
       entry: { multiple: true, type: "string" },
       extern: { multiple: true, type: "string" },
-      "fatal-warnings": { type: "boolean" },
+      "typed-extern": { multiple: true, type: "string" },
       help: { short: "h", type: "boolean" },
       js: { multiple: true, type: "string" },
       "language-out": { type: "string" },
@@ -66,7 +66,6 @@ export function parseCliArgs(args: string[]): CliParseResult {
       "--compilation-level",
     ),
     diagnostics: {
-      fatalWarnings: values["fatal-warnings"],
       preflight: parseChoice(
         values.preflight,
         DIAGNOSTICS_PREFLIGHT_MODES,
@@ -91,6 +90,7 @@ export function parseCliArgs(args: string[]): CliParseResult {
     ),
     projectRoot: values["project-root"],
     srcDir: values["src-dir"],
+    typedExterns: values["typed-extern"],
   };
 
   return { options, showHelp: false };

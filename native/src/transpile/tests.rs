@@ -22,14 +22,16 @@ fn empty_context() -> super::TranspileContext {
         class_map_calls: Vec::new(),
         pure_callees: HashSet::new(),
         commonjs_specifiers: HashSet::new(),
+        opaque_commonjs: Default::default(),
         file_metadata: HashMap::new(),
         hoist_plan: None,
         preserved_property_names: HashSet::new(),
         lazy_imports_by_file: HashMap::new(),
         lazy_target_module_ids: HashSet::new(),
+        resolved_module_ids: HashMap::new(),
         package_aliases: Vec::new(),
         static_property_names: HashSet::new(),
-        typed_annotations: HashMap::new(),
+        type_metadata_enabled: true,
         vendor_module_ids: HashSet::new(),
         workspace_dir: PathBuf::from("/tmp"),
     }
@@ -58,11 +60,13 @@ fn make_js_pass_through_fixture(label: &str, source_text: &str) -> JsPassThrough
             class_map_calls: Vec::new(),
             pure_callees: HashSet::new(),
             commonjs_specifiers: HashSet::new(),
+            opaque_commonjs: Default::default(),
             file_metadata: HashMap::new(),
             hoist_plan: None,
             preserved_property_names: HashSet::new(),
             lazy_imports_by_file: HashMap::new(),
             lazy_target_module_ids: HashSet::new(),
+            resolved_module_ids: HashMap::new(),
             package_aliases: vec![super::PackageAliasInput {
                 packageName: "react".to_string(),
                 subpath: ".".to_string(),
@@ -72,7 +76,7 @@ fn make_js_pass_through_fixture(label: &str, source_text: &str) -> JsPassThrough
                     .to_string(),
             }],
             static_property_names: HashSet::new(),
-            typed_annotations: HashMap::new(),
+            type_metadata_enabled: true,
             vendor_module_ids: HashSet::new(),
             workspace_dir,
         },
@@ -223,12 +227,21 @@ fn annotates_static_class_members_with_nocollapse() {
 }
 
 #[test]
-fn generated_externs_include_only_hard_static_protocols() {
-    let externs = render_generated_externs(&HashSet::from([
-        "formAssociated".to_string(),
-        "observedAttributes".to_string(),
-    ]));
+fn generated_externs_include_preserved_instance_and_hard_static_protocols() {
+    let externs = render_generated_externs(
+        &HashSet::from(["letters".to_string()]),
+        &HashSet::from([
+            "formAssociated".to_string(),
+            "observedAttributes".to_string(),
+        ]),
+        &HashSet::from(["ambientGlobal".to_string()]),
+    );
 
+    // Ambient declarations are environment, not program code: they belong in
+    // the externs channel, typed `?` because the author's claim about a global
+    // we do not control is not something to assert to Closure.
+    assert!(externs.contains("var ambientGlobal;"), "{externs}");
+    assert!(externs.contains("Object.prototype.letters;"), "{externs}");
     assert!(
         externs.contains("Function.prototype.formAssociated;"),
         "{externs}"
@@ -259,12 +272,17 @@ fn rewrites_jscompiler_rename_property_protocol_accesses() {
 
 #[test]
 fn rewrites_directory_import_specifiers_to_explicit_index_files() {
-    let transformed = apply_js_compat_text_fixes(
-        "import item from '.';\nexport { other } from '..';\n".to_string(),
-    );
+    let source = "import item from '.';\nexport { other } from '..';\n";
+    let transformed = transform_js_pass_through_module(
+        parse_module(std::path::Path::new("fixture.js"), source).expect("module"),
+        source.to_string(),
+        std::path::Path::new("fixture.js"),
+        &empty_context(),
+    )
+    .expect("transform");
 
-    assert!(transformed.contains("from './index.js'"), "{transformed}");
-    assert!(transformed.contains("from '../index.js'"), "{transformed}");
+    assert!(transformed.contains("./index.js"), "{transformed}");
+    assert!(transformed.contains("../index.js"), "{transformed}");
 }
 
 #[test]
@@ -338,14 +356,34 @@ fn rewrites_undeclared_placeholder_returns_to_void_zero() {
 
 #[test]
 fn folds_process_env_node_env_for_browser_packages() {
-    let transformed = apply_js_compat_text_fixes(
-        "if (process.env.NODE_ENV !== 'production') console.warn('dev');\n".to_string(),
+    let source = concat!(
+        "if (process.env.NODE_ENV !== 'production') console.warn('dev');\n",
+        "globalThis.literal = 'process.env.NODE_ENV';\n",
     );
+    let transformed = transform_js_pass_through_module(
+        parse_module(std::path::Path::new("fixture.js"), source).expect("module"),
+        source.to_string(),
+        std::path::Path::new("fixture.js"),
+        &empty_context(),
+    )
+    .expect("transform");
 
+    assert!(!transformed.contains("console.warn"), "{transformed}");
     assert!(
-        transformed.contains("\"production\" !== 'production'"),
+        transformed.contains("literal = 'process.env.NODE_ENV'"),
         "{transformed}"
     );
+
+    let local_source =
+        "function read(process) { return process.env.NODE_ENV; }\nglobalThis.read = read;\n";
+    let local = transform_js_pass_through_module(
+        parse_module(std::path::Path::new("fixture.js"), local_source).expect("module"),
+        local_source.to_string(),
+        std::path::Path::new("fixture.js"),
+        &empty_context(),
+    )
+    .expect("transform");
+    assert!(local.contains("process.env.NODE_ENV"), "{local}");
 }
 
 #[test]
@@ -363,14 +401,16 @@ fn rewrites_commonjs_namespace_imports_in_native_stage() {
             class_map_calls: Vec::new(),
             pure_callees: HashSet::new(),
             commonjs_specifiers: HashSet::from(["demo-pkg".to_string()]),
+            opaque_commonjs: Default::default(),
             file_metadata: HashMap::new(),
             hoist_plan: None,
             preserved_property_names: HashSet::new(),
             lazy_imports_by_file: HashMap::new(),
             lazy_target_module_ids: HashSet::new(),
+            resolved_module_ids: HashMap::new(),
             package_aliases: Vec::new(),
             static_property_names: HashSet::new(),
-            typed_annotations: HashMap::new(),
+            type_metadata_enabled: true,
             vendor_module_ids: HashSet::new(),
             workspace_dir: PathBuf::from("/tmp"),
         },
@@ -385,7 +425,10 @@ fn rewrites_commonjs_namespace_imports_in_native_stage() {
         transformed.contains("const demo = __cjs_import_0;"),
         "{transformed}"
     );
-    assert!(transformed.contains("demo[\"answer\"]"), "{transformed}");
+    // Transparent package: the read is an ordinary property access, so Closure
+    // renames it with the producer's write.
+    assert!(transformed.contains("demo.answer"), "{transformed}");
+    assert!(!transformed.contains("demo[\"answer\"]"), "{transformed}");
 }
 
 #[test]
@@ -408,14 +451,18 @@ fn preserves_module_exports_member_names_in_commonjs_normalization() {
         })
         .unwrap();
 
+    // Transparent module: export names are ordinary properties.
     assert!(
-        output.contains("module.exports[\"Component\"] = Component;"),
+        output.contains("module[\"exports\"].Component = Component;"),
         "{output}"
     );
     assert!(
-        output.contains("module.exports[\"createContext\"] = createContext;"),
+        output.contains("module[\"exports\"].createContext = createContext;"),
         "{output}"
     );
+    // The scratch `module` slot itself stays quoted; dotting it makes Closure's
+    // checkTypes reject the assignment (JSC_TYPE_MISMATCH).
+    assert!(output.contains("module[\"exports\"] = {}"), "{output}");
 }
 
 #[test]
@@ -438,11 +485,13 @@ fn preserves_commonjs_alias_member_reads() {
         class_map_calls: Vec::new(),
         pure_callees: HashSet::new(),
         commonjs_specifiers: HashSet::new(),
+        opaque_commonjs: Default::default(),
         file_metadata: HashMap::new(),
         hoist_plan: None,
         preserved_property_names: HashSet::new(),
         lazy_imports_by_file: HashMap::new(),
         lazy_target_module_ids: HashSet::new(),
+        resolved_module_ids: HashMap::new(),
         package_aliases: vec![super::PackageAliasInput {
             packageName: "react".to_string(),
             subpath: ".".to_string(),
@@ -464,7 +513,7 @@ fn preserves_commonjs_alias_member_reads() {
             .unwrap()
             .to_path_buf(),
         static_property_names: HashSet::new(),
-        typed_annotations: HashMap::new(),
+        type_metadata_enabled: true,
         vendor_module_ids: HashSet::new(),
     };
     let output = GLOBALS
@@ -478,7 +527,7 @@ fn preserves_commonjs_alias_member_reads() {
         "{output}"
     );
     assert!(
-        output.contains("module[\"exports\"] = React[\"Component\"];"),
+        output.contains("module[\"exports\"] = React.Component;"),
         "{output}"
     );
 }
@@ -659,6 +708,7 @@ fn rewrites_hard_static_interop_property_reads_to_bracket_access() {
             class_map_calls: Vec::new(),
             pure_callees: HashSet::new(),
             commonjs_specifiers: HashSet::new(),
+            opaque_commonjs: Default::default(),
             file_metadata: HashMap::new(),
             hoist_plan: None,
             preserved_property_names: HashSet::from([
@@ -667,12 +717,13 @@ fn rewrites_hard_static_interop_property_reads_to_bracket_access() {
             ]),
             lazy_imports_by_file: HashMap::new(),
             lazy_target_module_ids: HashSet::new(),
+            resolved_module_ids: HashMap::new(),
             package_aliases: vec![],
             static_property_names: HashSet::from([
                 "formAssociated".to_string(),
                 "observedAttributes".to_string(),
             ]),
-            typed_annotations: HashMap::new(),
+            type_metadata_enabled: true,
             vendor_module_ids: HashSet::new(),
             workspace_dir: PathBuf::from("/tmp"),
         },
@@ -695,6 +746,57 @@ fn rewrites_hard_static_interop_property_reads_to_bracket_access() {
         transformed.contains("Demo[\"formAssociated\"] = true"),
         "{transformed}"
     );
+}
+
+/// A preserved name must be quoted on **both** sides — the object-literal key
+/// that defines it and every member access that reads it. One-sided quoting
+/// pins one spelling while the other renames, which is the exact shape that
+/// killed `$.Deferred`/`$.when` in the jQuery ablation: the app side was quoted
+/// to the literal `"Deferred"` while the library's own definition renamed.
+#[test]
+fn quotes_preserved_object_literal_keys_and_their_reads_together() {
+    let source = concat!(
+        "const settings = { retries: 3, other: 1 };\n",
+        "export function read(bag) { return bag.retries + settings.retries + settings.other; }\n",
+    );
+    let transformed = transform_js_pass_through_module(
+        parse_module(std::path::Path::new("fixture.js"), source).expect("module"),
+        source.to_string(),
+        std::path::Path::new("fixture.js"),
+        &super::TranspileContext {
+            bundler_module_slots: HashMap::new(),
+            bundler_runtime_logical_ids: HashMap::new(),
+            chunk_mode: super::ChunkMode::Off,
+            class_map_calls: Vec::new(),
+            pure_callees: HashSet::new(),
+            commonjs_specifiers: HashSet::new(),
+            opaque_commonjs: Default::default(),
+            file_metadata: HashMap::new(),
+            hoist_plan: None,
+            preserved_property_names: HashSet::from(["retries".to_string()]),
+            lazy_imports_by_file: HashMap::new(),
+            lazy_target_module_ids: HashSet::new(),
+            resolved_module_ids: HashMap::new(),
+            package_aliases: vec![],
+            static_property_names: HashSet::new(),
+            type_metadata_enabled: true,
+            vendor_module_ids: HashSet::new(),
+            workspace_dir: PathBuf::from("/tmp"),
+        },
+    )
+    .expect("transform");
+
+    // Definition side.
+    assert!(transformed.contains("\"retries\": 3"), "{transformed}");
+    // Both read sides.
+    assert!(transformed.contains("bag[\"retries\"]"), "{transformed}");
+    assert!(
+        transformed.contains("settings[\"retries\"]"),
+        "{transformed}"
+    );
+    // A name that is not preserved keeps renaming on both sides.
+    assert!(!transformed.contains("\"other\""), "{transformed}");
+    assert!(transformed.contains("settings.other"), "{transformed}");
 }
 
 #[test]
@@ -785,7 +887,7 @@ fn class_map_calls_gate_on_string_literal_args_and_member_callees() {
     let source = [
         "const host = React[\"createElement\"](\"button\", { onClick: handle, children: kids });",
         "const component = React[\"createElement\"](Panel, { onClick: handle });",
-        "const dotted = React.createElement(\"div\", { className: name });",
+        "const dotted = React.createElement((\"div\"), { className: name });",
         "",
     ]
     .join("\n");
@@ -821,19 +923,51 @@ fn class_map_calls_gate_on_string_literal_args_and_member_callees() {
 }
 
 #[test]
-fn class_map_call_rules_with_unparsable_patterns_are_dropped() {
-    // Fail closed: the regex crate has no lookahead, and silently widening
-    // to "quote every key" would be a behavior change rather than a visible
-    // missing transform.
-    let source = "const host = jsx(\"button\", { onClick: handle });\n".to_string();
+fn class_map_call_rules_with_unparsable_patterns_return_an_error() {
+    let calls = vec![super::ClassMapCallInput {
+        argIndex: 1,
+        callee: "jsx".to_string(),
+        keyExcludePattern: Some("^(?!children$).+$".to_string()),
+        keyPattern: None,
+        stringLiteralArgIndex: Some(0),
+    }];
+    let error = super::validate_class_map_calls(&calls).expect_err("invalid regex");
+    assert!(error.contains("compat.classMapCalls"), "{error}");
+    assert!(error.contains("jsx"), "{error}");
+    assert!(error.contains("keyExcludePattern"), "{error}");
+    assert!(error.contains("unsupported regex syntax"), "{error}");
+}
+
+#[test]
+fn class_map_calls_follow_host_value_and_static_object_provenance() {
+    let source = [
+        "const base = createElement((\"button\"), null);",
+        "const cloned = cloneElement(base, { onClick: handle, children: kids });",
+        "const component = createElement(Panel, { componentOnlyLongName: value });",
+        "const hoisted = { class: 'card' };",
+        "const vnode = createElementVNode('div', hoisted);",
+        "",
+    ]
+    .join("\n");
+    let host_rule = |callee: &str| super::ClassMapCallInput {
+        argIndex: 1,
+        callee: callee.to_string(),
+        keyExcludePattern: Some("^(?:children|key|ref)$".to_string()),
+        keyPattern: None,
+        stringLiteralArgIndex: Some(0),
+    };
     let context = super::TranspileContext {
-        class_map_calls: vec![super::ClassMapCallInput {
-            argIndex: 1,
-            callee: "jsx".to_string(),
-            keyExcludePattern: Some("^(?!children$).+$".to_string()),
-            keyPattern: None,
-            stringLiteralArgIndex: Some(0),
-        }],
+        class_map_calls: vec![
+            host_rule("createElement"),
+            host_rule("cloneElement"),
+            super::ClassMapCallInput {
+                argIndex: 1,
+                callee: "createElementVNode".to_string(),
+                keyExcludePattern: None,
+                keyPattern: None,
+                stringLiteralArgIndex: None,
+            },
+        ],
         ..empty_context()
     };
     let transformed = transform_js_pass_through_module(
@@ -844,8 +978,16 @@ fn class_map_call_rules_with_unparsable_patterns_are_dropped() {
     )
     .expect("transform");
 
-    assert!(transformed.contains("onClick: handle"), "{transformed}");
-    assert!(!transformed.contains("\"onClick\""), "{transformed}");
+    assert!(transformed.contains("\"onClick\": handle"), "{transformed}");
+    assert!(transformed.contains("children: kids"), "{transformed}");
+    assert!(
+        transformed.contains("componentOnlyLongName: value"),
+        "{transformed}"
+    );
+    assert!(
+        transformed.contains("\"class\": 'card'") || transformed.contains("\"class\": \"card\""),
+        "{transformed}"
+    );
 }
 
 #[test]
@@ -909,9 +1051,11 @@ fn quotes_member_access_on_default_only_commonjs_imports() {
     )
     .expect("transform");
 
-    // CommonJS namespaces carry literal keys, so the read must be quoted.
+    // Transparent package: the namespace read renames with the producer's
+    // write instead of being pinned as a literal key.
+    assert!(transformed.contains("React.forwardRef"), "{transformed}");
     assert!(
-        transformed.contains("React[\"forwardRef\"]"),
+        !transformed.contains("React[\"forwardRef\"]"),
         "{transformed}"
     );
 }
@@ -1117,6 +1261,114 @@ fn collects_string_defined_property_hazards_without_hard_coded_framework_names()
 }
 
 #[test]
+fn collects_computed_super_and_cooked_template_property_reads() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let file_path =
+        std::env::temp_dir().join(format!("gcc-ts-bundler-computed-properties-{unique}.js"));
+    fs::write(
+        &file_path,
+        [
+            "class Base { inherited() { return 41; } }",
+            "class Sub extends Base { call() { return super[`inherited`](); } }",
+            "class Value { constructor() { this.templated = 42; } }",
+            "export const read = value => value[`templ\\u0061ted`];",
+            "",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    let names = collect_preserved_property_names(
+        &[file_path.to_string_lossy().to_string()],
+        &HashSet::new(),
+    )
+    .expect("collect preserved properties");
+    assert!(names.contains("inherited"), "{names:?}");
+    assert!(names.contains("templated"), "{names:?}");
+}
+
+#[test]
+fn infers_runtime_record_contracts_from_declarations_and_callback_reads() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let file_path =
+        std::env::temp_dir().join(format!("gcc-ts-bundler-record-contract-{unique}.js"));
+    fs::write(
+        &file_path,
+        [
+            "const Child = defineComponent({",
+            "  props: { msg: {} },",
+            "  setup(componentProps) { return componentProps.msg; }",
+            "});",
+            "createVNode(Child, { msg: 'hello', componentOnlyLongName: 1 });",
+            "",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    let names = collect_preserved_property_names(
+        &[file_path.to_string_lossy().to_string()],
+        &HashSet::new(),
+    )
+    .expect("collect preserved properties");
+    assert!(names.contains("msg"), "{names:?}");
+    assert!(!names.contains("componentOnlyLongName"), "{names:?}");
+}
+
+#[test]
+fn preserves_registered_custom_element_surface_and_decorated_properties() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let file_path = std::env::temp_dir().join(format!("gcc-ts-bundler-custom-element-{unique}.ts"));
+    fs::write(
+        &file_path,
+        [
+            "function registered(_name: string) { return (value: unknown) => value; }",
+            "function reactive() { return () => {}; }",
+            "class ReactiveBase {",
+            "  renderRoot = {};",
+            "  hasUpdated = false;",
+            "  requestUpdate() {}",
+            "  get updateComplete() { return Promise.resolve(this.hasUpdated); }",
+            "}",
+            "@registered('x-motion')",
+            "export class Motion extends ReactiveBase {",
+            "  @reactive() accessor letters = ['L'];",
+            "  private veryLongInternalDetail = 1;",
+            "  read() { return this.veryLongInternalDetail; }",
+            "}",
+            "",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    let names = collect_preserved_property_names(
+        &[file_path.to_string_lossy().to_string()],
+        &HashSet::new(),
+    )
+    .expect("collect preserved properties");
+    for name in [
+        "renderRoot",
+        "hasUpdated",
+        "requestUpdate",
+        "updateComplete",
+        "letters",
+    ] {
+        assert!(names.contains(name), "missing {name}: {names:?}");
+    }
+    assert!(!names.contains("veryLongInternalDetail"), "{names:?}");
+}
+
+#[test]
 fn renders_commonjs_export_externs() {
     let externs = render_externs(
         &BTreeSet::from([
@@ -1284,14 +1536,16 @@ fn bundler_runtime_rewrites_namespace_member_reads_to_numeric_slots() {
                     class_map_calls: Vec::new(),
                     pure_callees: HashSet::new(),
                     commonjs_specifiers: HashSet::new(),
+                    opaque_commonjs: Default::default(),
                     file_metadata: HashMap::new(),
                     hoist_plan: None,
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     lazy_target_module_ids: HashSet::new(),
+                    resolved_module_ids: HashMap::new(),
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
-                    typed_annotations: HashMap::new(),
+                    type_metadata_enabled: true,
                     vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
@@ -1396,14 +1650,16 @@ fn bundler_runtime_rejects_reflective_namespace_usage() {
                     class_map_calls: Vec::new(),
                     pure_callees: HashSet::new(),
                     commonjs_specifiers: HashSet::new(),
+                    opaque_commonjs: Default::default(),
                     file_metadata: HashMap::new(),
                     hoist_plan: None,
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     lazy_target_module_ids: HashSet::new(),
+                    resolved_module_ids: HashMap::new(),
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
-                    typed_annotations: HashMap::new(),
+                    type_metadata_enabled: true,
                     vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
@@ -1465,14 +1721,16 @@ fn bundler_runtime_keeps_namespace_import_bindings_before_top_level_destructures
                     class_map_calls: Vec::new(),
                     pure_callees: HashSet::new(),
                     commonjs_specifiers: HashSet::new(),
+                    opaque_commonjs: Default::default(),
                     file_metadata: HashMap::new(),
                     hoist_plan: None,
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     lazy_target_module_ids: HashSet::new(),
+                    resolved_module_ids: HashMap::new(),
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
-                    typed_annotations: HashMap::new(),
+                    type_metadata_enabled: true,
                     vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
@@ -1534,14 +1792,16 @@ fn bundler_runtime_keeps_named_imports_live_instead_of_snapshotting_slots() {
                     class_map_calls: Vec::new(),
                     pure_callees: HashSet::new(),
                     commonjs_specifiers: HashSet::new(),
+                    opaque_commonjs: Default::default(),
                     file_metadata: HashMap::new(),
                     hoist_plan: None,
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     lazy_target_module_ids: HashSet::new(),
+                    resolved_module_ids: HashMap::new(),
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
-                    typed_annotations: HashMap::new(),
+                    type_metadata_enabled: true,
                     vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
@@ -1592,14 +1852,16 @@ fn bundler_runtime_keeps_exported_let_bindings_live() {
                     class_map_calls: Vec::new(),
                     pure_callees: HashSet::new(),
                     commonjs_specifiers: HashSet::new(),
+                    opaque_commonjs: Default::default(),
                     file_metadata: HashMap::new(),
                     hoist_plan: None,
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     lazy_target_module_ids: HashSet::new(),
+                    resolved_module_ids: HashMap::new(),
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
-                    typed_annotations: HashMap::new(),
+                    type_metadata_enabled: true,
                     vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
@@ -1661,14 +1923,16 @@ fn bundler_runtime_packs_named_reexports_from_single_dependency() {
                     class_map_calls: Vec::new(),
                     pure_callees: HashSet::new(),
                     commonjs_specifiers: HashSet::new(),
+                    opaque_commonjs: Default::default(),
                     file_metadata: HashMap::new(),
                     hoist_plan: None,
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     lazy_target_module_ids: HashSet::new(),
+                    resolved_module_ids: HashMap::new(),
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
-                    typed_annotations: HashMap::new(),
+                    type_metadata_enabled: true,
                     vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
@@ -1734,14 +1998,16 @@ fn bundler_runtime_packs_export_all_from_single_dependency() {
                     class_map_calls: Vec::new(),
                     pure_callees: HashSet::new(),
                     commonjs_specifiers: HashSet::new(),
+                    opaque_commonjs: Default::default(),
                     file_metadata: HashMap::new(),
                     hoist_plan: None,
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     lazy_target_module_ids: HashSet::new(),
+                    resolved_module_ids: HashMap::new(),
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
-                    typed_annotations: HashMap::new(),
+                    type_metadata_enabled: true,
                     vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
@@ -1831,14 +2097,16 @@ fn bundler_runtime_packs_imported_slot_alias_reexports_per_source() {
                     class_map_calls: Vec::new(),
                     pure_callees: HashSet::new(),
                     commonjs_specifiers: HashSet::new(),
+                    opaque_commonjs: Default::default(),
                     file_metadata: HashMap::new(),
                     hoist_plan: None,
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     lazy_target_module_ids: HashSet::new(),
+                    resolved_module_ids: HashMap::new(),
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
-                    typed_annotations: HashMap::new(),
+                    type_metadata_enabled: true,
                     vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
@@ -1913,14 +2181,16 @@ fn bundler_runtime_rewrites_promise_consumer_callback_params_to_slots() {
                     class_map_calls: Vec::new(),
                     pure_callees: HashSet::new(),
                     commonjs_specifiers: HashSet::new(),
+                    opaque_commonjs: Default::default(),
                     file_metadata: HashMap::new(),
                     hoist_plan: None,
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     lazy_target_module_ids: HashSet::new(),
+                    resolved_module_ids: HashMap::new(),
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
-                    typed_annotations: HashMap::new(),
+                    type_metadata_enabled: true,
                     vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
@@ -1987,14 +2257,16 @@ fn bundler_runtime_rewrites_wrapped_promise_consumer_callback_params_to_slots() 
                     class_map_calls: Vec::new(),
                     pure_callees: HashSet::new(),
                     commonjs_specifiers: HashSet::new(),
+                    opaque_commonjs: Default::default(),
                     file_metadata: HashMap::new(),
                     hoist_plan: None,
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     lazy_target_module_ids: HashSet::new(),
+                    resolved_module_ids: HashMap::new(),
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
-                    typed_annotations: HashMap::new(),
+                    type_metadata_enabled: true,
                     vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
@@ -2068,14 +2340,16 @@ fn bundler_runtime_rewrites_nested_wrapped_promise_consumer_callback_params_to_s
                     class_map_calls: Vec::new(),
                     pure_callees: HashSet::new(),
                     commonjs_specifiers: HashSet::new(),
+                    opaque_commonjs: Default::default(),
                     file_metadata: HashMap::new(),
                     hoist_plan: None,
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     lazy_target_module_ids: HashSet::new(),
+                    resolved_module_ids: HashMap::new(),
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
-                    typed_annotations: HashMap::new(),
+                    type_metadata_enabled: true,
                     vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
@@ -2144,14 +2418,16 @@ fn bundler_runtime_rewrites_realistic_helper_wrapped_consumer_callbacks_to_slots
                     class_map_calls: Vec::new(),
                     pure_callees: HashSet::new(),
                     commonjs_specifiers: HashSet::new(),
+                    opaque_commonjs: Default::default(),
                     file_metadata: HashMap::new(),
                     hoist_plan: None,
                     preserved_property_names: HashSet::new(),
                     lazy_imports_by_file: HashMap::new(),
                     lazy_target_module_ids: HashSet::new(),
+                    resolved_module_ids: HashMap::new(),
                     package_aliases: Vec::new(),
                     static_property_names: HashSet::new(),
-                    typed_annotations: HashMap::new(),
+                    type_metadata_enabled: true,
                     vendor_module_ids: HashSet::new(),
                     workspace_dir: root.clone(),
                 },
@@ -2224,6 +2500,14 @@ struct CrossChunkFixture {
 /// origin/reexport live in chunk 1, main in chunk 0: every import edge in this
 /// fixture crosses a chunk boundary through a pure re-export facade.
 fn make_cross_chunk_fixture(label: &str, lazy_target: Option<&str>) -> CrossChunkFixture {
+    make_cross_chunk_fixture_with_main(label, lazy_target, None)
+}
+
+fn make_cross_chunk_fixture_with_main(
+    label: &str,
+    lazy_target: Option<&str>,
+    main_source: Option<&str>,
+) -> CrossChunkFixture {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -2232,19 +2516,32 @@ fn make_cross_chunk_fixture(label: &str, lazy_target: Option<&str>) -> CrossChun
     let src_dir = root.join("src");
     fs::create_dir_all(&src_dir).unwrap();
 
+    let default_main_source = if lazy_target.is_some() {
+        concat!(
+            "export async function loadAwait() { const module = await import('./reexport'); return [module.default(), module.marker, module.renderMessage()]; }\n",
+            "export const loadThen = () => import('./reexport').then(module => module.default());\n",
+            "export async function loadDestructure() { const { default: render, marker } = await import('./reexport'); return [render(), marker]; }\n",
+            "export async function loadMutable() { const module = await import('./reexport'); module.increment(); return module.count; }\n",
+        )
+    } else {
+        "import { renderMessage } from './reexport';\nconsole.log(renderMessage());\n"
+    };
     let sources = [
         (
             "origin.ts",
-            "export const marker = 'x';\nexport function renderMessage() { return marker; }\n",
+            concat!(
+                "export default function renderDefault() { return marker; }\n",
+                "export let count = 0;\n",
+                "export function increment() { count += 1; }\n",
+                "export const marker = 'x';\n",
+                "export function renderMessage() { return marker; }\n",
+            ),
         ),
         (
             "reexport.ts",
-            "export { marker, renderMessage } from './origin';\n",
+            "export { default, count, increment, marker, renderMessage } from './origin';\n",
         ),
-        (
-            "main.ts",
-            "import { renderMessage } from './reexport';\nconsole.log(renderMessage());\n",
-        ),
+        ("main.ts", main_source.unwrap_or(default_main_source)),
     ];
     let mut files = HashMap::new();
     for (name, text) in sources {
@@ -2258,11 +2555,16 @@ fn make_cross_chunk_fixture(label: &str, lazy_target: Option<&str>) -> CrossChun
         .map(|name| files[*name].to_string_lossy().to_string())
         .collect::<Vec<_>>();
     let chunk_graph = vec![
+        // `main` statically imports from `shared`, so `shared` has to have run
+        // first: the vendor shape, where the plan puts the dependency chunk
+        // ahead of the base and base carries the generated import edge.
         super::TranspileChunkInput {
+            dependencies: vec!["shared".to_string()],
             files: vec!["src/main.ts".to_string()],
             name: "main".to_string(),
         },
         super::TranspileChunkInput {
+            dependencies: vec![],
             files: vec!["src/origin.ts".to_string(), "src/reexport.ts".to_string()],
             name: "shared".to_string(),
         },
@@ -2283,6 +2585,7 @@ fn make_cross_chunk_fixture(label: &str, lazy_target: Option<&str>) -> CrossChun
             &file_names,
             &root,
             &[],
+            &HashMap::new(),
             &chunk_graph,
             &lazy_imports,
             &HashMap::new(),
@@ -2297,6 +2600,9 @@ fn make_cross_chunk_fixture(label: &str, lazy_target: Option<&str>) -> CrossChun
             (
                 to_goog_module_id(&files[*name], &root),
                 super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
+                    "count".to_string(),
+                    "default".to_string(),
+                    "increment".to_string(),
                     "marker".to_string(),
                     "renderMessage".to_string(),
                 ])),
@@ -2309,23 +2615,33 @@ fn make_cross_chunk_fixture(label: &str, lazy_target: Option<&str>) -> CrossChun
         .collect::<HashMap<_, _>>();
 
     let context = super::TranspileContext {
-        bundler_module_slots: slots,
-        bundler_runtime_logical_ids: HashMap::new(),
+        bundler_module_slots: slots.clone(),
+        bundler_runtime_logical_ids: slots
+            .keys()
+            .map(|module_id| {
+                (
+                    crate::pathing::to_bundler_runtime_module_id(module_id),
+                    module_id.clone(),
+                )
+            })
+            .collect(),
         chunk_mode: super::ChunkMode::BundlerRuntime,
         class_map_calls: Vec::new(),
         pure_callees: HashSet::new(),
         commonjs_specifiers: HashSet::new(),
+        opaque_commonjs: Default::default(),
         file_metadata: HashMap::new(),
         hoist_plan: Some(plan.clone()),
         preserved_property_names: HashSet::new(),
-        lazy_imports_by_file: HashMap::new(),
+        lazy_imports_by_file: super::group_lazy_imports_by_file(lazy_imports.clone()),
         lazy_target_module_ids: lazy_imports
             .iter()
             .map(|lazy_import| lazy_import.moduleId.clone())
             .collect(),
+        resolved_module_ids: HashMap::new(),
         package_aliases: Vec::new(),
         static_property_names: HashSet::new(),
-        typed_annotations: HashMap::new(),
+        type_metadata_enabled: true,
         vendor_module_ids: HashSet::new(),
         workspace_dir: root.clone(),
     };
@@ -2344,6 +2660,7 @@ fn emit(fixture: &CrossChunkFixture, name: &str) -> String {
             transform_source_file(&fixture.files[name], &fixture.context)
         })
         .unwrap()
+        .code
 }
 
 #[test]
@@ -2381,15 +2698,184 @@ fn hoisted_pure_reexport_facade_is_pruned() {
 }
 
 #[test]
-fn hoisted_dynamic_import_target_keeps_facade() {
+fn hoisted_pure_esm_dynamic_import_uses_slots_and_named_facade() {
     let fixture = make_cross_chunk_fixture("cross-chunk-lazy", Some("reexport.ts"));
-    let transformed = emit(&fixture, "reexport.ts");
+    let main = emit(&fixture, "main.ts");
+    let facade = emit(&fixture, "reexport.ts");
+    let origin_module_id = to_goog_module_id(&fixture.files["origin.ts"], &fixture.root);
+    let origin_ordinal = fixture.plan.ordinal_of(&origin_module_id).unwrap();
+    let reexport_module_id = to_goog_module_id(&fixture.files["reexport.ts"], &fixture.root);
+    let slots = &fixture.context.bundler_module_slots[&reexport_module_id];
 
-    assert!(transformed.contains("__register("), "{transformed}");
-    // Slots of a lazy facade still resolve straight to the origin binding
-    // rather than re-entering the registry.
-    assert!(transformed.contains("return marker$$"), "{transformed}");
-    assert!(!transformed.contains("__require("), "{transformed}");
+    assert!(main.contains("__dynamicImport("), "{main}");
+    assert!(main.contains(".then("), "{main}");
+    for named_access in [
+        ".default",
+        ".increment",
+        ".marker",
+        ".renderMessage",
+        ".count",
+    ] {
+        assert!(!main.contains(named_access), "{main}");
+    }
+
+    assert!(facade.contains("__register("), "{facade}");
+    for (export_name, local_name) in [
+        ("default", "renderDefault"),
+        ("increment", "increment"),
+        ("marker", "marker"),
+        ("renderMessage", "renderMessage"),
+    ] {
+        let slot = slots.slot_for(export_name).unwrap();
+        assert!(
+            facade.contains(&format!(
+                "__exports[{slot}]={local_name}$${origin_ordinal};"
+            )),
+            "{facade}"
+        );
+    }
+    assert!(
+        facade.contains("Object.defineProperties(__exports"),
+        "{facade}"
+    );
+    assert!(facade.contains("__exports.__esModule = true;"), "{facade}");
+    assert!(!facade.contains("__require("), "{facade}");
+}
+
+#[test]
+fn hoisted_mutable_same_chunk_reexport_stays_live() {
+    let fixture = make_cross_chunk_fixture("cross-chunk-lazy-live", Some("reexport.ts"));
+    let facade = emit(&fixture, "reexport.ts");
+    let origin_module_id = to_goog_module_id(&fixture.files["origin.ts"], &fixture.root);
+    let origin_ordinal = fixture.plan.ordinal_of(&origin_module_id).unwrap();
+    let reexport_module_id = to_goog_module_id(&fixture.files["reexport.ts"], &fixture.root);
+    let count_slot = fixture.context.bundler_module_slots[&reexport_module_id]
+        .slot_for("count")
+        .unwrap();
+
+    assert!(
+        facade.contains(&format!(
+            "__live(__exports,{count_slot},function(){{return count$${origin_ordinal};}});"
+        )),
+        "{facade}"
+    );
+}
+
+#[test]
+fn hoisted_lazy_target_with_escaping_namespace_keeps_named_facade() {
+    let fixture = make_cross_chunk_fixture_with_main(
+        "cross-chunk-lazy-escape",
+        Some("reexport.ts"),
+        Some("import * as namespace from './reexport';\nglobalThis.namespace = namespace;\n"),
+    );
+    let facade = emit(&fixture, "reexport.ts");
+
+    assert!(
+        facade.contains("Object.defineProperties(__exports"),
+        "{facade}"
+    );
+    assert!(facade.contains("__exports.__esModule = true;"), "{facade}");
+}
+
+#[test]
+fn hoisted_commonjs_dynamic_target_keeps_named_facade() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("gcc-ts-bundler-cross-chunk-lazy-cjs-{unique}"));
+    let main_file = root.join("src/main.ts");
+    let commonjs_file = root.join("node_modules/demo/index.js");
+    fs::create_dir_all(main_file.parent().unwrap()).unwrap();
+    fs::create_dir_all(commonjs_file.parent().unwrap()).unwrap();
+    fs::write(
+        &main_file,
+        "export const load = () => import('../node_modules/demo/index.js').then(module => module.default());\n",
+    )
+    .unwrap();
+    fs::write(
+        &commonjs_file,
+        "module.exports = function demo() { return 'ok'; };\n",
+    )
+    .unwrap();
+
+    let file_names = vec![
+        main_file.to_string_lossy().to_string(),
+        commonjs_file.to_string_lossy().to_string(),
+    ];
+    let commonjs_module_id = to_goog_module_id(&commonjs_file, &root);
+    let lazy_imports = vec![super::LazyImportInput {
+        importerFilePath: main_file.to_string_lossy().to_string(),
+        moduleId: commonjs_module_id.clone(),
+        specifier: "../node_modules/demo/index.js".to_string(),
+        targetPath: commonjs_file.to_string_lossy().to_string(),
+    }];
+    let chunk_graph = vec![
+        super::TranspileChunkInput {
+            dependencies: vec![],
+            files: vec!["src/main.ts".to_string()],
+            name: "main".to_string(),
+        },
+        super::TranspileChunkInput {
+            dependencies: vec!["main".to_string()],
+            files: vec!["node_modules/demo/index.js".to_string()],
+            name: "lazy".to_string(),
+        },
+    ];
+    let slots = super::collect_bundler_module_slots(
+        &file_names,
+        &root,
+        &[],
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+    .unwrap();
+    let plan = std::sync::Arc::new(
+        super::build_hoist_plan(
+            &file_names,
+            &root,
+            &[],
+            &HashMap::new(),
+            &chunk_graph,
+            &lazy_imports,
+            &HashMap::new(),
+        )
+        .unwrap()
+        .expect("hoist plan"),
+    );
+    let context = super::TranspileContext {
+        bundler_module_slots: slots,
+        bundler_runtime_logical_ids: HashMap::new(),
+        chunk_mode: super::ChunkMode::BundlerRuntime,
+        class_map_calls: Vec::new(),
+        pure_callees: HashSet::new(),
+        commonjs_specifiers: HashSet::new(),
+        opaque_commonjs: Default::default(),
+        file_metadata: HashMap::new(),
+        hoist_plan: Some(plan),
+        preserved_property_names: HashSet::new(),
+        lazy_imports_by_file: super::group_lazy_imports_by_file(lazy_imports.clone()),
+        lazy_target_module_ids: HashSet::from([commonjs_module_id]),
+        resolved_module_ids: HashMap::new(),
+        package_aliases: Vec::new(),
+        static_property_names: HashSet::new(),
+        type_metadata_enabled: true,
+        vendor_module_ids: HashSet::new(),
+        workspace_dir: root,
+    };
+    let facade = GLOBALS
+        .set(&Globals::new(), || {
+            transform_source_file(&commonjs_file, &context)
+        })
+        .unwrap()
+        .code;
+
+    assert!(
+        facade.contains("Object.defineProperties(__exports"),
+        "{facade}"
+    );
+    assert!(facade.contains("default"), "{facade}");
+    assert!(facade.contains("__exports.__esModule = true;"), "{facade}");
 }
 
 /// A bundler-runtime build with no chunk graph gets no hoist plan
@@ -2400,47 +2886,105 @@ fn hoisted_dynamic_import_target_keeps_facade() {
 #[test]
 fn emission_without_a_hoist_plan_stays_registry_form() {
     let mut fixture = make_cross_chunk_fixture("cross-chunk-no-plan", None);
+    let reexport_module_id = to_goog_module_id(&fixture.files["reexport.ts"], &fixture.root);
+    let render_slot = fixture.context.bundler_module_slots[&reexport_module_id]
+        .slot_for("renderMessage")
+        .unwrap();
     fixture.context.hoist_plan = None;
     let transformed = emit(&fixture, "main.ts");
 
     assert!(transformed.contains("__register("), "{transformed}");
     assert!(transformed.contains("__require("), "{transformed}");
-    assert!(transformed.contains("[1]()"), "{transformed}");
+    assert!(
+        transformed.contains(&format!("[{render_slot}]()")),
+        "{transformed}"
+    );
     assert!(!transformed.contains("$$"), "{transformed}");
 }
 
-// --- typed annotations (docs/research/typed-input.md) ---------------------
+// --- unified Closure type metadata -----------------------------------------
 
-struct TypedFixture {
+struct TypedDeliveryFixture {
     context: super::TranspileContext,
     file_path: PathBuf,
-    ordinal: usize,
+    ordinal: Option<usize>,
 }
 
-/// A single hoisted module exercising every JSDoc-attachable declaration
-/// form: exported class, exported function, exported single-declarator
-/// const, a `__PURE__`-initialized const, and an unannotated const.
-fn make_typed_fixture(label: &str, annotations: &[(&str, &str)]) -> TypedFixture {
-    make_typed_fixture_from(label, TYPED_FIXTURE_SOURCE, annotations)
+fn runtime_symbol(id: &str, name: &str) -> crate::closure_metadata::ClosureTypeSymbol {
+    crate::closure_metadata::ClosureTypeSymbol {
+        builtin_name: None,
+        declaration_file_path: None,
+        declaration_id: None,
+        declaration_start: None,
+        diagnostic_name: name.to_string(),
+        id: id.to_string(),
+        kind: "runtime".to_string(),
+        local_name: Some(name.to_string()),
+    }
 }
 
-/// The v1 fixture body: every JSDoc-attachable declaration form, plus a
-/// `__PURE__` initializer and an unannotated const.
-const TYPED_FIXTURE_SOURCE: &str = concat!(
-    "export class Widget { constructor() { this.size = 1; } }\n",
-    "export function measure(widget) { return widget.size; }\n",
-    "export const label = 'w';\n",
-    "const built = /*#__PURE__*/ makeWidget();\n",
-    "const plain = 2;\n",
-    "function makeWidget() { return new Widget(); }\n",
-    "console.log(measure(built), label, plain);\n",
-);
+fn declared_symbol(id: &str, name: &str) -> crate::closure_metadata::ClosureTypeSymbol {
+    crate::closure_metadata::ClosureTypeSymbol {
+        builtin_name: None,
+        declaration_file_path: None,
+        declaration_id: Some(format!("{id}:declaration")),
+        declaration_start: None,
+        diagnostic_name: name.to_string(),
+        id: id.to_string(),
+        kind: "declared".to_string(),
+        local_name: None,
+    }
+}
 
-fn make_typed_fixture_from(
+fn type_reference(token: &str, symbol_id: &str) -> crate::closure_metadata::ClosureTypeReference {
+    crate::closure_metadata::ClosureTypeReference {
+        symbol_id: symbol_id.to_string(),
+        token: token.to_string(),
+    }
+}
+
+fn binding_annotation(
+    name: &str,
+    template: &str,
+    references: Vec<crate::closure_metadata::ClosureTypeReference>,
+) -> crate::closure_metadata::ClosureAnnotation {
+    crate::closure_metadata::ClosureAnnotation {
+        references,
+        target: crate::closure_metadata::ClosureAnnotationTarget::Binding {
+            binding_name: name.to_string(),
+        },
+        template: template.to_string(),
+        type_bearing: true,
+    }
+}
+
+fn member_annotation(
+    owner: &str,
+    kind: &str,
+    name: &str,
+    is_static: bool,
+    template: &str,
+    references: Vec<crate::closure_metadata::ClosureTypeReference>,
+) -> crate::closure_metadata::ClosureAnnotation {
+    crate::closure_metadata::ClosureAnnotation {
+        references,
+        target: crate::closure_metadata::ClosureAnnotationTarget::Member {
+            member_kind: kind.to_string(),
+            member_name: name.to_string(),
+            owner_binding_name: owner.to_string(),
+            is_static,
+        },
+        template: template.to_string(),
+        type_bearing: true,
+    }
+}
+
+fn make_typed_delivery_fixture(
     label: &str,
-    source: &str,
-    annotations: &[(&str, &str)],
-) -> TypedFixture {
+    chunk_mode: super::ChunkMode,
+    metadata_enabled: bool,
+    hoisted: bool,
+) -> TypedDeliveryFixture {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -2449,80 +2993,159 @@ fn make_typed_fixture_from(
     let src_dir = root.join("src");
     fs::create_dir_all(&src_dir).unwrap();
     let file_path = src_dir.join("main.ts");
-    fs::write(&file_path, source).unwrap();
+    fs::write(
+        &file_path,
+        concat!(
+            "export const enum Kind { Ready = 1, Done = 2 }\n",
+            "export class Widget {\n",
+            "  value;\n",
+            "  method(item) { return item; }\n",
+            "}\n",
+            "export function use(widget, ghost) { return widget; }\n",
+        ),
+    )
+    .unwrap();
 
-    let file_names = vec![file_path.to_string_lossy().to_string()];
+    let metadata = crate::closure_metadata::ClosureFileMetadata {
+        annotations: vec![
+            binding_annotation(
+                "use",
+                "/**\n * @param {!__GCC_TYPE_0__} widget\n * @param {!__GCC_TYPE_1__} ghost\n * @return {!__GCC_TYPE_2__}\n */\n",
+                vec![
+                    type_reference("__GCC_TYPE_0__", "runtime:widget"),
+                    type_reference("__GCC_TYPE_1__", "runtime:ghost"),
+                    type_reference("__GCC_TYPE_2__", "declared:config"),
+                ],
+            ),
+            member_annotation(
+                "Widget",
+                "field",
+                "value",
+                false,
+                "/** @type {!__GCC_TYPE_3__} */\n",
+                vec![type_reference("__GCC_TYPE_3__", "runtime:widget")],
+            ),
+            member_annotation(
+                "Widget",
+                "method",
+                "method",
+                false,
+                "/** @param {!__GCC_TYPE_4__} item @return {!__GCC_TYPE_5__} */\n",
+                vec![
+                    type_reference("__GCC_TYPE_4__", "runtime:widget"),
+                    type_reference("__GCC_TYPE_5__", "declared:config"),
+                ],
+            ),
+        ],
+        declarations: vec![crate::closure_metadata::ClosureTypeDeclaration {
+            declared_symbol_id: "declared:config".to_string(),
+            exported: true,
+            id: "declared:config:declaration".to_string(),
+            references: vec![type_reference("__GCC_TYPE_6__", "runtime:widget")],
+            template: concat!(
+                "/** @record */\n",
+                "function Config() {}\n",
+                "/** @type {!__GCC_TYPE_6__} */\n",
+                "Config.prototype.owner;\n",
+            )
+            .to_string(),
+        }],
+        ambient_globals: Vec::new(),
+        erased_const_enums: Vec::new(),
+        decorated_output_text: None,
+        diagnostics: Vec::new(),
+        enums: vec![crate::closure_metadata::ClosureEnumDeclaration {
+            binding_name: "Kind".to_string(),
+            exported: true,
+            members: vec![
+                crate::closure_metadata::ClosureEnumMember {
+                    name: "Ready".to_string(),
+                    value: serde_json::json!(1),
+                },
+                crate::closure_metadata::ClosureEnumMember {
+                    name: "Done".to_string(),
+                    value: serde_json::json!(2),
+                },
+            ],
+            symbol_id: "enum:kind".to_string(),
+            value_type: "number".to_string(),
+        }],
+        file_path: file_path.to_string_lossy().to_string(),
+        runtime_module_id: None,
+        source_file_path: file_path.to_string_lossy().to_string(),
+        symbols: vec![
+            runtime_symbol("runtime:widget", "Widget"),
+            runtime_symbol("runtime:ghost", "Ghost"),
+            runtime_symbol("enum:kind", "Kind"),
+            declared_symbol("declared:config", "Config"),
+        ],
+    };
+    let metadata_map = HashMap::from([(
+        crate::closure_metadata::closure_metadata_key(&file_path),
+        metadata,
+    )]);
+    let module_id = to_goog_module_id(&file_path, &root);
     let chunk_graph = vec![super::TranspileChunkInput {
+        dependencies: vec![],
         files: vec!["src/main.ts".to_string()],
         name: "main".to_string(),
     }];
-    let plan = std::sync::Arc::new(
-        super::build_hoist_plan(&file_names, &root, &[], &chunk_graph, &[], &HashMap::new())
-            .unwrap()
-            .expect("hoist plan"),
-    );
-    let module_id = to_goog_module_id(&file_path, &root);
-    let ordinal = plan.ordinal_of(&module_id).expect("ordinal");
+    let plan = if chunk_mode == super::ChunkMode::BundlerRuntime && hoisted {
+        super::build_hoist_plan(
+            &[file_path.to_string_lossy().to_string()],
+            &root,
+            &[],
+            &HashMap::new(),
+            &chunk_graph,
+            &[],
+            &metadata_map,
+        )
+        .unwrap()
+        .map(std::sync::Arc::new)
+    } else {
+        None
+    };
+    let ordinal = plan.as_ref().and_then(|value| value.ordinal_of(&module_id));
+    let slots = (chunk_mode == super::ChunkMode::BundlerRuntime)
+        .then(|| {
+            HashMap::from([(
+                module_id,
+                super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
+                    "Kind".to_string(),
+                    "Widget".to_string(),
+                    "use".to_string(),
+                ])),
+            )])
+        })
+        .unwrap_or_default();
 
-    let mut context = make_typed_context(&root, plan, &module_id);
-    if !annotations.is_empty() {
-        context.typed_annotations.insert(
-            super::typed_annotations::annotation_key(&file_path),
-            annotations
-                .iter()
-                .map(|(name, jsdoc)| {
-                    (
-                        name.to_string(),
-                        super::typed_annotations::TypedBindingAnnotation {
-                            jsdoc: jsdoc.to_string(),
-                            members: HashMap::new(),
-                        },
-                    )
-                })
-                .collect(),
-        );
-    }
-
-    TypedFixture {
-        context,
+    TypedDeliveryFixture {
+        context: super::TranspileContext {
+            bundler_module_slots: slots,
+            bundler_runtime_logical_ids: HashMap::new(),
+            chunk_mode,
+            class_map_calls: Vec::new(),
+            pure_callees: HashSet::new(),
+            commonjs_specifiers: HashSet::new(),
+            opaque_commonjs: Default::default(),
+            file_metadata: metadata_map,
+            hoist_plan: plan,
+            preserved_property_names: HashSet::new(),
+            lazy_imports_by_file: HashMap::new(),
+            lazy_target_module_ids: HashSet::new(),
+            resolved_module_ids: HashMap::new(),
+            package_aliases: Vec::new(),
+            static_property_names: HashSet::new(),
+            type_metadata_enabled: metadata_enabled,
+            vendor_module_ids: HashSet::new(),
+            workspace_dir: root,
+        },
         file_path,
         ordinal,
     }
 }
 
-fn make_typed_context(
-    root: &std::path::Path,
-    plan: std::sync::Arc<super::HoistPlan>,
-    module_id: &str,
-) -> super::TranspileContext {
-    super::TranspileContext {
-        bundler_module_slots: HashMap::from([(
-            module_id.to_string(),
-            super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
-                "Widget".to_string(),
-                "label".to_string(),
-                "measure".to_string(),
-            ])),
-        )]),
-        bundler_runtime_logical_ids: HashMap::new(),
-        chunk_mode: super::ChunkMode::BundlerRuntime,
-        class_map_calls: Vec::new(),
-        pure_callees: HashSet::new(),
-        commonjs_specifiers: HashSet::new(),
-        file_metadata: HashMap::new(),
-        hoist_plan: Some(plan),
-        preserved_property_names: HashSet::new(),
-        lazy_imports_by_file: HashMap::new(),
-        lazy_target_module_ids: HashSet::new(),
-        package_aliases: Vec::new(),
-        static_property_names: HashSet::new(),
-        typed_annotations: HashMap::new(),
-        vendor_module_ids: HashSet::new(),
-        workspace_dir: root.to_path_buf(),
-    }
-}
-
-fn emit_typed(fixture: &TypedFixture) -> String {
+fn emit_typed_delivery(fixture: &TypedDeliveryFixture) -> super::EmittedProgram {
     GLOBALS
         .set(&Globals::new(), || {
             transform_source_file(&fixture.file_path, &fixture.context)
@@ -2530,231 +3153,119 @@ fn emit_typed(fixture: &TypedFixture) -> String {
         .unwrap()
 }
 
-#[test]
-fn hoisted_typed_bindings_receive_their_jsdoc() {
-    let fixture = make_typed_fixture(
-        "typed-basic",
-        &[
-            ("Widget", "/** @constructor */\n"),
-            (
-                "measure",
-                "/**\n * @param {!Widget} widget\n * @return {number}\n */\n",
-            ),
-            ("label", "/** @type {string} */\n"),
-        ],
-    );
-    let ordinal = fixture.ordinal;
-    let transformed = emit_typed(&fixture);
-
-    // Annotations are keyed by the pre-hoist name but must land on the
-    // suffixed declaration the emitter actually prints.
+fn assert_full_typed_delivery(
+    output: &super::EmittedProgram,
+    runtime_name: &str,
+    declaration_name: &str,
+) {
     assert!(
-        transformed.contains(&format!("/** @constructor */\nclass Widget$${ordinal}")),
-        "{transformed}"
+        output.contains(&format!("@param {{!{runtime_name}}} widget")),
+        "{output}"
     );
-    // Same-module type references are rewritten to the suffixed class name.
+    assert!(output.contains("@param {?} ghost"), "{output}");
+    assert!(output.contains("@record"), "{output}");
+    assert!(output.contains("@enum {number}"), "{output}");
     assert!(
-        transformed.contains(&format!(
-            "@param {{!Widget$${ordinal}}} widget\n * @return {{number}}\n */\nfunction measure$${ordinal}"
-        )),
-        "{transformed}"
+        output.contains(&format!("{runtime_name}.prototype.value")),
+        "{output}"
     );
-    assert!(
-        transformed.contains(&format!("/** @type {{string}} */\nconst label$${ordinal}")),
-        "{transformed}"
-    );
+    assert!(output.contains(declaration_name), "{output}");
+    assert_eq!(output.type_metadata.counts.annotationCount, 1);
+    assert_eq!(output.type_metadata.counts.memberAnnotationCount, 2);
+    assert_eq!(output.type_metadata.counts.typeDeclarationCount, 1);
+    assert_eq!(output.type_metadata.counts.enumDeclarationCount, 1);
+    assert_eq!(output.type_metadata.counts.unresolvedTypeReferenceCount, 1);
+    assert!(output
+        .type_metadata
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.reason == "runtime-binding-not-found"));
 }
 
 #[test]
-fn hoisted_typed_annotation_merges_with_pure_annotation() {
-    let fixture = make_typed_fixture("typed-pure", &[("built", "/** @type {!Widget} */\n")]);
-    let ordinal = fixture.ordinal;
-    let transformed = emit_typed(&fixture);
-
-    // Closure keeps only the JSDoc block nearest the declaration, so the two
-    // annotations must arrive as one block, not two adjacent ones.
-    assert!(
-        transformed.contains(&format!(
-            "/** @pureOrBreakMyCode @type {{!Widget$${ordinal}}} */\nconst built$${ordinal}"
-        )),
-        "{transformed}"
-    );
-    assert_eq!(
-        transformed.matches("@pureOrBreakMyCode").count(),
-        1,
-        "{transformed}"
-    );
-}
-
-#[test]
-fn pure_annotation_is_unaffected_when_no_typed_annotation_matches() {
-    let fixture = make_typed_fixture("typed-pure-only", &[("plain", "/** @type {number} */\n")]);
-    let ordinal = fixture.ordinal;
-    let transformed = emit_typed(&fixture);
-
-    assert!(
-        transformed.contains(&format!(
-            "{}const built$${ordinal}",
-            super::pure_calls::PURE_JSDOC
-        )),
-        "{transformed}"
-    );
-    assert!(
-        transformed.contains(&format!("/** @type {{number}} */\nconst plain$${ordinal}")),
-        "{transformed}"
-    );
-}
-
-#[test]
-fn hoisted_emission_without_typed_annotations_is_unchanged() {
-    let annotated = emit_typed(&make_typed_fixture(
-        "typed-none-a",
-        &[("Widget", "/** @constructor */\n")],
+fn typed_metadata_delivers_in_off_mode() {
+    // `goog.module` emission is now unique to unchunked output: `split` joined
+    // the shared chunked emission path, so its former row here asserted a shape
+    // that no longer exists rather than a behaviour worth keeping.
+    let output = emit_typed_delivery(&make_typed_delivery_fixture(
+        "typed-off",
+        super::ChunkMode::Off,
+        true,
+        false,
     ));
-    let bare = emit_typed(&make_typed_fixture("typed-none-b", &[]));
-
-    assert!(!bare.contains("@constructor"), "{bare}");
-    assert_eq!(
-        bare,
-        annotated.replace("/** @constructor */\n", ""),
-        "annotations must be the only difference"
-    );
+    assert_full_typed_delivery(&output, "Widget", "function Config()");
+    assert!(output.starts_with("goog.module("), "{output}");
 }
 
 #[test]
-fn typed_annotations_never_match_a_multi_declarator_statement() {
-    // JSDoc attaches to the whole statement, so annotating one name in
-    // `var a = 1, b = 2` would silently claim the other declarator too.
-    let source = "var size = 1, other = 2;\n";
-    let module = parse_module(std::path::Path::new("fixture.js"), source).expect("module");
-    let super::ModuleItem::Stmt(statement) = &module.body[0] else {
-        panic!("expected statement");
-    };
-    let annotations = HashMap::from([(
-        "size".to_string(),
-        super::typed_annotations::TypedBindingAnnotation {
-            jsdoc: "/** @type {number} */\n".to_string(),
-            members: HashMap::new(),
-        },
-    )]);
-
-    assert!(super::typed_annotations::typed_annotation_for_statement(
-        statement,
-        &annotations,
-        |_| None
-    )
-    .is_none());
+fn typed_metadata_delivers_declarations_enums_and_members_through_hoisting() {
+    let fixture = make_typed_delivery_fixture(
+        "typed-hoisted",
+        super::ChunkMode::BundlerRuntime,
+        true,
+        true,
+    );
+    let ordinal = fixture.ordinal.expect("hoist ordinal");
+    let output = emit_typed_delivery(&fixture);
+    assert_full_typed_delivery(
+        &output,
+        &format!("Widget$${ordinal}"),
+        &format!("function Config$$type$${ordinal}()"),
+    );
+    assert!(
+        output.contains(&format!("class Widget$${ordinal}")),
+        "{output}"
+    );
+    assert!(
+        output.contains(&format!("function Config$$type$${ordinal}()")),
+        "{output}"
+    );
+    assert!(
+        output.contains(&format!("const Kind$${ordinal}")),
+        "{output}"
+    );
+    assert!(!output.contains("__register("), "{output}");
 }
 
 #[test]
-fn pure_tag_stays_in_sync_with_the_standalone_pure_block() {
-    assert!(super::pure_calls::PURE_JSDOC.contains(super::typed_annotations::PURE_TAG));
-}
-
-// --- typed annotations v2: members and cross-module type names -----------
-
-fn typed_annotation(
-    jsdoc: &str,
-    members: &[(&str, &str)],
-) -> super::typed_annotations::TypedBindingAnnotation {
-    super::typed_annotations::TypedBindingAnnotation {
-        jsdoc: jsdoc.to_string(),
-        members: members
-            .iter()
-            .map(|(name, jsdoc)| (name.to_string(), jsdoc.to_string()))
-            .collect(),
-    }
+fn typed_metadata_delivers_declarations_enums_and_members_in_registry_runtime() {
+    let fixture = make_typed_delivery_fixture(
+        "typed-registry",
+        super::ChunkMode::BundlerRuntime,
+        true,
+        false,
+    );
+    let output = emit_typed_delivery(&fixture);
+    assert_full_typed_delivery(&output, "Widget", "function Config()");
+    assert!(output.contains("__register("), "{output}");
 }
 
 #[test]
-fn member_annotations_land_on_declared_fields_and_constructor_assignments() {
-    // `size` is constructor-assigned (the shape esbuild leaves for a bare
-    // `size: number` declaration), `unit` is a class field.
-    let mut fixture = make_typed_fixture_from(
-        "typed-members",
-        concat!(
-            "export class Widget {\n",
-            "  unit = 'px';\n",
-            "  ['computed'] = 0;\n",
-            "  handler = function() {\n",
-            "    this.size = 'not-a-number';\n",
-            "  };\n",
-            "  constructor() {\n",
-            "    this.size = 1;\n",
-            "  }\n",
-            "  measure(other) {\n",
-            "    const size = other;\n",
-            "    return size;\n",
-            "  }\n",
-            "}\n",
-            "console.log(new Widget());\n",
-        ),
-        &[],
+fn typed_metadata_escape_hatch_omits_optional_types_but_keeps_enum_lowering() {
+    let fixture = make_typed_delivery_fixture(
+        "typed-disabled",
+        super::ChunkMode::BundlerRuntime,
+        false,
+        true,
     );
-    fixture.context.typed_annotations.insert(
-        super::typed_annotations::annotation_key(&fixture.file_path),
-        HashMap::from([(
-            "Widget".to_string(),
-            typed_annotation(
-                "",
-                &[
-                    ("size", "/** @type {number} */\n"),
-                    ("unit", "/** @type {string} */\n"),
-                    ("computed", "/** @type {number} */\n"),
-                ],
-            ),
-        )]),
-    );
-    let transformed = emit_typed(&fixture);
-
-    assert!(
-        transformed.contains("/** @type {string} */\n    unit = 'px';"),
-        "{transformed}"
-    );
-    assert!(
-        transformed.contains("/** @type {number} */\n        this.size = 1;"),
-        "{transformed}"
-    );
-    // Computed keys are never matched, and a local `const size` one level
-    // deeper inside a method must not be mistaken for the field.
-    assert!(
-        !transformed.contains("*/\n    ['computed']"),
-        "{transformed}"
-    );
-    // `this.size` inside a non-arrow function field is a different `this`;
-    // annotating it would be a lie, and it is one indent step deep like a
-    // real constructor assignment, so only the constructor body counts.
-    assert_eq!(
-        transformed.matches("@type {number}").count(),
-        1,
-        "{transformed}"
-    );
-    assert!(
-        !transformed.contains("*/\n        this.size = 'not-a-number'"),
-        "{transformed}"
-    );
-    // A class takes no JSDoc of its own, so an empty binding block must not
-    // emit a stray comment before the declaration.
-    assert!(!transformed.contains("*/\nclass Widget$$"), "{transformed}");
+    let output = emit_typed_delivery(&fixture);
+    assert!(!output.contains("@param"), "{output}");
+    assert!(!output.contains("@record"), "{output}");
+    assert!(output.contains("@enum {number}"), "{output}");
+    assert_eq!(output.type_metadata.counts.annotationCount, 0);
+    assert_eq!(output.type_metadata.counts.memberAnnotationCount, 0);
+    assert_eq!(output.type_metadata.counts.typeDeclarationCount, 0);
+    assert_eq!(output.type_metadata.counts.enumDeclarationCount, 1);
+    assert_eq!(output.type_metadata.counts.unresolvedTypeReferenceCount, 0);
 }
 
-/// origin declares a class, main imports it and is annotated with it. Both
-/// live in one chunk, so the import resolves to a direct binding.
-fn make_cross_module_typed_fixture(
-    label: &str,
-    annotations: HashMap<String, super::typed_annotations::TypedBindingAnnotation>,
-) -> (super::TranspileContext, PathBuf, usize) {
-    make_cross_module_typed_fixture_with(label, annotations, false)
+struct TypedImportFixture {
+    context: super::TranspileContext,
+    main: PathBuf,
+    origin_ordinal: Option<usize>,
 }
 
-/// `veto_origin_hoist` gives origin closure-ir enum metadata, which is the
-/// hoist veto in `hoist.rs`: origin then stays a registry module and main's
-/// import degrades from a direct binding to a slot access.
-fn make_cross_module_typed_fixture_with(
-    label: &str,
-    annotations: HashMap<String, super::typed_annotations::TypedBindingAnnotation>,
-    veto_origin_hoist: bool,
-) -> (super::TranspileContext, PathBuf, usize) {
+fn make_typed_import_fixture(label: &str, hoisted: bool) -> TypedImportFixture {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -2764,201 +3275,135 @@ fn make_cross_module_typed_fixture_with(
     fs::create_dir_all(&src_dir).unwrap();
     let origin = src_dir.join("origin.ts");
     let main = src_dir.join("main.ts");
-    fs::write(
-        &origin,
-        "export class Money { constructor() { this.minor = 0; } }\n",
-    )
-    .unwrap();
+    fs::write(&origin, "export class Money { minor = 0; }\n").unwrap();
     fs::write(
         &main,
-        concat!(
-            "import { Money as Cash } from './origin';\n",
-            "export function total(cash) { return cash.minor; }\n",
-            "console.log(total(new Cash()));\n",
-        ),
+        "import { Money as Cash } from './origin';\nexport const sample = new Cash();\nexport function total(cash) { return cash.minor; }\n",
     )
     .unwrap();
-
+    let metadata = crate::closure_metadata::ClosureFileMetadata {
+        annotations: vec![binding_annotation(
+            "total",
+            "/** @param {!__GCC_TYPE_0__} cash @return {number} */\n",
+            vec![type_reference("__GCC_TYPE_0__", "runtime:cash")],
+        )],
+        declarations: Vec::new(),
+        ambient_globals: Vec::new(),
+        erased_const_enums: Vec::new(),
+        decorated_output_text: None,
+        diagnostics: Vec::new(),
+        enums: Vec::new(),
+        file_path: main.to_string_lossy().to_string(),
+        runtime_module_id: None,
+        source_file_path: main.to_string_lossy().to_string(),
+        symbols: vec![runtime_symbol("runtime:cash", "Cash")],
+    };
+    let metadata_map = HashMap::from([(
+        crate::closure_metadata::closure_metadata_key(&main),
+        metadata,
+    )]);
     let file_names = vec![
         origin.to_string_lossy().to_string(),
         main.to_string_lossy().to_string(),
     ];
     let chunk_graph = vec![super::TranspileChunkInput {
+        dependencies: vec![],
         files: vec!["src/origin.ts".to_string(), "src/main.ts".to_string()],
         name: "main".to_string(),
     }];
-    let mut file_metadata = HashMap::new();
-    if veto_origin_hoist {
-        file_metadata.insert(
-            origin.to_string_lossy().to_string(),
-            crate::closure_metadata::ClosureFileMetadata {
-                decorated_output_text: None,
-                enum_declarations: vec![crate::closure_metadata::ClosureEnumDeclaration {
-                    exported: true,
-                    members: Vec::new(),
-                    name: "Kind".to_string(),
-                    value_type: "number".to_string(),
-                }],
-                file_path: origin.to_string_lossy().to_string(),
-                top_level_docs: Vec::new(),
-                type_declarations: Vec::new(),
-            },
-        );
-    }
-    let plan = std::sync::Arc::new(
-        super::build_hoist_plan(&file_names, &root, &[], &chunk_graph, &[], &file_metadata)
+    let plan = hoisted
+        .then(|| {
+            super::build_hoist_plan(
+                &file_names,
+                &root,
+                &[],
+                &HashMap::new(),
+                &chunk_graph,
+                &[],
+                &metadata_map,
+            )
             .unwrap()
-            .expect("hoist plan"),
-    );
+            .map(std::sync::Arc::new)
+        })
+        .flatten();
     let origin_module_id = to_goog_module_id(&origin, &root);
-    let origin_ordinal = plan.ordinal_of(&origin_module_id).expect("ordinal");
-
-    let slots = HashMap::from([
-        (
-            origin_module_id,
-            super::BundlerModuleSlots::from_export_names(&BTreeSet::from(["Money".to_string()])),
-        ),
-        (
-            to_goog_module_id(&main, &root),
-            super::BundlerModuleSlots::from_export_names(&BTreeSet::from(["total".to_string()])),
-        ),
-    ]);
-    let mut context = super::TranspileContext {
-        bundler_module_slots: slots,
-        bundler_runtime_logical_ids: HashMap::new(),
-        chunk_mode: super::ChunkMode::BundlerRuntime,
-        class_map_calls: Vec::new(),
-        pure_callees: HashSet::new(),
-        commonjs_specifiers: HashSet::new(),
-        file_metadata: HashMap::new(),
-        hoist_plan: Some(plan),
-        preserved_property_names: HashSet::new(),
-        lazy_imports_by_file: HashMap::new(),
-        lazy_target_module_ids: HashSet::new(),
-        package_aliases: Vec::new(),
-        static_property_names: HashSet::new(),
-        typed_annotations: HashMap::new(),
-        vendor_module_ids: HashSet::new(),
-        workspace_dir: root.clone(),
-    };
-    context
-        .typed_annotations
-        .insert(super::typed_annotations::annotation_key(&main), annotations);
-    (context, main, origin_ordinal)
+    let main_module_id = to_goog_module_id(&main, &root);
+    let origin_ordinal = plan
+        .as_ref()
+        .and_then(|value| value.ordinal_of(&origin_module_id));
+    TypedImportFixture {
+        context: super::TranspileContext {
+            bundler_module_slots: HashMap::from([
+                (
+                    origin_module_id,
+                    super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
+                        "Money".to_string()
+                    ])),
+                ),
+                (
+                    main_module_id,
+                    super::BundlerModuleSlots::from_export_names(&BTreeSet::from([
+                        "total".to_string(),
+                        "sample".to_string(),
+                    ])),
+                ),
+            ]),
+            bundler_runtime_logical_ids: HashMap::new(),
+            chunk_mode: super::ChunkMode::BundlerRuntime,
+            class_map_calls: Vec::new(),
+            pure_callees: HashSet::new(),
+            commonjs_specifiers: HashSet::new(),
+            opaque_commonjs: Default::default(),
+            file_metadata: metadata_map,
+            hoist_plan: plan,
+            preserved_property_names: HashSet::new(),
+            lazy_imports_by_file: HashMap::new(),
+            lazy_target_module_ids: HashSet::new(),
+            resolved_module_ids: HashMap::new(),
+            package_aliases: Vec::new(),
+            static_property_names: HashSet::new(),
+            type_metadata_enabled: true,
+            vendor_module_ids: HashSet::new(),
+            workspace_dir: root,
+        },
+        main,
+        origin_ordinal,
+    }
 }
 
 #[test]
-fn imported_class_type_reference_rewrites_to_the_origin_suffixed_name() {
-    // The checker names the type by the LOCAL binding as written (`Cash`);
-    // native must route it through the same import rewrite the code takes.
-    let (context, main, origin_ordinal) = make_cross_module_typed_fixture(
-        "typed-cross-ok",
-        HashMap::from([(
-            "total".to_string(),
-            typed_annotation("/** @param {!Cash} cash @return {number} */\n", &[]),
-        )]),
-    );
-    let transformed = GLOBALS
-        .set(&Globals::new(), || transform_source_file(&main, &context))
+fn typed_import_alias_resolves_to_authoritative_hoisted_origin_binding() {
+    let fixture = make_typed_import_fixture("typed-import-hoisted", true);
+    let origin_ordinal = fixture.origin_ordinal.expect("origin ordinal");
+    let output = GLOBALS
+        .set(&Globals::new(), || {
+            transform_source_file(&fixture.main, &fixture.context)
+        })
         .unwrap();
-
     assert!(
-        transformed.contains(&format!("@param {{!Money$${origin_ordinal}}} cash")),
-        "{transformed}"
+        output.contains(&format!("@param {{!Money$${origin_ordinal}}} cash")),
+        "{output}"
     );
-    assert!(transformed.contains("@return {number}"), "{transformed}");
+    assert_eq!(output.type_metadata.counts.unresolvedTypeReferenceCount, 0);
 }
 
 #[test]
-fn unresolvable_type_reference_drops_the_block_without_failing_the_build() {
-    // `Ghost` is neither a binding of this module nor a direct-binding
-    // import, so the block cannot be made to name a real declaration.
-    let (context, main, _) = make_cross_module_typed_fixture(
-        "typed-cross-drop",
-        HashMap::from([(
-            "total".to_string(),
-            typed_annotation("/** @param {!Ghost} cash @return {number} */\n", &[]),
-        )]),
-    );
-    let transformed = GLOBALS
-        .set(&Globals::new(), || transform_source_file(&main, &context))
+fn typed_registry_import_degrades_only_the_unnameable_atom() {
+    let fixture = make_typed_import_fixture("typed-import-registry", false);
+    let output = GLOBALS
+        .set(&Globals::new(), || {
+            transform_source_file(&fixture.main, &fixture.context)
+        })
         .unwrap();
-
-    assert!(!transformed.contains("@param"), "{transformed}");
-    assert!(!transformed.contains("Ghost"), "{transformed}");
-    // The declaration itself still emits: dropping an annotation must never
-    // drop code.
-    assert!(transformed.contains("function total$$"), "{transformed}");
-}
-
-#[test]
-fn member_annotation_with_an_unresolvable_type_is_dropped_on_its_own() {
-    let (context, main, _) = make_cross_module_typed_fixture(
-        "typed-member-drop",
-        HashMap::from([(
-            "total".to_string(),
-            typed_annotation(
-                "/** @param {number} cash @return {number} */\n",
-                &[("minor", "/** @type {!Ghost} */\n")],
-            ),
-        )]),
-    );
-    let transformed = GLOBALS
-        .set(&Globals::new(), || transform_source_file(&main, &context))
-        .unwrap();
-
-    assert!(!transformed.contains("Ghost"), "{transformed}");
-    // The sibling block on the same binding survives.
-    assert!(
-        transformed.contains("@param {number} cash"),
-        "{transformed}"
-    );
-}
-
-#[test]
-fn type_name_rewriting_keeps_primitives_and_reports_unresolvable_names() {
-    let names = HashMap::from([("Foo".to_string(), "Foo$$3".to_string())]);
-
-    assert_eq!(
-        super::typed_annotations::rewrite_type_names(
-            "/** @param {!Foo} a @param {number} b @return {void} */\n",
-            &names,
-        )
-        .as_deref(),
-        Some("/** @param {!Foo$$3} a @param {number} b @return {void} */\n"),
-    );
-    assert_eq!(
-        super::typed_annotations::rewrite_type_names("/** @type {!Bar} */\n", &names),
-        None,
-    );
-    // No type expression at all: nothing to resolve, nothing to drop.
-    assert_eq!(
-        super::typed_annotations::rewrite_type_names("/** @pureOrBreakMyCode */\n", &names)
-            .as_deref(),
-        Some("/** @pureOrBreakMyCode */\n"),
-    );
-}
-
-#[test]
-fn registry_slot_imports_are_not_expressible_as_type_names() {
-    // A slot import rewrites to `__gcc_req_0[0]`, which is an expression, not
-    // a type name. It must not be spliced into the block; the block goes.
-    let (context, main, _) = make_cross_module_typed_fixture_with(
-        "typed-slot-drop",
-        HashMap::from([(
-            "total".to_string(),
-            typed_annotation("/** @param {!Cash} cash @return {number} */\n", &[]),
-        )]),
-        true,
-    );
-    let transformed = GLOBALS
-        .set(&Globals::new(), || transform_source_file(&main, &context))
-        .unwrap();
-
-    assert!(transformed.contains("__require("), "{transformed}");
-    assert!(!transformed.contains("@param"), "{transformed}");
-    assert!(!transformed.contains("Cash"), "{transformed}");
-    assert!(transformed.contains("function total$$"), "{transformed}");
+    assert!(output.contains("@param {?} cash"), "{output}");
+    assert!(output.contains("@return {number}"), "{output}");
+    assert_eq!(output.type_metadata.counts.annotationCount, 1);
+    assert_eq!(output.type_metadata.counts.unresolvedTypeReferenceCount, 1);
+    assert!(output
+        .type_metadata
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.reason == "registry-slot-is-not-a-type-name"));
 }
 
 // --- vendor assigner detection (JSC_IMPORT_ASSIGN hardening) -------------
@@ -3050,7 +3495,7 @@ fn no_module_bindings_means_nothing_to_pin() {
 #[test]
 fn the_noinline_tag_merges_into_one_block_with_pure_and_typed_tags() {
     use super::assigners::NOINLINE_TAG;
-    use super::typed_annotations::{compose_annotations, PURE_TAG};
+    use super::type_metadata::{compose_annotations, PURE_TAG};
 
     // Closure keeps only the JSDoc block nearest the declaration, so two
     // adjacent blocks would silently drop the first.
@@ -3116,4 +3561,456 @@ fn only_vendor_chunk_modules_are_pinned() {
     assert!(!is_vendor_chunk_name("main"));
     assert!(!is_vendor_chunk_name("main-shared"));
     assert!(!is_vendor_chunk_name("src-panel-lazy"));
+}
+
+/// Builds a workspace with one CommonJS package and one ESM consumer that
+/// exercises all three export-ABI emission sites, and returns
+/// `(producer_output, consumer_output)`.
+fn transform_cjs_abi_fixture(label: &str, package_source: &str) -> (String, String) {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("gcc-ts-bundler-cjs-abi-{label}-{unique}"));
+    let package_file = root.join("node_modules/demo/index.js");
+    let consumer_file = root.join("src/consumer.js");
+    fs::create_dir_all(package_file.parent().unwrap()).unwrap();
+    fs::create_dir_all(consumer_file.parent().unwrap()).unwrap();
+    fs::write(&package_file, package_source).unwrap();
+    fs::write(
+        &consumer_file,
+        // namespace read (site C1) and named import (site C2)
+        "import * as ns from \"demo\";\nimport { alpha } from \"demo\";\nexport const value = ns.beta + alpha;\n",
+    )
+    .unwrap();
+
+    let package_aliases = vec![super::PackageAliasInput {
+        packageName: "demo".to_string(),
+        subpath: ".".to_string(),
+        targetPath: package_file.to_string_lossy().to_string(),
+    }];
+    let commonjs_specifiers = HashSet::from(["demo".to_string()]);
+    let file_names = vec![
+        package_file.to_string_lossy().to_string(),
+        consumer_file.to_string_lossy().to_string(),
+    ];
+
+    let mut context = empty_context();
+    context.workspace_dir = root.clone();
+    context.commonjs_specifiers = commonjs_specifiers.clone();
+    context.package_aliases = package_aliases.clone();
+    let opacity = super::cjs_opacity::collect_opaque_commonjs(
+        &file_names,
+        &commonjs_specifiers,
+        &package_aliases,
+    )
+    .expect("opacity");
+    context.opaque_commonjs = std::sync::Arc::new(opacity);
+
+    GLOBALS.set(&Globals::new(), || {
+        (
+            transform_source_file(&package_file, &context)
+                .expect("producer")
+                .code,
+            transform_source_file(&consumer_file, &context)
+                .expect("consumer")
+                .code,
+        )
+    })
+}
+
+#[test]
+fn cjs_export_abi_agrees_across_all_three_emission_sites() {
+    // A name quoted at one site and renamed at another resolves to `undefined`
+    // at runtime, so the producer write, the namespace read and the named-import
+    // destructure must always agree. This asserts the agreement in both
+    // directions rather than either form on its own.
+    let (transparent_producer, transparent_consumer) =
+        transform_cjs_abi_fixture("transparent", "exports.alpha = 1;\nexports.beta = 2;\n");
+    assert!(
+        transparent_producer.contains("module[\"exports\"].alpha = 1;"),
+        "producer: {transparent_producer}"
+    );
+    assert!(
+        transparent_consumer.contains("ns.beta"),
+        "consumer: {transparent_consumer}"
+    );
+    assert!(
+        transparent_consumer.contains(".alpha") && !transparent_consumer.contains("[\"alpha\"]"),
+        "consumer: {transparent_consumer}"
+    );
+
+    let (opaque_producer, opaque_consumer) = transform_cjs_abi_fixture(
+        "opaque",
+        "exports.alpha = 1;\nexports.beta = 2;\nregister(Object.keys(exports));\n",
+    );
+    assert!(
+        opaque_producer.contains("module[\"exports\"][\"alpha\"] = 1;"),
+        "producer: {opaque_producer}"
+    );
+    assert!(
+        opaque_consumer.contains("ns[\"beta\"]"),
+        "consumer: {opaque_consumer}"
+    );
+    assert!(
+        opaque_consumer.contains("[\"alpha\"]"),
+        "consumer: {opaque_consumer}"
+    );
+}
+
+#[test]
+fn reflecting_commonjs_module_keeps_literal_export_names() {
+    // `Object.keys` over its own exports means the names are readable as data;
+    // the whole package surface must stay literal.
+    let (producer, consumer) = transform_cjs_abi_fixture(
+        "reflecting",
+        "exports.alpha = 1;\nexports.beta = 2;\nmodule.exports.names = Object.keys(exports);\n",
+    );
+    assert!(
+        producer.contains("module[\"exports\"][\"alpha\"] = 1;"),
+        "{producer}"
+    );
+    assert!(
+        producer.contains("module[\"exports\"][\"beta\"] = 2;"),
+        "{producer}"
+    );
+    assert!(consumer.contains("ns[\"beta\"]"), "{consumer}");
+}
+
+#[test]
+fn non_reflecting_commonjs_module_renames_export_names() {
+    let (producer, consumer) =
+        transform_cjs_abi_fixture("plain", "exports.alpha = 1;\nexports.beta = 2;\n");
+    assert!(
+        producer.contains("module[\"exports\"].alpha = 1;"),
+        "{producer}"
+    );
+    assert!(
+        !producer.contains("module[\"exports\"][\"alpha\"]"),
+        "{producer}"
+    );
+    assert!(consumer.contains("ns.beta"), "{consumer}");
+    assert!(!consumer.contains("ns[\"beta\"]"), "{consumer}");
+}
+
+#[test]
+fn consumer_side_reflection_pins_the_package_surface() {
+    // The reflection is in the *importer*, not the package: the verdict must
+    // still reach the producer, or the producer would rename what the consumer
+    // reads as a string.
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("gcc-ts-bundler-cjs-consumer-{unique}"));
+    let package_file = root.join("node_modules/demo/index.js");
+    let consumer_file = root.join("src/consumer.js");
+    fs::create_dir_all(package_file.parent().unwrap()).unwrap();
+    fs::create_dir_all(consumer_file.parent().unwrap()).unwrap();
+    fs::write(&package_file, "exports.alpha = 1;\n").unwrap();
+    fs::write(
+        &consumer_file,
+        "import * as ns from \"demo\";\nexport const keys = Object.keys(ns);\nexport const dyn = (k) => ns[k];\n",
+    )
+    .unwrap();
+
+    let package_aliases = vec![super::PackageAliasInput {
+        packageName: "demo".to_string(),
+        subpath: ".".to_string(),
+        targetPath: package_file.to_string_lossy().to_string(),
+    }];
+    let commonjs_specifiers = HashSet::from(["demo".to_string()]);
+    let opacity = super::cjs_opacity::collect_opaque_commonjs(
+        &[
+            package_file.to_string_lossy().to_string(),
+            consumer_file.to_string_lossy().to_string(),
+        ],
+        &commonjs_specifiers,
+        &package_aliases,
+    )
+    .expect("opacity");
+
+    assert!(opacity.specifier_is_opaque("demo"));
+    assert!(opacity.file_is_opaque(&package_file));
+}
+
+#[test]
+fn ts_export_assignment_does_not_reference_module_exports() {
+    // `export = x` used to reach SWC's TypeScript strip untouched, which lowers
+    // it to `module.exports = x`. Every output shape here is a `goog.module`,
+    // where `module` is unbound, so Closure rejected the file with
+    // JSC_UNDEFINED_VARIABLE for *any* source using `export =`.
+    let file_path = PathBuf::from("/tmp/src/es5_exports.ts");
+    let source = "let x = 0;\nexport = x;\n";
+    let output = GLOBALS
+        .set(&Globals::new(), || {
+            transform_program(
+                parse_module(&file_path, source).expect("module"),
+                &file_path,
+                &empty_context(),
+                None,
+            )
+            .and_then(|program| print_program(&program))
+        })
+        .expect("transform");
+
+    assert!(!output.contains("module.exports"), "{output}");
+    assert!(!output.contains("module["), "{output}");
+    assert!(output.contains("x = 0"), "{output}");
+}
+
+#[test]
+fn ts_export_assignment_of_a_call_keeps_the_expression() {
+    let file_path = PathBuf::from("/tmp/src/reexport.ts");
+    let source = "function make() { return 1; }\nexport = make();\n";
+    let output = GLOBALS
+        .set(&Globals::new(), || {
+            transform_program(
+                parse_module(&file_path, source).expect("module"),
+                &file_path,
+                &empty_context(),
+                None,
+            )
+            .and_then(|program| print_program(&program))
+        })
+        .expect("transform");
+
+    assert!(!output.contains("module.exports"), "{output}");
+    assert!(output.contains("make()"), "{output}");
+}
+
+#[test]
+fn ambient_declarations_are_not_program_declared_names() {
+    // `declare` emits no runtime binding, so the name is *not* provided by the
+    // program and must stay eligible for the ambient extern channel. Counting
+    // it as program-declared suppressed the extern its own reference needed
+    // (JSC_UNDEFINED_VARIABLE: Component).
+    let file_path = PathBuf::from("/tmp/src/decorated.ts");
+    let source = [
+        "declare const Component: any;",
+        "declare function ambientCall(): void;",
+        "declare class AmbientClass {}",
+        "const realConst = 1;",
+        "function realFn() {}",
+        "class RealClass {}",
+        "export const use = [Component, ambientCall, AmbientClass, realConst, realFn, RealClass];",
+        "",
+    ]
+    .join("\n");
+    let module = parse_module(&file_path, &source).expect("module");
+    let names = super::externs::collect_program_declared_names_for_test(&[module]);
+
+    for ambient in ["Component", "ambientCall", "AmbientClass"] {
+        assert!(!names.contains(ambient), "{ambient} in {names:?}");
+    }
+    for declared in ["realConst", "realFn", "RealClass"] {
+        assert!(
+            names.contains(declared),
+            "{declared} missing from {names:?}"
+        );
+    }
+}
+
+/// The marker spelling is an ABI: the `in` probe and the property read that
+/// follows it must be the *same* name, or the probe silently answers "no" and
+/// the consumer binds the namespace object instead of the exports bag.
+const CJS_EXPORT_MARKER: &str = "__cjsExports";
+
+/// Anything that can rewrite a property name into a different symbol. If one of
+/// these ever reaches the marker, the string and the property stop agreeing.
+const RENAME_PRIMITIVES: [&str; 3] = [
+    "JSCompiler_renameProperty",
+    "goog.reflect.objectProperty",
+    "goog.reflect.object",
+];
+
+/// Extracts every `"<quoted>" in <ns> ? <ns>.<dotted> : <ns>` interop probe as
+/// the (quoted, dotted) pair whose agreement is the whole invariant.
+fn cjs_interop_probes(source: &str) -> Vec<(String, String)> {
+    let mut probes = Vec::new();
+    for (index, _) in source.match_indices(" in ") {
+        let head = &source[..index];
+        let Some(close) = head.rfind('"') else {
+            continue;
+        };
+        let Some(open) = head[..close].rfind('"') else {
+            continue;
+        };
+        let tail = &source[index + " in ".len()..];
+        let (Some(question), Some(colon)) = (tail.find(" ? "), tail.find(" : ")) else {
+            continue;
+        };
+        if question > colon {
+            continue;
+        }
+        let consequent = &tail[question + 3..colon];
+        let Some(dot) = consequent.rfind('.') else {
+            continue;
+        };
+        probes.push((
+            head[open + 1..close].to_string(),
+            consequent[dot + 1..].trim().to_string(),
+        ));
+    }
+    probes
+}
+
+fn collect_rust_sources(directory: &std::path::Path, into: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(directory).expect("read crate source dir") {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            collect_rust_sources(&path, into);
+        } else if path.extension().is_some_and(|ext| ext == "rs")
+            && path.file_name().is_some_and(|name| name != "tests.rs")
+        {
+            into.push(path);
+        }
+    }
+}
+
+/// The companion guard to `cjs_export_abi_agrees_across_all_three_emission_sites`.
+///
+/// That test compares the three emitters to each other, so it passes even when
+/// all three are wrong in the same direction — it passed throughout the W2
+/// mangling experiment that produced a silent miscompile. This one anchors the
+/// marker to a fixed spelling instead, and fails on the two ways a fourth path
+/// can appear: a rename primitive reaching the marker, and a new file emitting
+/// it without anyone revisiting the ABI.
+#[test]
+fn cjs_export_marker_is_never_reachable_through_a_rename_primitive() {
+    // 1. Dynamic: the emitted interop probe must be self-consistent. This is
+    //    the exact desync W2-A reproduced — `"M" in aa ? aa.__cjsExports : aa`,
+    //    where the string was renamed and the property was not.
+    let chain = transform_cjs_interop_chain_fixture("rename-guard");
+    let probes = cjs_interop_probes(&chain);
+    assert!(
+        !probes.is_empty(),
+        "fixture no longer emits the interop probe, so this test proves nothing: {chain}"
+    );
+    for (quoted, dotted) in &probes {
+        assert_eq!(
+            quoted, CJS_EXPORT_MARKER,
+            "probe string desynced from the ABI marker: {chain}"
+        );
+        assert_eq!(
+            dotted, CJS_EXPORT_MARKER,
+            "probe property desynced from the ABI marker: {chain}"
+        );
+    }
+    // The quoted marker must survive for opaque packages specifically.
+    assert!(
+        chain.contains(&format!("\"{CJS_EXPORT_MARKER}\" in ")),
+        "opaque output lost the quoted marker: {chain}"
+    );
+    for primitive in RENAME_PRIMITIVES {
+        assert!(
+            !chain.contains(primitive),
+            "emitted output routes through {primitive}: {chain}"
+        );
+    }
+
+    // 2. Static: no rename primitive may co-occur with the marker anywhere in
+    //    the crate, and the set of emitting files is pinned so a fourth
+    //    emission path cannot land unnoticed.
+    let mut sources = Vec::new();
+    collect_rust_sources(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut sources,
+    );
+    let mut emitting = BTreeSet::new();
+    for source in &sources {
+        let text = fs::read_to_string(source).expect("read crate source");
+        if !text.contains(CJS_EXPORT_MARKER) {
+            continue;
+        }
+        for line in text.lines() {
+            if !line.contains(CJS_EXPORT_MARKER) {
+                continue;
+            }
+            for primitive in RENAME_PRIMITIVES {
+                assert!(
+                    !line.contains(primitive),
+                    "{} reaches the CommonJS export marker through {primitive}: {line}",
+                    source.display()
+                );
+            }
+        }
+        emitting.insert(
+            source
+                .strip_prefix(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"))
+                .expect("relative source path")
+                .to_string_lossy()
+                .replace('\\', "/"),
+        );
+    }
+    let expected: BTreeSet<String> = [
+        "support_files.rs",
+        "transpile/context.rs",
+        "transpile/emit_hoist.rs",
+        "transpile/emit_runtime.rs",
+        "transpile/hoist.rs",
+        "transpile/imports_exports/bindings.rs",
+        "transpile/js_compat/ast.rs",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    assert_eq!(
+        emitting, expected,
+        "the set of files mentioning the CommonJS export marker changed. A new \
+         emission path must agree with the existing ones on the literal \
+         spelling and must not route through a rename primitive; update this \
+         list once that is verified."
+    );
+}
+
+fn transform_cjs_interop_chain_fixture(label: &str) -> String {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("gcc-ts-bundler-cjs-chain-{label}-{unique}"));
+    let demo = root.join("node_modules/demo/index.js");
+    let other = root.join("node_modules/other/index.js");
+    fs::create_dir_all(demo.parent().unwrap()).unwrap();
+    fs::create_dir_all(other.parent().unwrap()).unwrap();
+    // `demo` is a CommonJS file that *requires* another CommonJS package, which
+    // is the path that emits the `"__cjsExports" in ns ? ns.__cjsExports : ns`
+    // interop probe.
+    fs::write(&demo, "const other = require(\"other\");\nexports.alpha = other.x;\nregister(Object.keys(exports));\n").unwrap();
+    fs::write(&other, "exports.x = 1;\n").unwrap();
+
+    let package_aliases = vec![
+        super::PackageAliasInput {
+            packageName: "demo".to_string(),
+            subpath: ".".to_string(),
+            targetPath: demo.to_string_lossy().to_string(),
+        },
+        super::PackageAliasInput {
+            packageName: "other".to_string(),
+            subpath: ".".to_string(),
+            targetPath: other.to_string_lossy().to_string(),
+        },
+    ];
+    let commonjs_specifiers = HashSet::from(["demo".to_string(), "other".to_string()]);
+    let file_names = vec![
+        demo.to_string_lossy().to_string(),
+        other.to_string_lossy().to_string(),
+    ];
+
+    let mut context = empty_context();
+    context.workspace_dir = root.clone();
+    context.commonjs_specifiers = commonjs_specifiers.clone();
+    context.package_aliases = package_aliases.clone();
+    let opacity = super::cjs_opacity::collect_opaque_commonjs(
+        &file_names,
+        &commonjs_specifiers,
+        &package_aliases,
+    )
+    .expect("opacity");
+    context.opaque_commonjs = std::sync::Arc::new(opacity);
+
+    GLOBALS.set(&Globals::new(), || {
+        transform_source_file(&demo, &context).expect("chain").code
+    })
 }

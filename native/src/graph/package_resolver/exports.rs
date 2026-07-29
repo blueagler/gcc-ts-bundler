@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use serde_json::Value;
 
 pub(crate) fn select_package_export_target(
@@ -78,7 +80,7 @@ pub(super) fn resolve_package_exports_with_conditions(
 
 pub(super) fn resolve_browser_subpath(
     package_json: &Value,
-    subpath: &str,
+    requested_path: &str,
 ) -> std::result::Result<Option<String>, String> {
     let Some(browser_field) = package_json.get("browser") else {
         return Ok(None);
@@ -88,12 +90,26 @@ pub(super) fn resolve_browser_subpath(
         return Ok(None);
     };
 
-    for key in [subpath.to_string(), format!("{subpath}.js")] {
+    let requested_path = requested_path.replace('\\', "/");
+    let normalized_path = format!("./{}", requested_path.trim_start_matches("./"));
+    let mut keys = vec![requested_path];
+    if keys[0] != normalized_path {
+        keys.push(normalized_path);
+    }
+    for extension in ["js", "json"] {
+        for key in keys.clone() {
+            if Path::new(&key).extension().is_none() {
+                keys.push(format!("{key}.{extension}"));
+            }
+        }
+    }
+
+    for key in keys {
         if let Some(value) = object.get(&key) {
             return match value {
                 Value::String(target) => Ok(Some(target.clone())),
                 Value::Bool(false) | Value::Null => Err(format!(
-                    "Package subpath \"{subpath}\" is disabled by the browser field"
+                    "Package path \"{key}\" is disabled by the browser field"
                 )),
                 _ => Ok(None),
             };

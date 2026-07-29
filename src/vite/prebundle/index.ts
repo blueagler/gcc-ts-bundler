@@ -6,6 +6,13 @@ import type {
   CapturedRuntimeModule,
   MaterializedGraph,
 } from "../internal-types";
+import {
+  hashTypeMetadataValue,
+  parseRuntimeExportGraph,
+  shouldBypassTypeMetadataFusion,
+  withOneToOneTypeProvenance,
+} from "../type-metadata";
+import type { PrebundleExportFacade } from "../type-metadata";
 import { createBarrelFlattener } from "./barrels";
 import {
   canonicalizeDuplicateLazyEntryOutputs,
@@ -63,26 +70,45 @@ export async function prebundleMaterializedDependencies(input: {
   outputSrcDir?: string;
 }): Promise<MaterializedGraph> {
   const context = createPrebundleContext(input);
-  const { bundleRequests, regionLabelsByAuthoredFile } =
-    await collectBundleRequests(context, input.dynamicRootModuleIds);
+  // ponytail: preserve the whole graph until symbol-level fusion can keep typed
+  // dependency-source bindings exact; narrow this to typed regions when needed.
+  if (
+    context.materialized.modules.some(
+      (module) =>
+        !context.authoredFiles.has(normalizePath(module.filePath)) &&
+        shouldBypassTypeMetadataFusion(module),
+    )
+  ) {
+    return mirrorGraphWithoutBundles(context);
+  }
+  const {
+    bundleRequests,
+    dynamicRootRequestKeyByTargetFilePath,
+    regionLabelsByAuthoredFile,
+  } = await collectBundleRequests(context, input.dynamicRootModuleIds);
   if (bundleRequests.size === 0) {
     return mirrorGraphWithoutBundles(context);
   }
 
-  const bundles = await buildDependencyBundles(context, bundleRequests);
+  const bundles = await buildDependencyBundles(
+    context,
+    bundleRequests,
+    new Set(dynamicRootRequestKeyByTargetFilePath.values()),
+  );
   if (!bundles) {
     return context.materialized;
   }
 
   const authoredEntries = await rewriteAuthoredModules({
     collapsedEntryOutputByPath: bundles.collapsedEntryOutputByPath,
+    dynamicRootRequestKeyByTargetFilePath,
     materialized: context.materialized,
     outputByRequestKey: bundles.canonicalizedEntryOutputs.outputByRequestKey,
     regionLabelsByAuthoredFile,
     requestGroupKeyByTarget: bundles.requestGroupKeyByTarget,
     runtimeSrcDir: context.runtimeSrcDir,
   });
-  return assembleGraph(context, bundles, authoredEntries);
+  return await assembleGraph(context, bundles, authoredEntries);
 }
 
 function createPrebundleContext(input: {
@@ -125,14 +151,15 @@ async function collectBundleRequests(
   const entryFilePaths = context.materialized.entries.map((entry) =>
     normalizePath(path.resolve(context.materialized.srcDir, entry)),
   );
-  const dynamicRootFilePaths = dynamicRootModuleIds
-    .map((moduleId) => context.moduleBySourceId.get(moduleId)?.filePath)
-    .filter(
-      (filePath): filePath is string =>
-        typeof filePath === "string" &&
-        context.authoredFiles.has(normalizePath(filePath)),
-    )
-    .map((filePath) => normalizePath(filePath))
+  const dynamicRootModulesByFilePath = new Map<string, CapturedRuntimeModule>();
+  for (const moduleId of dynamicRootModuleIds) {
+    const module = context.moduleBySourceId.get(moduleId);
+    if (module) {
+      dynamicRootModulesByFilePath.set(normalizePath(module.filePath), module);
+    }
+  }
+  const dynamicRootFilePaths = [...dynamicRootModulesByFilePath.keys()]
+    .filter((filePath) => context.authoredFiles.has(filePath))
     .sort((left, right) => left.localeCompare(right));
 
   const regionLabelsByAuthoredFile = await assignRegionLabels({
@@ -187,7 +214,36 @@ async function collectBundleRequests(
     }
   }
 
-  return { bundleRequests, regionLabelsByAuthoredFile };
+  const dynamicRootRequestKeyByTargetFilePath = new Map<string, string>();
+  for (const [targetFilePath, targetModule] of [
+    ...dynamicRootModulesByFilePath.entries(),
+  ].sort(([left], [right]) => left.localeCompare(right))) {
+    if (context.authoredFiles.has(targetFilePath)) {
+      continue;
+    }
+    const regionKey = `dynamic:${targetFilePath}`;
+    const requestKey = `${regionKey}\u0000${targetFilePath}`;
+    const parsedTarget = await context.parseModule(targetFilePath);
+    bundleRequests.set(requestKey, {
+      exportedNames: parsedTarget.exportedNames,
+      hasDefaultExport: parsedTarget.hasDefaultExport,
+      needsDefault: parsedTarget.hasDefaultExport,
+      needsExportAll: true,
+      needsSideEffectOnly: false,
+      regionKey,
+      sourceModuleIds: [...targetModule.sourceModuleIds],
+      targetFilePath,
+      targetModule,
+      usedNamedExports: new Set<string>(),
+    });
+    dynamicRootRequestKeyByTargetFilePath.set(targetFilePath, requestKey);
+  }
+
+  return {
+    bundleRequests,
+    dynamicRootRequestKeyByTargetFilePath,
+    regionLabelsByAuthoredFile,
+  };
 }
 
 /** No dependency bundles: mirror the graph into the runtime dir unchanged. */
@@ -196,7 +252,10 @@ async function mirrorGraphWithoutBundles(
 ): Promise<MaterializedGraph> {
   const { materialized, runtimeSrcDir } = context;
   if (runtimeSrcDir === materialized.srcDir) {
-    return materialized;
+    return {
+      ...materialized,
+      modules: materialized.modules.map(withOneToOneTypeProvenance),
+    };
   }
   const runtimeEntries = await Promise.all(
     [
@@ -226,7 +285,9 @@ async function mirrorGraphWithoutBundles(
       )
       .sort((left, right) => left.localeCompare(right)),
     modules: materialized.modules.map((module) =>
-      remapRuntimeModuleToSrcDir(module, materialized.srcDir, runtimeSrcDir),
+      withOneToOneTypeProvenance(
+        remapRuntimeModuleToSrcDir(module, materialized.srcDir, runtimeSrcDir),
+      ),
     ),
     srcDir: runtimeSrcDir,
   };
@@ -236,6 +297,7 @@ async function mirrorGraphWithoutBundles(
 async function buildDependencyBundles(
   context: PrebundleContext,
   bundleRequests: Map<string, RegionBundleRequest>,
+  preservedRequestKeys: Set<string>,
 ): Promise<DependencyBundleSet | null> {
   const { materialized, runtimeSrcDir } = context;
   const { groupedRequests, requestGroupKeyByTarget } = groupBundleRequests([
@@ -344,8 +406,17 @@ async function buildDependencyBundles(
     },
   );
 
+  const preservedEntryOutputPaths = new Set(
+    [...preservedRequestKeys]
+      .map((requestKey) =>
+        canonicalizedEntryOutputs.outputByRequestKey.get(requestKey),
+      )
+      .filter((filePath): filePath is string => filePath !== undefined),
+  );
   const collapsedEntryOutputByPath = await collectCollapsibleBundleEntryOutputs(
-    [...new Set(canonicalizedEntryOutputs.outputByRequestKey.values())],
+    [...new Set(canonicalizedEntryOutputs.outputByRequestKey.values())].filter(
+      (filePath) => !preservedEntryOutputPaths.has(filePath),
+    ),
   );
 
   return {
@@ -358,11 +429,11 @@ async function buildDependencyBundles(
 }
 
 /** Merge rewritten authored modules and bundle outputs into the final graph. */
-function assembleGraph(
+async function assembleGraph(
   context: PrebundleContext,
   bundles: DependencyBundleSet,
   authoredEntries: Array<{ content: string; relativePath: string }>,
-): MaterializedGraph {
+): Promise<MaterializedGraph> {
   const { authoredFiles, materialized, runtimeSrcDir } = context;
   const originalSourceIdsByFilePath = new Map(
     materialized.modules.map((module) => [
@@ -376,9 +447,10 @@ function assembleGraph(
       request.sourceModuleIds,
     ]),
   );
-  const bundledModules = collectBundledModules({
+  const bundledModules = await collectBundledModules({
     extraModules: bundles.canonicalizedEntryOutputs.canonicalModules,
     bundleSrcDir: materialized.srcDir,
+    exportFacadesByOutputPath: collectExportFacadesByOutputPath(bundles),
     metafile: bundles.metafile,
     omittedFilePaths: new Set([
       ...bundles.collapsedEntryOutputByPath.keys(),
@@ -398,10 +470,12 @@ function assembleGraph(
       ...materialized.modules
         .filter((module) => authoredFiles.has(normalizePath(module.filePath)))
         .map((module) =>
-          remapRuntimeModuleToSrcDir(
-            module,
-            materialized.srcDir,
-            runtimeSrcDir,
+          withOneToOneTypeProvenance(
+            remapRuntimeModuleToSrcDir(
+              module,
+              materialized.srcDir,
+              runtimeSrcDir,
+            ),
           ),
         ),
       ...bundledModules,
@@ -421,7 +495,7 @@ function assembleGraph(
   } satisfies MaterializedGraph;
 }
 
-function collectBundledModules(input: {
+async function collectBundledModules(input: {
   extraModules: CapturedRuntimeModule[];
   bundleSrcDir: string;
   metafile: NonNullable<Awaited<ReturnType<EsbuildBuild>>["metafile"]>;
@@ -429,7 +503,8 @@ function collectBundledModules(input: {
   originalSourceIdsByFilePath: Map<string, string[]>;
   outputSrcDir: string;
   syntheticSourceIdsByFilePath: Map<string, string[]>;
-}) {
+  exportFacadesByOutputPath: Map<string, PrebundleExportFacade[]>;
+}): Promise<CapturedRuntimeModule[]> {
   const modules: CapturedRuntimeModule[] = [];
 
   for (const [outputPath, metadata] of Object.entries(input.metafile.outputs)) {
@@ -459,23 +534,126 @@ function collectBundledModules(input: {
     if (input.omittedFilePaths.has(filePath)) {
       continue;
     }
+    const sourceModuleIdsSorted = [...sourceModuleIds].sort((left, right) =>
+      left.localeCompare(right),
+    );
+    const exportFacades = input.exportFacadesByOutputPath.get(filePath) ?? [];
+    let sourceText = "";
+    try {
+      sourceText = await fs.readFile(filePath, "utf8");
+    } catch {
+      // The build path owns missing-output errors. Metadata stays conservative.
+    }
+    const localNameByExport = new Map(
+      parseRuntimeExportGraph(filePath, sourceText).flatMap((fact) =>
+        fact.exportName && fact.localName
+          ? [[fact.exportName, fact.localName] as const]
+          : [],
+      ),
+    );
+    const resolvedFacades = exportFacades.map((facade) => ({
+      ...facade,
+      outputLocalName: localNameByExport.get(facade.outputExportName),
+    }));
     modules.push({
       filePath,
       id: filePath,
       relativePath: path
         .relative(input.outputSrcDir, filePath)
         .replace(/\\/g, "/"),
-      sourceModuleIds: [...sourceModuleIds].sort((left, right) =>
-        left.localeCompare(right),
-      ),
+      sourceModuleIds: sourceModuleIdsSorted,
+      typeMetadata: {
+        cacheKey: hashTypeMetadataValue({
+          exportFacades: resolvedFacades,
+          sourceHash: hashText(sourceText),
+          sourceModuleIds: sourceModuleIdsSorted,
+        }),
+        exportFacades: resolvedFacades,
+        kind: "fused",
+        sourceMappings: [],
+      },
     });
   }
 
-  modules.push(...input.extraModules);
+  modules.push(
+    ...input.extraModules.map((module) => {
+      const exportFacades =
+        input.exportFacadesByOutputPath.get(normalizePath(module.filePath)) ??
+        [];
+      return {
+        ...module,
+        typeMetadata: {
+          cacheKey: hashTypeMetadataValue({
+            exportFacades,
+            sourceModuleIds: module.sourceModuleIds,
+          }),
+          exportFacades,
+          kind: "fused" as const,
+          sourceMappings: [],
+        },
+      };
+    }),
+  );
 
   return modules.sort((left, right) =>
     left.relativePath.localeCompare(right.relativePath),
   );
+}
+
+function collectExportFacadesByOutputPath(bundles: DependencyBundleSet) {
+  const facadesByOutputPath = new Map<string, PrebundleExportFacade[]>();
+  for (const writtenRequest of bundles.writtenRequests) {
+    let outputFilePath =
+      bundles.canonicalizedEntryOutputs.outputByRequestKey.get(
+        writtenRequest.requestKey,
+      );
+    if (!outputFilePath) {
+      continue;
+    }
+    outputFilePath =
+      bundles.collapsedEntryOutputByPath.get(outputFilePath)
+        ?.directTargetFilePath ?? outputFilePath;
+    const facades = facadesByOutputPath.get(outputFilePath) ?? [];
+    for (const request of writtenRequest.requests) {
+      const outputNames = new Set(
+        request.needsExportAll
+          ? request.exportedNames
+          : [...request.usedNamedExports],
+      );
+      if (request.hasDefaultExport && request.needsDefault) {
+        outputNames.add("default");
+      }
+      for (const outputExportName of [...outputNames].sort()) {
+        facades.push({
+          facadeId: hashTypeMetadataValue({
+            originExportName: outputExportName,
+            originModuleId: request.targetModule.id,
+            outputExportName,
+            requestKey: writtenRequest.requestKey,
+          }),
+          originExportName: outputExportName,
+          originModuleId: request.targetModule.id,
+          outputExportName,
+        });
+      }
+    }
+    facadesByOutputPath.set(
+      outputFilePath,
+      [
+        ...new Map(
+          facades.map((facade) => [
+            `${facade.outputExportName}\0${facade.originModuleId}\0${facade.originExportName}`,
+            facade,
+          ]),
+        ).values(),
+      ].sort((left, right) =>
+        `${left.outputExportName}\0${left.originModuleId}`.localeCompare(
+          `${right.outputExportName}\0${right.originModuleId}`,
+        ),
+      ),
+    );
+  }
+  return facadesByOutputPath;
 }
 
 function remapRuntimeModuleToSrcDir(

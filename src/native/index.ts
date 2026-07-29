@@ -4,6 +4,7 @@ import path from "node:path";
 
 import {
   createBundleRequire,
+  createCurrentWorkingDirectoryRequire,
   getPackageRootFromBundle,
 } from "../shared/bundle-location";
 import { getErrorMessage, isRecord } from "../shared/validation";
@@ -57,25 +58,36 @@ function getTargetKey() {
 function loadNativeBinding(): unknown {
   const targetKey = getTargetKey();
   const packageName = SUPPORTED_TARGETS.get(targetKey);
-
-  const localFallbackPath = path.join(
-    getPackageRootFromBundle(),
-    "native",
-    "index.node",
-  );
-  if (fs.existsSync(localFallbackPath)) {
-    const binding: unknown = require(localFallbackPath);
-    return binding;
-  }
-
   const loadErrors: string[] = [];
 
-  if (packageName) {
-    try {
-      const binding: unknown = require(packageName);
+  try {
+    const localFallbackPath = path.join(
+      getPackageRootFromBundle(),
+      "native",
+      "index.node",
+    );
+    if (fs.existsSync(localFallbackPath)) {
+      const binding: unknown = require(localFallbackPath);
       return binding;
-    } catch (error) {
-      loadErrors.push(`${packageName}: ${getErrorMessage(error)}`);
+    }
+  } catch (error) {
+    loadErrors.push(`local development addon: ${getErrorMessage(error)}`);
+  }
+
+  if (packageName) {
+    const packageRequires: Array<[string, NodeRequire]> = [
+      ["bundle", require],
+      ["current working directory", createCurrentWorkingDirectoryRequire()],
+    ];
+    for (const [anchor, packageRequire] of packageRequires) {
+      try {
+        const binding: unknown = packageRequire(packageName);
+        return binding;
+      } catch (error) {
+        loadErrors.push(
+          `${packageName} from ${anchor}: ${getErrorMessage(error)}`,
+        );
+      }
     }
   }
 

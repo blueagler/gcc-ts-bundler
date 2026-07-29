@@ -73,9 +73,7 @@ function isDocRelevantTopLevelDeclaration(
     return true;
   }
 
-  return (
-    eligibility.hasJsDocText && ts.getJSDocCommentsAndTags(statement).length > 0
-  );
+  return eligibility.hasJsDocText && hasAttachedJsDoc(statement);
 }
 
 function collectExportedTopLevelDeclarationNames(sourceFile: ts.SourceFile) {
@@ -137,4 +135,11 @@ function canGenerateComponentObjectParamRecord(
 
 function isTypeScriptLikeSourceFile(sourceFile: ts.SourceFile) {
   return /\.(?:cts|mts|ts|tsx)$/u.test(sourceFile.fileName);
+}
+
+function hasAttachedJsDoc(node: ts.Node) {
+  if (ts.getJSDocCommentsAndTags(node).length > 0) {
+    return true;
+  }
+  return "jsDoc" in node && Array.isArray(node.jsDoc) && node.jsDoc.length > 0;
 }

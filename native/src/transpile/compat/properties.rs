@@ -41,28 +41,55 @@ pub(crate) fn collect_class_static_assignments(source_text: &str) -> Vec<(String
 
 /// Quotes object-literal keys passed to configured runtime calls (for
 /// example a framework's class-map helper) so Closure never renames keys
-/// that must match CSS class names at runtime. The call list comes from
-/// build options; framework presets supply their runtime's helpers.
+/// that must match runtime strings. Rules can also follow immutable object
+/// bindings and values produced by another literal-gated configured call.
 pub(crate) struct ClassMapCallCompatVisitor {
     calls: HashMap<String, Vec<ClassMapCallRule>>,
-    /// local import binding name -> imported export name, so compiler
-    /// aliases like `_createElementVNode` still match the configured callee.
-    import_aliases: HashMap<String, String>,
+    /// local import binding Id -> imported export name, so compiler aliases
+    /// still match configured callees without matching same-spelled shadows.
+    import_aliases: HashMap<Id, String>,
+    /// Immutable bindings proven to carry a value created from a literal
+    /// contract (for example `const button = createElement("button")`).
+    literal_contract_bindings: HashSet<Id>,
+    /// Immutable object bindings passed to configured calls. Vue hoists static
+    /// DOM props into module-level constants before calling its vnode helpers.
+    object_binding_rules: HashMap<Id, Vec<ClassMapCallRule>>,
 }
 
-/// `Some(None)` when no pattern was configured, `Some(Some(regex))` when it
-/// compiled, `None` when the caller supplied a pattern this engine cannot
-/// parse (the rule is then dropped rather than silently widened).
-fn compile_optional_pattern(pattern: Option<&str>) -> Option<Option<regex::Regex>> {
-    match pattern {
-        None => Some(None),
-        Some(pattern) => regex::Regex::new(pattern).ok().map(Some),
+fn compile_optional_pattern(
+    callee: &str,
+    field: &str,
+    pattern: Option<&str>,
+) -> std::result::Result<Option<regex::Regex>, String> {
+    pattern
+        .map(|pattern| {
+            regex::Regex::new(pattern).map_err(|error| {
+                format!(
+                    "Invalid compat.classMapCalls rule for callee {callee:?}: {field} uses unsupported regex syntax: {error}"
+                )
+            })
+        })
+        .transpose()
+}
+
+pub(crate) fn validate_class_map_calls(
+    calls: &[ClassMapCallInput],
+) -> std::result::Result<(), String> {
+    for call in calls {
+        compile_optional_pattern(&call.callee, "keyPattern", call.keyPattern.as_deref())?;
+        compile_optional_pattern(
+            &call.callee,
+            "keyExcludePattern",
+            call.keyExcludePattern.as_deref(),
+        )?;
     }
+    Ok(())
 }
 
 /// One configured quoting rule for a call: which argument holds the object
 /// literal, which keys it covers, and whether it is gated on another
-/// argument being a string literal.
+/// argument carrying literal-contract provenance.
+#[derive(Clone)]
 struct ClassMapCallRule {
     arg_index: usize,
     key_exclude_pattern: Option<regex::Regex>,
@@ -73,23 +100,21 @@ struct ClassMapCallRule {
 impl ClassMapCallCompatVisitor {
     pub(crate) fn new(
         calls: &[ClassMapCallInput],
-        import_aliases: HashMap<String, String>,
+        import_aliases: HashMap<Id, String>,
+        program: &Program,
     ) -> Self {
         let mut grouped: HashMap<String, Vec<ClassMapCallRule>> = HashMap::new();
         for call in calls {
-            // Fail closed: an unparsable pattern skips the rule instead of
-            // falling through to "quote every key", which would be a silent
-            // behavior change rather than a visible missing transform.
-            // (The regex crate has no lookahead or backreferences.)
-            let key_pattern = match compile_optional_pattern(call.keyPattern.as_deref()) {
-                Some(pattern) => pattern,
-                None => continue,
-            };
-            let key_exclude_pattern =
-                match compile_optional_pattern(call.keyExcludePattern.as_deref()) {
-                    Some(pattern) => pattern,
-                    None => continue,
-                };
+            // `transpile_sources` validates these before parallel file work.
+            let key_pattern =
+                compile_optional_pattern(&call.callee, "keyPattern", call.keyPattern.as_deref())
+                    .expect("class-map rules were validated");
+            let key_exclude_pattern = compile_optional_pattern(
+                &call.callee,
+                "keyExcludePattern",
+                call.keyExcludePattern.as_deref(),
+            )
+            .expect("class-map rules were validated");
             grouped
                 .entry(call.callee.clone())
                 .or_default()
@@ -102,88 +127,242 @@ impl ClassMapCallCompatVisitor {
                         .map(|index| index as usize),
                 });
         }
-        Self {
+        let mut visitor = Self {
             calls: grouped,
             import_aliases,
+            literal_contract_bindings: HashSet::new(),
+            object_binding_rules: HashMap::new(),
+        };
+        visitor.literal_contract_bindings = visitor.collect_literal_contract_bindings(program);
+        visitor.object_binding_rules = visitor.collect_object_binding_rules(program);
+        visitor
+    }
+
+    fn collect_literal_contract_bindings(&self, program: &Program) -> HashSet<Id> {
+        let mut collector = ConstBindingInitializerCollector::default();
+        program.visit_with(&mut collector);
+        let mut bindings = HashSet::new();
+        loop {
+            let mut changed = false;
+            for (binding, initializer) in &collector.initializers {
+                if !bindings.contains(binding)
+                    && self.expr_has_literal_contract(initializer, &bindings)
+                {
+                    bindings.insert(binding.clone());
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
         }
+        bindings
+    }
+
+    fn collect_object_binding_rules(
+        &self,
+        program: &Program,
+    ) -> HashMap<Id, Vec<ClassMapCallRule>> {
+        let mut binding_collector = ConstBindingInitializerCollector::default();
+        program.visit_with(&mut binding_collector);
+        let const_bindings = binding_collector
+            .initializers
+            .into_iter()
+            .map(|(binding, _)| binding)
+            .collect::<HashSet<_>>();
+        let mut collector = ObjectBindingEvidenceCollector {
+            const_bindings: &const_bindings,
+            rules: HashMap::new(),
+            visitor: self,
+        };
+        program.visit_with(&mut collector);
+        collector.rules
+    }
+
+    fn expr_has_literal_contract(&self, expr: &Expr, bindings: &HashSet<Id>) -> bool {
+        let expr = unwrap_transparent_expr(expr);
+        match expr {
+            Expr::Lit(Lit::Str(_)) => true,
+            Expr::Tpl(template) if template.exprs.is_empty() && template.quasis.len() == 1 => true,
+            Expr::Ident(ident) => bindings.contains(&ident.to_id()),
+            Expr::Call(call) => self.call_has_literal_contract(call, bindings),
+            _ => false,
+        }
+    }
+
+    fn call_has_literal_contract(&self, call: &CallExpr, bindings: &HashSet<Id>) -> bool {
+        let Some(rules) = self.rules_for_call(call) else {
+            return false;
+        };
+        rules.iter().any(|rule| {
+            rule.string_literal_arg_index.is_some_and(|index| {
+                call.args
+                    .get(index)
+                    .is_some_and(|arg| self.expr_has_literal_contract(&arg.expr, bindings))
+            })
+        })
+    }
+
+    fn gate_matches(&self, call: &CallExpr, rule: &ClassMapCallRule) -> bool {
+        rule.string_literal_arg_index.is_none_or(|index| {
+            call.args.get(index).is_some_and(|arg| {
+                self.expr_has_literal_contract(&arg.expr, &self.literal_contract_bindings)
+            })
+        })
+    }
+
+    fn rules_for_call(&self, call: &CallExpr) -> Option<&Vec<ClassMapCallRule>> {
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+        let (local_name, local_id) = callee_local_binding(callee)?;
+        let callee_name = local_id
+            .as_ref()
+            .and_then(|id| self.import_aliases.get(id))
+            .map(String::as_str)
+            .unwrap_or(local_name.as_str());
+        self.calls.get(callee_name)
     }
 }
 
-pub(crate) fn collect_import_alias_names(module: &Module) -> HashMap<String, String> {
-    let mut aliases = HashMap::new();
-    for item in &module.body {
-        let ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import_decl)) = item
-        else {
-            continue;
-        };
-        for specifier in &import_decl.specifiers {
-            if let ImportSpecifier::Named(named) = specifier {
-                let imported = named
-                    .imported
-                    .as_ref()
-                    .map(module_export_name_to_string)
-                    .unwrap_or_else(|| named.local.sym.to_string());
-                aliases.insert(named.local.sym.to_string(), imported);
+#[derive(Default)]
+struct ConstBindingInitializerCollector {
+    initializers: Vec<(Id, Box<Expr>)>,
+}
+
+impl Visit for ConstBindingInitializerCollector {
+    fn visit_var_decl(&mut self, declaration: &VarDecl) {
+        if declaration.kind == VarDeclKind::Const {
+            for declarator in &declaration.decls {
+                let (Pat::Ident(binding), Some(initializer)) = (&declarator.name, &declarator.init)
+                else {
+                    continue;
+                };
+                self.initializers
+                    .push((binding.id.to_id(), initializer.clone()));
             }
         }
+        declaration.visit_children_with(self);
     }
-    aliases
+}
+
+struct ObjectBindingEvidenceCollector<'a> {
+    const_bindings: &'a HashSet<Id>,
+    rules: HashMap<Id, Vec<ClassMapCallRule>>,
+    visitor: &'a ClassMapCallCompatVisitor,
+}
+
+impl Visit for ObjectBindingEvidenceCollector<'_> {
+    fn visit_call_expr(&mut self, call: &CallExpr) {
+        if let Some(rules) = self.visitor.rules_for_call(call) {
+            for rule in rules {
+                if !self.visitor.gate_matches(call, rule) {
+                    continue;
+                }
+                let Some(argument) = call.args.get(rule.arg_index) else {
+                    continue;
+                };
+                let Expr::Ident(binding) = unwrap_transparent_expr(&argument.expr) else {
+                    continue;
+                };
+                let binding = binding.to_id();
+                if self.const_bindings.contains(&binding) {
+                    self.rules.entry(binding).or_default().push(rule.clone());
+                }
+            }
+        }
+        call.visit_children_with(self);
+    }
+}
+
+fn unwrap_transparent_expr(mut expr: &Expr) -> &Expr {
+    while let Expr::Paren(parenthesized) = expr {
+        expr = &parenthesized.expr;
+    }
+    expr
+}
+
+fn object_literal_mut(expr: &mut Expr) -> Option<&mut swc_core::ecma::ast::ObjectLit> {
+    match expr {
+        Expr::Object(object) => Some(object),
+        Expr::Paren(parenthesized) => object_literal_mut(&mut parenthesized.expr),
+        _ => None,
+    }
+}
+
+fn callee_local_binding(callee: &Expr) -> Option<(String, Option<Id>)> {
+    match unwrap_transparent_expr(callee) {
+        Expr::Ident(ident) => Some((ident.sym.to_string(), Some(ident.to_id()))),
+        Expr::Member(member) => {
+            let name = match &member.prop {
+                MemberProp::Ident(prop) => prop.sym.to_string(),
+                // CommonJS namespace access is quoted before this pass runs.
+                MemberProp::Computed(computed) => string_literal_expr(&computed.expr)?,
+                MemberProp::PrivateName(_) => return None,
+            };
+            Some((name, None))
+        }
+        _ => None,
+    }
+}
+
+fn string_literal_expr(expr: &Expr) -> Option<String> {
+    match unwrap_transparent_expr(expr) {
+        Expr::Lit(Lit::Str(value)) => Some(value.value.to_string_lossy().to_string()),
+        Expr::Tpl(template) if template.exprs.is_empty() && template.quasis.len() == 1 => {
+            template.quasis.first().map(|quasi| {
+                quasi
+                    .cooked
+                    .as_ref()
+                    .map(|value| value.to_string_lossy().to_string())
+                    .unwrap_or_else(|| quasi.raw.to_string())
+            })
+        }
+        _ => None,
+    }
 }
 
 impl VisitMut for ClassMapCallCompatVisitor {
+    fn visit_mut_var_declarator(&mut self, declarator: &mut VarDeclarator) {
+        declarator.visit_mut_children_with(self);
+        let Pat::Ident(binding) = &declarator.name else {
+            return;
+        };
+        let Some(rules) = self.object_binding_rules.get(&binding.id.to_id()).cloned() else {
+            return;
+        };
+        let Some(initializer) = &mut declarator.init else {
+            return;
+        };
+        let Some(object) = object_literal_mut(initializer) else {
+            return;
+        };
+        for rule in rules {
+            quote_object_literal_keys(
+                object,
+                rule.key_pattern.as_ref(),
+                rule.key_exclude_pattern.as_ref(),
+            );
+        }
+    }
+
     fn visit_mut_call_expr(&mut self, call: &mut CallExpr) {
         call.visit_mut_children_with(self);
-
-        let Callee::Expr(callee) = &call.callee else {
+        let Some(rules) = self.rules_for_call(call).cloned() else {
             return;
         };
-        // Bare identifier (`_createElementVNode(...)`, the shape Vue's SFC
-        // compiler emits) or a member call (`React.createElement(...)`, what
-        // swc's classic JSX transform emits). Member calls match on the
-        // property name; configuration is opt-in per callee, so the
-        // namespace is not part of the contract.
-        let local_name = match callee.as_ref() {
-            Expr::Ident(ident) => ident.sym.to_string(),
-            Expr::Member(member) => match &member.prop {
-                MemberProp::Ident(prop) => prop.sym.to_string(),
-                // CommonJS namespace access is quoted before this pass runs,
-                // so `React.createElement` reaches us as
-                // `React["createElement"]`.
-                MemberProp::Computed(computed) => match computed.expr.as_ref() {
-                    Expr::Lit(Lit::Str(value)) => value.value.to_string_lossy().to_string(),
-                    _ => return,
-                },
-                _ => return,
-            },
-            _ => return,
-        };
-        let callee_name = self
-            .import_aliases
-            .get(&local_name)
-            .cloned()
-            .unwrap_or(local_name);
-        let callee_name = callee_name.as_str();
-        let Some(arg_rules) = self.calls.get(callee_name) else {
-            return;
-        };
-        for rule in arg_rules {
-            if let Some(gate_index) = rule.string_literal_arg_index {
-                let is_string_literal = call
-                    .args
-                    .get(gate_index)
-                    .is_some_and(|arg| matches!(arg.expr.as_ref(), Expr::Lit(Lit::Str(_))));
-                if !is_string_literal {
-                    continue;
-                }
+        for rule in rules {
+            if !self.gate_matches(call, &rule) {
+                continue;
             }
-            let Some(class_map) = call.args.get_mut(rule.arg_index) else {
+            let Some(argument) = call.args.get_mut(rule.arg_index) else {
                 continue;
             };
-            let Expr::Object(class_map) = class_map.expr.as_mut() else {
+            let Some(object) = object_literal_mut(&mut argument.expr) else {
                 continue;
             };
             quote_object_literal_keys(
-                class_map,
+                object,
                 rule.key_pattern.as_ref(),
                 rule.key_exclude_pattern.as_ref(),
             );

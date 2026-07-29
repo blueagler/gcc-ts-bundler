@@ -93,16 +93,29 @@ pub(super) fn collect_exports(
                             context,
                         )?;
                         for specifier in &named.specifiers {
-                            if let ExportSpecifier::Named(named_specifier) = specifier {
-                                let exported_name = export_name_from_module_export_name(
-                                    named_specifier
-                                        .exported
-                                        .as_ref()
-                                        .unwrap_or(&named_specifier.orig),
-                                );
-                                if exported_name != "default" {
-                                    export_names.insert(exported_name);
+                            match specifier {
+                                ExportSpecifier::Named(named_specifier) => {
+                                    let exported_name = export_name_from_module_export_name(
+                                        named_specifier
+                                            .exported
+                                            .as_ref()
+                                            .unwrap_or(&named_specifier.orig),
+                                    );
+                                    if exported_name != "default" {
+                                        export_names.insert(exported_name);
+                                    }
                                 }
+                                // `export * as ns from "./m"` exports one name:
+                                // the namespace object. Dropping it here left
+                                // the entry shim with nothing to re-export, so
+                                // ADVANCED pruned the whole module and every
+                                // consumer read `undefined`.
+                                ExportSpecifier::Namespace(namespace_specifier) => {
+                                    export_names.insert(export_name_from_module_export_name(
+                                        &namespace_specifier.name,
+                                    ));
+                                }
+                                ExportSpecifier::Default(_) => {}
                             }
                         }
                         if target_exports.hasDefaultExport

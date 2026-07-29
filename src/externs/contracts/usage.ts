@@ -1,5 +1,6 @@
 import ts from "typescript";
 
+import { renderStructuralExternLine } from "../barriers";
 import type { ExternAnalysisContext } from "../context";
 import {
   addMapSetValue,
@@ -461,10 +462,4 @@ function isStructuralBoundaryArgument(expression: ts.Expression) {
     expression.kind === ts.SyntaxKind.FalseKeyword ||
     expression.kind === ts.SyntaxKind.NullKeyword
   );
-}
-
-function renderStructuralExternLine(name: string) {
-  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)
-    ? `Object.prototype.${name};`
-    : `Object.prototype[${JSON.stringify(name)}];`;
 }

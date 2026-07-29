@@ -12,6 +12,8 @@ const files = [
 ];
 
 async function main() {
+  const checkOnly = process.argv.includes("--check");
+  const dirty = [];
   const cwd = process.cwd();
   const sourceFiles = [];
   for await (const file of new Bun.Glob("src/**/*.ts").scan({
@@ -31,8 +33,19 @@ async function main() {
     });
 
     if (formatted !== source) {
-      await writeFile(filePath, formatted, "utf-8");
+      if (checkOnly) {
+        dirty.push(file);
+      } else {
+        await writeFile(filePath, formatted, "utf-8");
+      }
     }
+  }
+
+  if (dirty.length > 0) {
+    console.error(
+      `format --check: ${dirty.length} file(s) need formatting:\n${dirty.join("\n")}`,
+    );
+    process.exit(1);
   }
 }
 

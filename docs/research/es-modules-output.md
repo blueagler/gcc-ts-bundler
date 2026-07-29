@@ -1,3 +1,10 @@
+> **Superseded (root-fix wave).** The `rewriteDecoratorMetadata` post-pass this
+> note treats as mandatory no longer exists. Reflective property keys and
+> decorator-metadata keys are preserved before Closure runs instead, and the ES5
+> helper bag was replaced by content-addressed helper pooling at emit. The
+> measurements below still describe the ESM-vs-script comparison faithfully;
+> the post-pass conclusions do not apply.
+
 # ES_MODULES chunk output — research + spike
 
 Status: **research spike, GO with gating.** No repo source was changed for this

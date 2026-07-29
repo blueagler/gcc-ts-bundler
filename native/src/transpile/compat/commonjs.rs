@@ -1,11 +1,20 @@
 use super::*;
 
+/// Consumer side of the CommonJS export ABI: rewrites `ns.foo` on a binding
+/// that resolves to a CommonJS module's export object.
+///
+/// This is the construct that keeps every CommonJS export name in the program
+/// un-renameable (react-spa: 72 of 89 invalidation suspects, 2,493 of 2,792
+/// cost units). It exists only because the producer writes literal keys, so
+/// the two sides are governed by one predicate,
+/// `cjs_opacity::OpaqueCommonJs` — see its doc comment for why they can never
+/// disagree.
 pub(crate) struct CommonJsNamespaceAccessVisitor {
-    bindings: HashSet<String>,
+    bindings: HashSet<Id>,
 }
 
 impl CommonJsNamespaceAccessVisitor {
-    pub(crate) fn new(bindings: HashSet<String>) -> Self {
+    pub(crate) fn new(bindings: HashSet<Id>) -> Self {
         Self { bindings }
     }
 }
@@ -23,7 +32,7 @@ impl VisitMut for CommonJsNamespaceAccessVisitor {
         let Expr::Ident(object_ident) = &*member.obj else {
             return;
         };
-        if !self.bindings.contains(object_ident.sym.as_ref()) {
+        if !self.bindings.contains(&object_ident.to_id()) {
             return;
         }
         let MemberProp::Ident(prop_ident) = &member.prop else {
@@ -86,7 +95,9 @@ fn create_throw_iife_statement(argument: Box<Expr>) -> Stmt {
 pub(crate) fn rewrite_commonjs_imports(
     module: &mut Module,
     commonjs_specifiers: &HashSet<String>,
-) -> HashSet<String> {
+    opaque_commonjs: &OpaqueCommonJs,
+    fresh_names: &mut FreshNameAllocator,
+) -> HashSet<Id> {
     if commonjs_specifiers.is_empty() {
         return HashSet::new();
     }
@@ -108,9 +119,20 @@ pub(crate) fn rewrite_commonjs_imports(
             continue;
         }
 
-        let (rewritten_items, bindings) =
-            rewrite_commonjs_import_decl(import_decl, &specifier, &mut import_counter);
-        namespace_bindings.extend(bindings);
+        // One decision, consulted here for both consumer sites: the quoted
+        // destructure keys below and the `CommonJsNamespaceAccessVisitor`
+        // bindings this function returns.
+        let quoted = opaque_commonjs.specifier_is_opaque(&specifier);
+        let (rewritten_items, bindings) = rewrite_commonjs_import_decl(
+            import_decl,
+            &specifier,
+            quoted,
+            &mut import_counter,
+            fresh_names,
+        );
+        if quoted {
+            namespace_bindings.extend(bindings);
+        }
         if rewritten_items.is_empty() {
             next_body.push(item);
         } else {
@@ -125,19 +147,21 @@ pub(crate) fn rewrite_commonjs_imports(
 fn rewrite_commonjs_import_decl(
     import_decl: &ImportDecl,
     specifier: &str,
+    quoted: bool,
     import_counter: &mut usize,
-) -> (Vec<ModuleItem>, HashSet<String>) {
-    let mut default_local: Option<String> = None;
-    let mut namespace_local: Option<String> = None;
-    let mut named_bindings: Vec<(String, String)> = Vec::new();
+    fresh_names: &mut FreshNameAllocator,
+) -> (Vec<ModuleItem>, HashSet<Id>) {
+    let mut default_local: Option<Ident> = None;
+    let mut namespace_local: Option<Ident> = None;
+    let mut named_bindings: Vec<(String, Ident)> = Vec::new();
 
     for import_specifier in &import_decl.specifiers {
         match import_specifier {
             ImportSpecifier::Default(default_specifier) => {
-                default_local = Some(default_specifier.local.sym.to_string());
+                default_local = Some(default_specifier.local.clone());
             }
             ImportSpecifier::Namespace(namespace_specifier) => {
-                namespace_local = Some(namespace_specifier.local.sym.to_string());
+                namespace_local = Some(namespace_specifier.local.clone());
             }
             ImportSpecifier::Named(named_specifier) => {
                 let imported = match &named_specifier.imported {
@@ -149,7 +173,7 @@ fn rewrite_commonjs_import_decl(
                     }
                     None => named_specifier.local.sym.to_string(),
                 };
-                named_bindings.push((imported, named_specifier.local.sym.to_string()));
+                named_bindings.push((imported, named_specifier.local.clone()));
             }
         }
     }
@@ -161,38 +185,45 @@ fn rewrite_commonjs_import_decl(
         // `React.forwardRef` read would miss them (the react-spa breakage).
         return (
             Vec::new(),
-            default_local.into_iter().collect::<HashSet<_>>(),
+            default_local
+                .into_iter()
+                .map(|ident| ident.to_id())
+                .collect::<HashSet<_>>(),
         );
     }
 
-    let helper_name = default_local.clone().unwrap_or_else(|| {
-        let helper = format!("__cjs_import_{import_counter}");
+    let helper_ident = default_local.clone().unwrap_or_else(|| {
+        let preferred = format!("__cjs_import_{}", *import_counter);
         *import_counter += 1;
-        helper
+        create_ident(&fresh_names.fresh(&preferred))
     });
 
-    let mut items = vec![create_default_import_item(&helper_name, specifier)];
+    let mut items = vec![create_default_import_item(&helper_ident, specifier)];
     let mut bindings = HashSet::new();
-    bindings.insert(helper_name.clone());
+    bindings.insert(helper_ident.to_id());
 
     if let Some(namespace_binding) = namespace_local {
-        if namespace_binding != helper_name {
-            items.push(create_const_alias_item(&namespace_binding, &helper_name));
+        if namespace_binding.to_id() != helper_ident.to_id() {
+            items.push(create_const_alias_item(&namespace_binding, &helper_ident));
         }
-        bindings.insert(namespace_binding);
+        bindings.insert(namespace_binding.to_id());
     }
 
     if !named_bindings.is_empty() {
-        items.push(create_named_destructure_item(&helper_name, &named_bindings));
+        items.push(create_named_destructure_item(
+            &helper_ident,
+            &named_bindings,
+            quoted,
+        ));
     }
 
     (items, bindings)
 }
 
-fn create_default_import_item(local_name: &str, specifier: &str) -> ModuleItem {
+fn create_default_import_item(local: &Ident, specifier: &str) -> ModuleItem {
     ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(ImportDecl {
         specifiers: vec![ImportSpecifier::Default(ImportDefaultSpecifier {
-            local: create_ident(local_name),
+            local: local.clone(),
             span: Default::default(),
         })],
         src: Box::new(Str {
@@ -207,7 +238,7 @@ fn create_default_import_item(local_name: &str, specifier: &str) -> ModuleItem {
     }))
 }
 
-fn create_const_alias_item(local_name: &str, target_name: &str) -> ModuleItem {
+fn create_const_alias_item(local: &Ident, target: &Ident) -> ModuleItem {
     ModuleItem::Stmt(Stmt::Decl(swc_core::ecma::ast::Decl::Var(Box::new(
         VarDecl {
             kind: VarDeclKind::Const,
@@ -218,16 +249,20 @@ fn create_const_alias_item(local_name: &str, target_name: &str) -> ModuleItem {
                 span: Default::default(),
                 definite: false,
                 name: Pat::Ident(BindingIdent {
-                    id: create_ident(local_name),
+                    id: local.clone(),
                     type_ann: None,
                 }),
-                init: Some(Box::new(Expr::Ident(create_ident(target_name)))),
+                init: Some(Box::new(Expr::Ident(target.clone()))),
             }],
         },
     ))))
 }
 
-fn create_named_destructure_item(source_name: &str, bindings: &[(String, String)]) -> ModuleItem {
+fn create_named_destructure_item(
+    source: &Ident,
+    bindings: &[(String, Ident)],
+    quoted: bool,
+) -> ModuleItem {
     ModuleItem::Stmt(Stmt::Decl(swc_core::ecma::ast::Decl::Var(Box::new(
         VarDecl {
             kind: VarDeclKind::Const,
@@ -240,13 +275,21 @@ fn create_named_destructure_item(source_name: &str, bindings: &[(String, String)
                     span: Default::default(),
                     definite: false,
                     name: Pat::Ident(BindingIdent {
-                        id: create_ident(local),
+                        id: local.clone(),
                         type_ann: None,
                     }),
                     init: Some(Box::new(Expr::Member(MemberExpr {
                         span: Default::default(),
-                        obj: Box::new(Expr::Ident(create_ident(source_name))),
-                        prop: create_string_computed_prop(imported),
+                        obj: Box::new(Expr::Ident(source.clone())),
+                        // Third access site on the same ABI as the producer
+                        // and `CommonJsNamespaceAccessVisitor`; all three read
+                        // one predicate so a name is never quoted on one side
+                        // and renamed on another.
+                        prop: if quoted {
+                            create_string_computed_prop(imported)
+                        } else {
+                            MemberProp::Ident(create_ident(imported).into())
+                        },
                     }))),
                 })
                 .collect(),

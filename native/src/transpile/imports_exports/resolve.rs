@@ -1,10 +1,23 @@
 use super::*;
 
+pub(crate) fn resolved_import_key(file_path: &Path, specifier: &str) -> String {
+    format!(
+        "{}\0{specifier}",
+        normalize_path(file_path).to_string_lossy()
+    )
+}
+
 pub(crate) fn resolve_module_id_for_specifier(
     file_path: &Path,
     specifier: &str,
     context: &TranspileContext,
 ) -> std::result::Result<String, String> {
+    if let Some(module_id) = context
+        .resolved_module_ids
+        .get(&resolved_import_key(file_path, specifier))
+    {
+        return Ok(module_id.clone());
+    }
     if specifier.starts_with('.') {
         let resolved = resolve_relative_module(file_path, specifier).ok_or_else(|| {
             format!(

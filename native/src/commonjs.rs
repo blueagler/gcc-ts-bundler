@@ -9,6 +9,18 @@ pub struct CommonJsAnalysis {
     pub export_names: Vec<String>,
     pub has_commonjs: bool,
     pub has_default_export: bool,
+    /// The module observes its own export surface as data: a computed key, an
+    /// enumeration, or the export object itself escaping into an expression we
+    /// cannot follow. Such a module's export names must stay literal, because
+    /// something can read them as strings at runtime.
+    ///
+    /// This is the fail-closed half of the export-name decision; see
+    /// `transpile::collect_opaque_commonjs`. Three constructs that would also
+    /// belong here are already rejected outright by `CommonJsCollector` and can
+    /// never reach normalization: computed export writes, non-literal
+    /// `require()`, and `Object.defineProperty` exports other than
+    /// `__esModule`.
+    pub exports_are_opaque: bool,
     pub proxy_export: Option<String>,
     pub unsupported: Vec<String>,
 }
@@ -23,13 +35,142 @@ pub fn analyze_commonjs_module(module: &Module) -> CommonJsAnalysis {
             .push("Mixed ESM and CommonJS syntax is not supported.".to_string());
     }
 
+    let mut opacity = ExportsOpacityVisitor::default();
+    module.visit_with(&mut opacity);
+
     CommonJsAnalysis {
         dependencies: collector.dependencies.into_iter().collect(),
         export_names: collector.export_names.into_iter().collect(),
         has_commonjs: collector.has_commonjs,
         has_default_export: collector.has_default_export,
+        exports_are_opaque: opacity.opaque,
         proxy_export: collector.proxy_export,
         unsupported: collector.unsupported,
+    }
+}
+
+/// Decides whether a CommonJS module can ever observe its own export names as
+/// strings.
+///
+/// The walk is inverted on purpose: instead of enumerating the shapes that leak
+/// (an open-ended list), it enumerates the two shapes that provably cannot —
+/// a statically-named member access on the export object, and an assignment to
+/// the export slot itself — and consumes them without descending into the
+/// export object. Anything that still reaches the export object through normal
+/// recursion is, by construction, an occurrence we did not prove safe, and the
+/// module is marked opaque. New syntax therefore fails closed by default.
+#[derive(Default)]
+struct ExportsOpacityVisitor {
+    opaque: bool,
+}
+
+impl ExportsOpacityVisitor {
+    /// A statically-named read/write: `exports.foo`, `module.exports["foo"]`.
+    /// Returns false when the key is computed and not a string literal.
+    fn visit_static_member(&mut self, member: &MemberExpr) -> bool {
+        if !is_commonjs_export_object(&member.obj) {
+            return false;
+        }
+        match &member.prop {
+            MemberProp::Ident(_) => true,
+            MemberProp::Computed(computed) => {
+                if string_literal_expr(&computed.expr).is_some() {
+                    true
+                } else {
+                    // `exports[k]` — the key is data.
+                    self.opaque = true;
+                    true
+                }
+            }
+            MemberProp::PrivateName(_) => false,
+        }
+    }
+}
+
+impl Visit for ExportsOpacityVisitor {
+    fn visit_expr(&mut self, expression: &Expr) {
+        if let Expr::Member(member) = expression {
+            if self.visit_static_member(member) {
+                // Consumed: deliberately do not descend into `member.obj`, so a
+                // bare export-object reference can only be reached when no
+                // safe shape claimed it.
+                return;
+            }
+        }
+        if is_commonjs_export_object(expression) {
+            self.opaque = true;
+            return;
+        }
+        expression.visit_children_with(self);
+    }
+
+    fn visit_assign_expr(&mut self, expression: &AssignExpr) {
+        if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &expression.left {
+            // `module.exports = …` replaces the slot; `exports.foo = …` names a
+            // key. Neither exposes a name as data.
+            if is_module_exports_target(member) || self.visit_static_member(member) {
+                expression.right.visit_with(self);
+                return;
+            }
+        }
+        expression.visit_children_with(self);
+    }
+
+    fn visit_for_in_stmt(&mut self, statement: &ForInStmt) {
+        if is_commonjs_export_object(&statement.right) {
+            // `for (const key in exports)` reads every name as a string.
+            self.opaque = true;
+        }
+        statement.visit_children_with(self);
+    }
+}
+
+/// Consumer-side counterpart: does `module` observe any of `bindings` (locals
+/// bound to an imported CommonJS namespace) as data?
+///
+/// Only key-reading shapes count here. Passing the namespace object around is
+/// safe under whole-program renaming, because every access site renames with
+/// it; what is not safe is turning a name into a string.
+pub fn commonjs_namespace_is_opaque(module: &Module, bindings: &BTreeSet<String>) -> bool {
+    if bindings.is_empty() {
+        return false;
+    }
+    let mut visitor = NamespaceOpacityVisitor {
+        bindings,
+        opaque: false,
+    };
+    module.visit_with(&mut visitor);
+    visitor.opaque
+}
+
+struct NamespaceOpacityVisitor<'a> {
+    bindings: &'a BTreeSet<String>,
+    opaque: bool,
+}
+
+impl NamespaceOpacityVisitor<'_> {
+    fn is_namespace(&self, expression: &Expr) -> bool {
+        matches!(expression, Expr::Ident(ident) if self.bindings.contains(ident.sym.as_ref()))
+    }
+}
+
+impl Visit for NamespaceOpacityVisitor<'_> {
+    fn visit_member_expr(&mut self, member: &MemberExpr) {
+        if self.is_namespace(&member.obj) {
+            if let MemberProp::Computed(computed) = &member.prop {
+                if string_literal_expr(&computed.expr).is_none() {
+                    self.opaque = true;
+                }
+            }
+        }
+        member.visit_children_with(self);
+    }
+
+    fn visit_for_in_stmt(&mut self, statement: &ForInStmt) {
+        if self.is_namespace(&statement.right) {
+            self.opaque = true;
+        }
+        statement.visit_children_with(self);
     }
 }
 

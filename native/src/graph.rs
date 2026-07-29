@@ -66,6 +66,16 @@ pub struct PackageAliasEntry {
 #[allow(non_snake_case)]
 #[napi(object)]
 #[derive(Clone, Debug)]
+pub struct ResolvedImportEntry {
+    pub importerFilePath: String,
+    pub moduleId: String,
+    pub specifier: String,
+    pub targetPath: String,
+}
+
+#[allow(non_snake_case)]
+#[napi(object)]
+#[derive(Clone, Debug)]
 pub struct LazyImportEntry {
     pub importerFilePath: String,
     pub moduleId: String,
@@ -103,6 +113,7 @@ pub struct ResolveGraphOutput {
     pub graph: Vec<DependencyGraphEntry>,
     pub lazyImports: Vec<LazyImportEntry>,
     pub packageAliases: Vec<PackageAliasEntry>,
+    pub resolvedImports: Vec<ResolvedImportEntry>,
     pub packageJsonFiles: Vec<String>,
     pub sourceFiles: Vec<String>,
     pub trackedFiles: Vec<String>,
@@ -114,11 +125,18 @@ enum PackageMode {
     Off,
 }
 
+/// Emission shape for chunked output.
+///
+/// `split` is deliberately absent: it names the same emission shape as
+/// `bundler-runtime` (shared chunk graph, graph-derived renameable module ids,
+/// shared capability-gated runtime, envelope chosen by the output-type gate) and
+/// is folded into it at the parse boundary. Keeping one variant per shape rather
+/// than one per public mode name is what stops a shape decision from silently
+/// applying to only one of the two.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ChunkMode {
     BundlerRuntime,
     Off,
-    Split,
 }
 
 struct ResolveContext<'a> {
@@ -150,9 +168,8 @@ pub fn resolve_graph(
 impl ChunkMode {
     fn parse(value: &str) -> std::result::Result<Self, String> {
         match value {
-            "bundler-runtime" => Ok(Self::BundlerRuntime),
+            "bundler-runtime" | "split" => Ok(Self::BundlerRuntime),
             "off" => Ok(Self::Off),
-            "split" => Ok(Self::Split),
             _ => Err(format!("Unsupported chunk mode: {value}")),
         }
     }
@@ -179,16 +196,15 @@ pub fn plan_chunks(
         .collect::<HashMap<_, _>>();
 
     Ok(match chunk_mode {
-        ChunkMode::BundlerRuntime | ChunkMode::Split => build_bundler_chunk_plan(
+        ChunkMode::BundlerRuntime => build_bundler_chunk_plan(
             &sanitize_chunk_name(&base_chunk_name),
             &entry_files,
             &graph,
             &lazy_imports,
             &workspace_dir,
-            // Split emits plain scripts with no import edge to order a vendor
-            // chunk against the base, so the partition is bundler-runtime
-            // only however the flag arrives.
-            vendor_chunk && chunk_mode == ChunkMode::BundlerRuntime,
+            // Both chunked modes now ship real import edges, which is what a
+            // vendor chunk needs to be ordered against the base.
+            vendor_chunk,
         ),
         ChunkMode::Off => build_off_chunk_plan(&entry_files, &graph, &shim_files, &workspace_dir),
     })

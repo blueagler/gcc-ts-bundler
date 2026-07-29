@@ -1,8 +1,6 @@
 mod closure_jobs;
 mod closure_metadata;
 mod commonjs;
-mod decorators;
-mod es5_helpers;
 mod exports;
 mod fs_state;
 mod graph;
@@ -92,12 +90,13 @@ pub fn transpile_sources(
     runtime_module_source_map_file: Option<String>,
     workspace_dir: String,
     package_aliases: Vec<transpile::PackageAliasInput>,
+    resolved_imports: Vec<transpile::ResolvedImportInput>,
     package_json_files: Vec<String>,
     lazy_imports: Vec<transpile::LazyImportInput>,
     chunk_graph: Vec<transpile::TranspileChunkInput>,
     class_map_calls: Vec<transpile::ClassMapCallInput>,
     pure_callees: Vec<String>,
-    typed_annotations: Vec<transpile::TypedAnnotationFileInput>,
+    type_inference_disabled: bool,
 ) -> Result<transpile::TranspileOutput> {
     into_napi(transpile::transpile_sources(
         file_names,
@@ -109,33 +108,19 @@ pub fn transpile_sources(
         runtime_module_source_map_file,
         workspace_dir,
         package_aliases,
+        resolved_imports,
         package_json_files,
         lazy_imports,
         chunk_graph,
         class_map_calls,
         pure_callees,
-        typed_annotations,
+        type_inference_disabled,
     ))
 }
 
 #[napi(js_name = "rewriteGccExports")]
-pub fn rewrite_gcc_exports(code: String) -> Result<String> {
+pub fn rewrite_gcc_exports(code: String) -> Result<exports::GccExportsRewrite> {
     with_globals(|| exports::rewrite_gcc_exports(code))
-}
-
-#[napi(js_name = "rewriteDecoratorMetadata")]
-pub fn rewrite_decorator_metadata(
-    code: String,
-    property_renaming_report: String,
-) -> Result<String> {
-    with_globals(|| decorators::rewrite_decorator_metadata(code, property_renaming_report))
-}
-
-#[napi(js_name = "rewriteBundlerRuntimeEs5Helpers")]
-pub fn rewrite_bundler_runtime_es5_helpers(
-    code: String,
-) -> Result<es5_helpers::Es5HelperRewriteOutput> {
-    with_globals(|| es5_helpers::rewrite_bundler_runtime_es5_helpers(code))
 }
 
 #[napi(js_name = "collectFileStates")]
