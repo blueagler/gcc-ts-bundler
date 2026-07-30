@@ -11,6 +11,7 @@ mod emit_goog;
 mod emit_helpers;
 mod emit_hoist;
 mod emit_reflective;
+mod emit_reflective_oxc;
 pub(crate) mod emit_runtime;
 mod emit_runtime_oxc;
 mod enums;

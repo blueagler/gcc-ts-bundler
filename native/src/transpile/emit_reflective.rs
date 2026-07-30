@@ -65,6 +65,19 @@ pub(super) fn collect_reflective_property_names(program: &Program) -> BTreeSet<S
     collector.names
 }
 
+#[cfg(test)]
+pub(super) fn collect_reflective_property_names_for_test(source: &str) -> BTreeSet<String> {
+    super::GLOBALS.set(&super::Globals::new(), || {
+        let module =
+            crate::module_cache::parse_module(std::path::Path::new("fixture.js"), source)
+                .expect("swc reflective parity parse");
+        let mut program = Program::Module(module);
+        super::apply_resolver_and_global_this_compat(&mut program, true)
+            .expect("swc reflective parity resolver");
+        collect_reflective_property_names(&program)
+    })
+}
+
 /// What a same-module call passes into a given parameter position.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ParameterRole {
