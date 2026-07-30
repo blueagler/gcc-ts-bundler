@@ -9,6 +9,7 @@ mod context;
 mod emit;
 mod emit_goog;
 mod emit_helpers;
+mod emit_helpers_oxc;
 mod emit_hoist;
 mod emit_reflective;
 mod emit_reflective_oxc;

@@ -109,6 +109,25 @@ pub(super) fn helper_initializer_source(
     Some(print_expression(initializer))
 }
 
+#[cfg(test)]
+pub(super) fn helper_initializer_sources_for_test(source: &str) -> Vec<String> {
+    let module = crate::module_cache::parse_module(std::path::Path::new("fixture.js"), source)
+        .expect("swc helper initializer parity parse");
+    module
+        .body
+        .iter()
+        .filter_map(|item| {
+            let ModuleItem::Stmt(Stmt::Decl(Decl::Var(declaration))) = item else {
+                return None;
+            };
+            helper_initializer_source(declaration, |expression| {
+                super::print_expression(expression.clone())
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect("swc helper initializer parity print")
+}
+
 /// TypeScript writes a lowering helper either bare or behind its ambient
 /// reuse guard, `var __x = (this && this.__x) || function (...) {...};`.
 /// Both forms qualify; the content address covers the whole initializer, so a
@@ -222,6 +241,15 @@ pub(super) fn collect_decorator_metadata_property_names(
     };
     swc_core::ecma::visit::VisitWith::visit_with(lowered_source, &mut collector);
     collector.names
+}
+
+#[cfg(test)]
+pub(super) fn collect_decorator_metadata_property_names_for_test(
+    source: &str,
+) -> std::collections::BTreeSet<String> {
+    let module = crate::module_cache::parse_module(std::path::Path::new("fixture.js"), source)
+        .expect("swc decorator metadata parity parse");
+    collect_decorator_metadata_property_names(&module)
 }
 
 struct DecoratorMetadataNames {
