@@ -282,6 +282,7 @@ impl PreparedTypeMetadata {
                 &bound.symbols_by_id,
                 &declaration_names,
                 &symbol_resolutions,
+                rename_declaration_template,
             );
             let failed_ids = first_pass
                 .iter()
@@ -302,6 +303,7 @@ impl PreparedTypeMetadata {
                     &bound.symbols_by_id,
                     &declaration_names,
                     &symbol_resolutions,
+                    rename_declaration_template,
                 )
             };
             for declaration in rendered {
@@ -503,25 +505,26 @@ struct RenderedMemberAnnotation {
     text: String,
 }
 
-struct RenderedTemplate {
-    diagnostics: Vec<TypeMetadataDiagnostic>,
-    text: String,
-    unresolved_count: u32,
+pub(super) struct RenderedTemplate {
+    pub(super) diagnostics: Vec<TypeMetadataDiagnostic>,
+    pub(super) text: String,
+    pub(super) unresolved_count: u32,
 }
 
-struct RenderedDeclaration {
-    code: Option<String>,
-    diagnostics: Vec<TypeMetadataDiagnostic>,
-    rendered_counts: TypeMetadataCounts,
-    symbol_id: String,
+pub(super) struct RenderedDeclaration {
+    pub(super) code: Option<String>,
+    pub(super) diagnostics: Vec<TypeMetadataDiagnostic>,
+    pub(super) rendered_counts: TypeMetadataCounts,
+    pub(super) symbol_id: String,
 }
 
-fn render_declarations(
+pub(super) fn render_declarations(
     metadata: &ClosureFileMetadata,
     declarations: &[ClosureTypeDeclaration],
     symbols_by_id: &HashMap<String, ClosureTypeSymbol>,
     declaration_names: &HashMap<String, String>,
     symbol_resolutions: &HashMap<String, RuntimeTypeName>,
+    rename_declaration: impl Fn(&str, &str, &str) -> std::result::Result<String, String>,
 ) -> Vec<RenderedDeclaration> {
     declarations
         .iter()
@@ -544,8 +547,7 @@ fn render_declarations(
                 .map(String::as_str)
                 .unwrap_or(authored_name);
             let mut diagnostics = rendered.diagnostics;
-            let code =
-                rename_declaration_template(&rendered.text, authored_name, emitted_name).ok();
+            let code = rename_declaration(&rendered.text, authored_name, emitted_name).ok();
             if code.is_none() {
                 diagnostics.push(TypeMetadataDiagnostic::delivery(
                     metadata,
@@ -568,7 +570,7 @@ fn render_declarations(
         .collect()
 }
 
-fn render_template(
+pub(super) fn render_template(
     metadata: &ClosureFileMetadata,
     template: &str,
     references: &[ClosureTypeReference],
@@ -677,7 +679,7 @@ impl Visit for IdentifierEditCollector<'_> {
     }
 }
 
-fn apply_source_edits(
+pub(super) fn apply_source_edits(
     source: &str,
     mut edits: Vec<(usize, usize, String)>,
 ) -> std::result::Result<String, String> {
@@ -811,7 +813,7 @@ fn unique_binding_id(bindings: &HashMap<String, Vec<BindingKey>>, name: &str) ->
     Some(id.clone())
 }
 
-fn empty_metadata() -> ClosureFileMetadata {
+pub(super) fn empty_metadata() -> ClosureFileMetadata {
     ClosureFileMetadata {
         ambient_globals: Vec::new(),
         erased_const_enums: Vec::new(),
@@ -827,7 +829,7 @@ fn empty_metadata() -> ClosureFileMetadata {
     }
 }
 
-fn annotation_target_label(target: &ClosureAnnotationTarget) -> String {
+pub(super) fn annotation_target_label(target: &ClosureAnnotationTarget) -> String {
     match target {
         ClosureAnnotationTarget::Binding { binding_name } => format!("binding {binding_name}"),
         ClosureAnnotationTarget::Member {
@@ -845,7 +847,7 @@ fn annotation_target_label(target: &ClosureAnnotationTarget) -> String {
     }
 }
 
-fn merge_jsdoc_blocks(blocks: &[String]) -> Option<String> {
+pub(super) fn merge_jsdoc_blocks(blocks: &[String]) -> Option<String> {
     let mut tags = Vec::new();
     for block in blocks {
         let Some(body) = block
@@ -934,11 +936,11 @@ fn prop_name_to_string(name: &PropName) -> Option<String> {
     }
 }
 
-fn is_class_declaration_text(code: &str) -> bool {
+pub(super) fn is_class_declaration_text(code: &str) -> bool {
     code.trim_start().starts_with("class ")
 }
 
-fn render_class_field_declaration(
+pub(super) fn render_class_field_declaration(
     owner: &str,
     member: &str,
     is_static: bool,
@@ -965,7 +967,7 @@ fn indent_jsdoc(jsdoc: &str, indent: &str) -> String {
         .collect()
 }
 
-fn insert_before_class_member(
+pub(super) fn insert_before_class_member(
     source: &mut String,
     member_kind: &str,
     member_name: &str,
@@ -991,7 +993,7 @@ fn insert_before_class_member(
     true
 }
 
-fn insert_before_object_member(
+pub(super) fn insert_before_object_member(
     source: &mut String,
     member_kind: &str,
     member_name: &str,
@@ -1137,6 +1139,56 @@ fn find_matching_brace(source_text: &str, open_index: usize) -> Option<usize> {
         index += 1;
     }
     None
+}
+
+#[cfg(test)]
+pub(super) struct TypeMetadataParitySnapshot {
+    pub(super) code: String,
+    pub(super) declaration_lines: Vec<String>,
+    pub(super) delivery: TypeMetadataDelivery,
+    pub(super) enum_name: Option<String>,
+}
+
+#[cfg(test)]
+pub(super) fn render_type_metadata_for_test(
+    source: &str,
+    metadata: &ClosureFileMetadata,
+    hoist_ordinal: Option<usize>,
+) -> std::result::Result<TypeMetadataParitySnapshot, String> {
+    GLOBALS.set(&Globals::new(), || {
+        let module = parse_module(Path::new("fixture.js"), source)?;
+        let mut program = Program::Module(module);
+        resolver(Mark::new(), Mark::new(), false).process(&mut program);
+        let Program::Module(module) = program else {
+            return Err("Expected module program".to_string());
+        };
+        let bound = BoundTypeMetadata::bind(&module, Some(metadata), true);
+        let runtime_names = runtime_type_names_from_module(&module, &bound);
+        let mut fresh_names = FreshNameAllocator::from_module(&module);
+        let mut prepared = bound.prepare(&mut fresh_names, &runtime_names, hoist_ordinal);
+        let declaration_lines = prepared.take_declaration_lines();
+        let enum_declaration = prepared.enum_declarations().first().cloned();
+        let enum_name = enum_declaration
+            .as_ref()
+            .map(|declaration| prepared.enum_name(declaration));
+        if enum_declaration.is_some() {
+            prepared.count_enum();
+        }
+        let mut code = Vec::new();
+        for item in module.body {
+            if let ModuleItem::Stmt(statement) = item {
+                if matches!(statement, Stmt::Decl(_)) {
+                    code.push(prepared.render_statement(statement, &[])?);
+                }
+            }
+        }
+        Ok(TypeMetadataParitySnapshot {
+            code: code.join("\n"),
+            declaration_lines,
+            delivery: prepared.finish(),
+            enum_name,
+        })
+    })
 }
 
 #[cfg(test)]

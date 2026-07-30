@@ -35,6 +35,7 @@ mod precedence;
 mod print;
 mod pure_calls;
 mod type_metadata;
+mod type_metadata_oxc;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
