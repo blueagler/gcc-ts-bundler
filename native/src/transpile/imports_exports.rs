@@ -4,7 +4,7 @@ mod bindings;
 mod resolve;
 
 pub(super) use self::bindings::{
-    apply_import_binding_rewrites, exported_decl_names, member_access,
+    apply_import_binding_rewrites, exported_decl_names, live_export_accessor_name, member_access,
     module_export_name_to_string, render_live_export_slot, render_live_export_slot_with,
     render_namespace_export_slots_with, render_packed_live_export_slots_with,
     render_static_export_slot, render_static_export_slot_with, stable_slot_access,
@@ -28,6 +28,9 @@ pub(super) fn convert_import_decl(
     context: &TranspileContext,
     import_counter: &mut usize,
     fresh_names: &mut FreshNameAllocator,
+    // Locals that alias another module's live export accessor; see
+    // `emit_goog`'s live-export section.
+    live_imported_ids: &HashSet<Id>,
 ) -> std::result::Result<Vec<String>, String> {
     let module_id = resolve_module_id_for_specifier(
         file_path,
@@ -56,7 +59,11 @@ pub(super) fn convert_import_decl(
         let local_name = fresh_names.fresh(&format!("__goog_import_{}", *import_counter));
         *import_counter += 1;
         lines.push(format!("const {local_name} = goog.require({module_id:?});"));
-        lines.extend(bind_import_specifiers(&local_name, &value_specifiers));
+        lines.extend(bind_import_specifiers(
+            &local_name,
+            &value_specifiers,
+            live_imported_ids,
+        ));
     }
     if !type_specifiers.is_empty() {
         let local_name = fresh_names.fresh(&format!("__goog_type_{}", *import_counter));
@@ -64,7 +71,11 @@ pub(super) fn convert_import_decl(
         lines.push(format!(
             "const {local_name} = goog.requireType({module_id:?});"
         ));
-        lines.extend(bind_import_specifiers(&local_name, &type_specifiers));
+        lines.extend(bind_import_specifiers(
+            &local_name,
+            &type_specifiers,
+            &HashSet::new(),
+        ));
     }
 
     Ok(lines)
@@ -131,6 +142,9 @@ pub(super) fn convert_named_export(
     context: &TranspileContext,
     export_counter: &mut usize,
     fresh_names: &mut FreshNameAllocator,
+    // Local names that now hold another module's live export accessor rather
+    // than its value, so re-exporting one has to call it.
+    live_imported_locals: &HashSet<String>,
 ) -> std::result::Result<Vec<String>, String> {
     let mut lines = Vec::new();
     if let Some(src) = &named_export.src {
@@ -161,10 +175,15 @@ pub(super) fn convert_named_export(
     }
 
     for binding in collect_named_export_bindings(named_export) {
-        lines.push(format!(
-            "exports.{} = {};",
-            binding.export_name, binding.local_name
-        ));
+        // Re-exporting a live import: the local is the accessor, so the value
+        // has to be read out of it. This export is still a snapshot -- it is a
+        // value property, which is what a namespace consumer reads.
+        let value = if live_imported_locals.contains(&binding.local_name) {
+            format!("{}()", binding.local_name)
+        } else {
+            binding.local_name.clone()
+        };
+        lines.push(format!("exports.{} = {value};", binding.export_name));
     }
     Ok(lines)
 }

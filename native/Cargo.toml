@@ -19,5 +19,15 @@ swc_ecma_transforms_base = "46.0.1"
 swc_ecma_transforms_react = "52.0.0"
 swc_ecma_transforms_typescript = "52.0.0"
 
+# oxc owns the three parse islands that never share an AST with the transpile
+# monolith: the graph import scanner, the post-Closure `exports.rs` rewrite and
+# the bundler-runtime output verifier. Pinned exactly - these crates break API
+# on every minor and the islands read spans and semantics directly.
+oxc_allocator = "=0.142.0"
+oxc_ast = "=0.142.0"
+oxc_parser = "=0.142.0"
+oxc_semantic = "=0.142.0"
+oxc_span = "=0.142.0"
+
 [build-dependencies]
 napi-build = "2.3.2"

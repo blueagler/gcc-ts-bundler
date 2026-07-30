@@ -104,6 +104,203 @@ fn prefers_development_exports_in_debug_mode() {
 }
 
 #[test]
+fn release_conditions_fall_through_to_a_sibling_key_when_the_matched_subtree_is_debug_only() {
+    // The matched `browser` key holds a subtree that only answers to
+    // `development`. Under release conditions that subtree resolves to nothing,
+    // and the walk has to continue to the sibling `default` key. Ending the walk
+    // at `browser` instead made every non-debug pass return nothing, so the
+    // release `.or()` chain fell through to the development pass and a release
+    // build resolved `./dev.js`.
+    let exports = serde_json::from_str::<Value>(
+        r#"{
+                "browser": {
+                    "development": "./dev.js"
+                },
+                "default": "./def.js"
+            }"#,
+    )
+    .unwrap();
+
+    let release = select_package_export_target(&exports, ".", "demo-pkg", false).unwrap();
+    let debug = select_package_export_target(&exports, ".", "demo-pkg", true).unwrap();
+
+    assert_eq!(
+        release.as_deref(),
+        Some("./def.js"),
+        "release must not ship debug code"
+    );
+    assert_eq!(
+        debug.as_deref(),
+        Some("./dev.js"),
+        "debug still prefers the debug subtree"
+    );
+}
+
+#[test]
+fn a_matched_subtree_with_no_resolvable_condition_and_no_sibling_fails_closed() {
+    // Same shape with the sibling removed, and with a condition no pass knows.
+    // Falling through has to run out of keys and report "no target" rather than
+    // invent one.
+    let exports = serde_json::from_str::<Value>(
+        r#"{
+                "browser": {
+                    "react-native": "./rn.js"
+                }
+            }"#,
+    )
+    .unwrap();
+
+    for prefer_debug in [false, true] {
+        let resolved =
+            select_package_export_target(&exports, ".", "demo-pkg", prefer_debug).unwrap();
+        assert_eq!(
+            resolved, None,
+            "exhausting the sibling keys must fail closed"
+        );
+    }
+}
+
+#[test]
+fn a_package_offering_only_a_development_build_still_resolves_in_release() {
+    // The deliberate other half of the policy, pinned so the fall-through fix
+    // above cannot be mistaken for it. `select_package_export_target` chains
+    // production -> default -> development for release, so a package whose only
+    // build answers `development` still resolves rather than failing the build.
+    // That last-resort chain is exactly why the missing sibling fall-through was
+    // invisible: it silently absorbed the `None` that should have gone to a
+    // sibling key.
+    let exports = serde_json::from_str::<Value>(
+        r#"{
+                "browser": {
+                    "development": "./dev.js"
+                }
+            }"#,
+    )
+    .unwrap();
+
+    let release = select_package_export_target(&exports, ".", "demo-pkg", false).unwrap();
+
+    assert_eq!(release.as_deref(), Some("./dev.js"));
+}
+
+#[test]
+fn sibling_fall_through_works_at_every_nesting_depth() {
+    // The fall-through is not a top-level special case. Here the *inner*
+    // `browser` object is the one that has to recover: its `import` key matches,
+    // its subtree answers only `development`, and the walk must continue to the
+    // inner `default` sibling. `import` is deliberately a key the release
+    // condition list contains - a key it does not contain is skipped rather than
+    // matched, and would not exercise this path at all.
+    let exports = serde_json::from_str::<Value>(
+        r#"{
+                "browser": {
+                    "import": {
+                        "development": "./dev.js"
+                    },
+                    "default": "./browser-default.js"
+                },
+                "default": "./def.js"
+            }"#,
+    )
+    .unwrap();
+
+    let release = select_package_export_target(&exports, ".", "demo-pkg", false).unwrap();
+
+    assert_eq!(
+        release.as_deref(),
+        Some("./browser-default.js"),
+        "release must recover inside the nested object, not fall through to the debug pass"
+    );
+}
+
+#[test]
+fn a_false_target_stays_a_hard_error_even_when_a_sibling_key_would_resolve() {
+    // The fall-through must not turn a disabled export into a silent fallback.
+    // `"browser": false` means the package refuses browser bundling; resolving
+    // the sibling `default` here would serve its Node build to a browser bundle,
+    // which is the whole failure this error exists to prevent.
+    let exports = serde_json::from_str::<Value>(
+        r#"{
+                "browser": false,
+                "default": "./node.js"
+            }"#,
+    )
+    .unwrap();
+
+    for prefer_debug in [false, true] {
+        let error = select_package_export_target(&exports, ".", "demo-pkg", prefer_debug)
+            .expect_err("a disabled browser export must stay an error");
+        assert!(error.contains("disables this export"), "{error}");
+    }
+}
+
+#[test]
+fn a_null_target_stays_a_hard_error_even_when_a_sibling_key_would_resolve() {
+    let exports = serde_json::from_str::<Value>(
+        r#"{
+                "browser": null,
+                "default": "./node.js"
+            }"#,
+    )
+    .unwrap();
+
+    let error = select_package_export_target(&exports, ".", "demo-pkg", false)
+        .expect_err("a null target must stay an error");
+    assert!(error.contains("disables this export"), "{error}");
+}
+
+#[test]
+fn condition_walk_order_follows_our_ranking_not_the_json_key_order() {
+    // Walk-order pin. Node iterates the object's keys in insertion order, so it
+    // would answer `./default.js` here. We iterate our own condition ranking
+    // instead, because that ranking *is* the release/debug policy: release must
+    // prefer `production` however the package happened to order its map.
+    //
+    // If a future change adopts Node's key order, this test fails and the
+    // policy change becomes a deliberate decision instead of a silent one.
+    let exports = serde_json::from_str::<Value>(
+        r#"{
+                "default": "./default.js",
+                "production": "./prod.js",
+                "development": "./dev.js"
+            }"#,
+    )
+    .unwrap();
+
+    let release = select_package_export_target(&exports, ".", "demo-pkg", false).unwrap();
+    let debug = select_package_export_target(&exports, ".", "demo-pkg", true).unwrap();
+
+    assert_eq!(
+        release.as_deref(),
+        Some("./prod.js"),
+        "release ranks production first"
+    );
+    assert_eq!(
+        debug.as_deref(),
+        Some("./dev.js"),
+        "debug ranks development first"
+    );
+}
+
+#[test]
+fn browser_outranks_a_sibling_import_key_that_also_resolves() {
+    // The other half of the walk-order pin: `browser` is first in every
+    // condition list, so a resolvable `browser` subtree wins over a resolvable
+    // `import` sibling. Only an *unresolvable* match falls through.
+    let exports = serde_json::from_str::<Value>(
+        r#"{
+                "import": "./import.js",
+                "browser": "./browser.js"
+            }"#,
+    )
+    .unwrap();
+
+    let release = select_package_export_target(&exports, ".", "demo-pkg", false).unwrap();
+
+    assert_eq!(release.as_deref(), Some("./browser.js"));
+}
+
+#[test]
 fn resolves_package_subpath_from_exports_pattern() {
     let temp_dir = TestDir::new();
     temp_dir.write(

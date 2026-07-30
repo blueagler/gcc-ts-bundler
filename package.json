@@ -62,6 +62,7 @@
     "build": "node ./scripts/build.mjs",
     "typecheck": "bun --bun tsc --noEmit && bun --bun tsc -p tsconfig.types.json --noEmit",
     "ledger": "bun --bun ./scripts/property-ledger.ts",
+    "oxc-diff": "node ./scripts/oxc-diff.mjs",
     "lint": "bun run typecheck && bun --bun ./scripts/format.ts --check && bun --bun eslint -c eslint.config.ts \"src/**/*.ts\"",
     "fix": "bun --bun ./scripts/format.ts && bun --bun eslint -c eslint.config.ts \"src/**/*.ts\" --fix",
     "test": "cargo test --manifest-path native/Cargo.toml && bun run build && bun test ./test/*.test.mjs",

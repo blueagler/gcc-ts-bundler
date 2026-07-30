@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 use napi_derive::napi;
 use serde_json::Value;
 use swc_core::ecma::ast::*;
-use swc_core::ecma::visit::{Visit, VisitWith};
 
 use crate::commonjs::{analyze_commonjs_module, CommonJsAnalysis};
 use crate::module_cache::{get_or_parse_cached_module, parse_and_cache_module};

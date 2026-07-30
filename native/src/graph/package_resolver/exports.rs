@@ -137,9 +137,34 @@ fn resolve_export_target_value(
             Ok(None)
         }
         Value::Object(object) => {
+            // Node's conditional-exports walk does not stop at the first key whose
+            // condition matches: a matched key whose subtree resolves to nothing
+            // falls through to the next sibling key. Returning the inner result
+            // directly is what let
+            //
+            //     {"browser": {"development": "./dev.js"}, "default": "./def.js"}
+            //
+            // resolve to nothing on the production and default passes, so the
+            // release `.or()` chain in `select_package_export_target` reached the
+            // development pass and a release build shipped `./dev.js`.
+            //
+            // `?` is what keeps this fail-closed rather than merely lenient: only
+            // `Ok(None)` continues the walk. A `false`/`null` target is still a
+            // hard error and still aborts the whole resolution, so
+            // `{"browser": false, "default": "./node.js"}` cannot quietly serve a
+            // package's Node build to a browser bundle.
+            //
+            // The walk order is *our* condition ranking, not the object's key
+            // order. That is deliberate policy (it is how release prefers
+            // `production` over `default` regardless of how the package spelled
+            // its map) and is pinned by a test.
             for condition in preferred_conditions {
                 if let Some(value) = object.get(*condition) {
-                    return resolve_export_target_value(value, package_name, preferred_conditions);
+                    if let Some(target) =
+                        resolve_export_target_value(value, package_name, preferred_conditions)?
+                    {
+                        return Ok(Some(target));
+                    }
                 }
             }
             Ok(None)

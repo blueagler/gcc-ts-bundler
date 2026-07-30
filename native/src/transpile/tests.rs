@@ -1479,6 +1479,163 @@ fn inlines_relative_imported_enum_members() {
 }
 
 #[test]
+fn inlines_const_enum_members_defined_by_constant_expressions() {
+    // TypeScript allows a whole constant-expression grammar in enum member
+    // initializers, and a `const enum` has no runtime object to fall back on:
+    // a member the folder gives up on is emitted as a property read against an
+    // erased object, which throws at runtime instead of failing the build.
+    // Cross-module, because that is the path where the object is gone for good.
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("gcc-ts-bundler-enum-expr-{unique}"));
+    let dep_file = root.join("dir.ts");
+    let entry_file = root.join("index.ts");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        &dep_file,
+        concat!(
+            "export const enum Dir {\n",
+            "  Up = 1,\n",
+            "  Down = 1 + Up,\n",
+            "  Both = Down << 2,\n",
+            "  Neg = -Down,\n",
+            "  Mask = Both | Dir.Up,\n",
+            "  Half = (Both + 2) / 5,\n",
+            "  Next,\n",
+            "}\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &entry_file,
+        concat!(
+            "import { Dir } from './dir';\n",
+            "export const values = [Dir.Up, Dir.Down, Dir.Both, Dir.Neg, Dir.Mask, Dir.Half, Dir.Next];\n",
+        ),
+    )
+    .unwrap();
+
+    let transformed = GLOBALS
+        .set(&Globals::new(), || {
+            transform_source_file(&entry_file, &empty_context())
+        })
+        .unwrap();
+
+    // Up=1, Down=2, Both=8, Neg=-2, Mask=9, Half=2, Next=3 (auto-numbering
+    // resumes from the folded value, as TypeScript does).
+    assert!(
+        transformed.contains("[\n    1,\n    2,\n    8,\n    -2,\n    9,\n    2,\n    3\n]")
+            || transformed.contains("[1, 2, 8, -2, 9, 2, 3]"),
+        "{transformed}"
+    );
+    assert!(!transformed.contains("Dir."), "{transformed}");
+}
+
+/// Emits one file through the real pipeline and returns the emitted text.
+fn transform_single_source(name: &str, source: &str) -> String {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("gcc-ts-bundler-{name}-{unique}"));
+    let file = root.join("index.ts");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&file, source).unwrap();
+    GLOBALS
+        .set(&Globals::new(), || {
+            transform_source_file(&file, &empty_context())
+        })
+        .unwrap()
+        .code
+}
+
+#[test]
+fn merges_split_namespace_declaration_blocks_before_lowering() {
+    // Declaration merging: the second block's body must see the first block's
+    // members. SWC's `strip` only qualifies members declared in the same block,
+    // so without the pre-merge this emits bare `Inner`/`version` reads that
+    // Closure rejects with JSC_UNDEFINED_VARIABLE.
+    let transformed = transform_single_source(
+        "merged-namespace",
+        concat!(
+            "export namespace Outer {\n",
+            "  export const version = 3;\n",
+            "  export namespace Inner {\n",
+            "    export function twice(value: number): number { return value * 2; }\n",
+            "  }\n",
+            "}\n",
+            "export namespace Outer {\n",
+            "  export function versionTwice(): number { return Inner.twice(version); }\n",
+            "}\n",
+        ),
+    );
+
+    assert!(
+        transformed.contains("Outer.Inner.twice(Outer.version)"),
+        "{transformed}"
+    );
+    // One lowered block, so one IIFE and one `Outer ||` initializer.
+    assert_eq!(transformed.matches("Outer || (Outer = {})").count(), 1, "{transformed}");
+}
+
+#[test]
+fn merges_split_namespace_blocks_across_declarations_and_at_every_depth() {
+    // Blocks need not be adjacent: declarations may sit between them, and a
+    // nested namespace split across two *parent* blocks only becomes a sibling
+    // pair after the outer merge, so the merge has to recurse afterwards.
+    let transformed = transform_single_source(
+        "merged-namespace-nested",
+        concat!(
+            "export namespace Outer {\n",
+            "  export namespace Inner {\n",
+            "    export const tag = \"INNER\";\n",
+            "  }\n",
+            "}\n",
+            "export function between(): number { return 1; }\n",
+            "export namespace Outer {\n",
+            "  export namespace Inner {\n",
+            "    export function read(): string { return tag; }\n",
+            "  }\n",
+            "}\n",
+        ),
+    );
+
+    assert!(transformed.contains("Inner.tag"), "{transformed}");
+    assert_eq!(transformed.matches("Outer || (Outer = {})").count(), 1, "{transformed}");
+    assert_eq!(
+        transformed.matches("Outer.Inner || (Outer.Inner = {})").count(),
+        1,
+        "{transformed}"
+    );
+}
+
+#[test]
+fn leaves_split_namespace_blocks_alone_when_merging_would_reorder_work() {
+    // A statement between the blocks would run *after* the second body once the
+    // bodies are merged, so this group keeps today's behaviour rather than
+    // silently changing evaluation order.
+    let transformed = transform_single_source(
+        "merged-namespace-reorder",
+        concat!(
+            "export namespace Outer {\n",
+            "  export const version = 3;\n",
+            "}\n",
+            "console.log(\"between\");\n",
+            "export namespace Outer {\n",
+            "  export function read(): number { return 7; }\n",
+            "}\n",
+        ),
+    );
+
+    assert_eq!(transformed.matches("Outer || (Outer = {})").count(), 2, "{transformed}");
+    let between = transformed.find("between").expect("{transformed}");
+    let second = transformed.rfind("Outer || (Outer = {})").expect("{transformed}");
+    assert!(between < second, "{transformed}");
+}
+
+#[test]
 fn renders_named_enum_externs() {
     let externs = render_externs(
         &BTreeSet::new(),

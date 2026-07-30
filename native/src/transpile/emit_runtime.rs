@@ -527,6 +527,12 @@ struct BundlerExportsRewriteCollector<'a> {
 #[cfg(test)]
 impl Visit for BundlerExportsRewriteCollector<'_> {
     fn visit_assign_expr(&mut self, assignment: &swc_core::ecma::ast::AssignExpr) {
+        // Named here rather than re-exported through `transpile.rs`: this is the
+        // only consumer left now the graph scanner reads templates via oxc, and
+        // it is `cfg(test)`-only, so a crate-level re-export would be an unused
+        // import in every non-test build.
+        use super::namespace::dynamic_imports::no_substitution_template_value;
+
         assignment.visit_children_with(self);
         let swc_core::ecma::ast::AssignTarget::Simple(
             swc_core::ecma::ast::SimpleAssignTarget::Member(member),
@@ -776,9 +782,12 @@ pub(super) fn export_binding_names_with_ids(pattern: &Pat) -> Vec<(Id, String)> 
     }
 }
 
-struct ReassignedBindingCollector {
-    tracked_ids: HashSet<Id>,
-    reassigned_ids: HashSet<Id>,
+/// Provably-reassigned bindings: the one place that answers "is this binding
+/// ever written after its declaration?". Shared with `emit_goog`, which needs
+/// the same answer to decide whether an export can be a snapshot.
+pub(super) struct ReassignedBindingCollector {
+    pub(super) tracked_ids: HashSet<Id>,
+    pub(super) reassigned_ids: HashSet<Id>,
 }
 
 impl Visit for ReassignedBindingCollector {

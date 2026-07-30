@@ -1,4 +1,5 @@
 use super::*;
+use oxc_allocator::Allocator;
 
 pub(super) fn resolve_graph_impl(
     entries: Vec<String>,
@@ -43,15 +44,17 @@ pub(super) fn resolve_graph_impl(
         }
         commonjs_cache.insert(current_file.clone(), commonjs_analysis.clone());
 
-        let specifiers = if commonjs_analysis.has_commonjs {
-            commonjs_analysis.dependencies.clone()
+        // The scanner owns this parse. Only the non-CommonJS path needs it, so
+        // the extra parse is skipped exactly where its answers are unused.
+        let scan_allocator = Allocator::default();
+        let (specifiers, lazy_specifiers) = if commonjs_analysis.has_commonjs {
+            (commonjs_analysis.dependencies.clone(), Vec::new())
         } else {
-            extract_dependencies(&module)
-        };
-        let lazy_specifiers = if commonjs_analysis.has_commonjs {
-            Vec::new()
-        } else {
-            collect_dynamic_import_specifiers(&module)?
+            let scanned = parse_scanned_module(&scan_allocator, &current_file, &contents)?;
+            (
+                extract_dependencies(&scanned),
+                collect_dynamic_import_specifiers(&scanned)?,
+            )
         };
 
         let mut dependencies = BTreeSet::new();

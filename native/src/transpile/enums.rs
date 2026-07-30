@@ -1,4 +1,7 @@
 use super::*;
+// Imported here rather than through `transpile.rs`'s shared list: this module is
+// the only user, and the shared list is a merge magnet.
+use swc_core::ecma::ast::BinaryOp;
 
 #[derive(Clone)]
 pub(super) enum EnumLiteralValue {
@@ -37,7 +40,9 @@ pub(super) fn collect_ts_enum_literal_values(
                 TsEnumMemberId::Str(value) => value.value.to_string_lossy().to_string(),
             };
             let value = if let Some(initializer) = &member.init {
-                let Some(value) = enum_literal_value_from_expr(initializer) else {
+                let Some(value) =
+                    enum_literal_value_from_expr(initializer, &enum_decl.id.sym, &members)
+                else {
                     has_next_number = false;
                     continue;
                 };
@@ -204,26 +209,101 @@ fn append_extension(base: &Path, extension: &str) -> PathBuf {
     PathBuf::from(appended)
 }
 
-fn enum_literal_value_from_expr(expr: &Expr) -> Option<EnumLiteralValue> {
+/// Folds an enum member initializer to a literal value.
+///
+/// TypeScript allows any *constant expression* here (`Down = 1 + Up`,
+/// `Mask = Both | Up`), and a `const enum` has no runtime object to fall back
+/// on: a member we fail to fold is emitted as a property read on an erased
+/// object, which is a runtime `TypeError`, not a build error. So the fold has
+/// to cover the constant-expression grammar, including references to members
+/// declared earlier in the same enum (`already`), by name or through the enum's
+/// own identifier.
+///
+/// Deliberately conservative: anything outside that grammar returns `None` and
+/// the member is left alone (auto-numbering then stops, matching TypeScript,
+/// which requires an initializer after a non-constant member).
+fn enum_literal_value_from_expr(
+    expr: &Expr,
+    enum_name: &str,
+    already: &HashMap<String, EnumLiteralValue>,
+) -> Option<EnumLiteralValue> {
+    let fold = |expr: &Expr| enum_literal_value_from_expr(expr, enum_name, already);
     match expr {
         Expr::Lit(Lit::Num(value)) => Some(EnumLiteralValue::Number(value.value)),
         Expr::Lit(Lit::Str(value)) => Some(EnumLiteralValue::String(
             value.value.to_string_lossy().to_string(),
         )),
         Expr::Lit(Lit::Bool(value)) => Some(EnumLiteralValue::Bool(value.value)),
-        Expr::Unary(UnaryExpr {
-            op: UnaryOp::Minus,
-            arg,
-            ..
-        }) => {
-            let EnumLiteralValue::Number(value) = enum_literal_value_from_expr(arg)? else {
+        // `Down = 1 + Up` — a bare reference to an earlier member of this enum.
+        Expr::Ident(ident) => already.get(ident.sym.as_ref()).cloned(),
+        // `Down = 1 + Direction.Up` — the same thing, qualified.
+        Expr::Member(member) => {
+            let Expr::Ident(object) = &*member.obj else {
                 return None;
             };
-            Some(EnumLiteralValue::Number(-value))
+            if object.sym.as_ref() != enum_name {
+                return None;
+            }
+            let MemberProp::Ident(property) = &member.prop else {
+                return None;
+            };
+            already.get(property.sym.as_ref()).cloned()
         }
-        Expr::Paren(parenthesized) => enum_literal_value_from_expr(&parenthesized.expr),
+        Expr::Unary(UnaryExpr { op, arg, .. }) => {
+            let EnumLiteralValue::Number(value) = fold(arg)? else {
+                return None;
+            };
+            match op {
+                UnaryOp::Minus => Some(EnumLiteralValue::Number(-value)),
+                UnaryOp::Plus => Some(EnumLiteralValue::Number(value)),
+                UnaryOp::Tilde => Some(EnumLiteralValue::Number(!to_int32(value) as f64)),
+                _ => None,
+            }
+        }
+        Expr::Bin(binary) => {
+            // String `+` is rejected by TypeScript in enums ("computed values are
+            // not permitted in an enum with string valued members"), so every
+            // binary operator here is numeric.
+            let EnumLiteralValue::Number(left) = fold(&binary.left)? else {
+                return None;
+            };
+            let EnumLiteralValue::Number(right) = fold(&binary.right)? else {
+                return None;
+            };
+            let folded = match binary.op {
+                BinaryOp::Add => left + right,
+                BinaryOp::Sub => left - right,
+                BinaryOp::Mul => left * right,
+                BinaryOp::Div => left / right,
+                BinaryOp::Mod => left % right,
+                BinaryOp::Exp => left.powf(right),
+                BinaryOp::BitOr => (to_int32(left) | to_int32(right)) as f64,
+                BinaryOp::BitAnd => (to_int32(left) & to_int32(right)) as f64,
+                BinaryOp::BitXor => (to_int32(left) ^ to_int32(right)) as f64,
+                BinaryOp::LShift => (to_int32(left) << (to_uint32(right) & 31)) as f64,
+                BinaryOp::RShift => (to_int32(left) >> (to_uint32(right) & 31)) as f64,
+                BinaryOp::ZeroFillRShift => (to_uint32(left) >> (to_uint32(right) & 31)) as f64,
+                _ => return None,
+            };
+            Some(EnumLiteralValue::Number(folded))
+        }
+        Expr::Paren(parenthesized) => fold(&parenthesized.expr),
         _ => None,
     }
+}
+
+/// ECMAScript `ToInt32`/`ToUint32`, which is what the bitwise operators above
+/// are defined in terms of. `as i32` in Rust saturates instead of wrapping, so
+/// go through the modulo-2^32 step explicitly.
+fn to_uint32(value: f64) -> u32 {
+    if !value.is_finite() {
+        return 0;
+    }
+    (value.trunc().rem_euclid(4_294_967_296.0)) as u32
+}
+
+fn to_int32(value: f64) -> i32 {
+    to_uint32(value) as i32
 }
 
 pub(super) struct EnumValueInlineVisitor {

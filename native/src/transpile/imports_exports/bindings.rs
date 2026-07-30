@@ -59,6 +59,10 @@ pub(crate) struct ImportBindingSlotAlias {
 pub(super) fn bind_import_specifiers(
     local_name: &str,
     specifiers: &[&ImportSpecifier],
+    // Locals whose target export is provably reassigned: those alias the
+    // exporter's live accessor instead of its value property, and reads of them
+    // were rewritten into calls. See `emit_goog`'s live-export section.
+    live_imported_ids: &HashSet<Id>,
 ) -> Vec<String> {
     specifiers
         .iter()
@@ -76,14 +80,27 @@ pub(super) fn bind_import_specifiers(
                     .as_ref()
                     .map(module_export_name_to_string)
                     .unwrap_or_else(|| named_specifier.local.sym.to_string());
+                let source_name = if live_imported_ids.contains(&named_specifier.local.to_id()) {
+                    live_export_accessor_name(&imported_name)
+                } else {
+                    imported_name
+                };
                 format!(
                     "const {} = {};",
                     named_specifier.local.sym,
-                    member_access(local_name, &imported_name)
+                    member_access(local_name, &source_name)
                 )
             }
         })
         .collect()
+}
+
+/// The export name carrying a live accessor for `export_name`.
+///
+/// Derived from the export name rather than allocated, because the exporting
+/// module and every importer have to agree on it without a side channel.
+pub(crate) fn live_export_accessor_name(export_name: &str) -> String {
+    format!("__gccLive_{export_name}")
 }
 
 pub(super) fn plan_bundler_import_specifiers(

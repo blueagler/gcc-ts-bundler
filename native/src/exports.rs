@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
 
 use napi_derive::napi;
-use swc_core::common::{sync::Lrc, BytePos, FileName, SourceMap, Span, Spanned};
-use swc_core::ecma::ast::*;
-use swc_core::ecma::parser::{lexer::Lexer, EsSyntax, Parser, StringInput, Syntax};
+use oxc_allocator::Allocator;
+use oxc_ast::ast::*;
+use oxc_parser::Parser;
+use oxc_span::{GetSpan, SourceType, Span};
 
 /// Result of converting a Closure `globalThis.GCC` export bag back into ESM.
 ///
@@ -46,9 +46,13 @@ pub fn rewrite_gcc_exports(code: String) -> std::result::Result<GccExportsRewrit
         });
     }
 
-    let (module, source_start) = parse_module_with_offset(&code)?;
+    // oxc spans are plain 0-based byte offsets into exactly this string, so a
+    // span is already an index into `code`: no source-map registration and no
+    // per-file base offset to subtract.
+    let allocator = Allocator::default();
+    let program = parse_program(&allocator, &code)?;
     let slice = |span: Span| -> std::result::Result<&str, String> {
-        let (start, end) = span_range(span, source_start, code.len())?;
+        let (start, end) = span_range(span, code.len())?;
         Ok(&code[start..end])
     };
 
@@ -59,23 +63,16 @@ pub fn rewrite_gcc_exports(code: String) -> std::result::Result<GccExportsRewrit
     let mut has_default_export = false;
     let mut named_export_specifiers = Vec::<String>::new();
 
-    for item in &module.body {
+    for item in &program.body {
         collect_top_level_declared_names(item, &mut declared_names);
         match item {
-            ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(named)) => {
+            Statement::ExportNamedDeclaration(named) => {
                 for specifier in &named.specifiers {
-                    if let ExportSpecifier::Named(named_specifier) = specifier {
-                        existing_export_names.insert(export_name_from_module_export_name(
-                            named_specifier
-                                .exported
-                                .as_ref()
-                                .unwrap_or(&named_specifier.orig),
-                        ));
-                    }
+                    existing_export_names
+                        .insert(export_name_from_module_export_name(&specifier.exported));
                 }
             }
-            ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(_))
-            | ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(_)) => {
+            Statement::ExportDefaultDeclaration(_) => {
                 has_default_export = true;
             }
             _ => {}
@@ -83,8 +80,8 @@ pub fn rewrite_gcc_exports(code: String) -> std::result::Result<GccExportsRewrit
     }
 
     let mut edits = Vec::<SourceEdit>::new();
-    for item in &module.body {
-        let (start, end) = span_range(item.span(), source_start, code.len())?;
+    for item in &program.body {
+        let (start, end) = span_range(item.span(), code.len())?;
         let end = absorb_statement_terminator(&code, end);
 
         if is_gcc_bootstrap_statement(item) {
@@ -161,37 +158,27 @@ pub fn rewrite_gcc_exports(code: String) -> std::result::Result<GccExportsRewrit
     })
 }
 
-/// Parses with a source map this function owns, so span positions can be turned
-/// back into offsets into `code`.
-fn parse_module_with_offset(code: &str) -> std::result::Result<(Module, BytePos), String> {
-    let source_map: Lrc<SourceMap> = Default::default();
-    let source_file = source_map.new_source_file(
-        FileName::Real(PathBuf::from("bundle.js")).into(),
-        code.to_string(),
-    );
-    let start_pos = source_file.start_pos;
-    let lexer = Lexer::new(
-        Syntax::Es(EsSyntax::default()),
-        Default::default(),
-        StringInput::from(&*source_file),
-        None,
-    );
-    let module = Parser::new_from(lexer)
-        .parse_module()
-        .map_err(|error| format!("bundle.js: {}", error.kind().msg()))?;
-    Ok((module, start_pos))
+/// Parses the Closure output as an ES module. Spans in the returned program are
+/// byte offsets into `code` itself.
+fn parse_program<'a>(
+    allocator: &'a Allocator,
+    code: &'a str,
+) -> std::result::Result<Program<'a>, String> {
+    let parsed = Parser::new(allocator, code, SourceType::mjs()).parse();
+    if let Some(error) = parsed.diagnostics.first() {
+        return Err(format!("bundle.js: {}", error.message));
+    }
+    Ok(parsed.program)
 }
 
-fn span_range(
-    span: Span,
-    source_start: BytePos,
-    source_len: usize,
-) -> std::result::Result<(usize, usize), String> {
-    if span.lo < source_start || span.hi < span.lo {
+/// Fail-closed bounds check. The offsets are already relative to `code`, so the
+/// only thing left to reject is a span that is inverted or runs past the end.
+fn span_range(span: Span, source_len: usize) -> std::result::Result<(usize, usize), String> {
+    if span.end < span.start {
         return Err("gcc-exports rewrite found a span outside the parsed source".to_string());
     }
-    let start = (span.lo.0 - source_start.0) as usize;
-    let end = (span.hi.0 - source_start.0) as usize;
+    let start = span.start as usize;
+    let end = span.end as usize;
     if end > source_len {
         return Err("gcc-exports rewrite found a span past the end of the source".to_string());
     }
@@ -267,103 +254,125 @@ impl ExportRewrite {
     }
 }
 
-fn get_gcc_export_assignment(item: &ModuleItem) -> Option<(String, &Expr)> {
-    let statement = match item {
-        ModuleItem::Stmt(Stmt::Expr(statement)) => statement,
-        _ => return None,
+fn get_gcc_export_assignment<'a>(item: &'a Statement<'a>) -> Option<(String, &'a Expression<'a>)> {
+    let Statement::ExpressionStatement(statement) = item else {
+        return None;
+    };
+    let Expression::AssignmentExpression(assignment) = &statement.expression else {
+        return None;
     };
 
-    let assignment = match &*statement.expr {
-        Expr::Assign(assignment) => assignment,
-        _ => return None,
-    };
+    let (object, export_name) = assignment_target_member_parts(&assignment.left)?;
+    let (global, object_name) = member_parts(object)?;
 
-    let left = match &assignment.left {
-        AssignTarget::Simple(SimpleAssignTarget::Member(member)) => member,
-        _ => return None,
+    let Expression::Identifier(global) = global else {
+        return None;
     };
-
-    let object = match &*left.obj {
-        Expr::Member(member) => member,
-        _ => return None,
-    };
-
-    let object_name = member_prop_name(&object.prop)?;
-    let global_name = match &*object.obj {
-        Expr::Ident(ident) => ident.sym.to_string(),
-        _ => return None,
-    };
-
-    if global_name != "globalThis" || object_name != "GCC" {
+    if global.name != "globalThis" || object_name != "GCC" {
         return None;
     }
 
-    let export_name = member_prop_name(&left.prop)?;
     Some((export_name, &assignment.right))
 }
 
-fn is_gcc_bootstrap_statement(item: &ModuleItem) -> bool {
-    let statement = match item {
-        ModuleItem::Stmt(Stmt::Expr(statement)) => statement,
-        _ => return false,
+fn is_gcc_bootstrap_statement(item: &Statement<'_>) -> bool {
+    let Statement::ExpressionStatement(statement) = item else {
+        return false;
     };
-
-    let assignment = match &*statement.expr {
-        Expr::Assign(assignment) => assignment,
-        _ => return false,
+    let Expression::AssignmentExpression(assignment) = &statement.expression else {
+        return false;
     };
-
-    let left = match &assignment.left {
-        AssignTarget::Simple(SimpleAssignTarget::Member(member)) => member,
-        _ => return false,
+    let Some((object, property)) = assignment_target_member_parts(&assignment.left) else {
+        return false;
     };
-
-    let right = match &*assignment.right {
-        Expr::Bin(binary) if binary.op == BinaryOp::LogicalOr => binary,
-        _ => return false,
+    let Expression::LogicalExpression(right) = &assignment.right else {
+        return false;
     };
+    if right.operator != LogicalOperator::Or {
+        return false;
+    }
 
-    is_global_gcc_member(&left.obj, &left.prop)
-        && matches!(&*right.left, Expr::Member(member) if is_global_gcc_member(&member.obj, &member.prop))
-        && matches!(&*right.right, Expr::Object(object) if object.props.is_empty())
+    is_global_gcc_member(object, &property)
+        && matches!(member_parts(&right.left), Some((object, property)) if is_global_gcc_member(object, &property))
+        && matches!(&right.right, Expression::ObjectExpression(object) if object.properties.is_empty())
 }
 
-fn is_global_gcc_member(object: &Expr, prop: &MemberProp) -> bool {
-    matches!(object, Expr::Ident(ident) if ident.sym == "globalThis")
-        && member_prop_name(prop).as_deref() == Some("GCC")
+fn is_global_gcc_member(object: &Expression<'_>, property: &str) -> bool {
+    matches!(object, Expression::Identifier(ident) if ident.name == "globalThis")
+        && property == "GCC"
 }
 
-fn bare_identifier_name(expression: &Expr) -> Option<String> {
+/// Splits `<object>.<name>` / `<object>["<name>"]` in expression position.
+/// Anything else - including a private field or a non-string computed key - is
+/// not a member access this pass can name, so it is rejected.
+fn member_parts<'a>(expression: &'a Expression<'a>) -> Option<(&'a Expression<'a>, String)> {
     match expression {
-        Expr::Ident(ident) => Some(ident.sym.to_string()),
+        Expression::StaticMemberExpression(member) => {
+            Some((&member.object, member.property.name.to_string()))
+        }
+        Expression::ComputedMemberExpression(member) => match &member.expression {
+            Expression::StringLiteral(value) => Some((&member.object, value.value.to_string())),
+            _ => None,
+        },
         _ => None,
     }
 }
 
-fn collect_top_level_declared_names(item: &ModuleItem, names: &mut HashSet<String>) {
+/// Same split for a member expression used as an assignment target.
+fn assignment_target_member_parts<'a>(
+    target: &'a AssignmentTarget<'a>,
+) -> Option<(&'a Expression<'a>, String)> {
+    match target {
+        AssignmentTarget::StaticMemberExpression(member) => {
+            Some((&member.object, member.property.name.to_string()))
+        }
+        AssignmentTarget::ComputedMemberExpression(member) => match &member.expression {
+            Expression::StringLiteral(value) => Some((&member.object, value.value.to_string())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn bare_identifier_name(expression: &Expression<'_>) -> Option<String> {
+    match expression {
+        Expression::Identifier(ident) => Some(ident.name.to_string()),
+        _ => None,
+    }
+}
+
+fn collect_top_level_declared_names(item: &Statement<'_>, names: &mut HashSet<String>) {
     match item {
-        ModuleItem::Stmt(Stmt::Decl(Decl::Var(variable))) => {
-            for declarator in &variable.decls {
-                collect_pattern_names(&declarator.name, names);
+        Statement::VariableDeclaration(variable) => {
+            for declarator in &variable.declarations {
+                collect_pattern_names(&declarator.id, names);
             }
         }
-        ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) => {
-            names.insert(function.ident.sym.to_string());
+        Statement::FunctionDeclaration(function) => {
+            if let Some(id) = &function.id {
+                names.insert(id.name.to_string());
+            }
         }
-        ModuleItem::Stmt(Stmt::Decl(Decl::Class(class))) => {
-            names.insert(class.ident.sym.to_string());
+        Statement::ClassDeclaration(class) => {
+            if let Some(id) = &class.id {
+                names.insert(id.name.to_string());
+            }
         }
-        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export_decl)) => match &export_decl.decl {
-            Decl::Var(variable) => {
-                for declarator in &variable.decls {
-                    collect_pattern_names(&declarator.name, names);
+        Statement::ExportNamedDeclaration(export_decl) => match &export_decl.declaration {
+            Some(Declaration::VariableDeclaration(variable)) => {
+                for declarator in &variable.declarations {
+                    collect_pattern_names(&declarator.id, names);
                 }
             }
-            Decl::Fn(function) => {
-                names.insert(function.ident.sym.to_string());
+            Some(Declaration::FunctionDeclaration(function)) => {
+                if let Some(id) = &function.id {
+                    names.insert(id.name.to_string());
+                }
             }
-            Decl::Class(class) => {
-                names.insert(class.ident.sym.to_string());
+            Some(Declaration::ClassDeclaration(class)) => {
+                if let Some(id) = &class.id {
+                    names.insert(id.name.to_string());
+                }
             }
             _ => {}
         },
@@ -371,52 +380,41 @@ fn collect_top_level_declared_names(item: &ModuleItem, names: &mut HashSet<Strin
     }
 }
 
-fn collect_pattern_names(pattern: &Pat, names: &mut HashSet<String>) {
+fn collect_pattern_names(pattern: &BindingPattern<'_>, names: &mut HashSet<String>) {
     match pattern {
-        Pat::Ident(binding) => {
-            names.insert(binding.id.sym.to_string());
+        BindingPattern::BindingIdentifier(binding) => {
+            names.insert(binding.name.to_string());
         }
-        Pat::Array(array) => {
-            for element in array.elems.iter().flatten() {
+        BindingPattern::ArrayPattern(array) => {
+            for element in array.elements.iter().flatten() {
                 collect_pattern_names(element, names);
             }
-        }
-        Pat::Object(object) => {
-            for prop in &object.props {
-                match prop {
-                    ObjectPatProp::Assign(assign) => {
-                        names.insert(assign.key.sym.to_string());
-                    }
-                    ObjectPatProp::KeyValue(key_value) => {
-                        collect_pattern_names(&key_value.value, names);
-                    }
-                    ObjectPatProp::Rest(rest) => {
-                        collect_pattern_names(&rest.arg, names);
-                    }
-                }
+            if let Some(rest) = &array.rest {
+                collect_pattern_names(&rest.argument, names);
             }
         }
-        Pat::Assign(assign) => collect_pattern_names(&assign.left, names),
-        Pat::Rest(rest) => collect_pattern_names(&rest.arg, names),
-        _ => {}
+        BindingPattern::ObjectPattern(object) => {
+            // A shorthand property, a renamed one and a defaulted one all reach
+            // their binding through `value`, so one recursion covers the three
+            // shapes swc spelled out separately.
+            for property in &object.properties {
+                collect_pattern_names(&property.value, names);
+            }
+            if let Some(rest) = &object.rest {
+                collect_pattern_names(&rest.argument, names);
+            }
+        }
+        BindingPattern::AssignmentPattern(assign) => {
+            collect_pattern_names(&assign.left, names);
+        }
     }
 }
 
-fn member_prop_name(prop: &MemberProp) -> Option<String> {
-    match prop {
-        MemberProp::Ident(ident) => Some(ident.sym.to_string()),
-        MemberProp::Computed(computed) => match &*computed.expr {
-            Expr::Lit(Lit::Str(value)) => Some(value.value.to_string_lossy().to_string()),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn export_name_from_module_export_name(name: &ModuleExportName) -> String {
+fn export_name_from_module_export_name(name: &ModuleExportName<'_>) -> String {
     match name {
-        ModuleExportName::Ident(ident) => ident.sym.to_string(),
-        ModuleExportName::Str(string) => string.value.to_string_lossy().to_string(),
+        ModuleExportName::IdentifierName(ident) => ident.name.to_string(),
+        ModuleExportName::IdentifierReference(ident) => ident.name.to_string(),
+        ModuleExportName::StringLiteral(string) => string.value.to_string(),
     }
 }
 

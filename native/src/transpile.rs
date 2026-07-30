@@ -71,7 +71,6 @@ use self::global_this::*;
 use self::hoist::*;
 use self::imports_exports::*;
 use self::js_compat::*;
-pub(crate) use self::namespace::no_substitution_template_value;
 use self::namespace::*;
 use self::print::*;
 use self::type_metadata::*;

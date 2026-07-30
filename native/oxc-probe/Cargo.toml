@@ -1,0 +1,36 @@
+# Dual-stack parity probe: the repo-pinned swc pipeline vs the oxc pipeline the
+# migration would move to (/tmp/gcc-o1-oxc.md, phase P3).
+#
+# Deliberately its own workspace: the oxc dependency tree must never enter
+# `native/Cargo.toml`, which is the shipping crate. `cargo test` on the native
+# crate does not see this package, and nothing in the build or publish path
+# depends on it. Drive it through `scripts/oxc-diff.mjs`.
+[package]
+name = "gcc-oxc-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "oxc-probe"
+path = "src/main.rs"
+
+[dependencies]
+# Must stay byte-identical to native/Cargo.toml, or the probe measures the wrong
+# baseline.
+swc_core = { version = "74.0.2", features = ["common", "ecma_ast", "ecma_codegen", "ecma_parser", "ecma_visit"] }
+swc_ecma_transforms_base = "46.0.1"
+swc_ecma_transforms_react = "52.0.0"
+swc_ecma_transforms_typescript = "52.0.0"
+
+oxc_allocator = "0.142.0"
+oxc_parser = "0.142.0"
+oxc_span = "0.142.0"
+oxc_semantic = "0.142.0"
+oxc_transformer = "0.142.0"
+oxc_codegen = "0.142.0"
+
+[profile.release]
+debug = false

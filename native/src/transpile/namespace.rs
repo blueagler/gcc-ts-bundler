@@ -1,10 +1,9 @@
 use super::*;
 
-mod dynamic_imports;
+pub(super) mod dynamic_imports;
 mod flow;
 mod wrappers;
 
-pub(crate) use self::dynamic_imports::no_substitution_template_value;
 pub(super) use self::dynamic_imports::{group_lazy_imports_by_file, DynamicImportRewriteVisitor};
 pub(super) use self::flow::{
     rewrite_bundler_runtime_namespace_usage, rewrite_hoisted_namespace_usage,

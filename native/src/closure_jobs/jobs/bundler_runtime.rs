@@ -1,12 +1,12 @@
 use super::super::*;
 use super::shared::{aggregate_type_metadata, property_renaming_report_path};
-use crate::module_cache::parse_module;
 use crate::transpile::assigners::collect_annotated_assigner_names;
+use oxc_allocator::Allocator;
+use oxc_ast::ast::{Argument, BindingPattern, Expression, IdentifierReference, Program};
+use oxc_ast::AstKind;
+use oxc_semantic::{Semantic, SemanticBuilder, SymbolId};
+use oxc_span::SourceType;
 use std::collections::{HashMap, HashSet};
-use swc_core::common::{Globals, Mark, Spanned, SyntaxContext, GLOBALS};
-use swc_core::ecma::ast::{CallExpr, Callee, Expr, Id, Lit, Pass, Pat, Program};
-use swc_core::ecma::visit::{Visit, VisitWith};
-use swc_ecma_transforms_base::resolver;
 
 #[derive(Clone, Debug, serde::Serialize)]
 struct DebugBundlerRuntimeInitManifest(
@@ -548,29 +548,55 @@ fn rename_runtime_aliases(
             suffix: String::new(),
         });
     }
-    let (program, unresolved_ctxt) = resolved_runtime_program(source_text)?;
-    let target_ids = RUNTIME_ALIAS_NAMES
-        .into_iter()
-        .map(|name| (runtime_ident_id(name, unresolved_ctxt), name))
-        .collect::<HashMap<_, _>>();
-    let mut collector = RuntimeAliasCollector {
-        target_ids,
-        targets: Vec::new(),
-        used_names: HashSet::new(),
-    };
-    program.visit_with(&mut collector);
+    let allocator = Allocator::default();
+    let program = parse_runtime_program(&allocator, source_text)?;
+    let semantic = build_runtime_semantic(&program);
+
+    let mut targets = Vec::<(usize, usize, &'static str)>::new();
+    let mut used_names = HashSet::<String>::new();
+    for node in semantic.nodes().iter() {
+        match node.kind() {
+            AstKind::IdentifierReference(ident) => {
+                // Only a free reference to the generated helper is a rename
+                // target. A reference that resolves to any declaration in the
+                // file is an authored binding and must keep its spelling.
+                match RUNTIME_ALIAS_NAMES
+                    .into_iter()
+                    .find(|name| *name == ident.name.as_str())
+                    .filter(|_| is_unresolved(&semantic, ident))
+                {
+                    Some(name) => {
+                        targets.push((ident.span.start as usize, ident.span.end as usize, name))
+                    }
+                    None => {
+                        used_names.insert(ident.name.to_string());
+                    }
+                }
+            }
+            // Binding and label names occupy the same namespace the suffix
+            // search has to dodge. Member and property names (oxc
+            // `IdentifierName`) deliberately do not, matching what swc's
+            // `Ident`-only visitor saw.
+            AstKind::BindingIdentifier(ident) => {
+                used_names.insert(ident.name.to_string());
+            }
+            AstKind::LabelIdentifier(ident) => {
+                used_names.insert(ident.name.to_string());
+            }
+            _ => {}
+        }
+    }
 
     let mut suffix = requested_suffix.to_string();
     let mut counter = 1usize;
     while RUNTIME_ALIAS_DECL_NAMES
         .iter()
-        .any(|name| collector.used_names.contains(&format!("{name}{suffix}")))
+        .any(|name| used_names.contains(&format!("{name}{suffix}")))
     {
         suffix = format!("{requested_suffix}_{counter}");
         counter += 1;
     }
-    let edits = collector
-        .targets
+    let edits = targets
         .into_iter()
         .map(|(start, end, name)| (start, end, format!("{name}{suffix}")))
         .collect();
@@ -578,26 +604,6 @@ fn rename_runtime_aliases(
         text: Some(apply_runtime_source_edits(source_text, edits)?),
         suffix,
     })
-}
-
-struct RuntimeAliasCollector {
-    target_ids: HashMap<Id, &'static str>,
-    targets: Vec<(usize, usize, &'static str)>,
-    used_names: HashSet<String>,
-}
-
-impl Visit for RuntimeAliasCollector {
-    fn visit_ident(&mut self, ident: &swc_core::ecma::ast::Ident) {
-        if let Some(name) = self.target_ids.get(&ident.to_id()).copied() {
-            self.targets.push((
-                ident.span.lo.0.saturating_sub(1) as usize,
-                ident.span.hi.0.saturating_sub(1) as usize,
-                name,
-            ));
-        } else {
-            self.used_names.insert(ident.sym.to_string());
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -612,144 +618,137 @@ fn rewrite_runtime_module_ids(
     source_text: &str,
     runtime_module_index_by_id: &BTreeMap<String, usize>,
 ) -> std::result::Result<String, String> {
-    let (program, unresolved_ctxt) = resolved_runtime_program(source_text)?;
-    let mut call_ids = HashMap::from([
-        (
-            runtime_ident_id("__register", unresolved_ctxt),
-            RuntimeCallKind::Register,
-        ),
-        (
-            runtime_ident_id("__require", unresolved_ctxt),
-            RuntimeCallKind::Require,
-        ),
-        (
-            runtime_ident_id("__dynamicImport", unresolved_ctxt),
-            RuntimeCallKind::DynamicImport,
-        ),
-        (
-            runtime_ident_id("__preloadDynamicImport", unresolved_ctxt),
-            RuntimeCallKind::PreloadDynamicImport,
-        ),
-    ]);
-    program.visit_with(&mut RegistryRuntimeParameterCollector {
-        register_id: runtime_ident_id("__register", unresolved_ctxt),
-        call_ids: &mut call_ids,
-    });
-    let mut collector = RuntimeModuleIdEditCollector {
-        call_ids: &call_ids,
-        edits: Vec::new(),
-        errors: Vec::new(),
-        runtime_module_index_by_id,
-    };
-    program.visit_with(&mut collector);
-    if !collector.errors.is_empty() {
-        return Err(collector.errors.join("\n"));
-    }
-    apply_runtime_source_edits(source_text, collector.edits)
-}
+    let allocator = Allocator::default();
+    let program = parse_runtime_program(&allocator, source_text)?;
+    let semantic = build_runtime_semantic(&program);
 
-struct RegistryRuntimeParameterCollector<'a> {
-    register_id: Id,
-    call_ids: &'a mut HashMap<Id, RuntimeCallKind>,
-}
-
-impl Visit for RegistryRuntimeParameterCollector<'_> {
-    fn visit_call_expr(&mut self, call: &CallExpr) {
-        if matches!(
-                    &call.callee,
-                    Callee::Expr(callee)
-                        if matches!(&**callee, Expr::Ident(ident) if ident.to_id() == self.register_id)
-        ) {
-            if let Some(callback) = call.args.get(1).map(|argument| argument.expr.as_ref()) {
-                match callback {
-                    Expr::Fn(function) => {
-                        self.collect_params(
-                            function.function.params.iter().map(|param| &param.pat),
-                        );
-                    }
-                    Expr::Arrow(arrow) => self.collect_params(arrow.params.iter()),
-                    _ => {}
-                }
-            }
+    // Every registry facade rebinds the helpers as callback parameters, so the
+    // parameter symbols are as much a call site as the free global is. Position
+    // in the facade signature is what names them.
+    let mut param_call_ids = HashMap::<SymbolId, RuntimeCallKind>::new();
+    for node in semantic.nodes().iter() {
+        let AstKind::CallExpression(call) = node.kind() else {
+            continue;
+        };
+        let Expression::Identifier(callee) = &call.callee else {
+            continue;
+        };
+        if callee.name != "__register" || !is_unresolved(&semantic, callee) {
+            continue;
         }
-        call.visit_children_with(self);
-    }
-}
-
-impl RegistryRuntimeParameterCollector<'_> {
-    fn collect_params<'a>(&mut self, params: impl Iterator<Item = &'a Pat>) {
-        for (index, pattern) in params.enumerate() {
-            let Pat::Ident(binding) = pattern else {
+        let Some(callback) = call.arguments.get(1).and_then(Argument::as_expression) else {
+            continue;
+        };
+        let params = match callback {
+            Expression::FunctionExpression(function) => &function.params,
+            Expression::ArrowFunctionExpression(arrow) => &arrow.params,
+            _ => continue,
+        };
+        for (index, parameter) in params.items.iter().enumerate() {
+            let BindingPattern::BindingIdentifier(binding) = &parameter.pattern else {
                 continue;
             };
             let kind = match index {
-                0 => Some(RuntimeCallKind::Require),
-                2 => Some(RuntimeCallKind::DynamicImport),
-                3 => Some(RuntimeCallKind::PreloadDynamicImport),
-                _ => None,
+                0 => RuntimeCallKind::Require,
+                2 => RuntimeCallKind::DynamicImport,
+                3 => RuntimeCallKind::PreloadDynamicImport,
+                _ => continue,
             };
-            if let Some(kind) = kind {
-                self.call_ids.insert(binding.id.to_id(), kind);
-            }
+            param_call_ids.insert(binding.symbol_id(), kind);
         }
     }
-}
 
-struct RuntimeModuleIdEditCollector<'a> {
-    call_ids: &'a HashMap<Id, RuntimeCallKind>,
-    edits: Vec<(usize, usize, String)>,
-    errors: Vec<String>,
-    runtime_module_index_by_id: &'a BTreeMap<String, usize>,
-}
-
-impl Visit for RuntimeModuleIdEditCollector<'_> {
-    fn visit_call_expr(&mut self, call: &CallExpr) {
-        call.visit_children_with(self);
-        let Callee::Expr(callee) = &call.callee else {
-            return;
+    let mut edits = Vec::<(usize, usize, String)>::new();
+    let mut errors = Vec::<String>::new();
+    for node in semantic.nodes().iter() {
+        let AstKind::CallExpression(call) = node.kind() else {
+            continue;
         };
-        let Expr::Ident(ident) = &**callee else {
-            return;
+        let Expression::Identifier(callee) = &call.callee else {
+            continue;
         };
-        let Some(_kind) = self.call_ids.get(&ident.to_id()) else {
-            return;
+        if runtime_call_kind(&semantic, callee, &param_call_ids).is_none() {
+            continue;
+        }
+        let Some(argument) = call.arguments.first().and_then(Argument::as_expression) else {
+            continue;
         };
-        let Some(argument) = call.args.first() else {
-            return;
+        let Expression::StringLiteral(module_id) = argument else {
+            continue;
         };
-        let Expr::Lit(Lit::Str(module_id)) = &*argument.expr else {
-            return;
+        let Some(module_index) = runtime_module_index_by_id.get(module_id.value.as_str()) else {
+            errors.push(format!("Missing module index for {}", module_id.value));
+            continue;
         };
-        let module_id = module_id.value.to_string_lossy().to_string();
-        let Some(module_index) = self.runtime_module_index_by_id.get(&module_id) else {
-            self.errors
-                .push(format!("Missing module index for {module_id}"));
-            return;
-        };
-        let span = argument.expr.span();
-        self.edits.push((
-            span.lo.0.saturating_sub(1) as usize,
-            span.hi.0.saturating_sub(1) as usize,
+        // oxc spans are plain byte offsets into `source_text`, so the literal's
+        // span - quotes included - is already the replacement range.
+        edits.push((
+            module_id.span.start as usize,
+            module_id.span.end as usize,
             module_index.to_string(),
         ));
     }
+    if !errors.is_empty() {
+        return Err(errors.join("\n"));
+    }
+    apply_runtime_source_edits(source_text, edits)
 }
 
-fn resolved_runtime_program(
-    source_text: &str,
-) -> std::result::Result<(Program, SyntaxContext), String> {
-    let module = parse_module(Path::new("bundler-runtime-linked.js"), source_text)?;
-    Ok(GLOBALS.set(&Globals::new(), || {
-        let mut program = Program::Module(module);
-        let unresolved_mark = Mark::new();
-        let top_level_mark = Mark::new();
-        resolver(unresolved_mark, top_level_mark, false).process(&mut program);
-        (program, SyntaxContext::empty().apply_mark(unresolved_mark))
-    }))
+/// Which generated helper a callee names, if any: either a free reference to
+/// the global spelling or a reference to a facade parameter that rebound it.
+fn runtime_call_kind(
+    semantic: &Semantic<'_>,
+    callee: &IdentifierReference<'_>,
+    param_call_ids: &HashMap<SymbolId, RuntimeCallKind>,
+) -> Option<RuntimeCallKind> {
+    match semantic
+        .scoping()
+        .get_reference(callee.reference_id())
+        .symbol_id()
+    {
+        Some(symbol_id) => param_call_ids.get(&symbol_id).copied(),
+        None => match callee.name.as_str() {
+            "__register" => Some(RuntimeCallKind::Register),
+            "__require" => Some(RuntimeCallKind::Require),
+            "__dynamicImport" => Some(RuntimeCallKind::DynamicImport),
+            "__preloadDynamicImport" => Some(RuntimeCallKind::PreloadDynamicImport),
+            _ => None,
+        },
+    }
 }
 
-fn runtime_ident_id(name: &str, ctxt: SyntaxContext) -> Id {
-    swc_core::ecma::ast::Ident::new(name.into(), Default::default(), ctxt).to_id()
+/// True when the reference resolves to no declaration in this file, which is
+/// oxc's equivalent of swc's "carries the unresolved mark".
+fn is_unresolved(semantic: &Semantic<'_>, ident: &IdentifierReference<'_>) -> bool {
+    semantic
+        .scoping()
+        .get_reference(ident.reference_id())
+        .symbol_id()
+        .is_none()
+}
+
+fn parse_runtime_program<'a>(
+    allocator: &'a Allocator,
+    source_text: &'a str,
+) -> std::result::Result<Program<'a>, String> {
+    let parsed = oxc_parser::Parser::new(allocator, source_text, SourceType::mjs()).parse();
+    if let Some(error) = parsed.diagnostics.first() {
+        return Err(format!("bundler-runtime-linked.js: {}", error.message));
+    }
+    Ok(parsed.program)
+}
+
+/// Resolves bindings. This is the oxc replacement for swc's `resolver` pass:
+/// the scope tree it builds is what distinguishes a generated helper call from
+/// an authored binding that happens to share the name.
+///
+/// `with_build_nodes` is off by default and leaves `Semantic::nodes` empty, so
+/// both passes below would silently find nothing to rewrite.
+fn build_runtime_semantic<'a>(program: &'a Program<'a>) -> Semantic<'a> {
+    SemanticBuilder::new()
+        .with_build_nodes(true)
+        .build(program)
+        .semantic
 }
 
 fn apply_runtime_source_edits(
