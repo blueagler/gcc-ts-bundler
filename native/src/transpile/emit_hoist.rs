@@ -897,3 +897,27 @@ impl Visit for NamespaceUsageScanner {
         expr.visit_children_with(self);
     }
 }
+
+#[cfg(test)]
+pub(super) fn emit_hoist_text_for_test(
+    file_path: &Path,
+    source: &str,
+    context: &TranspileContext,
+    plan: &HoistPlan,
+    file_metadata: Option<&ClosureFileMetadata>,
+    commonjs_export_name: Option<&str>,
+) -> std::result::Result<EmittedProgram, String> {
+    GLOBALS.set(&Globals::new(), || {
+        let module = parse_module(file_path, source)?;
+        let mut program = Program::Module(module);
+        apply_resolver_and_global_this_compat(&mut program, true)?;
+        emit_hoisted_module_program(
+            file_path,
+            program,
+            context,
+            plan,
+            file_metadata,
+            commonjs_export_name,
+        )
+    })
+}

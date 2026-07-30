@@ -2,14 +2,15 @@
 
 #![allow(dead_code)]
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use oxc_allocator::{Allocator, TakeIn};
+use oxc_allocator::{Allocator, FromIn, TakeIn};
 use oxc_ast::ast::*;
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_span::SPAN;
+use oxc_str::Str;
 use oxc_syntax::number::NumberBase;
 use oxc_syntax::operator::AssignmentOperator;
 
@@ -19,8 +20,10 @@ use super::wrappers_oxc::{
     DynamicImportWrappers,
 };
 use crate::transpile::emit_runtime_oxc::binding_names_with_ids;
-use crate::transpile::identity_oxc::{BindingKeyMap, ModuleIdentity};
-use crate::transpile::{resolve_module_id_for_specifier, TranspileContext};
+use crate::transpile::identity_oxc::{BindingKeyMap, BindingKeySet, ModuleIdentity};
+use crate::transpile::{
+    resolve_module_id_for_specifier, to_bundler_runtime_module_id, HoistPlan, TranspileContext,
+};
 
 pub(crate) fn rewrite_bundler_runtime_namespace_usage<'a>(
     allocator: &'a Allocator,
@@ -29,15 +32,56 @@ pub(crate) fn rewrite_bundler_runtime_namespace_usage<'a>(
     file_path: &Path,
     context: &TranspileContext,
 ) -> std::result::Result<(), String> {
+    rewrite_namespace_usage(allocator, program, identity, file_path, context, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rewrite_hoisted_namespace_usage<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    identity: &ModuleIdentity,
+    file_path: &Path,
+    context: &TranspileContext,
+    plan: &HoistPlan,
+    consumer_module_id: &str,
+    direct_namespace_ids: &BindingKeySet,
+    lexical_binding_names: &HashSet<String>,
+) -> std::result::Result<(), String> {
+    rewrite_namespace_usage(
+        allocator,
+        program,
+        identity,
+        file_path,
+        context,
+        Some(HoistNamespaceInfo {
+            consumer_module_id,
+            direct_namespace_ids,
+            lexical_binding_names,
+            plan,
+        }),
+    )
+}
+
+fn rewrite_namespace_usage<'a, 'i>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    identity: &'i ModuleIdentity,
+    file_path: &Path,
+    context: &'i TranspileContext,
+    hoist: Option<HoistNamespaceInfo<'i>>,
+) -> std::result::Result<(), String> {
     let wrappers = collect_dynamic_import_wrappers(program, identity);
     let object_carriers = collect_dynamic_import_object_carriers(program, &wrappers, identity);
     let promise_carriers =
         collect_dynamic_import_promise_carriers(program, &object_carriers, &wrappers, identity);
     let mut visitor = BundlerRuntimeNamespaceVisitor {
+        allocator,
         builder: AstBuilder::new(allocator),
         context,
+        direct_namespace_targets: HashMap::new(),
         errors: Vec::new(),
         file_path: file_path.to_path_buf(),
+        hoist,
         identity,
         namespace_bindings: HashMap::new(),
         object_carriers,
@@ -52,11 +96,21 @@ pub(crate) fn rewrite_bundler_runtime_namespace_usage<'a>(
     }
 }
 
+struct HoistNamespaceInfo<'i> {
+    consumer_module_id: &'i str,
+    direct_namespace_ids: &'i BindingKeySet,
+    lexical_binding_names: &'i HashSet<String>,
+    plan: &'i HoistPlan,
+}
+
 struct BundlerRuntimeNamespaceVisitor<'a, 'i> {
+    allocator: &'a Allocator,
     builder: AstBuilder<'a>,
     context: &'i TranspileContext,
+    direct_namespace_targets: BindingKeyMap<String>,
     errors: Vec<String>,
     file_path: std::path::PathBuf,
+    hoist: Option<HoistNamespaceInfo<'i>>,
     identity: &'i ModuleIdentity,
     namespace_bindings: BindingKeyMap<BTreeSet<String>>,
     object_carriers: BindingKeyMap<DynamicImportObjectWrapper>,
@@ -319,6 +373,101 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
             Expression::new_computed_member_expression(SPAN, object, slot, optional, &self.builder);
         true
     }
+
+    fn rewrite_direct_namespace_member(&mut self, expression: &mut Expression<'a>) -> bool {
+        let (object, property) = match expression {
+            Expression::StaticMemberExpression(member) => {
+                (&member.object, Some(member.property.name.to_string()))
+            }
+            Expression::ComputedMemberExpression(member) => {
+                (&member.object, computed_property_name(&member.expression))
+            }
+            _ => return false,
+        };
+        let Expression::Identifier(identifier) = object else {
+            return false;
+        };
+        let Some(binding) = self.identity.key_of_reference(identifier) else {
+            return false;
+        };
+        let Some(target_module_id) = self.direct_namespace_targets.get(&binding).cloned() else {
+            return false;
+        };
+        let Some(property) = property else {
+            self.push_error("bundler-runtime does not support computed namespace property access");
+            return true;
+        };
+        let Some(hoist) = &self.hoist else {
+            return false;
+        };
+        let Some(resolved) = hoist.plan.resolve_export(&target_module_id, &property) else {
+            self.push_error(format!(
+                "bundler-runtime cannot rewrite namespace access for export {property:?} from {target_module_id}"
+            ));
+            return true;
+        };
+        if hoist
+            .plan
+            .is_direct_binding(hoist.consumer_module_id, resolved)
+        {
+            if let Some(direct_name) = hoist.plan.direct_binding_name(resolved) {
+                if !hoist.lexical_binding_names.contains(&direct_name) {
+                    *expression = Expression::new_identifier(
+                        SPAN,
+                        oxc_str::Ident::from_in(&direct_name, self.allocator),
+                        &self.builder,
+                    );
+                    return true;
+                }
+            }
+        }
+        let Some(owner_slots) = self
+            .context
+            .bundler_module_slots
+            .get(&resolved.owner_module_id)
+        else {
+            self.push_error(format!(
+                "Missing bundler-runtime export slot metadata for {}",
+                resolved.owner_module_id
+            ));
+            return true;
+        };
+        let Some(owner_slot) = owner_slots.slot_for(&resolved.owner_export_name) else {
+            self.push_error(format!(
+                "bundler-runtime cannot rewrite namespace access for export {:?} from {}",
+                resolved.owner_export_name, resolved.owner_module_id
+            ));
+            return true;
+        };
+        let callee = Expression::new_identifier(SPAN, "__require", &self.builder);
+        let runtime_module_id = to_bundler_runtime_module_id(&resolved.owner_module_id);
+        let module_id = Expression::new_string_literal(
+            SPAN,
+            Str::from_in(&runtime_module_id, self.allocator),
+            None,
+            &self.builder,
+        );
+        let arguments =
+            oxc_allocator::Vec::from_value_in(Argument::from(module_id), &self.allocator);
+        let require = Expression::new_call_expression(
+            SPAN,
+            callee,
+            None::<oxc_allocator::Box<'a, TSTypeParameterInstantiation<'a>>>,
+            arguments,
+            false,
+            &self.builder,
+        );
+        let slot = Expression::new_numeric_literal(
+            SPAN,
+            owner_slot as f64,
+            None,
+            NumberBase::Decimal,
+            &self.builder,
+        );
+        *expression =
+            Expression::new_computed_member_expression(SPAN, require, slot, false, &self.builder);
+        true
+    }
 }
 
 impl<'a> VisitMut<'a> for BundlerRuntimeNamespaceVisitor<'a, '_> {
@@ -336,10 +485,18 @@ impl<'a> VisitMut<'a> for BundlerRuntimeNamespaceVisitor<'a, '_> {
             };
             for specifier in import.specifiers.iter().flatten() {
                 if let ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) = specifier {
-                    self.namespace_bindings.insert(
-                        self.identity.key_of_binding(&namespace.local),
-                        BTreeSet::from([module_id.clone()]),
-                    );
+                    let binding = self.identity.key_of_binding(&namespace.local);
+                    if self
+                        .hoist
+                        .as_ref()
+                        .is_some_and(|hoist| hoist.direct_namespace_ids.contains(&binding))
+                    {
+                        self.direct_namespace_targets
+                            .insert(binding, module_id.clone());
+                    } else {
+                        self.namespace_bindings
+                            .insert(binding, BTreeSet::from([module_id.clone()]));
+                    }
                 }
             }
         }
@@ -347,6 +504,9 @@ impl<'a> VisitMut<'a> for BundlerRuntimeNamespaceVisitor<'a, '_> {
     }
 
     fn visit_expression(&mut self, expression: &mut Expression<'a>) {
+        if self.rewrite_direct_namespace_member(expression) {
+            return;
+        }
         walk_mut::walk_expression(self, expression);
         self.rewrite_member_expression(expression);
     }
