@@ -4175,6 +4175,7 @@ fn cjs_export_marker_is_never_reachable_through_a_rename_primitive() {
         "transpile/context.rs",
         "transpile/emit_hoist.rs",
         "transpile/emit_runtime.rs",
+        "transpile/emit_runtime_oxc.rs",
         "transpile/hoist.rs",
         "transpile/imports_exports/bindings.rs",
         "transpile/js_compat/ast.rs",

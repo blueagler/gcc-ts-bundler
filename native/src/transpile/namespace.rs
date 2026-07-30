@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) mod dynamic_imports;
 mod flow;
+pub(super) mod flow_oxc;
 mod wrappers;
 mod wrappers_oxc;
 

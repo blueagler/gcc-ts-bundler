@@ -81,6 +81,12 @@ impl ModuleIdentity {
             .map(BindingKey)
     }
 
+    /// True only for a node built after semantic analysis. Authored unresolved
+    /// globals still have a reference id whose symbol is `None`.
+    pub(crate) fn is_synthesized_reference(&self, ident: &IdentifierReference<'_>) -> bool {
+        ident.reference_id.get().is_none()
+    }
+
     /// The binding this declaration introduces.
     ///
     /// Infallible: a `BindingIdentifier` always has a symbol once the semantic

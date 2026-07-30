@@ -25,6 +25,7 @@ impl FreshNameAllocator {
     pub(crate) fn from_program(program: &Program<'_>, identity: &ModuleIdentity) -> Self {
         let mut collector = IdentifierNameCollector {
             excluded_ids: None,
+            excluded_global_names: None,
             identity,
             names: HashSet::new(),
         };
@@ -41,6 +42,24 @@ impl FreshNameAllocator {
     ) -> Self {
         let mut collector = IdentifierNameCollector {
             excluded_ids: Some(excluded_ids),
+            excluded_global_names: None,
+            identity,
+            names: HashSet::new(),
+        };
+        collector.visit_program(program);
+        Self {
+            used: collector.names,
+        }
+    }
+
+    pub(crate) fn from_program_excluding_synthesized_globals(
+        program: &Program<'_>,
+        identity: &ModuleIdentity,
+        excluded_global_names: &HashSet<String>,
+    ) -> Self {
+        let mut collector = IdentifierNameCollector {
+            excluded_global_names: Some(excluded_global_names),
+            excluded_ids: None,
             identity,
             names: HashSet::new(),
         };
@@ -76,11 +95,19 @@ pub(crate) fn collect_lexical_binding_names(program: &Program<'_>) -> HashSet<St
 
 struct IdentifierNameCollector<'a> {
     excluded_ids: Option<&'a BindingKeySet>,
+    excluded_global_names: Option<&'a HashSet<String>>,
     identity: &'a ModuleIdentity,
     names: HashSet<String>,
 }
 
 impl IdentifierNameCollector<'_> {
+    fn excluded_global_reference(&self, identifier: &IdentifierReference<'_>) -> bool {
+        self.identity.is_synthesized_reference(identifier)
+            && self
+                .excluded_global_names
+                .is_some_and(|excluded| excluded.contains(identifier.name.as_str()))
+    }
+
     fn excluded_reference(&self, identifier: &IdentifierReference<'_>) -> bool {
         self.excluded_ids.is_some_and(|excluded| {
             self.identity
@@ -116,7 +143,7 @@ impl<'a> Visit<'a> for IdentifierNameCollector<'_> {
         if identifier.name == "const" && self.identity.is_global(identifier) {
             return;
         }
-        if !self.excluded_reference(identifier) {
+        if !self.excluded_global_reference(identifier) && !self.excluded_reference(identifier) {
             self.names.insert(identifier.name.to_string());
         }
     }

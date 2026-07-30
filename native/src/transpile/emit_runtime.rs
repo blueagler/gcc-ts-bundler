@@ -490,6 +490,28 @@ fn indent_block(source: &str) -> String {
 }
 
 #[cfg(test)]
+pub(super) fn emit_runtime_text_for_test(
+    file_path: &Path,
+    source: &str,
+    context: &TranspileContext,
+    file_metadata: Option<&ClosureFileMetadata>,
+    commonjs_export_name: Option<&str>,
+) -> std::result::Result<EmittedProgram, String> {
+    GLOBALS.set(&Globals::new(), || {
+        let module = parse_module(file_path, source)?;
+        let mut program = Program::Module(module);
+        apply_resolver_and_global_this_compat(&mut program, true)?;
+        emit_bundler_runtime_module_program(
+            file_path,
+            program,
+            context,
+            file_metadata,
+            commonjs_export_name,
+        )
+    })
+}
+
+#[cfg(test)]
 pub(crate) fn rewrite_bundler_exports(source: &str) -> String {
     rewrite_bundler_exports_with(source, "__exports").unwrap_or_else(|_| source.to_string())
 }
