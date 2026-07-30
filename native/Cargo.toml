@@ -28,6 +28,13 @@ oxc_ast = "=0.142.0"
 oxc_parser = "=0.142.0"
 oxc_semantic = "=0.142.0"
 oxc_span = "=0.142.0"
+# The swap adds what the islands did not need: TS/JSX lowering, a printer, the
+# visitor traits and the arena string type. Same exact pin, same reason.
+oxc_transformer = "=0.142.0"
+oxc_codegen = "=0.142.0"
+oxc_ast_visit = "=0.142.0"
+oxc_str = "=0.142.0"
+oxc_syntax = "=0.142.0"
 
 [build-dependencies]
 napi-build = "2.3.2"

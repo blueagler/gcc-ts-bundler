@@ -1,4 +1,5 @@
 mod analysis;
+mod analysis_oxc_shape;
 mod render;
 
 #[cfg(test)]

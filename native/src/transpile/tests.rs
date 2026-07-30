@@ -1533,15 +1533,43 @@ fn inlines_const_enum_members_defined_by_constant_expressions() {
     assert!(!transformed.contains("Dir."), "{transformed}");
 }
 
+/// A scratch directory that deletes itself.
+///
+/// `/tmp` is a tmpfs here and every fixture that leaks a directory costs inodes
+/// for the life of the box: the pre-existing `temp_dir().join(...)` sites in
+/// this file leak one per fixture per run, which measured 45,946 stale entries
+/// across accumulated runs. New fixtures use this; converting the older sites is
+/// tracked separately because they are load-bearing for other lanes' tests.
+struct ScratchDir {
+    path: PathBuf,
+}
+
+impl ScratchDir {
+    fn new(name: &str) -> Self {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("gcc-ts-bundler-{name}-{unique}"));
+        fs::create_dir_all(&path).unwrap();
+        Self { path }
+    }
+
+    fn join(&self, relative: &str) -> PathBuf {
+        self.path.join(relative)
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
 /// Emits one file through the real pipeline and returns the emitted text.
 fn transform_single_source(name: &str, source: &str) -> String {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("gcc-ts-bundler-{name}-{unique}"));
-    let file = root.join("index.ts");
-    fs::create_dir_all(&root).unwrap();
+    let scratch = ScratchDir::new(name);
+    let file = scratch.join("index.ts");
     fs::write(&file, source).unwrap();
     GLOBALS
         .set(&Globals::new(), || {
