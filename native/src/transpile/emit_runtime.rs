@@ -711,6 +711,21 @@ pub(super) fn collect_local_export_modes(
         .collect()
 }
 
+#[cfg(test)]
+pub(super) fn resolved_local_export_modes_for_test(
+    source: &str,
+) -> HashMap<String, BundlerExportSlotMode> {
+    GLOBALS.set(&Globals::new(), || {
+        let module = parse_module(Path::new("fixture.js"), source).unwrap();
+        let mut program = Program::Module(module);
+        apply_resolver_and_global_this_compat(&mut program, true).unwrap();
+        let Program::Module(module) = program else {
+            unreachable!();
+        };
+        collect_local_export_modes(&module)
+    })
+}
+
 fn collect_decl_export_candidates(
     decl: &swc_core::ecma::ast::Decl,
     binding_candidates: &mut BindingKeyMap<(String, BundlerExportSlotMode)>,

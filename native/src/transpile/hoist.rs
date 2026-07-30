@@ -767,6 +767,42 @@ impl Visit for NamespaceMemberScanner {
     }
 }
 
+#[cfg(test)]
+pub(super) fn usage_facts_for_test(
+    module: &Module,
+) -> (
+    BTreeSet<String>,
+    BTreeMap<String, Option<BTreeSet<String>>>,
+) {
+    let used = collect_used_binding_ids(module);
+    let namespace_usage = scan_namespace_usage(module);
+    let mut used_imports = BTreeSet::new();
+    let mut namespaces = BTreeMap::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import)) = item else {
+            continue;
+        };
+        for specifier in &import.specifiers {
+            let local = match specifier {
+                ImportSpecifier::Named(specifier) => &specifier.local,
+                ImportSpecifier::Default(specifier) => &specifier.local,
+                ImportSpecifier::Namespace(specifier) => {
+                    let local = &specifier.local;
+                    namespaces.insert(
+                        local.sym.to_string(),
+                        namespace_usage.member_only_usage(&BindingKey::of(local)),
+                    );
+                    local
+                }
+            };
+            if used.contains(&BindingKey::of(local)) {
+                used_imports.insert(local.sym.to_string());
+            }
+        }
+    }
+    (used_imports, namespaces)
+}
+
 struct FacadeNeeds<'a> {
     plan: &'a HoistPlan,
     slots: HashMap<String, FacadeSlots>,
