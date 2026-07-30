@@ -1,5 +1,4 @@
 mod analysis;
-mod analysis_oxc_shape;
 mod render;
 
 #[cfg(test)]
@@ -13,9 +12,19 @@ pub(super) use self::analysis::{
     collect_extern_property_names, collect_preserved_property_names,
     collect_static_property_names_from_text,
 };
-pub(super) use self::analysis::{
-    is_valid_js_identifier, prop_name_to_string, ExternPropertyAnalysis,
-};
+pub(super) use self::analysis::{is_valid_js_identifier, ExternPropertyAnalysis};
+
+// Still consumed by the swc-side test-only readers below. S1 moves this helper
+// out of the oxc analysis module so that reader has no swc AST dependency.
+pub(super) fn prop_name_to_string(prop_name: &swc_core::ecma::ast::PropName) -> Option<String> {
+    use swc_core::ecma::ast::PropName;
+    match prop_name {
+        PropName::Ident(ident) => Some(ident.sym.to_string()),
+        PropName::Str(value) => Some(value.value.to_string_lossy().to_string()),
+        PropName::Num(value) => Some(value.value.to_string()),
+        _ => None,
+    }
+}
 #[cfg(test)]
 pub(super) use self::render::render_externs;
 pub(super) use self::render::render_generated_externs;

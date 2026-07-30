@@ -4024,8 +4024,8 @@ fn ambient_declarations_are_not_program_declared_names() {
         "",
     ]
     .join("\n");
-    let module = parse_module(&file_path, &source).expect("module");
-    let names = super::externs::collect_program_declared_names_for_test(&[module]);
+    let names = super::externs::collect_program_declared_names_for_test(&file_path, &source)
+        .expect("declared names");
 
     for ambient in ["Component", "ambientCall", "AmbientClass"] {
         assert!(!names.contains(ambient), "{ambient} in {names:?}");

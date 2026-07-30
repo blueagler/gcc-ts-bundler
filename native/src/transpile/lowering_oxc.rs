@@ -970,3 +970,63 @@ mod comments_policy {
         assert_eq!(code.matches("__PURE__").count(), 2, "{code}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Upstream oxc defects and our mitigations
+// ---------------------------------------------------------------------------
+//
+// Three of the four findings from this milestone are defects in oxc 0.142 rather
+// than in our code. Each is mitigated here and pinned by an executing test; this
+// block is the record of what is ours to carry and what should go upstream.
+//
+// 1. `SemanticBuilder::with_enum_eval(true)` is *required* for enum lowering, and
+//    the transformer **panics** without it rather than emitting a diagnostic:
+//        "Transformer requires `Scoping` produced with
+//         `SemanticBuilder::with_enum_eval(true)` to correctly transform `enum X`"
+//    Mitigation: `lower_with_oxc` always sets it, and
+//    `with_enum_eval_is_required` below fails loudly if anyone removes it.
+//    Upstream: a hard panic on valid input is a bad failure mode; a diagnostic
+//    (or defaulting the flag when a `TSEnumDeclaration` is present) would be
+//    better. Severity for us: nil once set, fatal if forgotten.
+//
+// 2. An exported enum lowers to `export let`, and an exported *namespace* to
+//    `export let` as well. `tsc` emits `export var` for both. `let` has a
+//    temporal dead zone, so a forward reference throws instead of reading
+//    `undefined`, and `typeof` does not protect against it.
+//    Mitigation: `force_var_for_lowered_declarations`. Upstream: this is a
+//    divergence from tsc's emit contract, not a style choice.
+//
+// 3. Declaration merging is not implemented for namespaces: a second
+//    `namespace A { … }` block emits a bare reference to the first block's member
+//    and throws `ReferenceError` at runtime. swc has the identical gap.
+//    Mitigation: `merge_namespace_blocks`, run before lowering.
+//
+// The fourth finding was ours, not oxc's: `IdentifierReference::reference_id()`
+// panics on a synthesised node, so `identity_oxc::key_of_reference` reads the
+// `Cell` directly and is total. Pinned in `identity_oxc.rs`.
+
+#[cfg(test)]
+mod upstream_defect_guards {
+    use super::*;
+
+    /// Finding 1, pinned: lowering an enum must not panic.
+    ///
+    /// This is a guard against *our* configuration regressing, not against oxc:
+    /// drop `with_enum_eval(true)` from `lower_with_oxc` and this test dies with
+    /// the upstream panic instead of failing an assertion, which is exactly the
+    /// signal wanted — the failure mode in production would be identical.
+    #[test]
+    fn with_enum_eval_is_required_and_we_set_it() {
+        let code = lower_with_oxc(
+            Path::new("m.ts"),
+            "export enum Kind { A = 1 }\nenum Plain { B = 2 }\nconst enum C { D = 3 }\nexport const use = C.D;\n",
+        )
+        .expect("enum lowering must not panic");
+        assert!(code.contains("export var Kind"), "{code}");
+        assert!(code.contains("var Plain"), "{code}");
+        // The const enum is inlined and erased, so neither the object nor a
+        // member read survives.
+        assert!(!code.contains("var C "), "{code}");
+        assert!(code.contains("export const use = 3"), "{code}");
+    }
+}
