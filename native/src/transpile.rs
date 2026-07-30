@@ -29,6 +29,7 @@ mod lowering_oxc;
 mod global_this_oxc;
 mod imports_exports;
 mod js_compat;
+mod js_compat_oxc;
 mod namespace;
 mod precedence;
 mod print;
