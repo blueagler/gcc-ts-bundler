@@ -469,3 +469,50 @@ impl VisitMut for LiveImportCallRewriter {
         });
     }
 }
+
+#[cfg(test)]
+pub(super) fn emit_goog_text_for_test(file_path: &Path, source: &str) -> String {
+    super::GLOBALS.set(&super::Globals::new(), || {
+        let module = crate::module_cache::parse_module(file_path, source).expect("swc goog parse");
+        let mut program = Program::Module(module);
+        apply_resolver_and_global_this_compat(&mut program, true).expect("swc goog resolver");
+        let context = TranspileContext {
+            bundler_module_slots: HashMap::new(),
+            bundler_runtime_logical_ids: HashMap::new(),
+            chunk_mode: ChunkMode::Off,
+            class_map_calls: Vec::new(),
+            pure_callees: HashSet::new(),
+            commonjs_specifiers: HashSet::new(),
+            opaque_commonjs: Default::default(),
+            file_metadata: HashMap::new(),
+            hoist_plan: None,
+            lazy_imports_by_file: HashMap::new(),
+            lazy_target_module_ids: HashSet::new(),
+            package_aliases: Vec::new(),
+            resolved_module_ids: HashMap::new(),
+            preserved_property_names: HashSet::new(),
+            static_property_names: HashSet::new(),
+            type_metadata_enabled: false,
+            vendor_module_ids: HashSet::new(),
+            workspace_dir: file_path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+        };
+        emit_goog_module_program(file_path, program, &context, None, None)
+            .expect("swc goog emit")
+            .code
+    })
+}
+
+#[cfg(test)]
+pub(super) fn live_export_bindings_for_test(source: &str) -> BTreeMap<String, String> {
+    super::GLOBALS.set(&super::Globals::new(), || {
+        let module = crate::module_cache::parse_module(Path::new("fixture.js"), source)
+            .expect("swc live export parse");
+        let mut program = Program::Module(module);
+        apply_resolver_and_global_this_compat(&mut program, true)
+            .expect("swc live export resolver");
+        let Program::Module(module) = program else {
+            unreachable!();
+        };
+        live_export_bindings_of_module(&module)
+    })
+}

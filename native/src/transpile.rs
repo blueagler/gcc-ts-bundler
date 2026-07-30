@@ -8,6 +8,7 @@ pub(crate) mod compat;
 mod context;
 mod emit;
 mod emit_goog;
+mod emit_goog_oxc;
 mod emit_helpers;
 mod emit_helpers_oxc;
 mod emit_hoist;
