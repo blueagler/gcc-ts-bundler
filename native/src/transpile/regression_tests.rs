@@ -117,6 +117,8 @@ fn class_map_import_aliases_match_ids_not_shadowed_spellings() {
     context.commonjs_specifiers.insert("demo-pkg".to_string());
     context.class_map_calls = vec![ClassMapCallInput {
         argIndex: 1,
+        calleeModulePattern: None,
+        keySource: None,
         callee: "jsx".to_string(),
         keyExcludePattern: None,
         keyPattern: None,

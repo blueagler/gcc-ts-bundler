@@ -156,7 +156,17 @@ async function normalizeCapturedCode(
     nextCode = result.code;
   }
 
-  if (moduleAnalysis.needsTypeScriptCompatibilityDownlevel) {
+  if (
+    moduleAnalysis.needsTypeScriptCompatibilityDownlevel &&
+    // TypeScript's ES5 class emit turns a subclass into a function that calls
+    // `Base.call(this)`. When the base class comes from another module that was
+    // not lowered (a real ES6 class, e.g. lit's ReactiveElement), the browser
+    // throws "Class constructor cannot be invoked without 'new'". Lowering a
+    // whole inheritance chain consistently is not possible per module, so
+    // modules that extend a class keep their native syntax; Closure accepts
+    // `super` member access in that shape.
+    !moduleAnalysis.hasExtendingClass
+  ) {
     nextCode = ts.transpileModule(nextCode, {
       compilerOptions: {
         allowJs: true,
@@ -328,7 +338,9 @@ export function toMaterializedRelativePath(
   const cleanId = stripQuery(moduleId);
   const extension = path.extname(cleanId).replace(/^\./u, "");
   const queryHash =
-    cleanId === moduleId ? "" : `__${hashText(moduleId).slice(0, 8)}`;
+    cleanId === moduleId
+      ? ""
+      : `__${hashText(toCanonicalModuleId(projectRoot, moduleId)).slice(0, 8)}`;
 
   if (moduleId.startsWith("\0") || moduleId.startsWith("virtual:")) {
     return path.posix.join(
@@ -368,6 +380,36 @@ export function toMaterializedRelativePath(
     "__modules__",
     `${sanitizeSegment(cleanId)}${queryHash}.js`,
   );
+}
+
+/**
+ * Canonical, project-relative identity for a module id. Query-variant hash
+ * suffixes in materialized file names must not encode the absolute project
+ * location: those names flow into runtime module ids, chunk content, and the
+ * manifest, so hashing the raw absolute id makes output bytes and chunk names
+ * differ when the same project is built from two directories.
+ */
+export function toCanonicalModuleId(projectRoot: string, moduleId: string) {
+  if (moduleId.startsWith("\0") || moduleId.startsWith("virtual:")) {
+    return moduleId;
+  }
+  const cleanId = stripQuery(moduleId);
+  const query = moduleId.slice(cleanId.length);
+  if (path.isAbsolute(cleanId) && cleanId.startsWith(projectRoot)) {
+    return `${path.relative(projectRoot, cleanId).replace(/\\/g, "/")}${query}`;
+  }
+  const nodeModulesIndex = cleanId.lastIndexOf(
+    `${path.sep}node_modules${path.sep}`,
+  );
+  if (nodeModulesIndex >= 0) {
+    const relative = cleanId
+      .slice(nodeModulesIndex + `${path.sep}node_modules${path.sep}`.length)
+      .replace(/\\/g, "/");
+    return `node_modules/${relative}${query}`;
+  }
+  // Outside the project root and not under node_modules: no stable relative
+  // form exists, so the absolute id is the identity.
+  return moduleId;
 }
 
 export function toRelativeImportSpecifier(fromFile: string, toFile: string) {
@@ -451,6 +493,7 @@ function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
   const dynamicImportSpecifiers = new Set<string>();
   const bridgeSpecifiers = new Set<string>();
   let isForwardingOnly = true;
+  let hasExtendingClass = false;
   let needsClosureCompatibility = false;
   let needsTypeScriptCompatibility = false;
 
@@ -504,6 +547,15 @@ function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
       bridgeSpecifiers.add(specifier);
     }
 
+    if (
+      (ts.isClassDeclaration(node) || ts.isClassExpression(node)) &&
+      node.heritageClauses?.some(
+        (clause) => clause.token === ts.SyntaxKind.ExtendsKeyword,
+      )
+    ) {
+      hasExtendingClass = true;
+    }
+
     if (ts.isPrivateIdentifier(node) || isClassStaticBlockNode(node)) {
       needsClosureCompatibility = true;
     }
@@ -546,6 +598,7 @@ function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
     isEffectivelyEmpty: sourceFile.statements.every(
       isEffectivelyEmptyStatement,
     ),
+    hasExtendingClass,
     isForwardingOnly,
     needsClosureCompatibilityDownlevel: needsClosureCompatibility,
     needsTypeScriptCompatibilityDownlevel: needsTypeScriptCompatibility,

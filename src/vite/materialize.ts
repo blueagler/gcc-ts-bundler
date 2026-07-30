@@ -5,6 +5,7 @@ import type { ResolvedConfig } from "vite";
 
 import { syncDirectoryEntries } from "../shared/files";
 import { applyTextEdits } from "../shared/text-edits";
+import { createDefineApplier } from "./defines";
 import {
   getCapturedModuleAnalysis,
   isAuthoredModuleId,
@@ -100,57 +101,72 @@ export async function materializeCapturedGraph(
     }
   }
 
-  await syncDirectoryEntries(
-    input.srcDir,
-    await Promise.all(
-      materializedModuleIds.map(async (moduleId) => {
-        const record = input.capturedModules.get(moduleId);
-        if (!record) {
-          this.error(
-            `gccTsBundler() could not capture transformed code for ${moduleId}.`,
-          );
-        }
-
-        const outputPath = filePathByModuleId.get(moduleId);
-        if (!outputPath) {
-          this.error(`Missing materialized output path for ${moduleId}.`);
-        }
-
-        const rewritten = await rewriteModuleImports.call(this, {
-          code: record.code,
-          conditions: [
-            "browser",
-            "import",
-            ...(input.config.resolve?.conditions ?? []),
-          ],
-          filePathByModuleId,
-          importerId: moduleId,
-          metrics: input.metrics,
-          resolutionCache: input.resolutionCache,
-        });
-        for (const resolution of rewritten.runtimeResolutions) {
-          runtimeResolutionByKey.set(
-            runtimeResolutionKey(resolution),
-            resolution,
-          );
-        }
-        return {
-          content: rewritten.code,
-          relativePath: path
-            .relative(input.srcDir, outputPath)
-            .replace(/\\/g, "/"),
-        };
-      }),
-    ),
-    {
-      preserve(relativePath) {
-        return (
-          relativePath.startsWith("__dep-bundle-inputs/") ||
-          relativePath.startsWith("__dep-bundles/")
+  const applyDefines = createDefineApplier(input.config.define);
+  const materializedEntries = await Promise.all(
+    materializedModuleIds.map(async (moduleId) => {
+      const record = input.capturedModules.get(moduleId);
+      if (!record) {
+        this.error(
+          `gccTsBundler() could not capture transformed code for ${moduleId}.`,
         );
-      },
-    },
+      }
+
+      const outputPath = filePathByModuleId.get(moduleId);
+      if (!outputPath) {
+        this.error(`Missing materialized output path for ${moduleId}.`);
+      }
+
+      const rewritten = await rewriteModuleImports.call(this, {
+        code: record.code,
+        conditions: [
+          "browser",
+          "import",
+          ...(input.config.resolve?.conditions ?? []),
+        ],
+        filePathByModuleId,
+        importerId: moduleId,
+        metrics: input.metrics,
+        resolutionCache: input.resolutionCache,
+      });
+      for (const resolution of rewritten.runtimeResolutions) {
+        runtimeResolutionByKey.set(
+          runtimeResolutionKey(resolution),
+          resolution,
+        );
+      }
+      return {
+        content: applyDefines
+          ? await applyDefines(rewritten.code)
+          : rewritten.code,
+        relativePath: path
+          .relative(input.srcDir, outputPath)
+          .replace(/\\/g, "/"),
+      };
+    }),
   );
+  if (
+    materializedEntries.some((entry) =>
+      entry.relativePath.startsWith("node_modules/"),
+    )
+  ) {
+    // The nearest real package.json above the materialized tree is the app's,
+    // which is usually `"type": "module"` and would force esbuild to read
+    // materialized CommonJS dependency files (react's dev/prod wrappers) as
+    // ESM, leaving `module`/`exports` as dangling globals. Restore the
+    // extension-based default for the materialized dependency copies only.
+    materializedEntries.push({
+      content: '{ "type": "commonjs" }\n',
+      relativePath: "node_modules/package.json",
+    });
+  }
+  await syncDirectoryEntries(input.srcDir, materializedEntries, {
+    preserve(relativePath) {
+      return (
+        relativePath.startsWith("__dep-bundle-inputs/") ||
+        relativePath.startsWith("__dep-bundles/")
+      );
+    },
+  });
 
   const entryFiles = input.entryModuleIds.map((moduleId) => {
     const filePath = filePathByModuleId.get(moduleId);

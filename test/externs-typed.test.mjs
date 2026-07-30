@@ -214,15 +214,13 @@ test.serial(
 
 const reactExampleRoot = path.resolve(
   import.meta.dirname,
-  "../examples/react-spa",
+  "../examples/react-vite-official",
 );
 
 async function hasReactExampleDeps() {
   try {
     await fs.access(path.join(reactExampleRoot, "node_modules/react"));
-    await fs.access(
-      path.join(reactExampleRoot, "node_modules/@tanstack/react-router"),
-    );
+    await fs.access(path.join(reactExampleRoot, "node_modules/react-dom"));
     return true;
   } catch {
     return false;
@@ -241,15 +239,11 @@ test(
     if (!(await hasReactExampleDeps())) return;
 
     const result = await generateExterns({
-      appEntryFiles: ["./main.tsx"],
+      appEntryFiles: ["./src/main.tsx"],
       mode: "boundary-aware",
       modules: [
         { exports: "used", runtime: "external", specifier: "react" },
-        {
-          exports: "used",
-          runtime: "external",
-          specifier: "@tanstack/react-router",
-        },
+        { exports: "used", runtime: "external", specifier: "react-dom" },
       ],
       projectRoot: reactExampleRoot,
       srcDir: "./src",

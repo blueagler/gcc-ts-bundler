@@ -40,6 +40,7 @@ import {
   EAGER_REGION_LABEL,
   hashText,
   normalizePath,
+  toPathIndependentKey,
 } from "./shared";
 import type { ParsedMaterializedModule } from "./shared";
 
@@ -319,8 +320,12 @@ async function buildDependencyBundles(
         groupedRequest.requests[0]?.regionKey ?? EAGER_REGION_LABEL,
       ),
     );
+    // Hash a srcDir-relative form of the request key: the absolute
+    // materialized path must not decide the bundle's output file name, or
+    // the same project built from two directories gets different dep-bundle
+    // names (and with them different runtime module ids and chunk hashes).
     const fileName = `${sanitizeEntryName(groupedRequest)}-${hashText(
-      groupedRequest.requestKey,
+      toPathIndependentKey(groupedRequest.requestKey, materialized.srcDir),
     ).slice(0, 8)}.js`;
     const entryPoint = path.join(regionDir, fileName);
     const renderedEntry = await renderBundleEntrySource({
@@ -351,10 +356,24 @@ async function buildDependencyBundles(
     bundle: true,
     chunkNames: "chunks/[name]-[hash]",
     entryNames: "[dir]/[name]",
+    // Dependencies with dev/prod CJS wrappers (react, react-dom) branch on
+    // process.env.NODE_ENV before requiring per-mode files; only the branch
+    // Rollup retained is materialized, so the other require target must be
+    // eliminated as dead code here rather than resolved.
+    define: {
+      "process.env.NODE_ENV": JSON.stringify(
+        process.env["NODE_ENV"] ?? "production",
+      ),
+    },
     entryPoints,
     format: "esm",
     logLevel: "silent",
     metafile: true,
+    // Without syntax folding, a define-dead branch keeps its text
+    // (`if (false) warn(...)`) while tree shaking still drops the declaration
+    // it references, which reaches Closure as an undeclared variable. Folding
+    // removes the branch instead. Identifiers and whitespace are untouched.
+    minifySyntax: true,
     outdir: DEP_BUNDLE_OUTPUT_DIR,
     outbase: DEP_BUNDLE_INPUT_DIR,
     platform: "browser",

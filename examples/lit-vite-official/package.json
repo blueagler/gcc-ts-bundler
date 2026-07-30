@@ -1,0 +1,20 @@
+{
+  "name": "lit-vite-official",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "build:pure": "vite build --config vite.pure.config.ts"
+  },
+  "dependencies": {
+    "gcc-ts-bundler": "link:gcc-ts-bundler",
+    "lit": "^3.3.3"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.2",
+    "vite": "^8.1.1"
+  }
+}

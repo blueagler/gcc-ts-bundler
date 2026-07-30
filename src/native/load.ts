@@ -218,7 +218,9 @@ interface NativeTranspileChunkInput {
 interface NativeClassMapCallInput {
   argIndex: number;
   callee: string;
+  calleeModulePattern?: string | undefined;
   keyExcludePattern?: string | undefined;
+  keySource?: string | undefined;
   keyPattern?: string | undefined;
   stringLiteralArgIndex?: number | undefined;
 }

@@ -86,6 +86,15 @@ export function createModuleParser(targets: ParseTargets) {
       }
     }
 
+    if (!hasDefaultExport && exportedNames.size === 0) {
+      // A CommonJS-only dependency (jquery's UMD wrapper, any `module.exports`
+      // package) has no ESM export syntax to collect, but its ESM view still
+      // has a default binding: `module.exports`. Without this, a stock
+      // `import $ from "jquery"` renders a region entry with no exports and
+      // the bundler-runtime stage has no slot to bind the default to.
+      hasDefaultExport = hasCommonJsExportShape(sourceFile);
+    }
+
     const parsed = {
       dependencyImports,
       exportedNames: [...exportedNames].sort((left, right) =>
@@ -276,4 +285,53 @@ function parseDependencyReexport(
     kind: "reexport",
     localExportedNames,
   };
+}
+
+/**
+ * True when a module writes to a CommonJS export slot anywhere (including
+ * inside a UMD factory IIFE), which makes `module.exports` its ESM default.
+ */
+function hasCommonJsExportShape(sourceFile: ts.SourceFile): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) {
+      return;
+    }
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      isCommonJsExportTarget(node.left)
+    ) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(sourceFile, visit);
+  return found;
+}
+
+/** Matches `module.exports`, `module.exports.foo`, and `exports.foo` targets. */
+function isCommonJsExportTarget(node: ts.Expression): boolean {
+  if (
+    !ts.isPropertyAccessExpression(node) &&
+    !ts.isElementAccessExpression(node)
+  ) {
+    return false;
+  }
+  const object = node.expression;
+  if (ts.isIdentifier(object)) {
+    return object.text === "exports" || isModuleExportsAccess(node);
+  }
+  return isModuleExportsAccess(object);
+}
+
+/** Matches the `module.exports` access itself. */
+function isModuleExportsAccess(node: ts.Node): boolean {
+  return (
+    ts.isPropertyAccessExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === "module" &&
+    node.name.text === "exports"
+  );
 }

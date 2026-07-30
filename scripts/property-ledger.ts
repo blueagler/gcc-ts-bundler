@@ -21,7 +21,7 @@
  * Usage:
  *   bun run ledger                       # all examples, table to stdout
  *   bun run ledger -- --json out.json    # + machine-readable ledger
- *   bun run ledger -- --example react-spa
+ *   bun run ledger -- --example react-vite-official
  *   bun run ledger -- --top 20           # rows in each cost table
  *
  * Deterministic: every collection is sorted, the probe root is fixed per
@@ -84,84 +84,35 @@ interface ExampleDescriptor {
 
 const EXAMPLES: ExampleDescriptor[] = [
   {
-    name: "jquery-demo",
-    dir: "jquery-demo",
-    kind: "api",
-    buildOptions: {
-      diagnostics: { preflight: "full" },
-      entries: ["./main.ts"],
-      externs: ["./jquery.boundary.externs.js", "./jquery.runtime.externs.js"],
-      srcDir: ".",
-    },
-  },
-  {
-    name: "lazy-chunks-demo",
-    dir: "lazy-chunks-demo",
-    kind: "api",
-    buildOptions: {
-      chunks: { mode: "split", publicPath: "./" },
-      entries: ["./main.ts"],
-      srcDir: ".",
-    },
-  },
-  {
-    name: "lit-playground",
-    dir: "lit-playground",
-    kind: "api",
-    dependsOnGeneratedSources: [".lit-compiled"],
-    buildOptions: {
-      chunks: { mode: "bundler-runtime" },
-      entries: ["./main.ts"],
-      languageOut: "ECMASCRIPT5",
-      srcDir: "./.lit-compiled",
-    },
-  },
-  {
-    name: "react-spa",
-    dir: "react-spa",
-    kind: "api",
-    buildOptions: {
-      diagnostics: { preflight: "full" },
-      entries: ["./main.tsx"],
-      externs: ["./react.generated.externs.js"],
-      srcDir: "./src",
-    },
-    // classMapCalls are loaded from the shipped preset at run time.
-  },
-  {
-    name: "svelte-spa",
-    dir: "svelte-spa",
-    kind: "api",
-    dependsOnGeneratedSources: [".prebundle"],
-    buildOptions: {
-      chunks: { mode: "bundler-runtime" },
-      diagnostics: { preflight: "full" },
-      entries: ["./main.js"],
-      externs: ["./svelte.generated.externs.js"],
-      languageOut: "ECMASCRIPT_NEXT",
-      srcDir: "./.prebundle",
-    },
-  },
-  {
-    name: "vue-vapor-spa",
-    dir: "vue-vapor-spa",
-    kind: "api",
-    dependsOnGeneratedSources: [".vue-compiled"],
-    buildOptions: {
-      chunks: { mode: "split", publicPath: "./dist/" },
-      diagnostics: { preflight: "full" },
-      entries: ["./main.js"],
-      externs: ["./vue.runtime.externs.js"],
-      srcDir: "./.vue-compiled",
-    },
-  },
-  {
-    name: "svelte-vite-spa",
-    dir: "svelte-vite-spa",
+    name: "react-vite-official",
+    dir: "react-vite-official",
     kind: "vite",
     viteConfig: "vite.config.ts",
   },
-  { name: "vue-spa", dir: "vue-spa", kind: "vite", viteConfig: "vite.config.ts" },
+  {
+    name: "svelte-vite-official",
+    dir: "svelte-vite-official",
+    kind: "vite",
+    viteConfig: "vite.config.ts",
+  },
+  {
+    name: "lit-vite-official",
+    dir: "lit-vite-official",
+    kind: "vite",
+    viteConfig: "vite.config.ts",
+  },
+  {
+    name: "jquery-vite-official",
+    dir: "jquery-vite-official",
+    kind: "vite",
+    viteConfig: "vite.config.ts",
+  },
+  {
+    name: "vue-vapor-vite-official",
+    dir: "vue-vapor-vite-official",
+    kind: "vite",
+    viteConfig: "vite.config.ts",
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -479,20 +430,11 @@ function buildApiExample(example: ExampleDescriptor) {
     }
   }
 
-  // React's build.mjs supplies classMapCalls from the shipped preset; load it
-  // the same way so the probe compiles the same program.
-  const needsReactPreset = example.name === "react-spa";
   const script = `
 import path from "node:path";
 import { build } from ${JSON.stringify(path.join(REPO_ROOT, "dist/index.mjs"))};
-${
-  needsReactPreset
-    ? `import { REACT_ELEMENT_PROPS_CALLS } from ${JSON.stringify(path.join(REPO_ROOT, "dist/presets/react.mjs"))};`
-    : ""
-}
 const result = await build({
   ...${JSON.stringify(example.buildOptions ?? {})},
-${needsReactPreset ? "  compat: { classMapCalls: [...REACT_ELEMENT_PROPS_CALLS] }," : ""}
   cache: { mode: "persistent", dir: ${JSON.stringify(cacheDir)} },
   outDir: ${JSON.stringify(outDir)},
   projectRoot: ${JSON.stringify(projectRoot)},

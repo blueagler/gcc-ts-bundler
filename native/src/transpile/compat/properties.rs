@@ -82,6 +82,12 @@ pub(crate) fn validate_class_map_calls(
             "keyExcludePattern",
             call.keyExcludePattern.as_deref(),
         )?;
+        compile_optional_pattern(
+            &call.callee,
+            "calleeModulePattern",
+            call.calleeModulePattern.as_deref(),
+        )?;
+        parse_key_source(&call.callee, call.keySource.as_deref())?;
     }
     Ok(())
 }
@@ -105,6 +111,14 @@ impl ClassMapCallCompatVisitor {
     ) -> Self {
         let mut grouped: HashMap<String, Vec<ClassMapCallRule>> = HashMap::new();
         for call in calls {
+            // Pair-array rules pin keys that are already string literals; they
+            // are collected as preserved names instead of quoted here.
+            if parse_key_source(&call.callee, call.keySource.as_deref())
+                .expect("class-map rules were validated")
+                == ClassMapKeySource::PairArray
+            {
+                continue;
+            }
             // `transpile_sources` validates these before parallel file work.
             let key_pattern =
                 compile_optional_pattern(&call.callee, "keyPattern", call.keyPattern.as_deref())
@@ -531,5 +545,200 @@ pub(crate) fn quote_prop_name(prop_name: PropName) -> PropName {
             raw: None,
         }),
         other => other,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pair-array key source
+// ---------------------------------------------------------------------------
+
+/// The key-source shapes a `classMapCalls` rule can pin.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClassMapKeySource {
+    ObjectLiteral,
+    PairArray,
+}
+
+pub(crate) fn parse_key_source(
+    callee: &str,
+    value: Option<&str>,
+) -> std::result::Result<ClassMapKeySource, String> {
+    match value {
+        None | Some("objectLiteral") => Ok(ClassMapKeySource::ObjectLiteral),
+        Some("pairArray") => Ok(ClassMapKeySource::PairArray),
+        Some(other) => Err(format!(
+            "Invalid compat.classMapCalls rule for callee {callee:?}: keySource must be \"objectLiteral\" or \"pairArray\", got {other:?}."
+        )),
+    }
+}
+
+/// Local binding -> the export name and module specifier it was imported from.
+///
+/// Callee spelling is not identity: `_export_sfc` is a local alias for the
+/// default export of a virtual module, and bundlers rename such locals freely.
+fn collect_import_identities(module: &Module) -> HashMap<Id, (String, String)> {
+    let mut identities = HashMap::new();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import)) = item else {
+            continue;
+        };
+        let specifier_text = import.src.value.to_string_lossy().to_string();
+        for specifier in &import.specifiers {
+            match specifier {
+                ImportSpecifier::Named(named) => {
+                    let imported = named
+                        .imported
+                        .as_ref()
+                        .map(module_export_name_to_string)
+                        .unwrap_or_else(|| named.local.sym.to_string());
+                    identities.insert(named.local.to_id(), (imported, specifier_text.clone()));
+                }
+                ImportSpecifier::Default(default_specifier) => {
+                    identities.insert(
+                        default_specifier.local.to_id(),
+                        ("default".to_string(), specifier_text.clone()),
+                    );
+                }
+                // A namespace import is not a callee identity: the call goes
+                // through a member expression whose property may itself be
+                // renamed, so it contributes nothing.
+                ImportSpecifier::Namespace(_) => {}
+            }
+        }
+    }
+    identities
+}
+
+/// Property names pinned by `keySource: "pairArray"` rules in one module.
+///
+/// Helper functions such as plugin-vue's `_export_sfc(target, [["render", fn]])`
+/// splat entries onto a target with `target[key] = value`, i.e. the *definition*
+/// uses the string, while the consuming runtime reads `target.render` as a dot
+/// property. Renaming only the dot side leaves the target without the member.
+/// Every entry must prove its own key: anything irregular contributes nothing.
+pub(crate) fn collect_pair_array_class_map_property_names(
+    module: &Module,
+    calls: &[ClassMapCallInput],
+) -> std::result::Result<HashSet<String>, String> {
+    let mut rules = Vec::new();
+    for call in calls {
+        if parse_key_source(&call.callee, call.keySource.as_deref())?
+            != ClassMapKeySource::PairArray
+        {
+            continue;
+        }
+        let module_pattern = compile_optional_pattern(
+            &call.callee,
+            "calleeModulePattern",
+            call.calleeModulePattern.as_deref(),
+        )?;
+        let key_pattern =
+            compile_optional_pattern(&call.callee, "keyPattern", call.keyPattern.as_deref())?;
+        let key_exclude_pattern = compile_optional_pattern(
+            &call.callee,
+            "keyExcludePattern",
+            call.keyExcludePattern.as_deref(),
+        )?;
+        rules.push((
+            call.argIndex as usize,
+            call.callee.clone(),
+            module_pattern,
+            key_pattern,
+            key_exclude_pattern,
+        ));
+    }
+    if rules.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let mut collector = PairArrayKeyCollector {
+        identities: collect_import_identities(module),
+        names: HashSet::new(),
+        rules,
+    };
+    module.visit_with(&mut collector);
+    Ok(collector.names)
+}
+
+struct PairArrayKeyCollector {
+    identities: HashMap<Id, (String, String)>,
+    names: HashSet<String>,
+    #[allow(clippy::type_complexity)]
+    rules: Vec<(
+        usize,
+        String,
+        Option<regex::Regex>,
+        Option<regex::Regex>,
+        Option<regex::Regex>,
+    )>,
+}
+
+impl swc_core::ecma::visit::Visit for PairArrayKeyCollector {
+    fn visit_call_expr(&mut self, call: &CallExpr) {
+        call.visit_children_with(self);
+        let Callee::Expr(callee) = &call.callee else {
+            return;
+        };
+        let Expr::Ident(identifier) = &**callee else {
+            return;
+        };
+        let Some((imported_name, specifier)) = self.identities.get(&identifier.to_id()) else {
+            return;
+        };
+        for (arg_index, callee_export, module_pattern, key_pattern, key_exclude_pattern) in
+            &self.rules
+        {
+            if imported_name != callee_export {
+                continue;
+            }
+            if let Some(pattern) = module_pattern {
+                if !pattern.is_match(specifier) {
+                    continue;
+                }
+            }
+            let Some(argument) = call.args.get(*arg_index) else {
+                continue;
+            };
+            if argument.spread.is_some() {
+                continue;
+            }
+            let Expr::Array(entries) = &*argument.expr else {
+                continue;
+            };
+            for entry in &entries.elems {
+                // A hole, a spread, a non-array entry, or an entry whose first
+                // element is not a plain string literal proves nothing.
+                let Some(entry) = entry else { continue };
+                if entry.spread.is_some() {
+                    continue;
+                }
+                let Expr::Array(pair) = &*entry.expr else {
+                    continue;
+                };
+                let Some(Some(first)) = pair.elems.first() else {
+                    continue;
+                };
+                if first.spread.is_some() {
+                    continue;
+                }
+                let Expr::Lit(swc_core::ecma::ast::Lit::Str(key)) = &*first.expr else {
+                    continue;
+                };
+                let key = key.value.to_string_lossy().to_string();
+                if key_exclude_pattern
+                    .as_ref()
+                    .is_some_and(|pattern| pattern.is_match(&key))
+                {
+                    continue;
+                }
+                if key_pattern
+                    .as_ref()
+                    .is_some_and(|pattern| !pattern.is_match(&key))
+                {
+                    continue;
+                }
+                self.names.insert(key);
+            }
+        }
     }
 }

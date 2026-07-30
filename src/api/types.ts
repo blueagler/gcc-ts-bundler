@@ -102,6 +102,25 @@ export interface CompatClassMapCall {
   argIndex: number;
   callee: string;
   /**
+   * Optional regex over the module specifier the callee binding was imported
+   * from. Callee spelling is local (default imports and bundler aliases are
+   * renamed freely), so import identity is what a rule can rely on.
+   */
+  calleeModulePattern?: string | undefined;
+  /**
+   * Where the pinned keys live in the matched argument:
+   *
+   * - `"objectLiteral"` (default) - keys of an object-literal argument, which
+   *   are quoted so Closure keeps them;
+   * - `"pairArray"` - the first element of each entry of an array-literal
+   *   argument (`[["render", fn], ["__scopeId", id]]`), the shape helpers use
+   *   to splat entries onto a target with `target[key] = value`. Those keys are
+   *   already strings, so they are preserved instead of quoted. Entries fail
+   *   closed: a hole, a spread, a non-array entry, or a non-literal first
+   *   element contributes nothing.
+   */
+  keySource?: "objectLiteral" | "pairArray" | undefined;
+  /**
    * Optional regex; keys matching it are left alone even when `keyPattern`
    * admits them. Patterns are compiled by Rust's `regex` crate, which has no
    * lookahead or backreferences; unsupported syntax fails the build.

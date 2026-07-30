@@ -16,6 +16,38 @@ import type { GccTsBundlerVitePluginOptions } from "../vite/types";
 const COMPONENT_VNODE_KEY_PATTERN =
   "^(?:on[A-Z$_].*|key|ref|ref_for|ref_key|class|style)$";
 
+/**
+ * plugin-vue attaches options a template-only SFC cannot carry in `setup` -
+ * `render`, `__scopeId` - through its export helper:
+ *
+ * ```js
+ * export default _export_sfc(_sfc_main, [["render", _sfc_render], ["__scopeId", "data-v-…"]]);
+ * ```
+ *
+ * The helper's body is `target[key] = value`, so the *definition* goes through
+ * the string while the Vue runtime reads `component.render` as a dot property.
+ * Under ADVANCED the dot side renames and the string side cannot, so the
+ * component silently loses its render function: it mounts and produces nothing.
+ * `<script setup>` SFCs never hit this because their render is inlined into
+ * setup; template-only SFCs (a plain `<template>` with no script, and every
+ * vapor slot child that shape produces) do. Measured in the vapor example:
+ * 890 rendered characters instead of 8912, no console or page error
+ * (report: /tmp/gcc-e1-examples.md).
+ *
+ * The rule is call-shape evidence, not a name list: whatever key strings the
+ * helper is given are the keys that must survive, and the callee is resolved by
+ * import identity because `_export_sfc` is a local alias for a virtual module's
+ * default export.
+ */
+export const VUE_SFC_EXPORT_HELPER_CALLS: readonly CompatClassMapCall[] = [
+  {
+    argIndex: 1,
+    callee: "default",
+    calleeModulePattern: "plugin-vue[:-]export-helper",
+    keySource: "pairArray",
+  },
+];
+
 export const VUE_VNODE_PROPS_CALLS: readonly CompatClassMapCall[] = [
   { argIndex: 1, callee: "createElementVNode" },
   { argIndex: 1, callee: "createElementBlock" },
@@ -85,6 +117,7 @@ export function vuePreset(
         ...overrides.compiler?.compat,
         classMapCalls: [
           ...VUE_VNODE_PROPS_CALLS,
+          ...VUE_SFC_EXPORT_HELPER_CALLS,
           ...(overrides.compiler?.compat?.classMapCalls ?? []),
         ],
       },

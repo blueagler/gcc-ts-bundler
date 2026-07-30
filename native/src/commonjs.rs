@@ -183,6 +183,12 @@ struct CommonJsCollector {
     has_default_export: bool,
     proxy_export: Option<String>,
     unsupported: Vec<String>,
+    /// Depth of enclosing function scopes that bind `exports`/`module` as
+    /// parameters. Bundlers wrap CommonJS package sources in
+    /// `__commonJS({ "file.js"(exports, module) { ... } })` inside an
+    /// otherwise pure ESM file; those assignments write to a local parameter,
+    /// not to a module record, so they must not mark the file as CommonJS.
+    shadowed_exports_depth: u32,
 }
 
 impl CommonJsCollector {
@@ -293,10 +299,43 @@ impl CommonJsCollector {
             );
         }
     }
+
+    /// Visits a function body with `exports`/`module` treated as local when the
+    /// parameter list binds either name.
+    fn visit_shadowing_scope<T: VisitWith<Self>>(&mut self, shadows: bool, node: &T) {
+        if shadows {
+            self.shadowed_exports_depth += 1;
+            node.visit_children_with(self);
+            self.shadowed_exports_depth -= 1;
+            return;
+        }
+        node.visit_children_with(self);
+    }
+}
+
+/// True when any parameter pattern binds `exports` or `module` directly.
+fn binds_commonjs_wrapper_names<'a>(patterns: impl Iterator<Item = &'a Pat>) -> bool {
+    patterns.into_iter().any(|pattern| {
+        matches!(pattern, Pat::Ident(ident) if ident.id.sym == *"exports" || ident.id.sym == *"module")
+    })
 }
 
 impl Visit for CommonJsCollector {
+    fn visit_function(&mut self, node: &Function) {
+        let shadows = binds_commonjs_wrapper_names(node.params.iter().map(|param| &param.pat));
+        self.visit_shadowing_scope(shadows, node);
+    }
+
+    fn visit_arrow_expr(&mut self, node: &ArrowExpr) {
+        let shadows = binds_commonjs_wrapper_names(node.params.iter());
+        self.visit_shadowing_scope(shadows, node);
+    }
+
     fn visit_assign_expr(&mut self, expression: &AssignExpr) {
+        if self.shadowed_exports_depth > 0 {
+            expression.visit_children_with(self);
+            return;
+        }
         if expression.op != AssignOp::Assign {
             expression.visit_children_with(self);
             return;
@@ -331,6 +370,10 @@ impl Visit for CommonJsCollector {
     }
 
     fn visit_call_expr(&mut self, expression: &CallExpr) {
+        if self.shadowed_exports_depth > 0 {
+            expression.visit_children_with(self);
+            return;
+        }
         if let Some(specifier) = require_call_specifier(expression) {
             self.record_dependency(specifier);
             return;
@@ -552,6 +595,26 @@ mod tests {
             vec!["bar".to_string(), "foo".to_string()]
         );
         assert!(analysis.has_default_export);
+    }
+
+    #[test]
+    fn ignores_exports_shadowed_by_bundler_wrapper_parameters() {
+        // esbuild's `__commonJS` wrapper shape inside a pure ESM bundle.
+        let analysis = analyze(
+            "var require_a = __commonJS({ \"a.js\"(exports, module) { exports.jsx = 1; module.exports = null; } });\nexport { require_a };",
+        );
+        assert!(!analysis.has_commonjs);
+        assert!(analysis.export_names.is_empty());
+        assert!(analysis.unsupported.is_empty());
+    }
+
+    #[test]
+    fn still_detects_commonjs_outside_shadowing_scopes() {
+        let analysis = analyze(
+            "function wrap(exports) { exports.inner = 1; }\nmodule.exports.outer = 2;",
+        );
+        assert!(analysis.has_commonjs);
+        assert_eq!(analysis.export_names, vec!["outer".to_string()]);
     }
 
     #[test]

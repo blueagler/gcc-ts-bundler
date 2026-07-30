@@ -17,6 +17,15 @@ export function normalizePath(filePath: string) {
   return path.normalize(filePath);
 }
 
+/**
+ * Strips the absolute materialized srcDir from every path embedded in a
+ * request key, so hashes derived from the key are identical no matter where
+ * the project happens to live on disk.
+ */
+export function toPathIndependentKey(key: string, srcDir: string) {
+  return key.split(`${normalizePath(srcDir)}${path.sep}`).join("");
+}
+
 export interface ParsedDependencyImport {
   hasDefault: boolean;
   hasNamespace: boolean;

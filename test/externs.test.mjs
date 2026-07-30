@@ -682,7 +682,7 @@ test("the sibling-key rule fires exactly once across real jquery.js", async () =
     import.meta.dirname,
     "..",
     "examples",
-    "jquery-demo",
+    "jquery-vite-official",
     "node_modules",
     "jquery",
     "dist",
@@ -704,7 +704,7 @@ test("the sibling-key rule fires exactly once across real jquery.js", async () =
 test("jquery example pins proven barriers, not a type surface", async () => {
   const exampleRoot = path.resolve(
     import.meta.dirname,
-    "../examples/jquery-demo",
+    "../examples/jquery-vite-official",
   );
   try {
     await fs.access(path.join(exampleRoot, "node_modules/jquery"));
@@ -713,13 +713,13 @@ test("jquery example pins proven barriers, not a type surface", async () => {
   }
 
   const runtime = await generateExternsFromSource({
-    appEntryFiles: ["./main.ts"],
+    appEntryFiles: ["./src/main.ts"],
     mode: "runtime-aware",
     modules: ["jquery"],
     projectRoot: exampleRoot,
     protocolHelpers: {
       keyExclusionListCallees: [],
-      keyReadCallees: ["access", "data", "get"],
+      keyReadCallees: ["access", "get", "remove", "set"],
     },
     runtimeEntryFiles: ["./node_modules/jquery/dist/jquery.js"],
     srcDir: ".",
@@ -727,6 +727,10 @@ test("jquery example pins proven barriers, not a type surface", async () => {
 
   // The name that broke the page, now proven rather than guessed.
   expect(runtime.renameBarriers.propertyNames).toContain("resolveWith");
+  // The handler store jQuery writes as `elemData.events` and reads back as
+  // `dataPriv.get(this, "events")`; renaming one side silently unhooks every
+  // delegated handler.
+  expect(runtime.renameBarriers.propertyNames).toContain("events");
   // Two orders of magnitude below the 761 the type surface produced.
   expect(runtime.renameBarriers.propertyNames.length).toBeLessThan(60);
   expect(runtime.barrierWarnings).toEqual([]);

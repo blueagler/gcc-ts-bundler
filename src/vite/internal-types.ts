@@ -15,6 +15,8 @@ export type PreRenderedChunk = Rollup.PreRenderedChunk;
 
 export interface CapturedModuleAnalysis {
   bridgeSpecifiers: string[];
+  /** True when the module declares a class with an `extends` clause. */
+  hasExtendingClass: boolean;
   dynamicImportSpecifiers: string[];
   importSpecifiers: string[];
   isEffectivelyEmpty: boolean;

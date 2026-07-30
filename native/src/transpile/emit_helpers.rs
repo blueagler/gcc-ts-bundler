@@ -237,6 +237,20 @@ impl swc_core::ecma::visit::Visit for DecoratorMetadataNames {
         let Expr::Ident(identifier) = &**callee else {
             return;
         };
+        // Legacy (`experimentalDecorators`) lowering used by TypeScript,
+        // esbuild, oxc, and SWC passes the decorated member name as a string
+        // literal in the third argument: `__decorateClass([...], Proto,
+        // "count", void 0)`. Lit's `@property count` reaches the runtime only
+        // through that literal, so the name must survive renaming.
+        if is_legacy_decorator_helper_name(identifier.sym.as_ref()) {
+            if let Some(name_argument) = call.args.get(2) {
+                if let Expr::Lit(swc_core::ecma::ast::Lit::Str(literal)) = &*name_argument.expr {
+                    self.names
+                        .insert(literal.value.to_string_lossy().to_string());
+                }
+            }
+            return;
+        }
         if identifier.sym.as_ref() != "__esDecorate" {
             return;
         }
@@ -262,6 +276,15 @@ impl swc_core::ecma::visit::Visit for DecoratorMetadataNames {
             }
         }
     }
+}
+
+/// Recognises the legacy decorator helper each toolchain emits under its own
+/// name: TypeScript `__decorate`, esbuild `__decorateClass`, oxc `_decorate`,
+/// SWC `_ts_decorate`.
+fn is_legacy_decorator_helper_name(name: &str) -> bool {
+    let trimmed = name.trim_start_matches('_');
+    let trimmed = trimmed.strip_prefix("ts_").unwrap_or(trimmed);
+    trimmed.starts_with("decorate")
 }
 
 fn property_key_name(key: &swc_core::ecma::ast::PropName) -> Option<String> {

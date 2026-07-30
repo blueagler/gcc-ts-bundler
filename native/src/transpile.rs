@@ -146,6 +146,18 @@ pub struct ClassMapCallInput {
     /// literal-gated call. This lets element transforms such as cloneElement
     /// inherit proven host-element provenance without freezing component props.
     pub stringLiteralArgIndex: Option<u32>,
+    /// When set, the rule matches only when the callee binding was imported
+    /// from a module whose specifier matches this regex. Callee spelling is
+    /// local and meaningless for default imports and compiler-generated
+    /// aliases, so import identity is what a rule can rely on.
+    pub calleeModulePattern: Option<String>,
+    /// Where the keys of the pinned map live in the matched argument:
+    ///
+    /// * `"objectLiteral"` (default) - keys of an object literal argument;
+    /// * `"pairArray"` - first elements of the entries of an array-literal
+    ///   argument, the `[["render", fn], ["__scopeId", id]]` shape helper
+    ///   functions splat onto a target with `target[key] = value`.
+    pub keySource: Option<String>,
 }
 
 // napi positional contract: the TS side calls these by argument
@@ -224,6 +236,18 @@ pub fn transpile_sources(
     // Decorator metadata carries property keys as string literals; preserving
     // those keys keeps the literals valid instead of rewriting Closure output.
     preserved_property_names.extend(collect_decorated_metadata_property_names(&file_metadata)?);
+    // Inputs can also arrive already lowered by another tool (Vite lowers
+    // `experimentalDecorators` before this stage sees the module), in which
+    // case there is no decorator metadata and the literals live in the source
+    // itself: `__decorateClass([property(...)], MyElement.prototype, "count")`.
+    preserved_property_names.extend(collect_prelowered_decorator_property_names(&file_names)?);
+    // `classMapCalls` rules with `keySource: "pairArray"` pin keys that a
+    // helper splats onto a target by string while the runtime reads them as
+    // dot properties.
+    preserved_property_names.extend(collect_pair_array_property_names(
+        &file_names,
+        &class_map_calls,
+    )?);
     if type_inference_disabled {
         // The escape hatch omits @enum metadata, so keep emitted TS enum keys stable.
         preserved_property_names.extend(
@@ -456,6 +480,25 @@ fn collect_decorated_metadata_property_names(
     Ok(names)
 }
 
+/// Property keys embedded as string literals by decorator lowering that ran
+/// before this stage (Vite/esbuild/oxc lower `experimentalDecorators` during
+/// their own transform, so no decorator metadata reaches us).
+fn collect_prelowered_decorator_property_names(
+    file_names: &[String],
+) -> std::result::Result<BTreeSet<String>, String> {
+    let mut names = BTreeSet::new();
+    for file_name in file_names {
+        if file_name.ends_with(".d.ts") {
+            continue;
+        }
+        let module = get_or_parse_cached_module(&PathBuf::from(file_name))?;
+        names.extend(emit_helpers::collect_decorator_metadata_property_names(
+            &module,
+        ));
+    }
+    Ok(names)
+}
+
 /// Module ids the chunk plan placed in the vendor chunk.
 ///
 /// Only the chunk name and its file list cross the napi boundary, so the name
@@ -533,3 +576,28 @@ mod regression_tests;
 
 #[cfg(test)]
 mod tests;
+
+/// Property names pinned by pair-array `classMapCalls` rules across all inputs.
+fn collect_pair_array_property_names(
+    file_names: &[String],
+    class_map_calls: &[ClassMapCallInput],
+) -> std::result::Result<BTreeSet<String>, String> {
+    if class_map_calls
+        .iter()
+        .all(|call| call.keySource.as_deref() != Some("pairArray"))
+    {
+        return Ok(BTreeSet::new());
+    }
+    let mut names = BTreeSet::new();
+    for file_name in file_names {
+        if file_name.ends_with(".d.ts") {
+            continue;
+        }
+        let module = get_or_parse_cached_module(&PathBuf::from(file_name))?;
+        names.extend(collect_pair_array_class_map_property_names(
+            &module,
+            class_map_calls,
+        )?);
+    }
+    Ok(names)
+}

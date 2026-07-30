@@ -894,6 +894,8 @@ fn class_map_calls_gate_on_string_literal_args_and_member_callees() {
     let context = super::TranspileContext {
         class_map_calls: vec![super::ClassMapCallInput {
             argIndex: 1,
+            calleeModulePattern: None,
+            keySource: None,
             callee: "createElement".to_string(),
             keyExcludePattern: Some("^(?:children|key|ref)$".to_string()),
             keyPattern: None,
@@ -926,6 +928,8 @@ fn class_map_calls_gate_on_string_literal_args_and_member_callees() {
 fn class_map_call_rules_with_unparsable_patterns_return_an_error() {
     let calls = vec![super::ClassMapCallInput {
         argIndex: 1,
+        calleeModulePattern: None,
+        keySource: None,
         callee: "jsx".to_string(),
         keyExcludePattern: Some("^(?!children$).+$".to_string()),
         keyPattern: None,
@@ -951,6 +955,8 @@ fn class_map_calls_follow_host_value_and_static_object_provenance() {
     .join("\n");
     let host_rule = |callee: &str| super::ClassMapCallInput {
         argIndex: 1,
+        calleeModulePattern: None,
+        keySource: None,
         callee: callee.to_string(),
         keyExcludePattern: Some("^(?:children|key|ref)$".to_string()),
         keyPattern: None,
@@ -962,6 +968,8 @@ fn class_map_calls_follow_host_value_and_static_object_provenance() {
             host_rule("cloneElement"),
             super::ClassMapCallInput {
                 argIndex: 1,
+                calleeModulePattern: None,
+                keySource: None,
                 callee: "createElementVNode".to_string(),
                 keyExcludePattern: None,
                 keyPattern: None,
@@ -1001,6 +1009,8 @@ fn preserves_configured_class_map_call_keys() {
     let context = super::TranspileContext {
         class_map_calls: vec![super::ClassMapCallInput {
             argIndex: 5,
+            calleeModulePattern: None,
+            keySource: None,
             callee: "set_class".to_string(),
             keyExcludePattern: None,
             keyPattern: None,
@@ -4013,4 +4023,96 @@ fn transform_cjs_interop_chain_fixture(label: &str) -> String {
     GLOBALS.set(&Globals::new(), || {
         transform_source_file(&demo, &context).expect("chain").code
     })
+}
+
+fn pair_array_rule() -> super::ClassMapCallInput {
+    super::ClassMapCallInput {
+        argIndex: 1,
+        callee: "default".to_string(),
+        calleeModulePattern: Some("plugin-vue[:-]export-helper".to_string()),
+        keyExcludePattern: None,
+        keyPattern: None,
+        keySource: Some("pairArray".to_string()),
+        stringLiteralArgIndex: None,
+    }
+}
+
+fn pair_array_names(source: &str) -> Vec<String> {
+    let module = parse_module(&PathBuf::from("fixture.js"), source).unwrap();
+    let mut names = super::compat::collect_pair_array_class_map_property_names(
+        &module,
+        &[pair_array_rule()],
+    )
+    .unwrap()
+    .into_iter()
+    .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+#[test]
+fn pair_array_key_source_collects_entry_keys_by_import_identity() {
+    let names = pair_array_names(concat!(
+        "import _export_sfc from './__virtual__/plugin-vue-export-helper.js';\n",
+        "export default _export_sfc(main, [['render', render], ['__scopeId', 'data-v-1']]);\n",
+    ));
+    assert_eq!(
+        names,
+        vec!["__scopeId".to_string(), "render".to_string()],
+        "{names:?}"
+    );
+}
+
+#[test]
+fn pair_array_key_source_ignores_same_spelling_from_another_module() {
+    // Spelling is not identity: the same local name imported from elsewhere
+    // is a different function with different semantics.
+    let names = pair_array_names(concat!(
+        "import _export_sfc from './helpers/unrelated.js';\n",
+        "export default _export_sfc(main, [['render', render]]);\n",
+    ));
+    assert!(names.is_empty(), "{names:?}");
+}
+
+#[test]
+fn pair_array_key_source_fails_closed_on_irregular_entries() {
+    // Holes, spreads, computed/non-literal first elements, non-array entries,
+    // and a spread argument each prove nothing and must contribute nothing.
+    let names = pair_array_names(concat!(
+        "import _export_sfc from './__virtual__/plugin-vue-export-helper.js';\n",
+        "_export_sfc(main, [, ...rest, [key, value], ['ok', value], 'render', [[nested], v]]);\n",
+        "_export_sfc(main, ...spreadArgs);\n",
+    ));
+    assert_eq!(names, vec!["ok".to_string()], "{names:?}");
+}
+
+#[test]
+fn pair_array_key_source_is_opt_in_per_rule() {
+    let module = parse_module(
+        &PathBuf::from("fixture.js"),
+        concat!(
+            "import _export_sfc from './__virtual__/plugin-vue-export-helper.js';\n",
+            "_export_sfc(main, [['render', render]]);\n",
+        ),
+    )
+    .unwrap();
+    let object_literal_rule = super::ClassMapCallInput {
+        keySource: None,
+        ..pair_array_rule()
+    };
+    let names =
+        super::compat::collect_pair_array_class_map_property_names(&module, &[object_literal_rule])
+            .unwrap();
+    assert!(names.is_empty(), "{names:?}");
+}
+
+#[test]
+fn pair_array_key_source_rejects_unknown_key_source_values() {
+    let calls = vec![super::ClassMapCallInput {
+        keySource: Some("objectArray".to_string()),
+        ..pair_array_rule()
+    }];
+    let error = super::validate_class_map_calls(&calls).expect_err("invalid keySource");
+    assert!(error.contains("keySource"), "{error}");
+    assert!(error.contains("pairArray"), "{error}");
 }

@@ -1,0 +1,21 @@
+{
+  "name": "jquery-vite-official",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "build:pure": "vite build --config vite.pure.config.ts"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.2",
+    "vite": "^8.1.1",
+    "@types/jquery": "^3.5.32"
+  },
+  "dependencies": {
+    "gcc-ts-bundler": "link:gcc-ts-bundler",
+    "jquery": "^3.7.1"
+  }
+}

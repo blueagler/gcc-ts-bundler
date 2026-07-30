@@ -9,7 +9,8 @@ pub(super) use self::commonjs::{
 };
 pub(super) use self::object_patterns::ObjectPatternParamVisitor;
 pub(crate) use self::properties::{
-    collect_class_static_assignments, quote_prop_name, validate_class_map_calls,
+    collect_class_static_assignments, collect_pair_array_class_map_property_names, quote_prop_name,
+    validate_class_map_calls,
     ClassMapCallCompatVisitor, PreservedPropertyCompatVisitor,
 };
 

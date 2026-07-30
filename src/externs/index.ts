@@ -339,6 +339,7 @@ async function renderTypedDeclarations(
     checker: analysis.checker,
     modules,
     program: analysis.program,
+    projectRoot: options.projectRoot,
   });
 }
 

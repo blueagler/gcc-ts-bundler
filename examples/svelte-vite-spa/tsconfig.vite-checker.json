@@ -1,5 +1,0 @@
-{
-  "extends": "./tsconfig.json",
-  "include": ["src/**/*.d.ts", "src/**/*.ts", "vite.config.ts"],
-  "exclude": [".gcc-ts-bundler-vite/**", "dist/**"]
-}

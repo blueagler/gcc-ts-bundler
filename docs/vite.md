@@ -363,4 +363,19 @@ Framework compilation must finish before this plugin. Resource imports that surv
 
 ## Example
 
-`examples/svelte-vite-spa` demonstrates a Svelte application with third-party Vite transforms, runtime-aware extern generation, and the plugin at the end of the plugin list.
+Every example under `examples/` is an official framework starter with only
+`gccTsBundler()` added to `vite.config.ts`, alongside a `vite.pure.config.ts`
+that builds the same app without the plugin:
+
+| Example | Template | Plugin configuration |
+| --- | --- | --- |
+| `examples/react-vite-official` | `npm create vite --template react-ts` | `gccTsBundler(reactPreset())` |
+| `examples/svelte-vite-official` | `npm create vite --template svelte-ts` | `gccTsBundler(sveltePreset())` |
+| `examples/lit-vite-official` | `npm create vite --template lit-ts` | `gccTsBundler()` |
+| `examples/jquery-vite-official` | `npm create vite --template vanilla-ts` + jquery | `gccTsBundler({ externs: { generate: … } })` |
+| `examples/vue-vapor-vite-official` | `create-vue` (Vue 3.6 Vapor) | `gccTsBundler(vuePreset())` |
+
+`examples/jquery-vite-official` is the one that needs more than a preset: it
+shows runtime-aware extern generation with `protocolHelpers.keyReadCallees`,
+which is how a library that reads its own members through string keys keeps
+working under ADVANCED.

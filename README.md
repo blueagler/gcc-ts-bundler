@@ -168,12 +168,29 @@ Only the documented dashed CLI flags are supported. Unknown flags and deprecated
 
 ## Examples
 
-- `examples/lit-playground` is a copied Lit motion playground with its own package and build wrapper.
-- `examples/react-spa` is a real React 19 SPA fixture with its own `package.json` and `node_modules`.
-- `examples/lazy-chunks-demo` is a minimal browser fixture that uses native `import()` to lazy load a feature chunk.
-- `examples/jquery-demo` is a small browser fixture that uses `jquery` and `@types/jquery` to exercise both extern modes: boundary-aware for the app-to-library ABI, runtime-aware for jQuery's own internal rename hazards. Every pinned runtime name is executed by a user interaction, so a regression in either extern set breaks the page rather than passing silently.
-- `examples/svelte-spa` uses the latest Svelte compiler, then prebundles the Svelte runtime with `esbuild` before running the result through gcc-ts-bundler.
-- `examples/vue-vapor-spa` precompiles `.vue` single-file components through `vue/compiler-sfc` with Vapor mode enabled, then runs the generated ESM through gcc-ts-bundler with lazy async panels.
+Every example is the **official framework starter, unmodified**, with only
+`gccTsBundler()` added to `vite.config.ts`. That is the point: they prove the
+plugin works on stock templates rather than on app code shaped to suit it. Each
+one also ships `vite.pure.config.ts`, the identical build without the plugin, so
+any size or behaviour claim can be reproduced against a plain Vite baseline.
+
+Scaffolded with `npm create vite@latest -- --template <t>` (and `create-vue` for
+Vue), then `bun install && bunx vite build`.
+
+- `examples/react-vite-official` — `react-ts` template plus `reactPreset()`.
+- `examples/svelte-vite-official` — `svelte-ts` template plus `sveltePreset()`.
+- `examples/lit-vite-official` — `lit-ts` template, no preset. Covers decorator
+  metadata: `@property count` reaches the runtime as a string literal, so the
+  matching field must survive renaming.
+- `examples/jquery-vite-official` — `vanilla-ts` template with jQuery installed
+  the way the jQuery docs recommend. Carries the extern-generation story:
+  jQuery builds part of its own API from strings (`deferred[tuple[0] + "With"]`)
+  and reads its handler store back by string key (`dataPriv.get(this,
+"events")`), so `runtime-aware` generation plus key-reading protocol helpers
+  are what keep the page alive. Every pinned name is exercised by a real click.
+- `examples/vue-vapor-vite-official` — `create-vue` template on Vue 3.6 with
+  Vapor SFCs plus `vuePreset()`. Covers the template-only SFC ABI, where
+  plugin-vue attaches `render` through a string key.
 
 ## License
 

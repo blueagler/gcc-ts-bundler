@@ -38,6 +38,7 @@ type ModuleSeed = {
 };
 type RenderState = {
   checker: ts.TypeChecker;
+  projectRoot?: string | undefined;
   diagnostics: ExternTypeDiagnostic[];
   emitted: Set<ts.Symbol>;
   lines: string[];
@@ -51,10 +52,12 @@ export function renderTypedExternalDeclarations({
   checker,
   modules,
   program,
+  projectRoot,
 }: {
   checker: ts.TypeChecker;
   modules: readonly ModuleSeed[];
   program: ts.Program;
+  projectRoot?: string | undefined;
 }): {
   diagnostics: ExternTypeDiagnostic[];
   moduleExports: GeneratedExternModule[];
@@ -62,6 +65,7 @@ export function renderTypedExternalDeclarations({
 } {
   const state: RenderState = {
     checker,
+    projectRoot,
     diagnostics: [],
     emitted: new Set(),
     lines: [],
@@ -92,6 +96,7 @@ export function renderTypedExternalDeclarations({
     const namespace = stableExternNamespace(
       module.specifier,
       module.declarationEntry,
+      state.projectRoot,
     );
     state.namespaces.add(namespace);
     const exports = collectModuleExports(
@@ -170,9 +175,15 @@ function reserveSymbol(
   const namespace = stableExternNamespace(
     module.specifier,
     module.declarationEntry,
+    state.projectRoot,
   );
   state.namespaces.add(namespace);
-  const name = stableSymbolName(namespace, symbol, state.checker);
+  const name = stableSymbolName(
+    namespace,
+    symbol,
+    state.checker,
+    state.projectRoot,
+  );
   state.nameForSymbol.set(symbol, name);
   state.moduleForSymbol.set(symbol, module);
   state.pending.push(symbol);
