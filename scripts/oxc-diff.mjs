@@ -28,6 +28,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const corpusFile = path.join(repoRoot, "test/fixtures/oxc-corpus.txt");
@@ -62,8 +63,19 @@ const CLASSES = [
 //   * escape style is canonicalized (`\\0` vs `\\u0000`, `<\\/script>` vs
 //     `</script>`), because the decoded value is what matters.
 //
-// Anything left unhandled degrades toward *more* noise, never toward hiding a
-// difference, which is the safe direction for a gate.
+// CORRECTION (OX-D3 audit, /tmp/gcc-oxd3.md §2). An earlier version of this
+// comment claimed unhandled syntax "degrades toward more noise, never toward
+// hiding a difference". **That claim was false** at the
+// `token-level`/`semantic-suspect` boundary and is withdrawn. D3 planted 13
+// unambiguous semantic mutations -- `&&`->`||`, `===`->`==`, dropped
+// negation/`await`/`new`/`typeof`/`delete`, argument-order swap, operand-order
+// swap, `a.b`->`a[b]`, `a?.b`->`a.b`, `(a,b)`->`a; b`, `var`->`let` -- and **all
+// 13 classified `token-level`**, because that class is decided on *multisets* of
+// names and literals, which every one of those mutations preserves.
+//
+// So the tokenizer is a *triage* instrument, not a safety gate: it says how much
+// a diff moved, never whether the program still means the same thing. The
+// authority for that question is `--referee` below.
 const TOKEN_PATTERN = new RegExp(
   [
     "(?<comment>/\\*[\\s\\S]*?\\*/|//[^\\n]*)",
@@ -344,6 +356,80 @@ export function classify(swcCode, oxcCode) {
 }
 
 // ---------------------------------------------------------------------------
+// structural referee -- the disposition authority
+// ---------------------------------------------------------------------------
+//
+// Promoted from the OX-D3 audit (`/tmp/gcc-oxd3/referee.mjs`), unchanged in
+// method, because it is the only instrument here that can answer "do these two
+// programs still mean the same thing?".
+//
+// Both sides are re-printed through a THIRD implementation -- esbuild, already a
+// devDependency -- with `--minify-whitespace`. esbuild always prints from its own
+// AST, so it re-derives parentheses from precedence, normalises whitespace and
+// quoting, and drops non-legal comments. Two programs differing only in those
+// collapse to byte-identical text; anything that changes the parse tree survives.
+//
+// A positive and a negative control run on every invocation, so a silent esbuild
+// change cannot quietly turn this into a rubber stamp. If the controls fail the
+// referee reports `CONTROLS-FAILED` and every verdict is withheld.
+
+const esbuildBinary = path.join(repoRoot, "node_modules/.bin/esbuild");
+
+function esbuildNormalize(code, workDir, tag) {
+  const file = path.join(workDir, `${tag}.js`);
+  fs.writeFileSync(file, code);
+  try {
+    return {
+      ok: true,
+      // stderr captured, not inherited: an unparseable file is a *verdict*, not
+      // noise to print twice.
+      out: execFileSync(esbuildBinary, ["--minify-whitespace", file], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      out: String(error.stderr ?? error.message).split("\n").slice(0, 3).join(" | "),
+    };
+  }
+}
+
+/** `((a)+b)*(c)` must equal `(a+b)*c` and must not equal `a+b*c`. */
+function refereeControlsPass(workDir) {
+  const redundant = esbuildNormalize("x = ((a)+b)*(c);", workDir, "ctl_a");
+  const plain = esbuildNormalize("x = (a+b)*c;", workDir, "ctl_b");
+  const reassociated = esbuildNormalize("x = a+b*c;", workDir, "ctl_c");
+  return (
+    redundant.ok &&
+    plain.ok &&
+    reassociated.ok &&
+    redundant.out === plain.out &&
+    plain.out !== reassociated.out
+  );
+}
+
+/**
+ * `STRUCTURALLY-EQUAL` | `STRUCTURALLY-DIFFERENT` | `UNPARSEABLE` for one pair.
+ *
+ * `UNPARSEABLE` is not a pass: esbuild refuses some legal-for-us input (a
+ * decorator form), and those files fall back to human review rather than to the
+ * token class.
+ */
+function refereeVerdict(swcCode, oxcCode, workDir) {
+  const left = esbuildNormalize(swcCode, workDir, "swc");
+  const right = esbuildNormalize(oxcCode, workDir, "oxc");
+  if (!left.ok || !right.ok) {
+    return {
+      detail: left.ok ? `oxc: ${right.out}` : `swc: ${left.out}`,
+      verdict: "UNPARSEABLE",
+    };
+  }
+  return { verdict: left.out === right.out ? "STRUCTURALLY-EQUAL" : "STRUCTURALLY-DIFFERENT" };
+}
+
+// ---------------------------------------------------------------------------
 // self-check
 // ---------------------------------------------------------------------------
 
@@ -390,7 +476,51 @@ function selfCheck() {
     console.log("FAIL comment-only evidence missing");
     failures += 1;
   }
-  console.log(`${cases.length + 1} checks, ${failures} failed`);
+
+  // OX-D3's 13 planted mutations, kept here permanently. They are *unambiguous
+  // semantic changes*, and the point of the block is that the classifier calls
+  // every one of them `token-level` while the referee catches every one. Both
+  // halves are asserted: if a future tokenizer change starts catching some of
+  // them that is an improvement, but the referee must never stop catching them,
+  // and `token-level` must never be dispositioned as safe on the strength of the
+  // classifier alone.
+  const mutations = [
+    ["operator swap", "x = a && b;", "x = a || b;"],
+    ["equality loosened", "x = a === b;", "x = a == b;"],
+    ["dropped negation", "x = !a;", "x = a;"],
+    ["dropped await", "async function f(){ return await g(); }", "async function f(){ return g(); }"],
+    ["dropped new", "x = new f(a);", "x = f(a);"],
+    ["dropped typeof", "x = typeof a;", "x = a;"],
+    ["dropped delete", "delete a.b;", "a.b;"],
+    ["argument order", "f(a, b);", "f(b, a);"],
+    ["operand order", "x = a - b;", "x = b - a;"],
+    ["member form", "x = a.b;", "x = a[b];"],
+    ["optional chain dropped", "x = a?.b;", "x = a.b;"],
+    ["sequence split", "x = (a, b);", "a; x = b;"],
+    ["binding kind", "var a = 1;", "let a = 1;"],
+  ];
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "oxc-diff-selfcheck-"));
+  const controlsPass = refereeControlsPass(workDir);
+  if (!controlsPass) {
+    console.log("FAIL referee controls");
+    failures += 1;
+  }
+  let classifierCaught = 0;
+  for (const [name, left, right] of mutations) {
+    const classified = classify(left, right).class;
+    const { verdict } = refereeVerdict(left, right, workDir);
+    if (classified !== "token-level") classifierCaught += 1;
+    const refereeOk = verdict === "STRUCTURALLY-DIFFERENT";
+    if (!refereeOk) failures += 1;
+    console.log(
+      `${refereeOk ? "ok  " : "FAIL"} mutation ${name.padEnd(22)} classifier=${classified.padEnd(16)} referee=${verdict}`,
+    );
+  }
+  fs.rmSync(workDir, { force: true, recursive: true });
+  console.log(
+    `\n${mutations.length} planted semantic mutations: referee caught ${mutations.length - (failures - (controlsPass ? 0 : 1))}/${mutations.length}, classifier caught ${classifierCaught}/${mutations.length} (it is triage, not a gate)`,
+  );
+  console.log(`${cases.length + 1 + mutations.length + 1} checks, ${failures} failed`);
   return failures === 0;
 }
 
@@ -483,6 +613,9 @@ function parseArgs(argv) {
     filter: "",
     json: "",
     outDir: path.join(repoRoot, ".tmp/oxc-diff"),
+    // On by default: a disposition may not rest on the token class alone
+    // (OX-D3 audit §2). `--no-referee` is for a quick triage pass only.
+    referee: true,
     refreshCorpus: false,
     selfCheck: false,
     show: new Set(["semantic-suspect"]),
@@ -495,6 +628,8 @@ function parseArgs(argv) {
       case "--filter": options.filter = value; index += 1; break;
       case "--json": options.json = path.resolve(value); index += 1; break;
       case "--out": options.outDir = path.resolve(value); index += 1; break;
+      case "--referee": options.referee = true; break;
+      case "--no-referee": options.referee = false; break;
       case "--refresh-corpus": options.refreshCorpus = true; break;
       case "--self-check": options.selfCheck = true; break;
       case "--show":
@@ -545,7 +680,34 @@ function main() {
       });
       continue;
     }
-    results.push({ file: relative, ...classify(swc.code, oxc.code) });
+    results.push({
+      file: relative,
+      ...classify(swc.code, oxc.code),
+      swcCode: swc.code,
+      oxcCode: oxc.code,
+    });
+  }
+
+  // The referee runs before anything is reported, so no summary can imply a
+  // class is safe without it.
+  let refereeControls = null;
+  if (options.referee) {
+    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "oxc-diff-referee-"));
+    refereeControls = refereeControlsPass(workDir);
+    for (const result of results) {
+      if (result.swcCode === undefined || result.oxcCode === undefined) {
+        result.referee = "NO-OUTPUT";
+        continue;
+      }
+      const { verdict, detail } = refereeVerdict(result.swcCode, result.oxcCode, workDir);
+      result.referee = verdict;
+      if (detail) result.refereeDetail = detail;
+    }
+    fs.rmSync(workDir, { force: true, recursive: true });
+  }
+  for (const result of results) {
+    delete result.swcCode;
+    delete result.oxcCode;
   }
 
   const counts = new Map(CLASSES.map((name) => [name, 0]));
@@ -561,6 +723,48 @@ function main() {
     if (count === 0) continue;
     const share = ((count / results.length) * 100).toFixed(1);
     console.log(`  ${name.padEnd(17)} ${String(count).padStart(4)}  ${share.padStart(5)}%`);
+  }
+
+  // --- disposition ---------------------------------------------------------
+  //
+  // The token class above is triage: it says how far a diff moved. It does NOT
+  // say the program still means the same thing -- 13 planted semantic mutations
+  // all land in `token-level` (`--self-check`). The referee below is what a
+  // re-baseline disposition rests on.
+  if (!options.referee) {
+    console.log(
+      "\n  referee SKIPPED (--no-referee): triage only. Do NOT disposition a" +
+        "\n  re-baseline from the classes above -- `token-level` cannot carry it.",
+    );
+  } else if (refereeControls !== true) {
+    console.log(
+      "\n  REFEREE CONTROLS FAILED -- esbuild did not agree that `((a)+b)*(c)`" +
+        "\n  equals `(a+b)*c` and differs from `a+b*c`. Every verdict is withheld.",
+    );
+    process.exitCode = 2;
+  } else {
+    const grid = new Map();
+    for (const result of results) {
+      const key = `${result.class} / ${result.referee}`;
+      grid.set(key, (grid.get(key) ?? 0) + 1);
+    }
+    console.log(`\n  structural referee (esbuild re-print, controls passed):`);
+    for (const [key, count] of [...grid].sort()) {
+      console.log(`    ${key.padEnd(46)} ${String(count).padStart(4)}`);
+    }
+    const escalated = results.filter((result) => result.referee !== "STRUCTURALLY-EQUAL");
+    if (escalated.length === 0) {
+      console.log("\n  every pair is structurally equal: the diffs above are print-shape only.");
+    } else {
+      console.log(
+        `\n  ${escalated.length} pair(s) NOT structurally equal -- read every one, whatever their class:`,
+      );
+      for (const result of escalated) {
+        console.log(
+          `    [${result.class} / ${result.referee}] ${result.file}${result.refereeDetail ? `  ${result.refereeDetail}` : ""}`,
+        );
+      }
+    }
   }
 
   for (const name of CLASSES) {

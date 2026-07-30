@@ -1552,6 +1552,38 @@ fn transform_single_source(name: &str, source: &str) -> String {
 }
 
 #[test]
+fn lowers_an_exported_enum_to_a_hoisted_binding_not_a_dead_zone_one() {
+    // An exported enum must not be lowered onto a binding with a temporal dead
+    // zone. `tsc` emits `export var Kind;` and swc matches it, so a value-position
+    // read *before* the declaration executes reads `undefined`. oxc 0.142 emits
+    // `export let Kind`, which turns the same read into a hard
+    // `ReferenceError: Cannot access 'Kind' before initialization` -- and `typeof`
+    // does not protect against TDZ either (OX-D3 audit §7, with an executing
+    // repro). That is a divergence from tsc's emit contract, not a style
+    // difference, so the swap has to keep var semantics (or hoist the
+    // initialisation equivalently).
+    //
+    // Stated negatively on purpose: the *shape* of the lowering is free to change
+    // in the port (the goldens will be re-baselined), the dead zone is not.
+    let transformed = transform_single_source(
+        "enum-tdz",
+        concat!(
+            "export function early(): string { return typeof Kind; }\n",
+            "export const probe = early();\n",
+            "export enum Kind { A = 1 }\n",
+        ),
+    );
+
+    assert!(transformed.contains("var Kind"), "{transformed}");
+    assert!(!transformed.contains("let Kind"), "{transformed}");
+    // A `const` binding has the same dead zone, so it is no safer than `let`
+    // *unless* the initialiser is emitted before every reader; the metadata
+    // `@enum` shape does exactly that (it is emitted at the top of the module),
+    // which is why this asserts on the lowered-object shape only.
+    assert!(!transformed.contains("const Kind = function"), "{transformed}");
+}
+
+#[test]
 fn merges_split_namespace_declaration_blocks_before_lowering() {
     // Declaration merging: the second block's body must see the first block's
     // members. SWC's `strip` only qualifies members declared in the same block,

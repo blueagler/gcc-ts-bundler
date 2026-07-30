@@ -487,3 +487,77 @@ test.serial(
     expect(module.reachThroughAlias()).toBe(10);
   },
 );
+
+// ---------------------------------------------------------------------------
+// risk 6: enum lowering must not introduce a temporal dead zone
+// ---------------------------------------------------------------------------
+
+test.serial(
+  "a forward reference to an exported enum reads undefined instead of throwing",
+  { timeout: 30_000 },
+  async () => {
+    // `tsc` lowers an exported enum to `export var Kind;`, so a value-position
+    // read that runs *before* the declaration sees `undefined`. swc matches that
+    // contract. oxc 0.142 emits `export let Kind`, which has a temporal dead zone
+    // and turns the same read into a hard `ReferenceError: Cannot access 'Kind'
+    // before initialization` -- `typeof` does not protect against TDZ, so even the
+    // defensive spelling throws (OX-D3 audit, §7, with a minimal repro).
+    //
+    // This is a divergence from tsc's *emit contract*, not from swc's style, and
+    // the classifier files it as `token-level` (`var` -> `let`), which is exactly
+    // why that class cannot be dispositioned as bulk-review. Pinned here by
+    // execution so the shape stays free to change in the port and the dead zone
+    // does not.
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/helper.ts",
+      [
+        "export enum Shared { X = 7 }",
+        "export function readShared(): number { return Shared.X; }",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/entry.ts",
+      [
+        'import { readShared, Shared } from "./helper";',
+        // Same-module forward reference: this call runs while `Local` is still
+        // above its own declaration. Under `var` semantics it reads `undefined`;
+        // under `let`/`const` it throws.
+        "function earlyLocal(): string { return typeof Local; }",
+        "export const localBefore = earlyLocal();",
+        "export enum Local { A = 1, B = 2 }",
+        "export function localAfter(): string { return typeof Local; }",
+        "export function values(): string {",
+        '  return [Local.A, Local.B, Shared.X, readShared()].join("|");',
+        "}",
+        // Control: an *imported* enum is fully initialised before this module
+        // body runs, so it is an object here. Keeping both in one fixture stops
+        // the forward-reference assertion from passing for the wrong reason.
+        "export const importedAtInit = typeof Shared;",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await build({
+      cache: { mode: "off" },
+      entries: ["./entry.ts"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+    expectBuilt(result);
+
+    const module = await importOutput(
+      path.join(fixture.outDir, "entry.js"),
+      "enum-forward-reference",
+    );
+
+    // The assertion that fails under an `export let` lowering: reaching this line
+    // at all means the forward read did not throw.
+    expect(module.localBefore).toBe("undefined");
+    expect(module.localAfter()).toBe("object");
+    expect(module.importedAtInit).toBe("object");
+    expect(module.values()).toBe("1|2|7|7");
+  },
+);
