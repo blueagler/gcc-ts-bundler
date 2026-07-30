@@ -10,6 +10,64 @@ pub(crate) struct DynamicImportWrappers {
 
 pub(crate) type DynamicImportObjectWrapper = BTreeMap<String, BTreeSet<String>>;
 
+#[cfg(test)]
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct DynamicImportWrapperFacts {
+    pub(super) function_wrappers: BTreeMap<String, Vec<BTreeSet<String>>>,
+    pub(super) object_wrappers: BTreeMap<String, Vec<DynamicImportObjectWrapper>>,
+    pub(super) object_function_wrappers: BTreeMap<String, Vec<DynamicImportObjectWrapper>>,
+    pub(super) object_carriers: BTreeMap<String, Vec<DynamicImportObjectWrapper>>,
+    pub(super) promise_carriers: BTreeMap<String, Vec<BTreeSet<String>>>,
+}
+
+#[cfg(test)]
+fn normalize_binding_map<T: Clone + Ord>(
+    values: &BindingKeyMap<T>,
+) -> BTreeMap<String, Vec<T>> {
+    let mut normalized = BTreeMap::<String, Vec<T>>::new();
+    for (binding, value) in values {
+        normalized
+            .entry(binding.symbol().to_string())
+            .or_default()
+            .push(value.clone());
+    }
+    for values in normalized.values_mut() {
+        values.sort();
+    }
+    normalized
+}
+
+#[cfg(test)]
+pub(super) fn collect_dynamic_import_wrapper_facts_for_test(
+    source: &str,
+) -> DynamicImportWrapperFacts {
+    super::super::GLOBALS.set(&super::super::Globals::new(), || {
+        let module = crate::module_cache::parse_module(
+            std::path::Path::new("fixture.js"),
+            source,
+        )
+        .expect("swc wrapper parity parse");
+        let mut program = Program::Module(module);
+        super::super::apply_resolver_and_global_this_compat(&mut program, true)
+            .expect("swc wrapper parity resolver");
+        let Program::Module(module) = program else {
+            unreachable!();
+        };
+        let wrappers = collect_dynamic_import_wrappers(&module);
+        let object_carriers = collect_dynamic_import_object_carriers(&module, &wrappers);
+        let promise_carriers =
+            collect_dynamic_import_promise_carriers(&module, &object_carriers, &wrappers);
+        DynamicImportWrapperFacts {
+            function_wrappers: normalize_binding_map(&wrappers.function_wrappers),
+            object_wrappers: normalize_binding_map(&wrappers.object_wrappers),
+            object_function_wrappers:
+                normalize_binding_map(&wrappers.object_function_wrappers),
+            object_carriers: normalize_binding_map(&object_carriers),
+            promise_carriers: normalize_binding_map(&promise_carriers),
+        }
+    })
+}
+
 pub(crate) fn resolve_dynamic_import_module_ids(
     expr: &Expr,
     carriers: &BindingKeyMap<BTreeSet<String>>,

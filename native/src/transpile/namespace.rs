@@ -3,6 +3,7 @@ use super::*;
 pub(super) mod dynamic_imports;
 mod flow;
 mod wrappers;
+mod wrappers_oxc;
 
 pub(super) use self::dynamic_imports::{group_lazy_imports_by_file, DynamicImportRewriteVisitor};
 pub(super) use self::flow::{
