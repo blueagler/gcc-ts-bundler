@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 
-use swc_core::ecma::ast::{Id, Ident, Module, Program};
+use swc_core::ecma::ast::{Ident, Module, Program};
+
+use super::identity::{BindingKey, BindingKeySet};
 use swc_core::ecma::visit::{Visit, VisitWith};
 
 /// Allocates compiler bindings against every identifier visible in the
@@ -27,7 +29,7 @@ impl FreshNameAllocator {
         }
     }
 
-    pub(crate) fn from_module_excluding(module: &Module, excluded_ids: &HashSet<Id>) -> Self {
+    pub(crate) fn from_module_excluding(module: &Module, excluded_ids: &BindingKeySet) -> Self {
         let mut collector = IdentifierNameCollector {
             excluded_ids: Some(excluded_ids),
             ..Default::default()
@@ -61,7 +63,7 @@ pub(crate) fn collect_lexical_binding_names(module: &Module) -> HashSet<String> 
 
 #[derive(Default)]
 struct IdentifierNameCollector<'a> {
-    excluded_ids: Option<&'a HashSet<Id>>,
+    excluded_ids: Option<&'a BindingKeySet>,
     names: HashSet<String>,
 }
 
@@ -69,7 +71,7 @@ impl Visit for IdentifierNameCollector<'_> {
     fn visit_ident(&mut self, ident: &Ident) {
         if self
             .excluded_ids
-            .is_some_and(|excluded| excluded.contains(&ident.to_id()))
+            .is_some_and(|excluded| excluded.contains(&BindingKey::of(&ident)))
         {
             return;
         }

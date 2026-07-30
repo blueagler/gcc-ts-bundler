@@ -43,6 +43,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use swc_core::ecma::ast::*;
 use swc_core::ecma::visit::{Visit, VisitWith};
+use super::identity::{BindingKey, BindingKeyMap, BindingKeySet};
 
 pub(super) fn collect_reflective_property_names(program: &Program) -> BTreeSet<String> {
     let mut lists = ReflectiveListBindings {
@@ -77,7 +78,7 @@ enum ParameterRole {
 
 /// `const exclude = ["a", "b"]` / `const exclude = "a b".split(" ")`.
 struct ReflectiveListBindings {
-    lists: HashMap<Id, Vec<String>>,
+    lists: BindingKeyMap<Vec<String>>,
 }
 
 impl Visit for ReflectiveListBindings {
@@ -90,7 +91,7 @@ impl Visit for ReflectiveListBindings {
             return;
         };
         if let Some(values) = string_list(initializer) {
-            self.lists.insert(binding.id.to_id(), values);
+            self.lists.insert(BindingKey::of_binding(&binding), values);
         }
     }
 }
@@ -98,15 +99,15 @@ impl Visit for ReflectiveListBindings {
 /// Parameter roles for every function bound to a name in this module.
 #[derive(Default)]
 struct LocalFunctionRoles {
-    roles: HashMap<Id, Vec<Option<ParameterRole>>>,
+    roles: BindingKeyMap<Vec<Option<ParameterRole>>>,
     /// Names bound more than once, or reassigned: a call through such a name
     /// cannot be attributed to one function body, so it is not attributed at
     /// all.
-    ambiguous: HashSet<Id>,
+    ambiguous: BindingKeySet,
 }
 
 impl LocalFunctionRoles {
-    fn record(&mut self, binding: Id, roles: Vec<Option<ParameterRole>>) {
+    fn record(&mut self, binding: BindingKey, roles: Vec<Option<ParameterRole>>) {
         if self.roles.insert(binding.clone(), roles).is_some() {
             self.ambiguous.insert(binding);
         }
@@ -118,7 +119,7 @@ impl LocalFunctionRoles {
         }
     }
 
-    fn roles_for(&self, binding: &Id) -> Option<&[Option<ParameterRole>]> {
+    fn roles_for(&self, binding: &BindingKey) -> Option<&[Option<ParameterRole>]> {
         self.roles.get(binding).map(Vec::as_slice)
     }
 }
@@ -134,7 +135,7 @@ impl Visit for LocalFunctionRoles {
             .collect::<Vec<_>>();
         if let Some(body) = &declaration.function.body {
             self.record(
-                declaration.ident.to_id(),
+                BindingKey::of(&declaration.ident),
                 classify_parameters(&parameters, body),
             );
         }
@@ -157,13 +158,13 @@ impl Visit for LocalFunctionRoles {
                     .map(|parameter| binding_id(&parameter.pat))
                     .collect::<Vec<_>>();
                 if let Some(body) = &function.function.body {
-                    self.record(binding.id.to_id(), classify_parameters(&parameters, body));
+                    self.record(BindingKey::of_binding(&binding), classify_parameters(&parameters, body));
                 }
             }
             Expr::Arrow(arrow) => {
                 let parameters = arrow.params.iter().map(binding_id).collect::<Vec<_>>();
                 if let BlockStmtOrExpr::BlockStmt(body) = &*arrow.body {
-                    self.record(binding.id.to_id(), classify_parameters(&parameters, body));
+                    self.record(BindingKey::of_binding(&binding), classify_parameters(&parameters, body));
                 }
             }
             _ => {}
@@ -173,13 +174,13 @@ impl Visit for LocalFunctionRoles {
     fn visit_assign_expr(&mut self, assignment: &AssignExpr) {
         assignment.visit_children_with(self);
         if let AssignTarget::Simple(SimpleAssignTarget::Ident(target)) = &assignment.left {
-            self.ambiguous.insert(target.id.to_id());
+            self.ambiguous.insert(BindingKey::of_binding(&target));
         }
     }
 }
 
 /// Infers each parameter's role from how the function body uses it.
-fn classify_parameters(parameters: &[Option<Id>], body: &BlockStmt) -> Vec<Option<ParameterRole>> {
+fn classify_parameters(parameters: &[Option<BindingKey>], body: &BlockStmt) -> Vec<Option<ParameterRole>> {
     let indices = parameters
         .iter()
         .enumerate()
@@ -200,13 +201,13 @@ fn classify_parameters(parameters: &[Option<Id>], body: &BlockStmt) -> Vec<Optio
 struct ParameterUseScan {
     /// Live `for...in` bindings, each paired with the parameter index it
     /// iterates.
-    for_in_keys: Vec<(Id, usize)>,
-    parameters: HashMap<Id, usize>,
+    for_in_keys: Vec<(BindingKey, usize)>,
+    parameters: BindingKeyMap<usize>,
     roles: Vec<Option<ParameterRole>>,
 }
 
 impl ParameterUseScan {
-    fn iterated_parameter(&self, key: &Id) -> Option<usize> {
+    fn iterated_parameter(&self, key: &BindingKey) -> Option<usize> {
         self.for_in_keys
             .iter()
             .rev()
@@ -218,7 +219,7 @@ impl Visit for ParameterUseScan {
     fn visit_for_in_stmt(&mut self, statement: &ForInStmt) {
         statement.right.visit_with(self);
         let iterated = match &*statement.right {
-            Expr::Ident(object) => self.parameters.get(&object.to_id()).copied(),
+            Expr::Ident(object) => self.parameters.get(&BindingKey::of(&object)).copied(),
             _ => None,
         };
         let binding = for_in_binding_id(&statement.left);
@@ -247,8 +248,8 @@ impl Visit for ParameterUseScan {
             return;
         };
         let (Some(object_index), Some(key_index)) = (
-            self.parameters.get(&object.to_id()).copied(),
-            self.parameters.get(&key.to_id()).copied(),
+            self.parameters.get(&BindingKey::of(&object)).copied(),
+            self.parameters.get(&BindingKey::of(&key)).copied(),
         ) else {
             return;
         };
@@ -268,7 +269,7 @@ impl Visit for ParameterUseScan {
         let Expr::Ident(list) = test.list else {
             return;
         };
-        let Some(list_index) = self.parameters.get(&list.to_id()).copied() else {
+        let Some(list_index) = self.parameters.get(&BindingKey::of(&list)).copied() else {
             return;
         };
         let Some(iterated_index) = self.iterated_parameter(&test.key) else {
@@ -282,16 +283,16 @@ impl Visit for ParameterUseScan {
 }
 
 struct ReflectiveKeys {
-    for_in_bindings: HashSet<Id>,
+    for_in_bindings: BindingKeySet,
     functions: LocalFunctionRoles,
-    lists: HashMap<Id, Vec<String>>,
+    lists: BindingKeyMap<Vec<String>>,
     names: BTreeSet<String>,
 }
 
 impl ReflectiveKeys {
     fn collect_string_list(&mut self, expression: &Expr) {
         let values = match expression {
-            Expr::Ident(list) => self.lists.get(&list.to_id()).cloned(),
+            Expr::Ident(list) => self.lists.get(&BindingKey::of(&list)).cloned(),
             other => string_list(other),
         };
         self.names.extend(values.unwrap_or_default());
@@ -306,7 +307,7 @@ impl ReflectiveKeys {
         let Expr::Ident(callee) = &**callee else {
             return;
         };
-        let Some(roles) = self.functions.roles_for(&callee.to_id()) else {
+        let Some(roles) = self.functions.roles_for(&BindingKey::of(&callee)) else {
             return;
         };
         let roles = roles.to_vec();
@@ -355,7 +356,7 @@ impl Visit for ReflectiveKeys {
             let Expr::Ident(identifier) = identifier else {
                 continue;
             };
-            if !self.for_in_bindings.contains(&identifier.to_id()) {
+            if !self.for_in_bindings.contains(&BindingKey::of(&identifier)) {
                 continue;
             }
             if let Expr::Lit(Lit::Str(literal)) = literal {
@@ -382,7 +383,7 @@ impl Visit for ReflectiveKeys {
 /// argument. The receiver is handed back unresolved so a caller can accept
 /// either a named list or an inline `["a", "b"]` / `"a b".split(" ")`.
 struct MembershipTest<'a> {
-    key: Id,
+    key: BindingKey,
     list: &'a Expr,
 }
 
@@ -409,19 +410,19 @@ fn membership_test(call: &CallExpr) -> Option<MembershipTest<'_>> {
         return None;
     };
     Some(MembershipTest {
-        key: key.to_id(),
+        key: BindingKey::of(&key),
         list: &member.obj,
     })
 }
 
-fn binding_id(pattern: &Pat) -> Option<Id> {
+fn binding_id(pattern: &Pat) -> Option<BindingKey> {
     match pattern {
-        Pat::Ident(binding) => Some(binding.id.to_id()),
+        Pat::Ident(binding) => Some(BindingKey::of_binding(&binding)),
         _ => None,
     }
 }
 
-fn for_in_binding_id(left: &ForHead) -> Option<Id> {
+fn for_in_binding_id(left: &ForHead) -> Option<BindingKey> {
     match left {
         ForHead::VarDecl(declaration) => {
             let [declarator] = declaration.decls.as_slice() else {

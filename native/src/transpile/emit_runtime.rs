@@ -22,7 +22,7 @@ impl RuntimeBindingNames {
             "__live",
         ]
         .into_iter()
-        .map(|name| create_ident(name).to_id())
+        .map(|name| BindingKey::of(&create_ident(name)))
         .collect::<HashSet<_>>();
         let mut fresh_names = FreshNameAllocator::from_module_excluding(module, &generated_ids);
         let names = Self {
@@ -43,7 +43,7 @@ impl RuntimeBindingNames {
             ("__live", names.live.clone()),
         ]
         .into_iter()
-        .map(|(original, replacement)| (create_ident(original).to_id(), replacement))
+        .map(|(original, replacement)| (BindingKey::of(&create_ident(original)), replacement))
         .collect();
         module.visit_mut_with(&mut GeneratedRuntimeBindingRenameVisitor { replacements });
         (names, fresh_names)
@@ -51,12 +51,12 @@ impl RuntimeBindingNames {
 }
 
 struct GeneratedRuntimeBindingRenameVisitor {
-    replacements: HashMap<Id, String>,
+    replacements: BindingKeyMap<String>,
 }
 
 impl VisitMut for GeneratedRuntimeBindingRenameVisitor {
     fn visit_mut_ident(&mut self, ident: &mut Ident) {
-        if let Some(replacement) = self.replacements.get(&ident.to_id()) {
+        if let Some(replacement) = self.replacements.get(&BindingKey::of(&ident)) {
             ident.sym = replacement.clone().into();
         }
     }
@@ -642,7 +642,7 @@ fn slot_mode_for_export_decl(
 pub(super) fn collect_local_export_modes(
     module: &Module,
 ) -> HashMap<String, BundlerExportSlotMode> {
-    let mut binding_candidates = HashMap::<Id, (String, BundlerExportSlotMode)>::new();
+    let mut binding_candidates = BindingKeyMap::<(String, BundlerExportSlotMode)>::new();
     for item in &module.body {
         match item {
             ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import_decl)) => {
@@ -655,7 +655,7 @@ pub(super) fn collect_local_export_modes(
                         ImportSpecifier::Named(named_specifier) => &named_specifier.local,
                     };
                     binding_candidates.insert(
-                        local.to_id(),
+                        BindingKey::of(&local),
                         (local.sym.to_string(), BundlerExportSlotMode::Live),
                     );
                 }
@@ -669,7 +669,7 @@ pub(super) fn collect_local_export_modes(
                 swc_core::ecma::ast::DefaultDecl::Fn(function) => {
                     if let Some(ident) = &function.ident {
                         binding_candidates.insert(
-                            ident.to_id(),
+                            BindingKey::of(&ident),
                             (ident.sym.to_string(), BundlerExportSlotMode::Static),
                         );
                     }
@@ -677,7 +677,7 @@ pub(super) fn collect_local_export_modes(
                 swc_core::ecma::ast::DefaultDecl::Class(class) => {
                     if let Some(ident) = &class.ident {
                         binding_candidates.insert(
-                            ident.to_id(),
+                            BindingKey::of(&ident),
                             (ident.sym.to_string(), BundlerExportSlotMode::Static),
                         );
                     }
@@ -713,12 +713,12 @@ pub(super) fn collect_local_export_modes(
 
 fn collect_decl_export_candidates(
     decl: &swc_core::ecma::ast::Decl,
-    binding_candidates: &mut HashMap<Id, (String, BundlerExportSlotMode)>,
+    binding_candidates: &mut BindingKeyMap<(String, BundlerExportSlotMode)>,
 ) {
     match decl {
         swc_core::ecma::ast::Decl::Fn(function_decl) => {
             binding_candidates.insert(
-                function_decl.ident.to_id(),
+                BindingKey::of(&function_decl.ident),
                 (
                     function_decl.ident.sym.to_string(),
                     BundlerExportSlotMode::Static,
@@ -727,7 +727,7 @@ fn collect_decl_export_candidates(
         }
         swc_core::ecma::ast::Decl::Class(class_decl) => {
             binding_candidates.insert(
-                class_decl.ident.to_id(),
+                BindingKey::of(&class_decl.ident),
                 (
                     class_decl.ident.sym.to_string(),
                     BundlerExportSlotMode::Static,
@@ -752,9 +752,9 @@ fn collect_decl_export_candidates(
     }
 }
 
-pub(super) fn export_binding_names_with_ids(pattern: &Pat) -> Vec<(Id, String)> {
+pub(super) fn export_binding_names_with_ids(pattern: &Pat) -> Vec<(BindingKey, String)> {
     match pattern {
-        Pat::Ident(ident) => vec![(ident.to_id(), ident.id.sym.to_string())],
+        Pat::Ident(ident) => vec![(BindingKey::of(&ident), ident.id.sym.to_string())],
         Pat::Array(array) => array
             .elems
             .iter()
@@ -769,7 +769,7 @@ pub(super) fn export_binding_names_with_ids(pattern: &Pat) -> Vec<(Id, String)> 
                     export_binding_names_with_ids(&key_value.value)
                 }
                 swc_core::ecma::ast::ObjectPatProp::Assign(assign) => {
-                    vec![(assign.key.to_id(), assign.key.sym.to_string())]
+                    vec![(BindingKey::of(&assign.key), assign.key.sym.to_string())]
                 }
                 swc_core::ecma::ast::ObjectPatProp::Rest(rest) => {
                     export_binding_names_with_ids(&rest.arg)
@@ -786,8 +786,8 @@ pub(super) fn export_binding_names_with_ids(pattern: &Pat) -> Vec<(Id, String)> 
 /// ever written after its declaration?". Shared with `emit_goog`, which needs
 /// the same answer to decide whether an export can be a snapshot.
 pub(super) struct ReassignedBindingCollector {
-    pub(super) tracked_ids: HashSet<Id>,
-    pub(super) reassigned_ids: HashSet<Id>,
+    pub(super) tracked_ids: BindingKeySet,
+    pub(super) reassigned_ids: BindingKeySet,
 }
 
 impl Visit for ReassignedBindingCollector {
@@ -803,7 +803,7 @@ impl Visit for ReassignedBindingCollector {
     fn visit_update_expr(&mut self, update_expr: &swc_core::ecma::ast::UpdateExpr) {
         update_expr.visit_children_with(self);
         if let Expr::Ident(ident) = &*update_expr.arg {
-            let binding_id = ident.to_id();
+            let binding_id = BindingKey::of(&ident);
             if self.tracked_ids.contains(&binding_id) {
                 self.reassigned_ids.insert(binding_id);
             }
@@ -813,8 +813,8 @@ impl Visit for ReassignedBindingCollector {
 
 fn collect_assign_target_ids(
     target: &swc_core::ecma::ast::AssignTarget,
-    tracked_ids: &HashSet<Id>,
-    reassigned_ids: &mut HashSet<Id>,
+    tracked_ids: &BindingKeySet,
+    reassigned_ids: &mut BindingKeySet,
 ) {
     match target {
         swc_core::ecma::ast::AssignTarget::Simple(simple) => {
@@ -833,11 +833,11 @@ fn collect_assign_target_ids(
 
 fn collect_simple_assign_target_ids(
     target: &swc_core::ecma::ast::SimpleAssignTarget,
-    tracked_ids: &HashSet<Id>,
-    reassigned_ids: &mut HashSet<Id>,
+    tracked_ids: &BindingKeySet,
+    reassigned_ids: &mut BindingKeySet,
 ) {
     if let swc_core::ecma::ast::SimpleAssignTarget::Ident(binding) = target {
-        let binding_id = binding.id.to_id();
+        let binding_id = BindingKey::of_binding(&binding);
         if tracked_ids.contains(&binding_id) {
             reassigned_ids.insert(binding_id);
         }

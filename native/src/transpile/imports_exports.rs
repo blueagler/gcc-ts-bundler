@@ -30,7 +30,7 @@ pub(super) fn convert_import_decl(
     fresh_names: &mut FreshNameAllocator,
     // Locals that alias another module's live export accessor; see
     // `emit_goog`'s live-export section.
-    live_imported_ids: &HashSet<Id>,
+    live_imported_ids: &BindingKeySet,
 ) -> std::result::Result<Vec<String>, String> {
     let module_id = resolve_module_id_for_specifier(
         file_path,

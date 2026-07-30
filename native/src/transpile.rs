@@ -16,6 +16,7 @@ mod externs;
 pub(crate) mod fresh;
 mod global_this;
 mod hoist;
+mod identity;
 mod imports_exports;
 mod js_compat;
 mod namespace;
@@ -34,7 +35,7 @@ use rayon::prelude::*;
 use swc_core::common::{sync::Lrc, Globals, Mark, SourceMap, GLOBALS};
 use swc_core::ecma::ast::{
     ArrowExpr, BindingIdent, BlockStmt, BlockStmtOrExpr, Bool, CallExpr, Callee, EmptyStmt, Expr,
-    ExprStmt, Id, Ident, ImportDecl, ImportDefaultSpecifier, ImportSpecifier, Lit, MemberExpr,
+    ExprStmt, Ident, ImportDecl, ImportDefaultSpecifier, ImportSpecifier, Lit, MemberExpr,
     MemberProp, Module, ModuleItem, Pass, Pat, Program, PropName, Stmt, Str, SuperProp,
     TsEnumMemberId, UnaryExpr, UnaryOp, VarDecl, VarDeclKind, VarDeclarator,
 };
@@ -49,7 +50,7 @@ use crate::closure_metadata::{
     EmittedTypeMetadata,
 };
 use crate::commonjs::{analyze_commonjs_module, evaluate_boolean_expr};
-use crate::module_cache::{get_or_parse_cached_module, parse_module};
+use crate::module_cache::{parse_module, parse_source_file};
 use crate::pathing::{
     is_vendor_chunk_name, normalize_path, to_bundler_runtime_module_id, to_goog_module_id,
 };
@@ -69,6 +70,7 @@ use self::externs::*;
 use self::fresh::*;
 use self::global_this::*;
 use self::hoist::*;
+pub(crate) use self::identity::*;
 use self::imports_exports::*;
 use self::js_compat::*;
 use self::namespace::*;
@@ -490,7 +492,7 @@ fn collect_prelowered_decorator_property_names(
         if file_name.ends_with(".d.ts") {
             continue;
         }
-        let module = get_or_parse_cached_module(&PathBuf::from(file_name))?;
+        let module = parse_source_file(Path::new(file_name))?;
         names.extend(emit_helpers::collect_decorator_metadata_property_names(
             &module,
         ));
@@ -530,7 +532,7 @@ fn transform_source_file(
     {
         parse_module(&file_path.with_extension("js"), &decorated_output_text)?
     } else {
-        get_or_parse_cached_module(&file_path.to_path_buf())?
+        parse_source_file(file_path)?
     };
     let commonjs_analysis = analyze_commonjs_module(&module);
 
@@ -592,7 +594,7 @@ fn collect_pair_array_property_names(
         if file_name.ends_with(".d.ts") {
             continue;
         }
-        let module = get_or_parse_cached_module(&PathBuf::from(file_name))?;
+        let module = parse_source_file(Path::new(file_name))?;
         names.extend(collect_pair_array_class_map_property_names(
             &module,
             class_map_calls,

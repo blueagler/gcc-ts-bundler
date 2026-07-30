@@ -10,11 +10,11 @@ use super::*;
 /// `cjs_opacity::OpaqueCommonJs` — see its doc comment for why they can never
 /// disagree.
 pub(crate) struct CommonJsNamespaceAccessVisitor {
-    bindings: HashSet<Id>,
+    bindings: BindingKeySet,
 }
 
 impl CommonJsNamespaceAccessVisitor {
-    pub(crate) fn new(bindings: HashSet<Id>) -> Self {
+    pub(crate) fn new(bindings: BindingKeySet) -> Self {
         Self { bindings }
     }
 }
@@ -32,7 +32,7 @@ impl VisitMut for CommonJsNamespaceAccessVisitor {
         let Expr::Ident(object_ident) = &*member.obj else {
             return;
         };
-        if !self.bindings.contains(&object_ident.to_id()) {
+        if !self.bindings.contains(&BindingKey::of(&object_ident)) {
             return;
         }
         let MemberProp::Ident(prop_ident) = &member.prop else {
@@ -97,7 +97,7 @@ pub(crate) fn rewrite_commonjs_imports(
     commonjs_specifiers: &HashSet<String>,
     opaque_commonjs: &OpaqueCommonJs,
     fresh_names: &mut FreshNameAllocator,
-) -> HashSet<Id> {
+) -> BindingKeySet {
     if commonjs_specifiers.is_empty() {
         return HashSet::new();
     }
@@ -150,7 +150,7 @@ fn rewrite_commonjs_import_decl(
     quoted: bool,
     import_counter: &mut usize,
     fresh_names: &mut FreshNameAllocator,
-) -> (Vec<ModuleItem>, HashSet<Id>) {
+) -> (Vec<ModuleItem>, BindingKeySet) {
     let mut default_local: Option<Ident> = None;
     let mut namespace_local: Option<Ident> = None;
     let mut named_bindings: Vec<(String, Ident)> = Vec::new();
@@ -187,7 +187,7 @@ fn rewrite_commonjs_import_decl(
             Vec::new(),
             default_local
                 .into_iter()
-                .map(|ident| ident.to_id())
+                .map(|ident| BindingKey::of(&ident))
                 .collect::<HashSet<_>>(),
         );
     }
@@ -200,13 +200,13 @@ fn rewrite_commonjs_import_decl(
 
     let mut items = vec![create_default_import_item(&helper_ident, specifier)];
     let mut bindings = HashSet::new();
-    bindings.insert(helper_ident.to_id());
+    bindings.insert(BindingKey::of(&helper_ident));
 
     if let Some(namespace_binding) = namespace_local {
-        if namespace_binding.to_id() != helper_ident.to_id() {
+        if BindingKey::of(&namespace_binding) != BindingKey::of(&helper_ident) {
             items.push(create_const_alias_item(&namespace_binding, &helper_ident));
         }
-        bindings.insert(namespace_binding.to_id());
+        bindings.insert(BindingKey::of(&namespace_binding));
     }
 
     if !named_bindings.is_empty() {

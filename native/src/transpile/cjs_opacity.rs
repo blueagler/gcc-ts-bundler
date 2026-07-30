@@ -65,7 +65,7 @@ pub(super) fn collect_opaque_commonjs(
             // First-party code still consumes CommonJS packages, so it is
             // scanned for namespace reflection below even though it owns no
             // CommonJS export surface itself.
-            let module = get_or_parse_cached_module(&file_path)?;
+            let module = parse_source_file(&file_path)?;
             mark_reflecting_imports(
                 &module,
                 commonjs_specifiers,
@@ -74,7 +74,7 @@ pub(super) fn collect_opaque_commonjs(
             );
             continue;
         };
-        let module = get_or_parse_cached_module(&file_path)?;
+        let module = parse_source_file(&file_path)?;
         let analysis = analyze_commonjs_module(&module);
         if should_normalize_commonjs(&file_path, &analysis) && analysis.exports_are_opaque {
             package_keys.insert(key);

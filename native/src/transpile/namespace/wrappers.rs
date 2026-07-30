@@ -2,18 +2,18 @@ use super::*;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DynamicImportWrappers {
-    pub(crate) function_wrappers: HashMap<Id, BTreeSet<String>>,
-    pub(crate) object_wrappers: HashMap<Id, DynamicImportObjectWrapper>,
-    pub(crate) object_function_wrappers: HashMap<Id, DynamicImportObjectWrapper>,
-    pub(crate) loader_ids: HashSet<Id>,
+    pub(crate) function_wrappers: BindingKeyMap<BTreeSet<String>>,
+    pub(crate) object_wrappers: BindingKeyMap<DynamicImportObjectWrapper>,
+    pub(crate) object_function_wrappers: BindingKeyMap<DynamicImportObjectWrapper>,
+    pub(crate) loader_ids: BindingKeySet,
 }
 
 pub(crate) type DynamicImportObjectWrapper = BTreeMap<String, BTreeSet<String>>;
 
 pub(crate) fn resolve_dynamic_import_module_ids(
     expr: &Expr,
-    carriers: &HashMap<Id, BTreeSet<String>>,
-    object_carriers: &HashMap<Id, DynamicImportObjectWrapper>,
+    carriers: &BindingKeyMap<BTreeSet<String>>,
+    object_carriers: &BindingKeyMap<DynamicImportObjectWrapper>,
     dynamic_import_wrappers: &DynamicImportWrappers,
 ) -> Option<BTreeSet<String>> {
     resolve_dynamic_import_module_ids_with_options(
@@ -27,8 +27,8 @@ pub(crate) fn resolve_dynamic_import_module_ids(
 
 fn resolve_dynamic_import_module_ids_strict(
     expr: &Expr,
-    carriers: &HashMap<Id, BTreeSet<String>>,
-    object_carriers: &HashMap<Id, DynamicImportObjectWrapper>,
+    carriers: &BindingKeyMap<BTreeSet<String>>,
+    object_carriers: &BindingKeyMap<DynamicImportObjectWrapper>,
     dynamic_import_wrappers: &DynamicImportWrappers,
 ) -> Option<BTreeSet<String>> {
     resolve_dynamic_import_module_ids_with_options(
@@ -42,13 +42,13 @@ fn resolve_dynamic_import_module_ids_strict(
 
 fn resolve_dynamic_import_module_ids_with_options(
     expr: &Expr,
-    carriers: &HashMap<Id, BTreeSet<String>>,
-    object_carriers: &HashMap<Id, DynamicImportObjectWrapper>,
+    carriers: &BindingKeyMap<BTreeSet<String>>,
+    object_carriers: &BindingKeyMap<DynamicImportObjectWrapper>,
     dynamic_import_wrappers: &DynamicImportWrappers,
     allow_passthrough_calls: bool,
 ) -> Option<BTreeSet<String>> {
     match expr {
-        Expr::Ident(ident) => carriers.get(&ident.to_id()).cloned(),
+        Expr::Ident(ident) => carriers.get(&BindingKey::of(&ident)).cloned(),
         Expr::Call(call_expr) => resolve_dynamic_import_call_module_ids(
             call_expr,
             carriers,
@@ -85,9 +85,9 @@ fn resolve_dynamic_import_module_ids_with_options(
 
 pub(crate) fn collect_dynamic_import_promise_carriers(
     module: &Module,
-    object_carriers: &HashMap<Id, DynamicImportObjectWrapper>,
+    object_carriers: &BindingKeyMap<DynamicImportObjectWrapper>,
     dynamic_import_wrappers: &DynamicImportWrappers,
-) -> HashMap<Id, BTreeSet<String>> {
+) -> BindingKeyMap<BTreeSet<String>> {
     let storage_cells = collect_flow_storage_cells(module);
     let mut collector = PromiseCarrierCollector {
         carriers: HashMap::new(),
@@ -102,7 +102,7 @@ pub(crate) fn collect_dynamic_import_promise_carriers(
 pub(crate) fn collect_dynamic_import_object_carriers(
     module: &Module,
     dynamic_import_wrappers: &DynamicImportWrappers,
-) -> HashMap<Id, DynamicImportObjectWrapper> {
+) -> BindingKeyMap<DynamicImportObjectWrapper> {
     let mut collector = ObjectCarrierCollector {
         carriers: HashMap::new(),
         dynamic_import_wrappers: dynamic_import_wrappers.clone(),
@@ -112,7 +112,7 @@ pub(crate) fn collect_dynamic_import_object_carriers(
     collector.carriers
 }
 
-fn collect_flow_storage_cells(module: &Module) -> HashSet<Id> {
+fn collect_flow_storage_cells(module: &Module) -> BindingKeySet {
     let mut collector = FlowStorageCellCollector::default();
     module.visit_with(&mut collector);
     let evidenced_initializers = collector
@@ -135,14 +135,14 @@ fn collect_flow_storage_cells(module: &Module) -> HashSet<Id> {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum FlowCalleeKey {
-    Ident(Id),
-    Member(Id, String),
+    Ident(BindingKey),
+    Member(BindingKey, String),
 }
 
 #[derive(Default)]
 struct FlowStorageCellCollector {
-    initialized_by_call: HashMap<FlowCalleeKey, HashSet<Id>>,
-    read_by_unary_call: HashSet<Id>,
+    initialized_by_call: HashMap<FlowCalleeKey, BindingKeySet>,
+    read_by_unary_call: BindingKeySet,
 }
 
 impl Visit for FlowStorageCellCollector {
@@ -154,7 +154,7 @@ impl Visit for FlowStorageCellCollector {
                 self.initialized_by_call
                     .entry(callee)
                     .or_default()
-                    .insert(binding.id.to_id());
+                    .insert(BindingKey::of_binding(&binding));
             }
         }
         declarator.visit_children_with(self);
@@ -163,7 +163,7 @@ impl Visit for FlowStorageCellCollector {
     fn visit_call_expr(&mut self, call: &CallExpr) {
         if call.args.len() == 1 {
             if let Expr::Ident(binding) = &*call.args[0].expr {
-                self.read_by_unary_call.insert(binding.to_id());
+                self.read_by_unary_call.insert(BindingKey::of(&binding));
             }
         }
         call.visit_children_with(self);
@@ -175,7 +175,7 @@ fn flow_callee_key(callee: &Callee) -> Option<FlowCalleeKey> {
         return None;
     };
     match &**callee {
-        Expr::Ident(ident) => Some(FlowCalleeKey::Ident(ident.to_id())),
+        Expr::Ident(ident) => Some(FlowCalleeKey::Ident(BindingKey::of(&ident))),
         Expr::Member(member) => {
             let Expr::Ident(object) = &*member.obj else {
                 return None;
@@ -189,7 +189,7 @@ fn flow_callee_key(callee: &Callee) -> Option<FlowCalleeKey> {
                 },
                 MemberProp::PrivateName(_) => return None,
             };
-            Some(FlowCalleeKey::Member(object.to_id(), property))
+            Some(FlowCalleeKey::Member(BindingKey::of(&object), property))
         }
         Expr::Paren(paren) => flow_callee_key(&Callee::Expr(paren.expr.clone())),
         _ => None,
@@ -198,10 +198,10 @@ fn flow_callee_key(callee: &Callee) -> Option<FlowCalleeKey> {
 
 #[derive(Clone)]
 struct PromiseCarrierCollector {
-    carriers: HashMap<Id, BTreeSet<String>>,
-    object_carriers: HashMap<Id, DynamicImportObjectWrapper>,
+    carriers: BindingKeyMap<BTreeSet<String>>,
+    object_carriers: BindingKeyMap<DynamicImportObjectWrapper>,
     dynamic_import_wrappers: DynamicImportWrappers,
-    storage_cells: HashSet<Id>,
+    storage_cells: BindingKeySet,
 }
 
 impl PromiseCarrierCollector {
@@ -221,7 +221,7 @@ impl Visit for PromiseCarrierCollector {
         let Pat::Ident(binding) = &declarator.name else {
             return;
         };
-        let binding_id = binding.id.to_id();
+        let binding_id = BindingKey::of_binding(&binding);
         let module_ids = declarator
             .init
             .as_deref()
@@ -242,7 +242,7 @@ impl Visit for PromiseCarrierCollector {
             remove_assign_target_carriers(&assign_expr.left, &mut self.carriers);
             return;
         };
-        let binding_id = binding.id.to_id();
+        let binding_id = BindingKey::of_binding(&binding);
         let module_ids = matches!(assign_expr.op, swc_core::ecma::ast::AssignOp::Assign)
             .then(|| self.module_ids_for_promise_expr(&assign_expr.right))
             .flatten();
@@ -261,7 +261,7 @@ impl Visit for PromiseCarrierCollector {
         let Expr::Ident(carrier_ident) = &*call_expr.args[0].expr else {
             return;
         };
-        let carrier_id = carrier_ident.to_id();
+        let carrier_id = BindingKey::of(&carrier_ident);
         if !self.storage_cells.contains(&carrier_id) {
             return;
         }
@@ -275,7 +275,7 @@ impl Visit for PromiseCarrierCollector {
     fn visit_update_expr(&mut self, update_expr: &swc_core::ecma::ast::UpdateExpr) {
         update_expr.visit_children_with(self);
         if let Expr::Ident(ident) = &*update_expr.arg {
-            self.carriers.remove(&ident.to_id());
+            self.carriers.remove(&BindingKey::of(&ident));
         }
     }
     fn visit_for_in_stmt(&mut self, statement: &swc_core::ecma::ast::ForInStmt) {
@@ -291,9 +291,9 @@ impl Visit for PromiseCarrierCollector {
 
 #[derive(Clone)]
 struct ObjectCarrierCollector {
-    carriers: HashMap<Id, DynamicImportObjectWrapper>,
+    carriers: BindingKeyMap<DynamicImportObjectWrapper>,
     dynamic_import_wrappers: DynamicImportWrappers,
-    storage_cells: HashSet<Id>,
+    storage_cells: BindingKeySet,
 }
 
 impl ObjectCarrierCollector {
@@ -308,7 +308,7 @@ impl Visit for ObjectCarrierCollector {
         let Pat::Ident(binding) = &declarator.name else {
             return;
         };
-        let binding_id = binding.id.to_id();
+        let binding_id = BindingKey::of_binding(&binding);
         let wrapper = declarator
             .init
             .as_deref()
@@ -329,7 +329,7 @@ impl Visit for ObjectCarrierCollector {
             remove_assign_target_carriers(&assign_expr.left, &mut self.carriers);
             return;
         };
-        let binding_id = binding.id.to_id();
+        let binding_id = BindingKey::of_binding(&binding);
         let wrapper = matches!(assign_expr.op, swc_core::ecma::ast::AssignOp::Assign)
             .then(|| self.object_wrapper_for_expr(&assign_expr.right))
             .flatten();
@@ -348,7 +348,7 @@ impl Visit for ObjectCarrierCollector {
         let Expr::Ident(carrier_ident) = &*call_expr.args[0].expr else {
             return;
         };
-        let carrier_id = carrier_ident.to_id();
+        let carrier_id = BindingKey::of(&carrier_ident);
         if !self.storage_cells.contains(&carrier_id) {
             return;
         }
@@ -362,7 +362,7 @@ impl Visit for ObjectCarrierCollector {
     fn visit_update_expr(&mut self, update_expr: &swc_core::ecma::ast::UpdateExpr) {
         update_expr.visit_children_with(self);
         if let Expr::Ident(ident) = &*update_expr.arg {
-            self.carriers.remove(&ident.to_id());
+            self.carriers.remove(&BindingKey::of(&ident));
         }
     }
     fn visit_for_in_stmt(&mut self, statement: &swc_core::ecma::ast::ForInStmt) {
@@ -377,7 +377,7 @@ impl Visit for ObjectCarrierCollector {
 }
 pub(crate) fn remove_assign_target_carriers<T>(
     target: &swc_core::ecma::ast::AssignTarget,
-    carriers: &mut HashMap<Id, T>,
+    carriers: &mut BindingKeyMap<T>,
 ) {
     match target {
         swc_core::ecma::ast::AssignTarget::Simple(target) => {
@@ -403,11 +403,11 @@ pub(crate) fn remove_assign_target_carriers<T>(
 
 fn remove_simple_assign_target_carrier<T>(
     target: &swc_core::ecma::ast::SimpleAssignTarget,
-    carriers: &mut HashMap<Id, T>,
+    carriers: &mut BindingKeyMap<T>,
 ) {
     let expression = match target {
         swc_core::ecma::ast::SimpleAssignTarget::Ident(binding) => {
-            carriers.remove(&binding.id.to_id());
+            carriers.remove(&BindingKey::of_binding(&binding));
             return;
         }
         swc_core::ecma::ast::SimpleAssignTarget::Paren(expression) => &expression.expr,
@@ -419,13 +419,13 @@ fn remove_simple_assign_target_carrier<T>(
         _ => return,
     };
     if let Expr::Ident(ident) = &**expression {
-        carriers.remove(&ident.to_id());
+        carriers.remove(&BindingKey::of(&ident));
     }
 }
 
 pub(crate) fn remove_for_head_carriers<T>(
     head: &swc_core::ecma::ast::ForHead,
-    carriers: &mut HashMap<Id, T>,
+    carriers: &mut BindingKeyMap<T>,
 ) {
     if let swc_core::ecma::ast::ForHead::Pat(pattern) = head {
         remove_pattern_carriers(pattern, carriers);
@@ -434,7 +434,7 @@ pub(crate) fn remove_for_head_carriers<T>(
 
 fn remove_object_pattern_carriers<T>(
     object: &swc_core::ecma::ast::ObjectPat,
-    carriers: &mut HashMap<Id, T>,
+    carriers: &mut BindingKeyMap<T>,
 ) {
     for property in &object.props {
         match property {
@@ -442,7 +442,7 @@ fn remove_object_pattern_carriers<T>(
                 remove_pattern_carriers(&property.value, carriers)
             }
             swc_core::ecma::ast::ObjectPatProp::Assign(property) => {
-                carriers.remove(&property.key.to_id());
+                carriers.remove(&BindingKey::of(&property.key));
             }
             swc_core::ecma::ast::ObjectPatProp::Rest(property) => {
                 remove_pattern_carriers(&property.arg, carriers)
@@ -451,10 +451,10 @@ fn remove_object_pattern_carriers<T>(
     }
 }
 
-fn remove_pattern_carriers<T>(pattern: &Pat, carriers: &mut HashMap<Id, T>) {
+fn remove_pattern_carriers<T>(pattern: &Pat, carriers: &mut BindingKeyMap<T>) {
     match pattern {
         Pat::Ident(binding) => {
-            carriers.remove(&binding.id.to_id());
+            carriers.remove(&BindingKey::of_binding(&binding));
         }
         Pat::Array(array) => {
             for element in array.elems.iter().flatten() {
@@ -466,7 +466,7 @@ fn remove_pattern_carriers<T>(pattern: &Pat, carriers: &mut HashMap<Id, T>) {
         Pat::Rest(rest) => remove_pattern_carriers(&rest.arg, carriers),
         Pat::Expr(expr) => {
             if let Expr::Ident(ident) = &**expr {
-                carriers.remove(&ident.to_id());
+                carriers.remove(&BindingKey::of(&ident));
             }
         }
         _ => {}
@@ -504,11 +504,11 @@ pub(crate) fn collect_dynamic_import_wrappers(module: &Module) -> DynamicImportW
 
 #[derive(Default)]
 struct DynamicImportLoaderCollector {
-    called_ids: HashSet<Id>,
-    declared_ids: HashSet<Id>,
+    called_ids: BindingKeySet,
+    declared_ids: BindingKeySet,
 }
 
-fn collect_dynamic_import_loader_ids(module: &Module) -> HashSet<Id> {
+fn collect_dynamic_import_loader_ids(module: &Module) -> BindingKeySet {
     let mut collector = DynamicImportLoaderCollector::default();
     module.visit_with(&mut collector);
     collector
@@ -521,7 +521,7 @@ fn collect_dynamic_import_loader_ids(module: &Module) -> HashSet<Id> {
 impl DynamicImportLoaderCollector {
     fn declare(&mut self, ident: &Ident) {
         if ident.sym == *"__dynamicImport" {
-            self.declared_ids.insert(ident.to_id());
+            self.declared_ids.insert(BindingKey::of(&ident));
         }
     }
 }
@@ -578,7 +578,7 @@ impl Visit for DynamicImportLoaderCollector {
         if let Callee::Expr(callee) = &call.callee {
             if let Expr::Ident(ident) = &**callee {
                 if ident.sym == *"__dynamicImport" {
-                    self.called_ids.insert(ident.to_id());
+                    self.called_ids.insert(BindingKey::of(&ident));
                 }
             }
         }
@@ -599,7 +599,7 @@ impl Visit for DynamicImportWrapperCollector {
         ) {
             self.wrappers
                 .function_wrappers
-                .insert(function_decl.ident.to_id(), module_ids);
+                .insert(BindingKey::of(&function_decl.ident), module_ids);
         }
         function_decl.visit_children_with(self);
     }
@@ -615,13 +615,13 @@ impl Visit for DynamicImportWrapperCollector {
             {
                 self.wrappers
                     .function_wrappers
-                    .insert(binding.id.to_id(), module_ids);
+                    .insert(BindingKey::of_binding(&binding), module_ids);
             } else if let Some(object_wrappers) =
                 extract_dynamic_import_object_wrappers(init, &self.wrappers.loader_ids)
             {
                 self.wrappers
                     .object_wrappers
-                    .insert(binding.id.to_id(), object_wrappers);
+                    .insert(BindingKey::of_binding(&binding), object_wrappers);
             }
         }
         declarator.visit_children_with(self);
@@ -629,12 +629,12 @@ impl Visit for DynamicImportWrapperCollector {
 }
 
 struct DynamicImportObjectFunctionCollector {
-    object_function_wrappers: HashMap<Id, DynamicImportObjectWrapper>,
+    object_function_wrappers: BindingKeyMap<DynamicImportObjectWrapper>,
     dynamic_import_wrappers: DynamicImportWrappers,
 }
 
 impl DynamicImportObjectFunctionCollector {
-    fn insert_wrapper(&mut self, id: Id, wrapper: DynamicImportObjectWrapper) {
+    fn insert_wrapper(&mut self, id: BindingKey, wrapper: DynamicImportObjectWrapper) {
         self.dynamic_import_wrappers
             .object_function_wrappers
             .insert(id.clone(), wrapper.clone());
@@ -648,7 +648,7 @@ impl Visit for DynamicImportObjectFunctionCollector {
             &function_decl.function,
             &self.dynamic_import_wrappers,
         ) {
-            self.insert_wrapper(function_decl.ident.to_id(), wrapper);
+            self.insert_wrapper(BindingKey::of(&function_decl.ident), wrapper);
         }
         function_decl.visit_children_with(self);
     }
@@ -663,7 +663,7 @@ impl Visit for DynamicImportObjectFunctionCollector {
                 init,
                 &self.dynamic_import_wrappers,
             ) {
-                self.insert_wrapper(binding.id.to_id(), wrapper);
+                self.insert_wrapper(BindingKey::of_binding(&binding), wrapper);
             }
         }
         declarator.visit_children_with(self);
@@ -672,7 +672,7 @@ impl Visit for DynamicImportObjectFunctionCollector {
 
 fn extract_dynamic_import_module_ids_from_function(
     function: &swc_core::ecma::ast::Function,
-    loader_ids: &HashSet<Id>,
+    loader_ids: &BindingKeySet,
 ) -> Option<BTreeSet<String>> {
     if !function.params.is_empty() {
         return None;
@@ -690,7 +690,7 @@ fn extract_dynamic_import_module_ids_from_function(
 
 fn extract_dynamic_import_module_ids_from_expr(
     expr: &Expr,
-    loader_ids: &HashSet<Id>,
+    loader_ids: &BindingKeySet,
 ) -> Option<BTreeSet<String>> {
     match expr {
         Expr::Arrow(arrow) => extract_dynamic_import_module_ids_from_arrow(arrow, loader_ids),
@@ -705,7 +705,7 @@ fn extract_dynamic_import_module_ids_from_expr(
 
 fn extract_dynamic_import_module_ids_from_arrow(
     arrow: &ArrowExpr,
-    loader_ids: &HashSet<Id>,
+    loader_ids: &BindingKeySet,
 ) -> Option<BTreeSet<String>> {
     if !arrow.params.is_empty() {
         return None;
@@ -729,7 +729,7 @@ fn extract_dynamic_import_module_ids_from_arrow(
 
 fn extract_dynamic_import_object_wrappers(
     expr: &Expr,
-    loader_ids: &HashSet<Id>,
+    loader_ids: &BindingKeySet,
 ) -> Option<DynamicImportObjectWrapper> {
     match expr {
         Expr::Object(object) => {
@@ -814,7 +814,7 @@ fn is_wrapper_prelude_statement(statement: &Stmt) -> bool {
 
 pub(crate) fn dynamic_import_module_ids_from_call(
     call_expr: &CallExpr,
-    loader_ids: &HashSet<Id>,
+    loader_ids: &BindingKeySet,
 ) -> Option<BTreeSet<String>> {
     let Callee::Expr(callee_expr) = &call_expr.callee else {
         return None;
@@ -822,7 +822,7 @@ pub(crate) fn dynamic_import_module_ids_from_call(
     let Expr::Ident(callee_ident) = &**callee_expr else {
         return None;
     };
-    if !loader_ids.contains(&callee_ident.to_id()) || call_expr.args.len() != 1 {
+    if !loader_ids.contains(&BindingKey::of(&callee_ident)) || call_expr.args.len() != 1 {
         return None;
     }
     let Expr::Lit(Lit::Str(module_id)) = &*call_expr.args[0].expr else {
@@ -836,8 +836,8 @@ pub(crate) fn dynamic_import_module_ids_from_call(
 
 fn resolve_dynamic_import_call_module_ids(
     call_expr: &CallExpr,
-    carriers: &HashMap<Id, BTreeSet<String>>,
-    object_carriers: &HashMap<Id, DynamicImportObjectWrapper>,
+    carriers: &BindingKeyMap<BTreeSet<String>>,
+    object_carriers: &BindingKeyMap<DynamicImportObjectWrapper>,
     dynamic_import_wrappers: &DynamicImportWrappers,
     allow_passthrough_calls: bool,
 ) -> Option<BTreeSet<String>> {
@@ -854,7 +854,7 @@ fn resolve_dynamic_import_call_module_ids(
     match &**callee_expr {
         Expr::Ident(ident) if call_expr.args.is_empty() => dynamic_import_wrappers
             .function_wrappers
-            .get(&ident.to_id())
+            .get(&BindingKey::of(&ident))
             .cloned(),
         Expr::Member(member) if call_expr.args.is_empty() => {
             collect_member_wrapper_module_ids(member, object_carriers, dynamic_import_wrappers)
@@ -895,7 +895,7 @@ fn resolve_dynamic_import_call_module_ids(
 
 fn collect_member_wrapper_module_ids(
     member: &MemberExpr,
-    object_carriers: &HashMap<Id, DynamicImportObjectWrapper>,
+    object_carriers: &BindingKeyMap<DynamicImportObjectWrapper>,
     dynamic_import_wrappers: &DynamicImportWrappers,
 ) -> Option<BTreeSet<String>> {
     let wrapper_map = resolve_dynamic_import_object_wrapper(
@@ -917,14 +917,14 @@ fn collect_member_wrapper_module_ids(
 
 pub(crate) fn resolve_dynamic_import_object_wrapper(
     expr: &Expr,
-    object_carriers: &HashMap<Id, DynamicImportObjectWrapper>,
+    object_carriers: &BindingKeyMap<DynamicImportObjectWrapper>,
     dynamic_import_wrappers: &DynamicImportWrappers,
 ) -> Option<DynamicImportObjectWrapper> {
     match expr {
-        Expr::Ident(ident) => object_carriers.get(&ident.to_id()).cloned().or_else(|| {
+        Expr::Ident(ident) => object_carriers.get(&BindingKey::of(&ident)).cloned().or_else(|| {
             dynamic_import_wrappers
                 .object_wrappers
-                .get(&ident.to_id())
+                .get(&BindingKey::of(&ident))
                 .cloned()
         }),
         Expr::Call(call_expr) => resolve_dynamic_import_object_wrapper_from_call(
@@ -981,7 +981,7 @@ pub(crate) fn resolve_dynamic_import_object_wrapper(
 
 fn resolve_dynamic_import_object_wrapper_from_call(
     call_expr: &CallExpr,
-    object_carriers: &HashMap<Id, DynamicImportObjectWrapper>,
+    object_carriers: &BindingKeyMap<DynamicImportObjectWrapper>,
     dynamic_import_wrappers: &DynamicImportWrappers,
 ) -> Option<DynamicImportObjectWrapper> {
     let Callee::Expr(callee_expr) = &call_expr.callee else {
@@ -990,7 +990,7 @@ fn resolve_dynamic_import_object_wrapper_from_call(
     match &**callee_expr {
         Expr::Ident(ident) => dynamic_import_wrappers
             .object_function_wrappers
-            .get(&ident.to_id())
+            .get(&BindingKey::of(&ident))
             .cloned()
             .or_else(|| {
                 if call_expr.args.len() == 1 {
@@ -1036,7 +1036,7 @@ fn resolve_dynamic_import_object_wrapper_from_call(
 
 fn resolve_dynamic_import_object_wrapper_from_member(
     member: &MemberExpr,
-    object_carriers: &HashMap<Id, DynamicImportObjectWrapper>,
+    object_carriers: &BindingKeyMap<DynamicImportObjectWrapper>,
     dynamic_import_wrappers: &DynamicImportWrappers,
 ) -> Option<DynamicImportObjectWrapper> {
     let wrapper = resolve_dynamic_import_object_wrapper(
@@ -1059,7 +1059,7 @@ fn resolve_dynamic_import_object_wrapper_from_member(
 
 fn extract_dynamic_import_object_wrappers_from_object(
     object: &swc_core::ecma::ast::ObjectLit,
-    loader_ids: &HashSet<Id>,
+    loader_ids: &BindingKeySet,
 ) -> Option<DynamicImportObjectWrapper> {
     let mut wrappers = BTreeMap::new();
     for prop in &object.props {
@@ -1084,7 +1084,7 @@ fn extract_dynamic_import_object_wrappers_from_object(
 
 fn extract_dynamic_import_object_wrappers_from_array(
     array: &swc_core::ecma::ast::ArrayLit,
-    loader_ids: &HashSet<Id>,
+    loader_ids: &BindingKeySet,
 ) -> Option<DynamicImportObjectWrapper> {
     let mut merged = BTreeMap::new();
     for element in array.elems.iter().flatten() {

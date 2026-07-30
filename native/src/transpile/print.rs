@@ -235,9 +235,13 @@ pub(super) fn transform_program(
     enum_literal_values.extend(erased_enum_values);
     let mut program = Program::Module(module);
     let cm: Lrc<SourceMap> = Default::default();
-    let resolver_marks =
+    let module_identity =
         apply_resolver_and_global_this_compat(&mut program, should_run_resolver(file_path))?;
-    if let Some((unresolved_mark, top_level_mark)) = resolver_marks {
+    // The swc-only leg: `jsx` and `strip` take the resolver's marks directly.
+    // oxc's transformer takes the semantic model instead, so this destructuring
+    // is the seam that goes away with the AST swap -- everything else in the
+    // pipeline already asks `ModuleIdentity`.
+    if let Some((unresolved_mark, top_level_mark)) = module_identity.resolver_marks() {
         if should_run_react_transform(file_path) {
             jsx(
                 cm,

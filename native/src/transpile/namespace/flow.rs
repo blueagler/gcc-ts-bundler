@@ -14,7 +14,7 @@ pub(crate) fn rewrite_hoisted_namespace_usage(
     context: &TranspileContext,
     plan: &HoistPlan,
     consumer_module_id: &str,
-    direct_namespace_ids: &HashSet<Id>,
+    direct_namespace_ids: &BindingKeySet,
     lexical_binding_names: &HashSet<String>,
 ) -> std::result::Result<(), String> {
     rewrite_namespace_usage_with_hoist(
@@ -58,21 +58,21 @@ fn rewrite_namespace_usage_with_hoist(
 
 pub(crate) struct HoistNamespaceInfo<'a> {
     pub(crate) consumer_module_id: String,
-    pub(crate) direct_namespace_ids: &'a HashSet<Id>,
+    pub(crate) direct_namespace_ids: &'a BindingKeySet,
     pub(crate) plan: &'a HoistPlan,
     pub(crate) lexical_binding_names: &'a HashSet<String>,
 }
 
 struct BundlerRuntimeNamespaceVisitor<'a> {
     context: &'a TranspileContext,
-    direct_namespace_targets: HashMap<Id, String>,
+    direct_namespace_targets: BindingKeyMap<String>,
     dynamic_import_wrappers: DynamicImportWrappers,
     errors: Vec<String>,
     file_path: String,
     hoist: Option<HoistNamespaceInfo<'a>>,
-    namespace_bindings: HashMap<Id, BTreeSet<String>>,
-    object_carriers: HashMap<Id, DynamicImportObjectWrapper>,
-    promise_carriers: HashMap<Id, BTreeSet<String>>,
+    namespace_bindings: BindingKeyMap<BTreeSet<String>>,
+    object_carriers: BindingKeyMap<DynamicImportObjectWrapper>,
+    promise_carriers: BindingKeyMap<BTreeSet<String>>,
 }
 
 impl<'a> BundlerRuntimeNamespaceVisitor<'a> {
@@ -80,8 +80,8 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a> {
         file_path: &Path,
         context: &'a TranspileContext,
         dynamic_import_wrappers: DynamicImportWrappers,
-        object_carriers: HashMap<Id, DynamicImportObjectWrapper>,
-        promise_carriers: HashMap<Id, BTreeSet<String>>,
+        object_carriers: BindingKeyMap<DynamicImportObjectWrapper>,
+        promise_carriers: BindingKeyMap<BTreeSet<String>>,
     ) -> Self {
         Self {
             context,
@@ -112,7 +112,7 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a> {
 
     fn module_ids_for_namespace_expr(&self, expr: &Expr) -> Option<BTreeSet<String>> {
         match expr {
-            Expr::Ident(ident) => self.namespace_bindings.get(&ident.to_id()).cloned(),
+            Expr::Ident(ident) => self.namespace_bindings.get(&BindingKey::of(&ident)).cloned(),
             Expr::Await(await_expr) => self.module_ids_for_promise_expr(&await_expr.arg),
             Expr::Call(call_expr) if call_expr.args.len() == 1 => {
                 self.module_ids_for_namespace_expr(&call_expr.args[0].expr)
@@ -169,7 +169,7 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a> {
         match pattern {
             Pat::Ident(binding) => {
                 self.namespace_bindings
-                    .insert(binding.id.to_id(), module_ids.clone());
+                    .insert(BindingKey::of_binding(&binding), module_ids.clone());
                 true
             }
             Pat::Object(object) => {
@@ -288,7 +288,7 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a> {
                 };
                 let mut inserted = Vec::new();
                 if let Pat::Ident(binding) = target_pattern {
-                    let binding_id = binding.id.to_id();
+                    let binding_id = BindingKey::of_binding(&binding);
                     self.namespace_bindings
                         .insert(binding_id.clone(), module_ids.clone());
                     inserted.push(binding_id);
@@ -315,7 +315,7 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a> {
                 };
                 let mut inserted = Vec::new();
                 if let Pat::Ident(binding) = &mut target_param.pat {
-                    let binding_id = binding.id.to_id();
+                    let binding_id = BindingKey::of_binding(&binding);
                     self.namespace_bindings
                         .insert(binding_id.clone(), module_ids.clone());
                     inserted.push(binding_id);
@@ -344,7 +344,7 @@ impl BundlerRuntimeNamespaceVisitor<'_> {
         };
         let Some(target_module_id) = self
             .direct_namespace_targets
-            .get(&object_ident.to_id())
+            .get(&BindingKey::of(&object_ident))
             .cloned()
         else {
             return false;
@@ -440,7 +440,7 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
             if let Ok(module_id) = module_id {
                 for specifier in &import_decl.specifiers {
                     if let ImportSpecifier::Namespace(namespace_specifier) = specifier {
-                        let binding_id = namespace_specifier.local.to_id();
+                        let binding_id = BindingKey::of(&namespace_specifier.local);
                         if self
                             .hoist
                             .as_ref()
@@ -479,7 +479,7 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
             );
             return;
         };
-        self.promise_carriers.insert(binding.id.to_id(), module_ids);
+        self.promise_carriers.insert(BindingKey::of_binding(&binding), module_ids);
     }
 
     fn visit_mut_member_expr(&mut self, member_expr: &mut MemberExpr) {
@@ -574,7 +574,7 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
                             method_name.as_str(),
                             "assign" | "entries" | "keys" | "values"
                         ) && call_expr.args.iter().any(|arg| {
-                            matches!(&*arg.expr, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id()))
+                            matches!(&*arg.expr, Expr::Ident(ident) if self.namespace_bindings.contains_key(&BindingKey::of(&ident)))
                         }) {
                             self.push_error(
                                 "bundler-runtime does not support reflective Object.* operations on module namespace values",
@@ -588,11 +588,11 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
         let is_namespace_passthrough_call = call_expr.args.len() == 1
             && matches!(
                 &*call_expr.args[0].expr,
-                Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id())
+                Expr::Ident(ident) if self.namespace_bindings.contains_key(&BindingKey::of(&ident))
             );
         if !is_namespace_passthrough_call
             && call_expr.args.iter().any(|arg| {
-                matches!(&*arg.expr, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id()))
+                matches!(&*arg.expr, Expr::Ident(ident) if self.namespace_bindings.contains_key(&BindingKey::of(&ident)))
             })
         {
             self.push_error(
@@ -604,7 +604,7 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
     fn visit_mut_return_stmt(&mut self, return_stmt: &mut swc_core::ecma::ast::ReturnStmt) {
         return_stmt.visit_mut_children_with(self);
         if let Some(argument) = &return_stmt.arg {
-            if matches!(&**argument, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id()))
+            if matches!(&**argument, Expr::Ident(ident) if self.namespace_bindings.contains_key(&BindingKey::of(&ident)))
             {
                 self.push_error(
                     "bundler-runtime does not support returning module namespace values",
@@ -615,12 +615,12 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
 
     fn visit_mut_assign_expr(&mut self, assign_expr: &mut swc_core::ecma::ast::AssignExpr) {
         assign_expr.visit_mut_children_with(self);
-        let stores_namespace = matches!(&*assign_expr.right, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id()));
+        let stores_namespace = matches!(&*assign_expr.right, Expr::Ident(ident) if self.namespace_bindings.contains_key(&BindingKey::of(&ident)));
         if let swc_core::ecma::ast::AssignTarget::Simple(
             swc_core::ecma::ast::SimpleAssignTarget::Ident(binding),
         ) = &assign_expr.left
         {
-            let binding_id = binding.id.to_id();
+            let binding_id = BindingKey::of_binding(&binding);
             self.namespace_bindings.remove(&binding_id);
             let module_ids = matches!(assign_expr.op, swc_core::ecma::ast::AssignOp::Assign)
                 .then(|| self.module_ids_for_promise_expr(&assign_expr.right))
@@ -644,7 +644,7 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
     fn visit_mut_update_expr(&mut self, update_expr: &mut swc_core::ecma::ast::UpdateExpr) {
         update_expr.visit_mut_children_with(self);
         if let Expr::Ident(binding) = &*update_expr.arg {
-            let binding_id = binding.to_id();
+            let binding_id = BindingKey::of(&binding);
             self.namespace_bindings.remove(&binding_id);
             self.promise_carriers.remove(&binding_id);
         }
@@ -652,7 +652,7 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
 
     fn visit_mut_for_in_stmt(&mut self, for_in_stmt: &mut swc_core::ecma::ast::ForInStmt) {
         for_in_stmt.visit_mut_children_with(self);
-        let iterates_namespace = matches!(&*for_in_stmt.right, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id()));
+        let iterates_namespace = matches!(&*for_in_stmt.right, Expr::Ident(ident) if self.namespace_bindings.contains_key(&BindingKey::of(&ident)));
         remove_for_head_carriers(&for_in_stmt.left, &mut self.namespace_bindings);
         remove_for_head_carriers(&for_in_stmt.left, &mut self.promise_carriers);
         if iterates_namespace {
@@ -664,7 +664,7 @@ impl VisitMut for BundlerRuntimeNamespaceVisitor<'_> {
 
     fn visit_mut_for_of_stmt(&mut self, for_of_stmt: &mut swc_core::ecma::ast::ForOfStmt) {
         for_of_stmt.visit_mut_children_with(self);
-        let iterates_namespace = matches!(&*for_of_stmt.right, Expr::Ident(ident) if self.namespace_bindings.contains_key(&ident.to_id()));
+        let iterates_namespace = matches!(&*for_of_stmt.right, Expr::Ident(ident) if self.namespace_bindings.contains_key(&BindingKey::of(&ident)));
         remove_for_head_carriers(&for_of_stmt.left, &mut self.namespace_bindings);
         remove_for_head_carriers(&for_of_stmt.left, &mut self.promise_carriers);
         if iterates_namespace {

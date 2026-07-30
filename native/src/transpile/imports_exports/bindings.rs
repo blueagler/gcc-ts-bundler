@@ -37,7 +37,7 @@ pub(super) fn collect_namespace_export_bindings(
 
 #[derive(Clone)]
 pub(crate) struct ImportBindingRewrite {
-    pub(crate) binding_id: Id,
+    pub(crate) binding_id: BindingKey,
     pub(crate) local_name: String,
     pub(crate) replacement: Box<Expr>,
     pub(crate) replacement_code: String,
@@ -62,7 +62,7 @@ pub(super) fn bind_import_specifiers(
     // Locals whose target export is provably reassigned: those alias the
     // exporter's live accessor instead of its value property, and reads of them
     // were rewritten into calls. See `emit_goog`'s live-export section.
-    live_imported_ids: &HashSet<Id>,
+    live_imported_ids: &BindingKeySet,
 ) -> Vec<String> {
     specifiers
         .iter()
@@ -80,7 +80,7 @@ pub(super) fn bind_import_specifiers(
                     .as_ref()
                     .map(module_export_name_to_string)
                     .unwrap_or_else(|| named_specifier.local.sym.to_string());
-                let source_name = if live_imported_ids.contains(&named_specifier.local.to_id()) {
+                let source_name = if live_imported_ids.contains(&BindingKey::of(&named_specifier.local)) {
                     live_export_accessor_name(&imported_name)
                 } else {
                     imported_name
@@ -117,7 +117,7 @@ pub(super) fn plan_bundler_import_specifiers(
                     .slot_for("default")
                     .ok_or_else(|| "Missing bundler-runtime default export slot".to_string())?;
                 rewrites.push(ImportBindingRewrite {
-                    binding_id: default_specifier.local.to_id(),
+                    binding_id: BindingKey::of(&default_specifier.local),
                     local_name: default_specifier.local.sym.to_string(),
                     replacement: Box::new(slot_access_expr(local_name, slot)),
                     replacement_code: stable_slot_access(local_name, slot),
@@ -143,7 +143,7 @@ pub(super) fn plan_bundler_import_specifiers(
                     format!("Missing bundler-runtime export slot for imported name {imported_name}")
                 })?;
                 rewrites.push(ImportBindingRewrite {
-                    binding_id: named_specifier.local.to_id(),
+                    binding_id: BindingKey::of(&named_specifier.local),
                     local_name: named_specifier.local.sym.to_string(),
                     replacement: Box::new(slot_access_expr(local_name, slot)),
                     replacement_code: stable_slot_access(local_name, slot),
@@ -283,7 +283,7 @@ pub(crate) fn apply_import_binding_rewrites(
 }
 
 struct ImportBindingRewriteVisitor {
-    rewrite_map: HashMap<Id, Box<Expr>>,
+    rewrite_map: BindingKeyMap<Box<Expr>>,
 }
 
 impl VisitMut for ImportBindingRewriteVisitor {
@@ -292,7 +292,7 @@ impl VisitMut for ImportBindingRewriteVisitor {
         let Expr::Ident(ident) = expr else {
             return;
         };
-        let Some(replacement) = self.rewrite_map.get(&ident.to_id()) else {
+        let Some(replacement) = self.rewrite_map.get(&BindingKey::of(&ident)) else {
             return;
         };
         *expr = *replacement.clone();
@@ -300,7 +300,7 @@ impl VisitMut for ImportBindingRewriteVisitor {
 
     fn visit_mut_prop(&mut self, prop: &mut Prop) {
         if let Prop::Shorthand(ident) = prop {
-            if let Some(replacement) = self.rewrite_map.get(&ident.to_id()) {
+            if let Some(replacement) = self.rewrite_map.get(&BindingKey::of(&ident)) {
                 *prop = Prop::KeyValue(KeyValueProp {
                     key: PropName::Ident(ident.clone().into()),
                     value: replacement.clone(),

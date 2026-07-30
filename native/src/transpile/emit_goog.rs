@@ -24,7 +24,7 @@ pub(super) fn emit_goog_module_program(
     }
     let live_imported_locals = live_imported_ids
         .iter()
-        .map(|(symbol, _)| symbol.to_string())
+        .map(|binding| binding.symbol().to_string())
         .collect::<HashSet<_>>();
     let live_exports = live_export_bindings(file_path);
     let bound = BoundTypeMetadata::bind(&module, file_metadata, context.type_metadata_enabled);
@@ -278,15 +278,15 @@ fn render_statement(
 /// re-exports (`export { x } from "./m"`, which has no local binding) are never
 /// candidates, and a non-identifier export name is skipped.
 pub(super) fn live_export_bindings(file_path: &Path) -> BTreeMap<String, String> {
-    let Ok(module) = get_or_parse_cached_module(&file_path.to_path_buf()) else {
+    let Ok(module) = parse_source_file(file_path) else {
         return BTreeMap::new();
     };
     live_export_bindings_of_module(&module)
 }
 
 fn live_export_bindings_of_module(module: &Module) -> BTreeMap<String, String> {
-    let mut declared = HashMap::<Id, String>::new();
-    let mut exported = HashMap::<Id, (String, String)>::new();
+    let mut declared = BindingKeyMap::<String>::new();
+    let mut exported = BindingKeyMap::<(String, String)>::new();
     for item in &module.body {
         let (var_decl, is_exported) = match item {
             ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDecl(export_decl)) => {
@@ -332,7 +332,7 @@ fn live_export_bindings_of_module(module: &Module) -> BTreeMap<String, String> {
             let swc_core::ecma::ast::ModuleExportName::Ident(local) = &named.orig else {
                 continue;
             };
-            let Some(local_name) = declared.get(&local.to_id()) else {
+            let Some(local_name) = declared.get(&BindingKey::of(&local)) else {
                 continue;
             };
             let export_name = named
@@ -340,7 +340,7 @@ fn live_export_bindings_of_module(module: &Module) -> BTreeMap<String, String> {
                 .as_ref()
                 .map(module_export_name_to_string)
                 .unwrap_or_else(|| local_name.clone());
-            exported.insert(local.to_id(), (export_name, local_name.clone()));
+            exported.insert(BindingKey::of(&local), (export_name, local_name.clone()));
         }
     }
     if exported.is_empty() {
@@ -376,7 +376,7 @@ fn render_live_export_accessors(bindings: &BTreeMap<String, String>) -> Vec<Stri
 
 /// Local bindings that alias another module's live accessor, so a read of them
 /// has to become a call.
-fn collect_live_imported_binding_ids(module: &Module, file_path: &Path) -> HashSet<Id> {
+fn collect_live_imported_binding_ids(module: &Module, file_path: &Path) -> BindingKeySet {
     let mut ids = HashSet::new();
     for item in &module.body {
         let ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import_decl)) = item
@@ -412,7 +412,7 @@ fn collect_live_imported_binding_ids(module: &Module, file_path: &Path) -> HashS
                 .map(module_export_name_to_string)
                 .unwrap_or_else(|| named.local.sym.to_string());
             if live.contains_key(&imported_name) {
-                ids.insert(named.local.to_id());
+                ids.insert(BindingKey::of(&named.local));
             }
         }
     }
@@ -426,7 +426,7 @@ fn collect_live_imported_binding_ids(module: &Module, file_path: &Path) -> HashS
 /// reference position that is not an `Expr::Ident`; assignment targets need no
 /// handling because assigning to an imported binding is not legal ES.
 struct LiveImportCallRewriter {
-    bindings: HashSet<Id>,
+    bindings: BindingKeySet,
 }
 
 fn call_of(ident: Ident) -> Expr {
@@ -445,7 +445,7 @@ impl VisitMut for LiveImportCallRewriter {
         let Expr::Ident(ident) = expr else {
             return;
         };
-        if !self.bindings.contains(&ident.to_id()) {
+        if !self.bindings.contains(&BindingKey::of(&ident)) {
             return;
         }
         *expr = call_of(ident.clone());
@@ -456,7 +456,7 @@ impl VisitMut for LiveImportCallRewriter {
         let swc_core::ecma::ast::Prop::Shorthand(ident) = prop else {
             return;
         };
-        if !self.bindings.contains(&ident.to_id()) {
+        if !self.bindings.contains(&BindingKey::of(&ident)) {
             return;
         }
         // `{ x }` cannot carry a call; spell it out.

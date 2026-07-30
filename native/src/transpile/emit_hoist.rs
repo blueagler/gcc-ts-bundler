@@ -491,8 +491,8 @@ impl<'a> HoistedImportPlanner<'a> {
         &mut self,
         file_path: &Path,
         import_decl: &ImportDecl,
-        direct_namespace_ids: &HashSet<Id>,
-        used_binding_ids: &HashSet<Id>,
+        direct_namespace_ids: &BindingKeySet,
+        used_binding_ids: &BindingKeySet,
     ) -> std::result::Result<HoistedImportPlan, String> {
         let target_module_id = resolve_module_id_for_specifier(
             file_path,
@@ -518,11 +518,11 @@ impl<'a> HoistedImportPlanner<'a> {
                 ImportSpecifier::Named(named) if import_decl.type_only || named.is_type_only => {}
                 _ if import_decl.type_only => {}
                 ImportSpecifier::Named(named)
-                    if !used_binding_ids.contains(&named.local.to_id()) => {}
+                    if !used_binding_ids.contains(&BindingKey::of(&named.local)) => {}
                 ImportSpecifier::Default(default_specifier)
-                    if !used_binding_ids.contains(&default_specifier.local.to_id()) => {}
+                    if !used_binding_ids.contains(&BindingKey::of(&default_specifier.local)) => {}
                 ImportSpecifier::Namespace(namespace_specifier)
-                    if !used_binding_ids.contains(&namespace_specifier.local.to_id()) => {}
+                    if !used_binding_ids.contains(&BindingKey::of(&namespace_specifier.local)) => {}
                 ImportSpecifier::Named(named) => {
                     let imported_name = named
                         .imported
@@ -547,12 +547,12 @@ impl<'a> HoistedImportPlanner<'a> {
                     )?;
                 }
                 ImportSpecifier::Namespace(namespace_specifier) => {
-                    if direct_namespace_ids.contains(&namespace_specifier.local.to_id()) {
+                    if direct_namespace_ids.contains(&BindingKey::of(&namespace_specifier.local)) {
                         continue;
                     }
                     let object_name = self.require_binding(&target_module_id, &mut lines);
                     rewrites.push(ImportBindingRewrite {
-                        binding_id: namespace_specifier.local.to_id(),
+                        binding_id: BindingKey::of(&namespace_specifier.local),
                         local_name: namespace_specifier.local.sym.to_string(),
                         replacement: Box::new(Expr::Ident(create_ident(&object_name))),
                         replacement_code: object_name,
@@ -586,7 +586,7 @@ impl<'a> HoistedImportPlanner<'a> {
                     format!("Missing hoist ordinal for {}", binding.owner_module_id)
                 })?;
                 rewrites.push(ImportBindingRewrite {
-                    binding_id: local.to_id(),
+                    binding_id: BindingKey::of(&local),
                     local_name: local.sym.to_string(),
                     replacement: Box::new(Expr::Ident(create_ident(&direct_name))),
                     replacement_code: direct_name,
@@ -648,7 +648,7 @@ fn slot_rewrite(local: &Ident, object_name: &str, slot: usize) -> ImportBindingR
         }),
     });
     ImportBindingRewrite {
-        binding_id: local.to_id(),
+        binding_id: BindingKey::of(&local),
         local_name: local.sym.to_string(),
         replacement: Box::new(replacement),
         replacement_code: format!("{object_name}[{slot}]"),
@@ -661,7 +661,7 @@ fn slot_rewrite(local: &Ident, object_name: &str, slot: usize) -> ImportBindingR
 
 /// Top-level renaming plan for one hoisted module.
 pub(super) struct TopLevelRenames {
-    pub(super) renames: HashMap<Id, String>,
+    pub(super) renames: BindingKeyMap<String>,
     /// Canonical names assigned to poolable lowering helpers in this module.
     pub(super) shared_helper_names: HashSet<String>,
 }
@@ -696,20 +696,20 @@ fn collect_top_level_renames(
             binding.id.sym.as_ref(),
             &initializer_source?,
         );
-        renames.insert(binding.id.to_id(), canonical_name.clone());
+        renames.insert(BindingKey::of_binding(&binding), canonical_name.clone());
         shared_helper_names.insert(canonical_name);
     }
-    let add_decl = |decl: &swc_core::ecma::ast::Decl, renames: &mut HashMap<Id, String>| match decl
+    let add_decl = |decl: &swc_core::ecma::ast::Decl, renames: &mut BindingKeyMap<String>| match decl
     {
         swc_core::ecma::ast::Decl::Fn(function_decl) => {
             renames.insert(
-                function_decl.ident.to_id(),
+                BindingKey::of(&function_decl.ident),
                 suffixed_name(function_decl.ident.sym.as_ref(), ordinal),
             );
         }
         swc_core::ecma::ast::Decl::Class(class_decl) => {
             renames.insert(
-                class_decl.ident.to_id(),
+                BindingKey::of(&class_decl.ident),
                 suffixed_name(class_decl.ident.sym.as_ref(), ordinal),
             );
         }
@@ -737,12 +737,12 @@ fn collect_top_level_renames(
             )) => match &default_decl.decl {
                 swc_core::ecma::ast::DefaultDecl::Fn(function_expr) => {
                     if let Some(ident) = &function_expr.ident {
-                        renames.insert(ident.to_id(), suffixed_name(ident.sym.as_ref(), ordinal));
+                        renames.insert(BindingKey::of(&ident), suffixed_name(ident.sym.as_ref(), ordinal));
                     }
                 }
                 swc_core::ecma::ast::DefaultDecl::Class(class_expr) => {
                     if let Some(ident) = &class_expr.ident {
-                        renames.insert(ident.to_id(), suffixed_name(ident.sym.as_ref(), ordinal));
+                        renames.insert(BindingKey::of(&ident), suffixed_name(ident.sym.as_ref(), ordinal));
                     }
                 }
                 _ => {}
@@ -757,19 +757,19 @@ fn collect_top_level_renames(
 }
 
 struct TopLevelRenameVisitor {
-    renames: HashMap<Id, String>,
+    renames: BindingKeyMap<String>,
 }
 
 impl VisitMut for TopLevelRenameVisitor {
     fn visit_mut_ident(&mut self, ident: &mut Ident) {
-        if let Some(new_name) = self.renames.get(&ident.to_id()) {
+        if let Some(new_name) = self.renames.get(&BindingKey::of(&ident)) {
             ident.sym = new_name.clone().into();
         }
     }
 
     fn visit_mut_prop(&mut self, prop: &mut Prop) {
         if let Prop::Shorthand(ident) = prop {
-            if let Some(new_name) = self.renames.get(&ident.to_id()) {
+            if let Some(new_name) = self.renames.get(&BindingKey::of(&ident)) {
                 let mut renamed = ident.clone();
                 renamed.sym = new_name.clone().into();
                 *prop = Prop::KeyValue(KeyValueProp {
@@ -784,7 +784,7 @@ impl VisitMut for TopLevelRenameVisitor {
 
     fn visit_mut_object_pat_prop(&mut self, prop: &mut ObjectPatProp) {
         if let ObjectPatProp::Assign(assign) = prop {
-            if let Some(new_name) = self.renames.get(&assign.key.to_id()) {
+            if let Some(new_name) = self.renames.get(&BindingKey::of(&assign.key)) {
                 let mut renamed = assign.key.id.clone();
                 renamed.sym = new_name.clone().into();
                 let value = match assign.value.take() {
@@ -823,7 +823,7 @@ fn collect_direct_safe_namespace_ids(
     file_path: &Path,
     context: &TranspileContext,
     plan: &HoistPlan,
-) -> HashSet<Id> {
+) -> BindingKeySet {
     let consumer_module_id = to_goog_module_id(file_path, &context.workspace_dir);
     let consumer_chunk = plan.chunk_of(&consumer_module_id);
     let mut candidates = HashSet::new();
@@ -850,7 +850,7 @@ fn collect_direct_safe_namespace_ids(
         }
         for specifier in &import_decl.specifiers {
             if let ImportSpecifier::Namespace(namespace_specifier) = specifier {
-                candidates.insert(namespace_specifier.local.to_id());
+                candidates.insert(BindingKey::of(&namespace_specifier.local));
             }
         }
     }
@@ -873,15 +873,15 @@ fn collect_direct_safe_namespace_ids(
 }
 
 struct NamespaceUsageScanner {
-    candidates: HashSet<Id>,
-    disqualified: HashSet<Id>,
+    candidates: BindingKeySet,
+    disqualified: BindingKeySet,
 }
 
 impl Visit for NamespaceUsageScanner {
     fn visit_expr(&mut self, expr: &Expr) {
         if let Expr::Member(member) = expr {
             if let Expr::Ident(object_ident) = &*member.obj {
-                if self.candidates.contains(&object_ident.to_id())
+                if self.candidates.contains(&BindingKey::of(&object_ident))
                     && member_prop_name(&member.prop).is_some()
                 {
                     member.prop.visit_with(self);
@@ -890,8 +890,8 @@ impl Visit for NamespaceUsageScanner {
             }
         }
         if let Expr::Ident(ident) = expr {
-            if self.candidates.contains(&ident.to_id()) {
-                self.disqualified.insert(ident.to_id());
+            if self.candidates.contains(&BindingKey::of(&ident)) {
+                self.disqualified.insert(BindingKey::of(&ident));
             }
         }
         expr.visit_children_with(self);

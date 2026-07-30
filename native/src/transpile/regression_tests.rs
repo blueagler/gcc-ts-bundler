@@ -45,11 +45,11 @@ fn commonjs_lowering_keeps_original_binding_ids_and_fresh_helpers() {
         context.commonjs_specifiers.insert("demo-pkg".to_string());
         apply_program_compat_transforms(&mut program, &context);
 
-        struct LocalIds(HashSet<Id>);
+        struct LocalIds(BindingKeySet);
         impl Visit for LocalIds {
             fn visit_ident(&mut self, ident: &Ident) {
                 if ident.sym == *"local" {
-                    self.0.insert(ident.to_id());
+                    self.0.insert(BindingKey::of(&ident));
                 }
             }
         }
@@ -185,9 +185,9 @@ fn dynamic_import_carriers_kill_unknown_writes_and_ignore_arbitrary_calls() {
     let wrappers = collect_dynamic_import_wrappers(&module);
     let objects = collect_dynamic_import_object_carriers(&module, &wrappers);
     let promises = collect_dynamic_import_promise_carriers(&module, &objects, &wrappers);
-    assert!(!promises.keys().any(|id| id.0.as_ref() == "unrelated"));
-    assert!(!promises.keys().any(|id| id.0.as_ref() == "stale"));
-    assert!(!promises.keys().any(|id| id.0.as_ref() == "destructured"));
+    assert!(!promises.keys().any(|id| id.symbol() == "unrelated"));
+    assert!(!promises.keys().any(|id| id.symbol() == "stale"));
+    assert!(!promises.keys().any(|id| id.symbol() == "destructured"));
 }
 
 #[test]

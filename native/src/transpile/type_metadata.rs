@@ -9,7 +9,7 @@ use std::path::Path;
 
 use swc_core::common::Mark;
 use swc_core::ecma::ast::{
-    ClassMember, Decl, Id, ImportSpecifier, Module, ModuleItem, Program, PropName, Stmt,
+    ClassMember, Decl, ImportSpecifier, Module, ModuleItem, Program, PropName, Stmt,
 };
 use swc_core::ecma::visit::{Visit, VisitWith};
 use swc_ecma_transforms_base::resolver;
@@ -37,12 +37,12 @@ pub(crate) struct TypeMetadataDelivery {
 
 #[derive(Clone, Debug)]
 pub(crate) struct BoundTypeMetadata {
-    binding_annotations: HashMap<Id, Vec<ClosureAnnotation>>,
+    binding_annotations: BindingKeyMap<Vec<ClosureAnnotation>>,
     diagnostics: Vec<TypeMetadataDiagnostic>,
     enabled: bool,
-    member_annotations: HashMap<Id, Vec<ClosureAnnotation>>,
+    member_annotations: BindingKeyMap<Vec<ClosureAnnotation>>,
     metadata: ClosureFileMetadata,
-    runtime_symbol_bindings: HashMap<String, Id>,
+    runtime_symbol_bindings: HashMap<String, BindingKey>,
     symbols_by_id: HashMap<String, ClosureTypeSymbol>,
 }
 
@@ -61,8 +61,8 @@ impl BoundTypeMetadata {
             .collect::<HashMap<_, _>>();
         let top_level_bindings = collect_top_level_bindings(module);
         let mut diagnostics = metadata.diagnostics.clone();
-        let mut binding_annotations = HashMap::<Id, Vec<ClosureAnnotation>>::new();
-        let mut member_annotations = HashMap::<Id, Vec<ClosureAnnotation>>::new();
+        let mut binding_annotations = BindingKeyMap::<Vec<ClosureAnnotation>>::new();
+        let mut member_annotations = BindingKeyMap::<Vec<ClosureAnnotation>>::new();
         let mut runtime_symbol_bindings = HashMap::new();
 
         for symbol in &metadata.symbols {
@@ -140,38 +140,43 @@ impl BoundTypeMetadata {
         }
     }
 
-    pub(crate) fn remap_binding_ids(&mut self, renames: &HashMap<Id, String>) {
+    pub(crate) fn remap_binding_ids(&mut self, renames: &BindingKeyMap<String>) {
         self.binding_annotations =
             remap_id_keyed_map(std::mem::take(&mut self.binding_annotations), renames);
         self.member_annotations =
             remap_id_keyed_map(std::mem::take(&mut self.member_annotations), renames);
         for binding_id in self.runtime_symbol_bindings.values_mut() {
             if let Some(name) = renames.get(binding_id) {
-                binding_id.0 = name.clone().into();
+                // identity: re-spells the key to follow `emit_hoist`'s rename.
+                // Only meaningful while a key carries its own name; under oxc a
+                // `SymbolId` is stable across a rename, so this loop and
+                // `remap_id_keyed_map` below become no-ops to delete.
+                *binding_id = binding_id.renamed_to(name);
             }
         }
     }
 
-    pub(crate) fn runtime_binding_ids(&self) -> impl Iterator<Item = &Id> {
+    pub(crate) fn runtime_binding_ids(&self) -> impl Iterator<Item = &BindingKey> {
         self.runtime_symbol_bindings.values()
     }
 
     pub(crate) fn prepare(
         self,
         fresh_names: &mut FreshNameAllocator,
-        runtime_names: &HashMap<Id, RuntimeTypeName>,
+        runtime_names: &BindingKeyMap<RuntimeTypeName>,
         hoist_ordinal: Option<usize>,
     ) -> PreparedTypeMetadata {
         PreparedTypeMetadata::new(self, fresh_names, runtime_names, hoist_ordinal)
     }
 }
 
-fn remap_id_keyed_map<T>(values: HashMap<Id, T>, renames: &HashMap<Id, String>) -> HashMap<Id, T> {
+fn remap_id_keyed_map<T>(values: BindingKeyMap<T>, renames: &BindingKeyMap<String>) -> BindingKeyMap<T> {
     values
         .into_iter()
         .map(|(mut id, value)| {
             if let Some(name) = renames.get(&id) {
-                id.0 = name.clone().into();
+                // identity: see `apply_renames` -- swc-only key re-spelling.
+                id = id.renamed_to(name);
             }
             (id, value)
         })
@@ -179,11 +184,11 @@ fn remap_id_keyed_map<T>(values: HashMap<Id, T>, renames: &HashMap<Id, String>) 
 }
 
 pub(crate) struct PreparedTypeMetadata {
-    binding_annotations: HashMap<Id, Vec<ClosureAnnotation>>,
+    binding_annotations: BindingKeyMap<Vec<ClosureAnnotation>>,
     declaration_lines: Vec<String>,
     delivery: TypeMetadataDelivery,
     enum_names: HashMap<String, String>,
-    member_annotations: HashMap<Id, Vec<ClosureAnnotation>>,
+    member_annotations: BindingKeyMap<Vec<ClosureAnnotation>>,
     metadata: ClosureFileMetadata,
     symbol_resolutions: HashMap<String, RuntimeTypeName>,
     symbols_by_id: HashMap<String, ClosureTypeSymbol>,
@@ -193,7 +198,7 @@ impl PreparedTypeMetadata {
     fn new(
         bound: BoundTypeMetadata,
         fresh_names: &mut FreshNameAllocator,
-        runtime_names: &HashMap<Id, RuntimeTypeName>,
+        runtime_names: &BindingKeyMap<RuntimeTypeName>,
         hoist_ordinal: Option<usize>,
     ) -> Self {
         let mut symbol_resolutions = HashMap::new();
@@ -657,12 +662,12 @@ fn rename_declaration_template(
 struct IdentifierEditCollector<'a> {
     edits: Vec<(usize, usize, String)>,
     emitted_name: &'a str,
-    target_id: Id,
+    target_id: BindingKey,
 }
 
 impl Visit for IdentifierEditCollector<'_> {
     fn visit_ident(&mut self, ident: &Ident) {
-        if ident.to_id() == self.target_id {
+        if BindingKey::of(&ident) == self.target_id {
             self.edits.push((
                 ident.span.lo.0.saturating_sub(1) as usize,
                 ident.span.hi.0.saturating_sub(1) as usize,
@@ -694,7 +699,7 @@ fn apply_source_edits(
 pub(crate) fn runtime_type_names_from_module(
     module: &Module,
     bound: &BoundTypeMetadata,
-) -> HashMap<Id, RuntimeTypeName> {
+) -> BindingKeyMap<RuntimeTypeName> {
     let current_names = collect_top_level_bindings(module)
         .into_iter()
         .flat_map(|(name, ids)| {
@@ -713,10 +718,10 @@ pub(crate) fn runtime_type_names_from_module(
         .collect()
 }
 
-pub(crate) fn declared_statement_ids(statement: &Stmt) -> Vec<Id> {
+pub(crate) fn declared_statement_ids(statement: &Stmt) -> Vec<BindingKey> {
     match statement {
-        Stmt::Decl(Decl::Fn(declaration)) => vec![declaration.ident.to_id()],
-        Stmt::Decl(Decl::Class(declaration)) => vec![declaration.ident.to_id()],
+        Stmt::Decl(Decl::Fn(declaration)) => vec![BindingKey::of(&declaration.ident)],
+        Stmt::Decl(Decl::Class(declaration)) => vec![BindingKey::of(&declaration.ident)],
         Stmt::Decl(Decl::Var(declaration)) => declaration
             .decls
             .iter()
@@ -732,11 +737,11 @@ fn declared_statement_name(statement: &Stmt) -> Option<String> {
     let [id] = ids.as_slice() else {
         return None;
     };
-    Some(id.0.to_string())
+    Some(id.symbol().to_string())
 }
 
-fn collect_top_level_bindings(module: &Module) -> HashMap<String, Vec<Id>> {
-    let mut bindings = HashMap::<String, Vec<Id>>::new();
+fn collect_top_level_bindings(module: &Module) -> HashMap<String, Vec<BindingKey>> {
+    let mut bindings = HashMap::<String, Vec<BindingKey>>::new();
     for item in &module.body {
         match item {
             ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import_decl)) => {
@@ -774,7 +779,7 @@ fn collect_top_level_bindings(module: &Module) -> HashMap<String, Vec<Id>> {
     bindings
 }
 
-fn add_decl_bindings(bindings: &mut HashMap<String, Vec<Id>>, decl: &Decl) {
+fn add_decl_bindings(bindings: &mut HashMap<String, Vec<BindingKey>>, decl: &Decl) {
     match decl {
         Decl::Fn(declaration) => push_binding(bindings, &declaration.ident),
         Decl::Class(declaration) => push_binding(bindings, &declaration.ident),
@@ -791,14 +796,14 @@ fn add_decl_bindings(bindings: &mut HashMap<String, Vec<Id>>, decl: &Decl) {
     }
 }
 
-fn push_binding(bindings: &mut HashMap<String, Vec<Id>>, ident: &Ident) {
+fn push_binding(bindings: &mut HashMap<String, Vec<BindingKey>>, ident: &Ident) {
     bindings
         .entry(ident.sym.to_string())
         .or_default()
-        .push(ident.to_id());
+        .push(BindingKey::of(&ident));
 }
 
-fn unique_binding_id(bindings: &HashMap<String, Vec<Id>>, name: &str) -> Option<Id> {
+fn unique_binding_id(bindings: &HashMap<String, Vec<BindingKey>>, name: &str) -> Option<BindingKey> {
     let ids = bindings.get(name)?;
     let [id] = ids.as_slice() else {
         return None;

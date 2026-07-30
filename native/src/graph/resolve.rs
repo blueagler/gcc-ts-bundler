@@ -37,7 +37,7 @@ pub(super) fn resolve_graph_impl(
         let relative = path_relative_to(&current_file, context.workspace_dir);
         file_hashes.insert(relative, hash_content(&contents));
 
-        let module = parse_and_cache_module(&current_file, &contents)?;
+        let module = parse_module(&current_file, &contents)?;
         let commonjs_analysis = analyze_commonjs_module(&module);
         if commonjs_analysis.has_commonjs {
             validate_commonjs_usage(&current_file, &commonjs_analysis, &context)?;

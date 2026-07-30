@@ -187,10 +187,16 @@ pub(crate) fn transform_js_pass_through_program(
 
 pub(crate) type ResolverMarks = (Mark, Mark);
 
+/// Builds this module's semantic model and runs the compat passes that depend on
+/// it.
+///
+/// Returns the model rather than raw marks: under oxc the model is the `Scoping`
+/// from `SemanticBuilder` and the marks do not exist, so callers thread
+/// `ModuleIdentity` and ask it for what they need.
 pub(crate) fn apply_resolver_and_global_this_compat(
     program: &mut Program,
     run_resolver: bool,
-) -> std::result::Result<Option<ResolverMarks>, String> {
+) -> std::result::Result<ModuleIdentity, String> {
     let resolver_marks = if run_resolver {
         let unresolved_mark = Mark::new();
         let top_level_mark = Mark::new();
@@ -199,26 +205,28 @@ pub(crate) fn apply_resolver_and_global_this_compat(
     } else {
         None
     };
-    let unresolved_ctxt = unresolved_context_from_marks(resolver_marks.as_ref());
-    let compat_property_names = collect_global_this_compat_property_names(program, unresolved_ctxt);
+    let module_identity = ModuleIdentity::from_resolver_marks(resolver_marks);
+    let global_scope = module_identity.global_scope();
+
+    let compat_property_names = collect_global_this_compat_property_names(program, global_scope);
     if !compat_property_names.is_empty() {
         program.visit_mut_with(&mut GlobalThisCompatVisitor::new(
             compat_property_names,
-            unresolved_ctxt,
+            global_scope,
         )?);
     }
-    program.visit_mut_with(&mut ProcessEnvNodeEnvVisitor { unresolved_ctxt });
-    Ok(resolver_marks)
+    program.visit_mut_with(&mut ProcessEnvNodeEnvVisitor { global_scope });
+    Ok(module_identity)
 }
 
 struct ProcessEnvNodeEnvVisitor {
-    unresolved_ctxt: swc_core::common::SyntaxContext,
+    global_scope: GlobalScope,
 }
 
 impl VisitMut for ProcessEnvNodeEnvVisitor {
     fn visit_mut_expr(&mut self, expr: &mut Expr) {
         expr.visit_mut_children_with(self);
-        if !is_unresolved_process_env_node_env(expr, self.unresolved_ctxt) {
+        if !is_unresolved_process_env_node_env(expr, self.global_scope) {
             return;
         }
         *expr = Expr::Lit(Lit::Str(Str {
@@ -229,10 +237,7 @@ impl VisitMut for ProcessEnvNodeEnvVisitor {
     }
 }
 
-fn is_unresolved_process_env_node_env(
-    expr: &Expr,
-    unresolved_ctxt: swc_core::common::SyntaxContext,
-) -> bool {
+fn is_unresolved_process_env_node_env(expr: &Expr, global_scope: GlobalScope) -> bool {
     let Expr::Member(node_env) = expr else {
         return false;
     };
@@ -245,7 +250,7 @@ fn is_unresolved_process_env_node_env(
     if !matches!(&env.prop, MemberProp::Ident(prop) if prop.sym == *"env") {
         return false;
     }
-    matches!(&*env.obj, Expr::Ident(process) if process.sym == *"process" && process.ctxt == unresolved_ctxt)
+    matches!(&*env.obj, Expr::Ident(process) if process.sym == *"process" && global_scope.contains(process))
 }
 
 fn source_declares_ident(source_text: &str, name: &str) -> bool {
@@ -465,14 +470,4 @@ fn rewrite_directory_specifier(specifier: &mut Str) {
 
 pub(crate) fn parse_module_items(source: &str) -> std::result::Result<Vec<ModuleItem>, String> {
     Ok(parse_module(&PathBuf::from("snippet.js"), source)?.body)
-}
-
-fn unresolved_context_from_marks(
-    resolver_marks: Option<&ResolverMarks>,
-) -> swc_core::common::SyntaxContext {
-    resolver_marks
-        .map(|(unresolved_mark, _)| {
-            swc_core::common::SyntaxContext::empty().apply_mark(*unresolved_mark)
-        })
-        .unwrap_or_else(swc_core::common::SyntaxContext::empty)
 }

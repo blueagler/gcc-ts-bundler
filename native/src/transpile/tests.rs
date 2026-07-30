@@ -2633,26 +2633,26 @@ fn collects_realistic_helper_wrapped_object_and_promise_carriers() {
         wrappers
             .object_wrappers
             .keys()
-            .any(|id| id.0.as_ref() == "entries"),
+            .any(|id| id.symbol() == "entries"),
         "{wrappers:?}"
     );
     assert!(
         wrappers
             .object_function_wrappers
             .keys()
-            .any(|id| id.0.as_ref() == "resolveEntry"),
+            .any(|id| id.symbol() == "resolveEntry"),
         "{wrappers:?}"
     );
     assert!(
         object_carriers
             .keys()
-            .any(|id| id.0.as_ref() == "nextEntry"),
+            .any(|id| id.symbol() == "nextEntry"),
         "{object_carriers:?}"
     );
     assert!(
         promise_carriers
             .keys()
-            .any(|id| id.0.as_ref() == "pendingModule"),
+            .any(|id| id.symbol() == "pendingModule"),
         "{promise_carriers:?}"
     );
 }

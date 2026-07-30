@@ -9,7 +9,7 @@ use swc_core::ecma::ast::{
 };
 use swc_core::ecma::visit::{Visit, VisitWith};
 
-use crate::module_cache::get_or_parse_cached_module;
+use crate::module_cache::parse_source_file;
 
 const HARD_PLATFORM_CALLBACK_PROPERTY_NAMES: &[&str] = &[
     "adoptedCallback",
@@ -81,7 +81,7 @@ pub(crate) fn collect_extern_property_names_with_externs(
             continue;
         }
         let file_path = PathBuf::from(file_name);
-        match get_or_parse_cached_module(&file_path) {
+        match parse_source_file(&file_path) {
             Ok(module) => {
                 let mut collector = ExternPropertyCollector::default();
                 module.visit_with(&mut collector);
@@ -141,7 +141,7 @@ fn collect_explicit_extern_property_names(
 
     for file_name in extern_file_names {
         let file_path = PathBuf::from(file_name);
-        let module = get_or_parse_cached_module(&file_path)?;
+        let module = parse_source_file(&file_path)?;
         let mut collector = ExplicitExternPropertyCollector::default();
         module.visit_with(&mut collector);
         property_names.extend(collector.property_names);

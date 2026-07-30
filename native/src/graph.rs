@@ -16,7 +16,7 @@ use serde_json::Value;
 use swc_core::ecma::ast::*;
 
 use crate::commonjs::{analyze_commonjs_module, CommonJsAnalysis};
-use crate::module_cache::{get_or_parse_cached_module, parse_and_cache_module};
+use crate::module_cache::{parse_module, parse_source_file};
 use crate::pathing::to_goog_module_id;
 
 use self::chunk_plan::*;

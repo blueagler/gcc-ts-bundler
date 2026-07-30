@@ -228,7 +228,7 @@ pub(super) fn build_hoist_plan(
         {
             parse_module(&file_path.with_extension("js"), &decorated_text)?
         } else {
-            get_or_parse_cached_module(&file_path)?
+            parse_source_file(&file_path)?
         };
         let commonjs_analysis = analyze_commonjs_module(&module);
         let normalize_commonjs = should_normalize_commonjs(&file_path, &commonjs_analysis);
@@ -416,7 +416,7 @@ fn scan_esm_module(
                                 named.local.sym.to_string(),
                                 Some((target.clone(), imported.clone())),
                             );
-                            if used_binding_ids.contains(&named.local.to_id()) {
+                            if used_binding_ids.contains(&BindingKey::of(&named.local)) {
                                 edge.used_named.push(imported.clone());
                             }
                             edge.named.push(imported);
@@ -426,7 +426,7 @@ fn scan_esm_module(
                                 default_specifier.local.sym.to_string(),
                                 Some((target.clone(), "default".to_string())),
                             );
-                            if used_binding_ids.contains(&default_specifier.local.to_id()) {
+                            if used_binding_ids.contains(&BindingKey::of(&default_specifier.local)) {
                                 edge.used_named.push("default".to_string());
                             }
                             edge.named.push("default".to_string());
@@ -435,7 +435,7 @@ fn scan_esm_module(
                             import_locals.insert(namespace_specifier.local.sym.to_string(), None);
                             edge.namespace = true;
                             edge.namespace_members = namespace_usage
-                                .member_only_usage(&namespace_specifier.local.to_id());
+                                .member_only_usage(&BindingKey::of(&namespace_specifier.local));
                         }
                     }
                 }
@@ -650,7 +650,7 @@ fn resolve_export_binding(
 
 /// Ids referenced anywhere except import declarations and source-less named
 /// exports (pure re-exports are not uses).
-pub(super) fn collect_used_binding_ids(module: &Module) -> HashSet<Id> {
+pub(super) fn collect_used_binding_ids(module: &Module) -> BindingKeySet {
     let mut collector = UsedBindingCollector {
         used: HashSet::new(),
     };
@@ -666,22 +666,22 @@ pub(super) fn collect_used_binding_ids(module: &Module) -> HashSet<Id> {
 }
 
 struct UsedBindingCollector {
-    used: HashSet<Id>,
+    used: BindingKeySet,
 }
 
 impl Visit for UsedBindingCollector {
     fn visit_ident(&mut self, ident: &Ident) {
-        self.used.insert(ident.to_id());
+        self.used.insert(BindingKey::of(&ident));
     }
 }
 
 struct NamespaceUsage {
-    disqualified: HashSet<Id>,
-    members: HashMap<Id, BTreeSet<String>>,
+    disqualified: BindingKeySet,
+    members: BindingKeyMap<BTreeSet<String>>,
 }
 
 impl NamespaceUsage {
-    fn member_only_usage(&self, binding_id: &Id) -> Option<BTreeSet<String>> {
+    fn member_only_usage(&self, binding_id: &BindingKey) -> Option<BTreeSet<String>> {
         if self.disqualified.contains(binding_id) {
             return None;
         }
@@ -700,7 +700,7 @@ fn scan_namespace_usage(module: &Module) -> NamespaceUsage {
         };
         for specifier in &import_decl.specifiers {
             if let ImportSpecifier::Namespace(namespace_specifier) = specifier {
-                candidates.insert(namespace_specifier.local.to_id());
+                candidates.insert(BindingKey::of(&namespace_specifier.local));
             }
         }
     }
@@ -718,7 +718,7 @@ fn scan_namespace_usage(module: &Module) -> NamespaceUsage {
 }
 
 struct NamespaceMemberScanner {
-    candidates: HashSet<Id>,
+    candidates: BindingKeySet,
     usage: NamespaceUsage,
 }
 
@@ -726,7 +726,7 @@ impl Visit for NamespaceMemberScanner {
     fn visit_expr(&mut self, expr: &Expr) {
         if let Expr::Member(member) = expr {
             if let Expr::Ident(object_ident) = &*member.obj {
-                let binding_id = object_ident.to_id();
+                let binding_id = BindingKey::of(&object_ident);
                 if self.candidates.contains(&binding_id) {
                     // Identifier and quoted-string members both count as
                     // plain member access (preserved-property quoting turns
@@ -759,8 +759,8 @@ impl Visit for NamespaceMemberScanner {
             }
         }
         if let Expr::Ident(ident) = expr {
-            if self.candidates.contains(&ident.to_id()) {
-                self.usage.disqualified.insert(ident.to_id());
+            if self.candidates.contains(&BindingKey::of(&ident)) {
+                self.usage.disqualified.insert(BindingKey::of(&ident));
             }
         }
         expr.visit_children_with(self);

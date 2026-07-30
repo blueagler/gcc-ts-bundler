@@ -14,7 +14,7 @@ pub(crate) use self::properties::{
     ClassMapCallCompatVisitor, PreservedPropertyCompatVisitor,
 };
 
-fn collect_import_alias_names(module: &Module) -> HashMap<Id, String> {
+fn collect_import_alias_names(module: &Module) -> BindingKeyMap<String> {
     module
         .body
         .iter()
@@ -35,7 +35,7 @@ fn collect_import_alias_names(module: &Module) -> HashMap<Id, String> {
                 .as_ref()
                 .map(module_export_name_to_string)
                 .unwrap_or_else(|| named.local.sym.to_string());
-            Some((named.local.to_id(), imported))
+            Some((BindingKey::of(&named.local), imported))
         })
         .collect()
 }

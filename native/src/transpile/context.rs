@@ -122,7 +122,7 @@ pub(super) fn collect_bundler_module_slots(
         }
         let file_path = PathBuf::from(file_name);
         let module_id = to_goog_module_id(&file_path, workspace_dir);
-        let module = get_or_parse_cached_module(&file_path)?;
+        let module = parse_source_file(&file_path)?;
         let commonjs_analysis = analyze_commonjs_module(&module);
         let mut raw_exports = if should_normalize_commonjs(&file_path, &commonjs_analysis) {
             RawBundlerExportInfo {

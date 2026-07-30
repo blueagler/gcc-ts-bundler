@@ -2,34 +2,34 @@ use super::*;
 
 pub(super) fn collect_global_this_compat_property_names(
     program: &Program,
-    unresolved_ctxt: swc_core::common::SyntaxContext,
+    global_scope: GlobalScope,
 ) -> HashSet<String> {
-    let mut collector = GlobalThisCompatCollector::new(unresolved_ctxt);
+    let mut collector = GlobalThisCompatCollector::new(global_scope);
     program.visit_with(&mut collector);
     collector.properties
 }
 
 struct GlobalThisCompatCollector {
-    aliases: HashSet<Id>,
+    aliases: BindingKeySet,
     properties: HashSet<String>,
-    unresolved_ctxt: swc_core::common::SyntaxContext,
+    global_scope: GlobalScope,
 }
 
 impl GlobalThisCompatCollector {
-    fn new(unresolved_ctxt: swc_core::common::SyntaxContext) -> Self {
+    fn new(global_scope: GlobalScope) -> Self {
         Self {
-            aliases: HashSet::new(),
+            aliases: BindingKeySet::new(),
             properties: HashSet::new(),
-            unresolved_ctxt,
+            global_scope,
         }
     }
 
     fn is_global_this_expr(&self, expr: &Expr) -> bool {
-        matches!(expr, Expr::Ident(ident) if ident.sym == *"globalThis" && ident.ctxt == self.unresolved_ctxt)
+        matches!(expr, Expr::Ident(ident) if ident.sym == *"globalThis" && self.global_scope.contains(ident))
     }
 
     fn is_global_this_alias_expr(&self, expr: &Expr) -> bool {
-        matches!(expr, Expr::Ident(ident) if self.aliases.contains(&ident.to_id()))
+        matches!(expr, Expr::Ident(ident) if self.aliases.contains(&BindingKey::of(ident)))
     }
 
     fn is_global_object_expr(&self, expr: &Expr) -> bool {
@@ -42,7 +42,7 @@ impl Visit for GlobalThisCompatCollector {
         if let swc_core::ecma::ast::Pat::Ident(binding) = &declarator.name {
             if let Some(init) = &declarator.init {
                 if self.is_global_object_expr(init) {
-                    self.aliases.insert(binding.id.to_id());
+                    self.aliases.insert(BindingKey::of_binding(binding));
                 }
             }
         }
@@ -65,13 +65,13 @@ impl Visit for GlobalThisCompatCollector {
 
 pub(super) struct GlobalThisCompatVisitor {
     replacements: HashMap<String, Box<Expr>>,
-    unresolved_ctxt: swc_core::common::SyntaxContext,
+    global_scope: GlobalScope,
 }
 
 impl GlobalThisCompatVisitor {
     pub(super) fn new(
         property_names: HashSet<String>,
-        unresolved_ctxt: swc_core::common::SyntaxContext,
+        global_scope: GlobalScope,
     ) -> std::result::Result<Self, String> {
         let mut replacements = HashMap::new();
         for property_name in property_names {
@@ -83,7 +83,7 @@ impl GlobalThisCompatVisitor {
 
         Ok(Self {
             replacements,
-            unresolved_ctxt,
+            global_scope,
         })
     }
 }
@@ -93,7 +93,7 @@ impl VisitMut for GlobalThisCompatVisitor {
         expr.visit_mut_children_with(self);
 
         if let Expr::Ident(ident) = expr {
-            if ident.ctxt == self.unresolved_ctxt {
+            if self.global_scope.contains(ident) {
                 if let Some(replacement) = self.replacements.get(ident.sym.as_ref()) {
                     *expr = *replacement.clone();
                 }

@@ -87,7 +87,7 @@ pub(super) fn collect_imported_ts_enum_literal_values(
         let Some(resolved_path) = resolve_relative_module(file_path, &specifier) else {
             continue;
         };
-        let Ok(target_module) = get_or_parse_cached_module(&resolved_path) else {
+        let Ok(target_module) = parse_source_file(&resolved_path) else {
             continue;
         };
         let mut target_values = collect_ts_enum_literal_values(&target_module);
@@ -96,7 +96,7 @@ pub(super) fn collect_imported_ts_enum_literal_values(
                 if !metadata_path.exists() {
                     continue;
                 }
-                let Ok(metadata_module) = get_or_parse_cached_module(&metadata_path) else {
+                let Ok(metadata_module) = parse_source_file(&metadata_path) else {
                     continue;
                 };
                 target_values = collect_ts_enum_literal_values(&metadata_module);

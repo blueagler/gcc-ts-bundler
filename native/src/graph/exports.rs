@@ -14,7 +14,7 @@ pub(super) fn collect_exports(
     let module = if let Some(existing) = module_cache.get(file_path) {
         existing.clone()
     } else {
-        let parsed = get_or_parse_cached_module(file_path)?;
+        let parsed = parse_source_file(file_path)?;
         module_cache.insert(file_path.clone(), parsed.clone());
         parsed
     };

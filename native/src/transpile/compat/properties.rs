@@ -47,13 +47,13 @@ pub(crate) struct ClassMapCallCompatVisitor {
     calls: HashMap<String, Vec<ClassMapCallRule>>,
     /// local import binding Id -> imported export name, so compiler aliases
     /// still match configured callees without matching same-spelled shadows.
-    import_aliases: HashMap<Id, String>,
+    import_aliases: BindingKeyMap<String>,
     /// Immutable bindings proven to carry a value created from a literal
     /// contract (for example `const button = createElement("button")`).
-    literal_contract_bindings: HashSet<Id>,
+    literal_contract_bindings: BindingKeySet,
     /// Immutable object bindings passed to configured calls. Vue hoists static
     /// DOM props into module-level constants before calling its vnode helpers.
-    object_binding_rules: HashMap<Id, Vec<ClassMapCallRule>>,
+    object_binding_rules: BindingKeyMap<Vec<ClassMapCallRule>>,
 }
 
 fn compile_optional_pattern(
@@ -106,7 +106,7 @@ struct ClassMapCallRule {
 impl ClassMapCallCompatVisitor {
     pub(crate) fn new(
         calls: &[ClassMapCallInput],
-        import_aliases: HashMap<Id, String>,
+        import_aliases: BindingKeyMap<String>,
         program: &Program,
     ) -> Self {
         let mut grouped: HashMap<String, Vec<ClassMapCallRule>> = HashMap::new();
@@ -152,7 +152,7 @@ impl ClassMapCallCompatVisitor {
         visitor
     }
 
-    fn collect_literal_contract_bindings(&self, program: &Program) -> HashSet<Id> {
+    fn collect_literal_contract_bindings(&self, program: &Program) -> BindingKeySet {
         let mut collector = ConstBindingInitializerCollector::default();
         program.visit_with(&mut collector);
         let mut bindings = HashSet::new();
@@ -176,7 +176,7 @@ impl ClassMapCallCompatVisitor {
     fn collect_object_binding_rules(
         &self,
         program: &Program,
-    ) -> HashMap<Id, Vec<ClassMapCallRule>> {
+    ) -> BindingKeyMap<Vec<ClassMapCallRule>> {
         let mut binding_collector = ConstBindingInitializerCollector::default();
         program.visit_with(&mut binding_collector);
         let const_bindings = binding_collector
@@ -193,18 +193,18 @@ impl ClassMapCallCompatVisitor {
         collector.rules
     }
 
-    fn expr_has_literal_contract(&self, expr: &Expr, bindings: &HashSet<Id>) -> bool {
+    fn expr_has_literal_contract(&self, expr: &Expr, bindings: &BindingKeySet) -> bool {
         let expr = unwrap_transparent_expr(expr);
         match expr {
             Expr::Lit(Lit::Str(_)) => true,
             Expr::Tpl(template) if template.exprs.is_empty() && template.quasis.len() == 1 => true,
-            Expr::Ident(ident) => bindings.contains(&ident.to_id()),
+            Expr::Ident(ident) => bindings.contains(&BindingKey::of(&ident)),
             Expr::Call(call) => self.call_has_literal_contract(call, bindings),
             _ => false,
         }
     }
 
-    fn call_has_literal_contract(&self, call: &CallExpr, bindings: &HashSet<Id>) -> bool {
+    fn call_has_literal_contract(&self, call: &CallExpr, bindings: &BindingKeySet) -> bool {
         let Some(rules) = self.rules_for_call(call) else {
             return false;
         };
@@ -241,7 +241,7 @@ impl ClassMapCallCompatVisitor {
 
 #[derive(Default)]
 struct ConstBindingInitializerCollector {
-    initializers: Vec<(Id, Box<Expr>)>,
+    initializers: Vec<(BindingKey, Box<Expr>)>,
 }
 
 impl Visit for ConstBindingInitializerCollector {
@@ -253,7 +253,7 @@ impl Visit for ConstBindingInitializerCollector {
                     continue;
                 };
                 self.initializers
-                    .push((binding.id.to_id(), initializer.clone()));
+                    .push((BindingKey::of_binding(&binding), initializer.clone()));
             }
         }
         declaration.visit_children_with(self);
@@ -261,8 +261,8 @@ impl Visit for ConstBindingInitializerCollector {
 }
 
 struct ObjectBindingEvidenceCollector<'a> {
-    const_bindings: &'a HashSet<Id>,
-    rules: HashMap<Id, Vec<ClassMapCallRule>>,
+    const_bindings: &'a BindingKeySet,
+    rules: BindingKeyMap<Vec<ClassMapCallRule>>,
     visitor: &'a ClassMapCallCompatVisitor,
 }
 
@@ -279,7 +279,7 @@ impl Visit for ObjectBindingEvidenceCollector<'_> {
                 let Expr::Ident(binding) = unwrap_transparent_expr(&argument.expr) else {
                     continue;
                 };
-                let binding = binding.to_id();
+                let binding = BindingKey::of(&binding);
                 if self.const_bindings.contains(&binding) {
                     self.rules.entry(binding).or_default().push(rule.clone());
                 }
@@ -304,9 +304,9 @@ fn object_literal_mut(expr: &mut Expr) -> Option<&mut swc_core::ecma::ast::Objec
     }
 }
 
-fn callee_local_binding(callee: &Expr) -> Option<(String, Option<Id>)> {
+fn callee_local_binding(callee: &Expr) -> Option<(String, Option<BindingKey>)> {
     match unwrap_transparent_expr(callee) {
-        Expr::Ident(ident) => Some((ident.sym.to_string(), Some(ident.to_id()))),
+        Expr::Ident(ident) => Some((ident.sym.to_string(), Some(BindingKey::of(&ident)))),
         Expr::Member(member) => {
             let name = match &member.prop {
                 MemberProp::Ident(prop) => prop.sym.to_string(),
@@ -342,7 +342,7 @@ impl VisitMut for ClassMapCallCompatVisitor {
         let Pat::Ident(binding) = &declarator.name else {
             return;
         };
-        let Some(rules) = self.object_binding_rules.get(&binding.id.to_id()).cloned() else {
+        let Some(rules) = self.object_binding_rules.get(&BindingKey::of_binding(&binding)).cloned() else {
             return;
         };
         let Some(initializer) = &mut declarator.init else {
@@ -576,7 +576,7 @@ pub(crate) fn parse_key_source(
 ///
 /// Callee spelling is not identity: `_export_sfc` is a local alias for the
 /// default export of a virtual module, and bundlers rename such locals freely.
-fn collect_import_identities(module: &Module) -> HashMap<Id, (String, String)> {
+fn collect_import_identities(module: &Module) -> BindingKeyMap<(String, String)> {
     let mut identities = HashMap::new();
     for item in &module.body {
         let ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import)) = item else {
@@ -591,11 +591,11 @@ fn collect_import_identities(module: &Module) -> HashMap<Id, (String, String)> {
                         .as_ref()
                         .map(module_export_name_to_string)
                         .unwrap_or_else(|| named.local.sym.to_string());
-                    identities.insert(named.local.to_id(), (imported, specifier_text.clone()));
+                    identities.insert(BindingKey::of(&named.local), (imported, specifier_text.clone()));
                 }
                 ImportSpecifier::Default(default_specifier) => {
                     identities.insert(
-                        default_specifier.local.to_id(),
+                        BindingKey::of(&default_specifier.local),
                         ("default".to_string(), specifier_text.clone()),
                     );
                 }
@@ -661,7 +661,7 @@ pub(crate) fn collect_pair_array_class_map_property_names(
 }
 
 struct PairArrayKeyCollector {
-    identities: HashMap<Id, (String, String)>,
+    identities: BindingKeyMap<(String, String)>,
     names: HashSet<String>,
     #[allow(clippy::type_complexity)]
     rules: Vec<(
@@ -682,7 +682,7 @@ impl swc_core::ecma::visit::Visit for PairArrayKeyCollector {
         let Expr::Ident(identifier) = &**callee else {
             return;
         };
-        let Some((imported_name, specifier)) = self.identities.get(&identifier.to_id()) else {
+        let Some((imported_name, specifier)) = self.identities.get(&BindingKey::of(&identifier)) else {
             return;
         };
         for (arg_index, callee_export, module_pattern, key_pattern, key_exclude_pattern) in
