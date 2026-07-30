@@ -1,9 +1,6 @@
 //! Finds vendor-chunk callables that mutate their module's own state.
 
 use std::collections::HashSet;
-use std::path::Path;
-
-use swc_core::common::Spanned;
 use swc_core::ecma::ast::{
     ArrayPat, AssignTarget, AssignTargetPat, Decl, Expr, ForHead, Ident, ObjectPat, ObjectPatProp,
     Pat, SimpleAssignTarget, Stmt,
@@ -229,48 +226,29 @@ impl Visit for ModuleStateAssignmentVisitor<'_> {
     }
 }
 
-/// Extracts every annotated callable from an assembled vendor chunk. Parsing
-/// keeps annotation and pin extraction on the same declaration-shape model as
-/// the detector above instead of maintaining a second text grammar.
+/// Extracts every annotated callable from an assembled vendor chunk.
+/// This text-only island can switch before the transpile AST seam does.
 pub(crate) fn collect_annotated_assigner_names(chunk_text: &str) -> Vec<String> {
-    let Ok(module) = crate::module_cache::parse_module(Path::new("assigner-chunk.js"), chunk_text)
-    else {
-        return Vec::new();
-    };
-    let mut names = Vec::new();
-    let mut seen = HashSet::new();
-    let mut previous_end = 0usize;
-    for item in &module.body {
-        let swc_core::ecma::ast::ModuleItem::Stmt(statement) = item else {
-            continue;
-        };
-        let span = statement.span();
-        let start = span.lo.0.saturating_sub(1) as usize;
-        let end = span.hi.0.saturating_sub(1) as usize;
-        let leading = chunk_text
-            .get(previous_end.min(chunk_text.len())..start.min(chunk_text.len()))
-            .unwrap_or_default();
-        previous_end = end.min(chunk_text.len());
-        if !has_noinline_leading_comment(leading) {
-            continue;
-        }
-        for callable in callable_declarations(statement) {
-            let name = callable.name.sym.to_string();
-            if seen.insert(name.clone()) {
-                names.push(name);
-            }
-        }
-    }
-    names
+    super::assigners_oxc::collect_annotated_assigner_names(chunk_text)
 }
 
-fn has_noinline_leading_comment(leading: &str) -> bool {
-    let trimmed = leading.trim();
-    let Some(comment_start) = trimmed.rfind("/**") else {
-        return false;
-    };
-    let comment = &trimmed[comment_start..];
-    comment.ends_with("*/") && comment.contains(NOINLINE_TAG)
+#[cfg(test)]
+pub(crate) fn assigner_function_names_for_test(
+    source: &str,
+    module_bindings: &HashSet<String>,
+) -> Vec<String> {
+    let module = crate::module_cache::parse_module(std::path::Path::new("fixture.js"), source)
+        .expect("swc parity parse");
+    module
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            swc_core::ecma::ast::ModuleItem::Stmt(statement) => {
+                assigner_function_name(statement, module_bindings)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// The statement appended to a vendor chunk that makes its mutating functions

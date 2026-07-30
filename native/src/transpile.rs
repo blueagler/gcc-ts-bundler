@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 pub(crate) mod assigners;
+mod assigners_oxc;
 mod cjs_opacity;
 mod commonjs;
 pub(crate) mod compat;
@@ -14,6 +15,7 @@ pub(crate) mod emit_runtime;
 mod enums;
 mod externs;
 pub(crate) mod fresh;
+mod fresh_oxc;
 mod global_this;
 mod hoist;
 mod identity;
