@@ -1,5 +1,8 @@
 .DS_Store
+Thumbs.db
+*.log
 node_modules/
+.fallow/
 .vscode/
 .env
 .env.*
@@ -14,10 +17,9 @@ out/
 *.tsbuildinfo
 native/index.node
 native/target/
-bin/
-dist/
-npm/
-examples/**/dist/
+/bin/
+/dist/
+/npm/
 examples/**/node_modules/
 examples/**/.gcc-ts-bundler-vite/
 examples/**/.gcc-debug/

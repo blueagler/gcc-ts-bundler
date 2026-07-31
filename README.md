@@ -177,6 +177,21 @@ any size or behaviour claim can be reproduced against a plain Vite baseline.
 Scaffolded with `npm create vite@latest -- --template <t>` (and `create-vue` for
 Vue), then `bun install && bunx vite build`.
 
+Each example's committed `dist/` is the plugin-built output, so the compiled
+quality is inspectable in the repo. To run one locally, build then preview so
+the server never serves a stale bundle:
+
+```sh
+cd examples/react-vite-official
+bun run build    # tsc + vite build with gccTsBundler() -> dist/
+bun run preview  # serve dist/
+```
+
+Or from the repo root, `bun run preview:examples react` (any unique prefix of
+an example dir name works) — it builds the package and the example first if
+their `dist/` is missing, then starts `vite preview`. The `build:pure` baseline
+writes to `dist-pure/` and never touches the plugin-built `dist/`.
+
 - `examples/react-vite-official` — `react-ts` template plus `reactPreset()`.
 - `examples/svelte-vite-official` — `svelte-ts` template plus `sveltePreset()`.
 - `examples/lit-vite-official` — `lit-ts` template, no preset. Covers decorator

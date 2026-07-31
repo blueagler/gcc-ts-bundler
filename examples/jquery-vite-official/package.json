@@ -10,12 +10,12 @@
     "build:pure": "vite build --config vite.pure.config.ts"
   },
   "devDependencies": {
-    "typescript": "~6.0.2",
-    "vite": "^8.1.1",
-    "@types/jquery": "^3.5.32"
+    "typescript": "~6.0.3",
+    "vite": "^8.2.0",
+    "@types/jquery": "^4.0.1"
   },
   "dependencies": {
     "gcc-ts-bundler": "link:gcc-ts-bundler",
-    "jquery": "^3.7.1"
+    "jquery": "^4.0.0"
   }
 }

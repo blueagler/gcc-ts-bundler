@@ -1,0 +1,2 @@
+examples/*/dist/** -whitespace linguist-generated=true
+examples/*/dist-pure/** -whitespace linguist-generated=true
