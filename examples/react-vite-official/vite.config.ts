@@ -5,6 +5,7 @@ import { reactPreset } from 'gcc-ts-bundler/presets/react'
 
 // https://vite.dev/config/
 export default defineConfig({
+  preview: { host: true, allowedHosts: true },
   build: { target: 'esnext' },
   plugins: [react(), gccTsBundler(reactPreset())],
 })

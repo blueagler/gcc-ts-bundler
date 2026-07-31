@@ -5,6 +5,7 @@ import { sveltePreset } from 'gcc-ts-bundler/presets/svelte'
 
 // https://vite.dev/config/
 export default defineConfig({
+  preview: { host: true, allowedHosts: true },
   build: { target: 'esnext' },
   plugins: [svelte(), gccTsBundler(sveltePreset())],
 })

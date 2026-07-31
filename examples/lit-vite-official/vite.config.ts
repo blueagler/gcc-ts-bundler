@@ -4,6 +4,7 @@ import { gccTsBundler } from 'gcc-ts-bundler/vite'
 // The official lit-ts template ships no vite.config; this adds only the
 // gcc-ts-bundler plugin. Lit needs no preset.
 export default defineConfig({
+  preview: { host: true, allowedHosts: true },
   build: { target: 'esnext' },
   plugins: [gccTsBundler()],
 })

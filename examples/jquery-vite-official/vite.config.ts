@@ -19,6 +19,7 @@ import { gccTsBundler } from 'gcc-ts-bundler/vite'
 //     the scan's `dotDefined ∩ stringLiteralRead` rule turns `events` into a
 //     rename barrier.
 export default defineConfig({
+  preview: { host: true, allowedHosts: true },
   build: { target: 'esnext' },
   plugins: [
     gccTsBundler({

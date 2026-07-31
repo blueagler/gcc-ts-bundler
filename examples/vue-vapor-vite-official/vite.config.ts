@@ -8,6 +8,7 @@ import { vuePreset } from 'gcc-ts-bundler/presets/vue'
 
 // https://vite.dev/config/
 export default defineConfig({
+  preview: { host: true, allowedHosts: true },
   build: { target: 'esnext' },
   plugins: [vue(), vueDevTools(), gccTsBundler(vuePreset())],
   resolve: {
