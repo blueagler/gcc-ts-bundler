@@ -66,6 +66,11 @@
     "fix": "bun --bun ./scripts/format.ts && bun --bun eslint -c eslint.config.ts \"src/**/*.ts\" --fix",
     "test": "cargo test --manifest-path native/Cargo.toml && bun run build && bun test ./test/*.test.mjs",
     "preview:examples": "node ./scripts/preview-example.mjs",
+    "preview:react": "node ./scripts/preview-example.mjs react",
+    "preview:svelte": "node ./scripts/preview-example.mjs svelte",
+    "preview:lit": "node ./scripts/preview-example.mjs lit",
+    "preview:vue": "node ./scripts/preview-example.mjs vue",
+    "preview:jquery": "node ./scripts/preview-example.mjs jquery",
     "verify:package": "node ./scripts/check-install-sanity.mjs && node ./scripts/verify-package.mjs",
     "prepublishOnly": "bun run verify:package",
     "publish:npm": "node ./scripts/publish-npm.mjs"
