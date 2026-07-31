@@ -40,7 +40,7 @@ Run the repository's formatting, type, and ESLint pass with:
 bun run lint
 ```
 
-The lint script applies formatting and ESLint fixes, so review its diff before committing.
+The lint script checks Rust formatting and Clippy, then runs the TypeScript formatting and ESLint checks.
 
 ## Type-safety rules
 
@@ -62,6 +62,8 @@ Prefer types derived from value tuples, `satisfies`, and exact internal contract
 | `bun run build:native:all`                     | Build every configured native target.                            |
 | `bun run build`                                | Run host native and JavaScript builds in parallel.               |
 | `bun run typecheck`                            | Check source and declaration-build TypeScript configurations.    |
+| `bun run format:rust`                          | Check native Rust formatting with rustfmt.                       |
+| `bun run lint:rust`                            | Run Clippy for all native targets and features with warnings denied. |
 | `cargo test --manifest-path native/Cargo.toml` | Run only Rust tests.                                             |
 | `bun test ./test/vite-plugin.test.mjs`         | Run one JavaScript integration test file.                        |
 | `bun run verify:package`                       | Build, pack, and validate the published package contract.        |

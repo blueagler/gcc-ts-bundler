@@ -290,7 +290,7 @@ impl CommonJsCollector {
         }
     }
 
-    fn visit_shadowing_scope<'a, F>(&mut self, shadows: bool, visit: F)
+    fn visit_shadowing_scope<F>(&mut self, shadows: bool, visit: F)
     where
         F: FnOnce(&mut Self),
     {

@@ -504,16 +504,19 @@ fn scan_esm_program(
                     }
                     _ => None,
                 };
-                if let Some(expression) = export.declaration.as_expression() {
-                    if let oxc_ast::ast::Expression::Identifier(identifier) = expression {
-                        if let Some(Some((target, imported))) =
-                            import_locals.get(identifier.name.as_str())
-                        {
-                            scan.reexports
-                                .insert("default".to_string(), (target.clone(), imported.clone()));
-                            continue;
-                        }
-                    }
+                if let Some((target, imported)) =
+                    export.declaration.as_expression().and_then(|expression| {
+                        let oxc_ast::ast::Expression::Identifier(identifier) = expression else {
+                            return None;
+                        };
+                        import_locals
+                            .get(identifier.name.as_str())
+                            .and_then(Option::as_ref)
+                    })
+                {
+                    scan.reexports
+                        .insert("default".to_string(), (target.clone(), imported.clone()));
+                    continue;
                 }
                 scan.own_exports.insert(
                     "default".to_string(),

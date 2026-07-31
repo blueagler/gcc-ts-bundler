@@ -16,7 +16,7 @@ pub(crate) fn render_generated_externs(
     ambient_names.sort();
     for name in ambient_names {
         if is_valid_js_identifier(&name) {
-            lines.push(format!("/** @type {{?}} */"));
+            lines.push("/** @type {?} */".to_string());
             lines.push(format!("var {name};"));
         }
     }

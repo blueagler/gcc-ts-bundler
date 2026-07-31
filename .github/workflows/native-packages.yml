@@ -26,6 +26,17 @@ permissions:
   contents: read
 
 jobs:
+  rust-hygiene:
+    name: Rust hygiene
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - run: cargo fmt --manifest-path native/Cargo.toml -- --check
+      - run: cargo clippy --manifest-path native/Cargo.toml --all-targets --all-features -- -D warnings
+
   build-native-package:
     name: ${{ matrix.package_name }}
     runs-on: ${{ matrix.runs_on }}

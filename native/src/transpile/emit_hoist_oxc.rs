@@ -41,16 +41,26 @@ use super::{
 };
 use crate::closure_metadata::ClosureFileMetadata;
 
+pub(crate) struct HoistedModuleOptions<'a> {
+    pub(crate) context: &'a TranspileContext,
+    pub(crate) plan: &'a HoistPlan,
+    pub(crate) file_metadata: Option<&'a ClosureFileMetadata>,
+    pub(crate) commonjs_export_name: Option<&'a str>,
+}
+
 pub(crate) fn emit_hoisted_module_text<'a>(
     allocator: &'a Allocator,
     file_path: &Path,
     program: &mut Program<'a>,
     identity: &mut ModuleIdentity,
-    context: &TranspileContext,
-    plan: &HoistPlan,
-    file_metadata: Option<&ClosureFileMetadata>,
-    commonjs_export_name: Option<&str>,
+    options: HoistedModuleOptions<'_>,
 ) -> std::result::Result<EmittedProgram, String> {
+    let HoistedModuleOptions {
+        context,
+        plan,
+        file_metadata,
+        commonjs_export_name,
+    } = options;
     let bound = BoundTypeMetadata::bind(
         program,
         identity,

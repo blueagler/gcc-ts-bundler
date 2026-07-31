@@ -249,7 +249,8 @@ impl PreparedTypeMetadata {
             );
             let failed_ids = first_pass
                 .iter()
-                .filter_map(|rendered| rendered.code.is_none().then(|| rendered.symbol_id.clone()))
+                .filter(|rendered| rendered.code.is_none())
+                .map(|rendered| rendered.symbol_id.clone())
                 .collect::<HashSet<_>>();
             for failed_id in &failed_ids {
                 symbol_resolutions.insert(

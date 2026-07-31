@@ -45,10 +45,12 @@ pub(super) fn emit_module_program_oxc<'a>(
                         file_path,
                         program,
                         identity,
-                        context,
-                        &plan,
-                        file_metadata,
-                        commonjs_export_name,
+                        super::emit_hoist_oxc::HoistedModuleOptions {
+                            context,
+                            plan: &plan,
+                            file_metadata,
+                            commonjs_export_name,
+                        },
                     )?;
                     emitted.reflective_property_names = reflective_property_names;
                     return Ok(emitted);
