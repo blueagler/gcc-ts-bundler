@@ -100,6 +100,34 @@ export interface TypeMetadataTarget {
   sourceFilePath: string;
 }
 
+export function countTypeMetadata(
+  files: readonly ClosureTypeMetadataFile[],
+): TypeMetadataCounts {
+  return files.reduce<TypeMetadataCounts>(
+    (counts, file) => {
+      counts.annotationCount += file.annotations.filter(
+        (annotation) =>
+          annotation.target.kind === "binding" && annotation.typeBearing,
+      ).length;
+      counts.memberAnnotationCount += file.annotations.filter(
+        (annotation) =>
+          annotation.target.kind === "member" && annotation.typeBearing,
+      ).length;
+      counts.typeDeclarationCount += file.declarations.length;
+      counts.enumDeclarationCount += file.enums.length;
+      counts.unresolvedTypeReferenceCount += file.diagnostics.length;
+      return counts;
+    },
+    {
+      annotationCount: 0,
+      enumDeclarationCount: 0,
+      memberAnnotationCount: 0,
+      typeDeclarationCount: 0,
+      unresolvedTypeReferenceCount: 0,
+    },
+  );
+}
+
 export interface NativeTypeAnalysisResult {
   diagnostics: ts.Diagnostic[];
   extractedCounts: TypeMetadataCounts;

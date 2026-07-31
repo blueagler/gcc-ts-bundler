@@ -51,14 +51,7 @@ export function slicePlatformExterns(
     for (const dependency of unit.dependencies) {
       if (!addName(dependency)) return null;
     }
-    if (unit.override && unit.owner && unit.property) {
-      for (const ancestor of collectAncestors(index, unit.owner)) {
-        for (const candidate of index.unitsByProperty.get(unit.property) ??
-          []) {
-          if (candidate.owner === ancestor) add(candidate);
-        }
-      }
-    }
+    forEachAncestorPropertyUnit(index, unit, add);
   }
 
   const browser = orderSelectedUnits(index, selected);
@@ -87,15 +80,9 @@ function orderSelectedUnits(
         if (selected.has(candidate.id)) visit(candidate);
       }
     }
-    if (unit.override && unit.owner && unit.property) {
-      for (const ancestor of collectAncestors(index, unit.owner)) {
-        for (const candidate of index.unitsByProperty.get(unit.property) ??
-          []) {
-          if (candidate.owner === ancestor && selected.has(candidate.id))
-            visit(candidate);
-        }
-      }
-    }
+    forEachAncestorPropertyUnit(index, unit, (candidate) => {
+      if (selected.has(candidate.id)) visit(candidate);
+    });
     active.delete(unit.id);
     complete.add(unit.id);
     ordered.push(unit);
@@ -103,6 +90,19 @@ function orderSelectedUnits(
 
   for (const unit of stable) visit(unit);
   return ordered;
+}
+
+function forEachAncestorPropertyUnit(
+  index: PlatformExternIndex,
+  unit: PlatformDeclarationUnit,
+  callback: (candidate: PlatformDeclarationUnit) => void,
+) {
+  if (!unit.override || !unit.owner || !unit.property) return;
+  for (const ancestor of collectAncestors(index, unit.owner)) {
+    for (const candidate of index.unitsByProperty.get(unit.property) ?? []) {
+      if (candidate.owner === ancestor) callback(candidate);
+    }
+  }
 }
 
 function compareSourceOrder(

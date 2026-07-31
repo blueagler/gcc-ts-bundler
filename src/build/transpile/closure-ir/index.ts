@@ -21,6 +21,7 @@ export type {
   TypeMetadataDiagnostic,
   TypeMetadataTarget,
 } from "./types";
+export { countTypeMetadata } from "./types";
 
 interface NativeTypeAnalysisContext {
   compilerOptions: ts.CompilerOptions;

@@ -5,6 +5,7 @@ import ts from "typescript";
 
 import {
   collectNativeTypeMetadataFromContext,
+  countTypeMetadata,
   createNativeTypeAnalysisContext,
   scanNativeTypeAnalysisContext,
 } from "../../build/transpile/closure-ir";
@@ -13,7 +14,6 @@ import type {
   ClosureTypeDeclaration,
   ClosureTypeMetadataFile,
   ClosureTypeSymbol,
-  TypeMetadataCounts,
   TypeMetadataTarget,
 } from "../../build/transpile/closure-ir";
 import type {
@@ -47,14 +47,6 @@ interface OverlayAttachmentPlan {
   outputBindingName: string;
   target: TypeMetadataTarget;
 }
-
-const EMPTY_COUNTS: TypeMetadataCounts = {
-  annotationCount: 0,
-  enumDeclarationCount: 0,
-  memberAnnotationCount: 0,
-  typeDeclarationCount: 0,
-  unresolvedTypeReferenceCount: 0,
-};
 
 export async function collectViteTypeMetadata(input: {
   materialized: MaterializedGraph;
@@ -847,31 +839,11 @@ async function finalizeSidecar(input: {
     }),
     dependencies,
     diagnostics,
-    extractedCounts: countMetadata(files),
+    extractedCounts: countTypeMetadata(files),
     files,
     provenance: input.provenance,
     version: VITE_TYPE_METADATA_VERSION,
   };
-}
-
-function countMetadata(files: ClosureTypeMetadataFile[]): TypeMetadataCounts {
-  return files.reduce<TypeMetadataCounts>(
-    (counts, file) => {
-      counts.annotationCount += file.annotations.filter(
-        (annotation) =>
-          annotation.target.kind === "binding" && annotation.typeBearing,
-      ).length;
-      counts.memberAnnotationCount += file.annotations.filter(
-        (annotation) =>
-          annotation.target.kind === "member" && annotation.typeBearing,
-      ).length;
-      counts.typeDeclarationCount += file.declarations.length;
-      counts.enumDeclarationCount += file.enums.length;
-      counts.unresolvedTypeReferenceCount += file.diagnostics.length;
-      return counts;
-    },
-    { ...EMPTY_COUNTS },
-  );
 }
 
 function serializeTypeScriptDiagnostic(

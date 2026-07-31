@@ -3,10 +3,10 @@ import ts from "typescript";
 import { collectClosureIrFileMetadata } from "./collect";
 import { collectUnsafeEnumSymbols } from "./enums";
 import { scanClosureIrSourceFiles, type ClosureIrScanResult } from "./scan";
+import { countTypeMetadata } from "../types";
 import type {
   ClosureTypeMetadataFile,
   NativeTypeAnalysisResult,
-  TypeMetadataCounts,
   TypeMetadataTarget,
 } from "../types";
 
@@ -140,29 +140,7 @@ function buildCollectionResult(
   files: ClosureTypeMetadataFile[],
   scan: ClosureIrScanResult,
 ): TypeMetadataCollectionResult {
-  const extractedCounts = files.reduce<TypeMetadataCounts>(
-    (counts, file) => {
-      counts.annotationCount += file.annotations.filter(
-        (annotation) =>
-          annotation.target.kind === "binding" && annotation.typeBearing,
-      ).length;
-      counts.memberAnnotationCount += file.annotations.filter(
-        (annotation) =>
-          annotation.target.kind === "member" && annotation.typeBearing,
-      ).length;
-      counts.typeDeclarationCount += file.declarations.length;
-      counts.enumDeclarationCount += file.enums.length;
-      counts.unresolvedTypeReferenceCount += file.diagnostics.length;
-      return counts;
-    },
-    {
-      annotationCount: 0,
-      enumDeclarationCount: 0,
-      memberAnnotationCount: 0,
-      typeDeclarationCount: 0,
-      unresolvedTypeReferenceCount: 0,
-    },
-  );
+  const extractedCounts = countTypeMetadata(files);
   return {
     diagnostics,
     extractedCounts,
