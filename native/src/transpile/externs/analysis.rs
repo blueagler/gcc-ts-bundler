@@ -48,13 +48,6 @@ struct ParsedExternFileAnalysis {
     static_property_names: HashSet<String>,
 }
 
-#[cfg(test)]
-pub(crate) fn collect_extern_property_names(
-    file_names: &[String],
-) -> Result<ExternPropertyAnalysis, String> {
-    collect_extern_property_names_with_externs(file_names, &[])
-}
-
 pub(crate) fn collect_extern_property_names_with_externs(
     file_names: &[String],
     extern_file_names: &[String],
@@ -127,14 +120,6 @@ fn parse_program<'a>(
         return Err(format!("{}: {}", path.display(), error.message));
     }
     Ok(parsed.program)
-}
-
-#[cfg(test)]
-pub(crate) fn collect_preserved_property_names(
-    file_names: &[String],
-    _static_property_names: &HashSet<String>,
-) -> Result<HashSet<String>, String> {
-    Ok(collect_extern_property_names(file_names)?.preserved_property_names)
 }
 
 fn collect_explicit_extern_property_names(
@@ -1151,16 +1136,6 @@ fn collect_pattern_property_reads(pattern: &BindingPattern<'_>, names: &mut Hash
         }
         BindingPattern::BindingIdentifier(_) => {}
     }
-}
-
-#[cfg(test)]
-pub(crate) fn collect_program_declared_names_for_test(
-    path: &Path,
-    source: &str,
-) -> Result<HashSet<String>, String> {
-    let allocator = Allocator::default();
-    let program = parse_program(&allocator, path, source)?;
-    Ok(collect_program_declared_names(&[program]))
 }
 
 fn collect_program_declared_names(programs: &[Program<'_>]) -> HashSet<String> {

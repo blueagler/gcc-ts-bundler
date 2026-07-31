@@ -1,4 +1,8 @@
-use super::*;
+use std::path::Path;
+
+use crate::pathing::{normalize_path, to_goog_module_id};
+
+use super::super::{resolve_relative_module, TranspileContext};
 
 pub(crate) fn resolved_import_key(file_path: &Path, specifier: &str) -> String {
     format!(

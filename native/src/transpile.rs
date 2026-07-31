@@ -3,31 +3,22 @@
 pub(crate) mod assigners;
 mod assigners_oxc;
 mod cjs_opacity;
-mod commonjs;
 mod commonjs_oxc;
-pub(crate) mod compat;
+mod compat;
 mod compat_properties_oxc;
 mod context;
 mod emit;
-mod emit_goog;
 mod emit_goog_oxc;
 mod emit_helpers;
 mod emit_helpers_oxc;
-mod emit_hoist;
 mod emit_hoist_oxc;
-mod emit_reflective;
 mod emit_reflective_oxc;
-pub(crate) mod emit_runtime;
 mod emit_runtime_oxc;
-mod enums;
 mod externs;
-pub(crate) mod fresh;
 mod fresh_oxc;
-mod global_this;
 mod global_this_oxc;
 mod hoist;
 mod hoist_oxc;
-mod identity;
 mod identity_oxc;
 mod imports_exports;
 mod js_compat;
@@ -35,63 +26,37 @@ mod js_compat_oxc;
 mod lowering_oxc;
 mod namespace;
 mod print;
-mod print_swc;
 mod pure_calls;
 mod type_metadata;
 mod type_metadata_oxc;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
-use std::mem;
 use std::path::{Path, PathBuf};
 
 use napi_derive::napi;
 use rayon::prelude::*;
-use swc_core::common::{sync::Lrc, Globals, Mark, SourceMap, GLOBALS};
-use swc_core::ecma::ast::{
-    ArrowExpr, BindingIdent, BlockStmt, BlockStmtOrExpr, Bool, CallExpr, Callee, EmptyStmt, Expr,
-    ExprStmt, Ident, ImportDecl, ImportDefaultSpecifier, ImportSpecifier, Lit, MemberExpr,
-    MemberProp, Module, ModuleItem, Pass, Pat, Program, PropName, Stmt, Str, SuperProp,
-    TsEnumMemberId, UnaryExpr, UnaryOp, VarDecl, VarDeclKind, VarDeclarator,
-};
-use swc_core::ecma::codegen::{text_writer::JsWriter, Config as CodegenConfig, Emitter};
-use swc_core::ecma::visit::{Visit, VisitMut, VisitMutWith, VisitWith};
-use swc_ecma_transforms_base::resolver;
-use swc_ecma_transforms_react::{jsx, Options as ReactOptions, Runtime as ReactRuntime};
-use swc_ecma_transforms_typescript::strip;
 
 use crate::closure_metadata::{
     closure_metadata_key, load_closure_metadata, ClosureEnumDeclaration, ClosureFileMetadata,
     EmittedTypeMetadata,
 };
-use crate::commonjs::{analyze_commonjs_module, evaluate_boolean_expr};
-use crate::module_cache::{parse_module, parse_source_file};
+use crate::commonjs::analyze_commonjs_source;
 use crate::pathing::{
     is_vendor_chunk_name, normalize_path, to_bundler_runtime_module_id, to_goog_module_id,
 };
 use crate::support_files::{collect_commonjs_specifiers, emit_package_support_files};
 
 use self::cjs_opacity::*;
-use self::commonjs::*;
 use self::compat::*;
 pub(crate) use self::context::ChunkMode;
 use self::context::*;
 use self::emit::*;
-use self::emit_goog::*;
-use self::emit_hoist::*;
-use self::emit_runtime::*;
-use self::enums::*;
 use self::externs::*;
-use self::fresh::*;
-use self::global_this::*;
 use self::hoist::*;
-pub(crate) use self::identity::*;
 use self::imports_exports::*;
 use self::js_compat::*;
-use self::namespace::*;
 use self::print::*;
-use self::print_swc::*;
-use self::type_metadata::*;
 
 #[allow(non_snake_case)]
 #[napi(object)]
@@ -314,10 +279,7 @@ pub fn transpile_sources(
             let relative_path = file_path.strip_prefix(&workspace_dir).unwrap_or(&file_path);
             let output_path = out_dir.join(relative_path).with_extension("js");
 
-            let emitted = GLOBALS.set(&Globals::new(), || {
-                let emitted = transform_source_file(&file_path, &context)?;
-                Ok::<_, String>(emitted)
-            })?;
+            let emitted = transform_source_file(&file_path, &context)?;
 
             Ok::<_, String>((file_path, output_path, emitted))
         })
@@ -486,12 +448,11 @@ fn collect_decorated_metadata_property_names(
         let Some(lowered_source) = metadata.decorated_output_text.as_deref() else {
             continue;
         };
-        let module = parse_module(
-            &PathBuf::from(metadata_key).with_extension("js"),
-            lowered_source,
-        )?;
-        names.extend(emit_helpers::collect_decorator_metadata_property_names(
-            &module,
+        let allocator = oxc_allocator::Allocator::default();
+        let path = PathBuf::from(metadata_key).with_extension("js");
+        let program = parse_oxc_program(&allocator, &path, lowered_source)?;
+        names.extend(emit_helpers_oxc::collect_decorator_metadata_property_names(
+            &program,
         ));
     }
     Ok(names)
@@ -508,9 +469,11 @@ fn collect_prelowered_decorator_property_names(
         if file_name.ends_with(".d.ts") {
             continue;
         }
-        let module = parse_source_file(Path::new(file_name))?;
-        names.extend(emit_helpers::collect_decorator_metadata_property_names(
-            &module,
+        let source = fs::read_to_string(file_name).map_err(|error| error.to_string())?;
+        let allocator = oxc_allocator::Allocator::default();
+        let program = parse_oxc_program(&allocator, Path::new(file_name), &source)?;
+        names.extend(emit_helpers_oxc::collect_decorator_metadata_property_names(
+            &program,
         ));
     }
     Ok(names)
@@ -533,6 +496,99 @@ fn collect_vendor_module_ids(
         .collect()
 }
 
+fn group_lazy_imports_by_file(
+    lazy_imports: Vec<LazyImportInput>,
+) -> HashMap<String, Vec<LazyImportInput>> {
+    let mut grouped = HashMap::<String, Vec<LazyImportInput>>::new();
+    for entry in lazy_imports {
+        grouped
+            .entry(entry.importerFilePath.clone())
+            .or_default()
+            .push(entry);
+    }
+    for entries in grouped.values_mut() {
+        entries.sort_by(|left, right| left.specifier.cmp(&right.specifier));
+    }
+    grouped
+}
+
+pub(crate) fn resolve_relative_module(file_path: &Path, specifier: &str) -> Option<PathBuf> {
+    let base = normalize_path(&file_path.parent()?.join(specifier));
+    let candidates = if base.extension().is_some() {
+        match base
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+        {
+            "js" => vec![
+                base.clone(),
+                base.with_extension("ts"),
+                base.with_extension("tsx"),
+                base.with_extension("mts"),
+                base.with_extension("cjs"),
+                base.with_extension("cts"),
+                base.with_extension("jsx"),
+                base.with_extension("mjs"),
+            ],
+            "cjs" => vec![
+                base.clone(),
+                base.with_extension("js"),
+                base.with_extension("ts"),
+                base.with_extension("cts"),
+            ],
+            _ => vec![
+                base.clone(),
+                append_extension(&base, "ts"),
+                append_extension(&base, "tsx"),
+                append_extension(&base, "js"),
+                append_extension(&base, "jsx"),
+            ],
+        }
+    } else {
+        ["ts", "tsx", "mts", "js", "cjs", "cts", "jsx", "mjs"]
+            .into_iter()
+            .map(|extension| base.with_extension(extension))
+            .chain(
+                [
+                    "index.ts",
+                    "index.tsx",
+                    "index.mts",
+                    "index.js",
+                    "index.cjs",
+                    "index.cts",
+                    "index.jsx",
+                    "index.mjs",
+                ]
+                .into_iter()
+                .map(|file| base.join(file)),
+            )
+            .collect()
+    };
+    candidates.into_iter().find(|candidate| candidate.exists())
+}
+
+fn append_extension(base: &Path, extension: &str) -> PathBuf {
+    let mut appended = base.as_os_str().to_owned();
+    appended.push(".");
+    appended.push(extension);
+    PathBuf::from(appended)
+}
+
+fn parse_oxc_program<'a>(
+    allocator: &'a oxc_allocator::Allocator,
+    file_path: &Path,
+    source: &'a str,
+) -> Result<oxc_ast::ast::Program<'a>, String> {
+    let source_type = oxc_span::SourceType::from_path(file_path)
+        .unwrap_or_else(|_| oxc_span::SourceType::mjs())
+        .with_module(true);
+    let parsed = oxc_parser::Parser::new(allocator, source, source_type).parse();
+    if let Some(error) = parsed.diagnostics.first() {
+        return Err(format!("{}: {}", file_path.display(), error.message));
+    }
+    Ok(parsed.program)
+}
+
 fn transform_source_file(
     file_path: &Path,
     context: &TranspileContext,
@@ -551,8 +607,7 @@ fn transform_source_file(
         file_path.to_path_buf()
     };
     let emitted_source = decorated_output_text.unwrap_or(&source_text);
-    let module = parse_module(&effective_path, emitted_source)?;
-    let commonjs_analysis = analyze_commonjs_module(&module);
+    let commonjs_analysis = analyze_commonjs_source(&effective_path, emitted_source)?;
     if should_normalize_commonjs(file_path, &commonjs_analysis) {
         let normalized = commonjs_oxc::normalize_source(
             &effective_path,
@@ -577,30 +632,6 @@ fn transform_source_file(
     )
 }
 
-fn is_typescript_source_file(file_path: &Path) -> bool {
-    matches!(
-        file_path.extension().and_then(|value| value.to_str()),
-        Some("ts") | Some("tsx") | Some("mts")
-    ) && !file_path.to_string_lossy().ends_with(".d.ts")
-}
-
-fn should_run_resolver(file_path: &Path) -> bool {
-    is_typescript_source_file(file_path)
-}
-
-fn should_run_react_transform(file_path: &Path) -> bool {
-    matches!(
-        file_path.extension().and_then(|value| value.to_str()),
-        Some("tsx") | Some("jsx")
-    )
-}
-
-#[cfg(test)]
-mod regression_tests;
-
-#[cfg(test)]
-mod tests;
-
 /// Property names pinned by pair-array `classMapCalls` rules across all inputs.
 fn collect_pair_array_property_names(
     file_names: &[String],
@@ -617,11 +648,15 @@ fn collect_pair_array_property_names(
         if file_name.ends_with(".d.ts") {
             continue;
         }
-        let module = parse_source_file(Path::new(file_name))?;
-        names.extend(collect_pair_array_class_map_property_names(
-            &module,
-            class_map_calls,
-        )?);
+        let source = fs::read_to_string(file_name).map_err(|error| error.to_string())?;
+        let allocator = oxc_allocator::Allocator::default();
+        let program = parse_oxc_program(&allocator, Path::new(file_name), &source)?;
+        names.extend(
+            compat_properties_oxc::collect_pair_array_class_map_property_names(
+                &program,
+                class_map_calls,
+            )?,
+        );
     }
     Ok(names)
 }

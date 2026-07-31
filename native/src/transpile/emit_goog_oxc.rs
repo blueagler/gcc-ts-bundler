@@ -648,7 +648,6 @@ impl<'a> VisitMut<'a> for LiveImportCallRewriter<'a, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxc_codegen::Codegen;
     use std::collections::HashMap;
 
     use super::super::ChunkMode;
@@ -691,19 +690,8 @@ mod tests {
         }
     }
 
-    fn normalize(source: &str) -> String {
-        let allocator = Allocator::default();
-        let parsed = Parser::new(&allocator, source, SourceType::mjs()).parse();
-        assert!(
-            !parsed.panicked && parsed.diagnostics.is_empty(),
-            "{source}\n{:?}",
-            parsed.diagnostics
-        );
-        Codegen::new().build(&parsed.program).code
-    }
-
     #[test]
-    fn goog_text_matches_swc_structure_and_live_binding_contract() {
+    fn goog_text_preserves_live_binding_contract() {
         let root = std::env::temp_dir().join(format!("gcc-emit-goog-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let dep = root.join("dep.js");
@@ -740,8 +728,6 @@ mod tests {
             None,
         )
         .unwrap();
-        let swc = super::super::emit_goog::emit_goog_text_for_test(&entry, source);
-        assert_eq!(normalize(&oxc), normalize(&swc), "swc:\n{swc}\noxc:\n{oxc}");
         assert!(oxc.contains("const live = __goog_import_0.__gccLive_changing;"));
         assert!(oxc.contains("const object = { live: live() };"));
         assert!(oxc.contains("exports.snapshot = live();"));
@@ -754,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn anonymous_default_forms_match_swc_structure() {
+    fn anonymous_default_forms_are_exported() {
         let root =
             std::env::temp_dir().join(format!("gcc-emit-goog-default-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
@@ -776,12 +762,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            let swc = super::super::emit_goog::emit_goog_text_for_test(&entry, source);
-            assert_eq!(
-                normalize(&oxc),
-                normalize(&swc),
-                "source: {source}\nswc:\n{swc}\noxc:\n{oxc}"
-            );
+            assert!(oxc.contains("exports.default ="), "source: {source}\n{oxc}");
         }
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -815,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn live_export_facts_match_swc_for_aliases_and_invalidations() {
+    fn live_export_facts_cover_aliases_and_invalidations() {
         let source = r#"
             let direct = 0, local = 1, stable = 2;
             export { local as renamed, stable };
@@ -828,8 +809,6 @@ mod tests {
         let allocator = Allocator::default();
         let (program, identity) = parse(&allocator, source);
         let oxc = live_export_bindings_of_program(&program, &identity);
-        let swc = super::super::emit_goog::live_export_bindings_for_test(source);
-        assert_eq!(oxc, swc);
         assert_eq!(
             oxc,
             BTreeMap::from([

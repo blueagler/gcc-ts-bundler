@@ -7,6 +7,12 @@
 //! small export facades.
 
 use super::*;
+use oxc_allocator::Allocator;
+use oxc_ast::ast::{
+    BindingPattern, Declaration, ExportDefaultDeclarationKind, ImportDeclarationSpecifier,
+    ImportOrExportKind, ModuleExportName, Program as OxcProgram, Statement,
+};
+use oxc_semantic::SemanticBuilder;
 
 #[derive(Clone, Debug)]
 pub(super) struct ResolvedExportBinding {
@@ -222,24 +228,42 @@ pub(super) fn build_hoist_plan(
         let module_id = to_goog_module_id(&file_path, workspace_dir);
         sorted_module_ids.insert(module_id.clone());
         let metadata = file_metadata.get(&closure_metadata_key(&file_path));
-        let module = if let Some(decorated_text) = metadata
-            .as_ref()
-            .and_then(|metadata| metadata.decorated_output_text.clone())
-        {
-            parse_module(&file_path.with_extension("js"), &decorated_text)?
-        } else {
-            parse_source_file(&file_path)?
-        };
-        let commonjs_analysis = analyze_commonjs_module(&module);
+        let authored_source = fs::read_to_string(&file_path).map_err(|error| error.to_string())?;
+        let source = metadata
+            .and_then(|metadata| metadata.decorated_output_text.as_deref())
+            .unwrap_or(&authored_source);
+        let effective_path =
+            if metadata.is_some_and(|metadata| metadata.decorated_output_text.is_some()) {
+                file_path.with_extension("js")
+            } else {
+                file_path.clone()
+            };
+        let allocator = Allocator::default();
+        let program = super::parse_oxc_program(&allocator, &effective_path, source)?;
+        let commonjs_analysis = crate::commonjs::analyze_commonjs_program(&program);
         let normalize_commonjs = should_normalize_commonjs(&file_path, &commonjs_analysis);
         let mut scan = if normalize_commonjs {
             scan_commonjs_module(&file_path, &commonjs_analysis, &resolution_context)
         } else {
-            scan_esm_module(&module, &file_path, &resolution_context)
+            let semantic = SemanticBuilder::new()
+                .with_build_nodes(true)
+                .with_enum_eval(true)
+                .build(&program);
+            if !semantic.diagnostics.is_empty() {
+                return Err(semantic
+                    .diagnostics
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n"));
+            }
+            let identity =
+                super::identity_oxc::ModuleIdentity::new(semantic.semantic.into_scoping());
+            let mut scan = scan_esm_program(&program, &identity, &file_path, &resolution_context);
+            scan.local_export_modes =
+                super::emit_runtime_oxc::collect_local_export_modes(&program, &identity);
+            scan
         };
-        if !normalize_commonjs {
-            scan.local_export_modes = collect_resolved_local_export_modes(&module)?;
-        }
         if let Some(metadata) = metadata {
             scan.own_exports.extend(
                 metadata
@@ -326,19 +350,6 @@ fn build_chunk_dependency_closure(chunk_graph: &[TranspileChunkInput]) -> Vec<Ha
     closure
 }
 
-fn collect_resolved_local_export_modes(
-    module: &Module,
-) -> std::result::Result<HashMap<String, BundlerExportSlotMode>, String> {
-    GLOBALS.set(&Globals::new(), || {
-        let mut program = Program::Module(module.clone());
-        apply_resolver_and_global_this_compat(&mut program, true)?;
-        let Program::Module(module) = program else {
-            unreachable!("resolver preserves modules")
-        };
-        Ok(collect_local_export_modes(&module))
-    })
-}
-
 fn scan_commonjs_module(
     file_path: &Path,
     analysis: &crate::commonjs::CommonJsAnalysis,
@@ -349,9 +360,8 @@ fn scan_commonjs_module(
         .insert("__cjsExports".to_string(), "__cjsExports".to_string());
     scan.own_exports
         .insert("default".to_string(), "__cjsExports".to_string());
-    // The normalized CommonJS interop imports use `"__cjsExports" in ns`
-    // reflection, which requires a real require object; keep CommonJS modules
-    // with dependencies in registry form.
+    // The normalized CommonJS interop imports use reflection, which requires a
+    // real require object; keep CommonJS modules with dependencies in registry form.
     if !analysis.dependencies.is_empty() {
         scan.scan_failed = true;
         for specifier in &analysis.dependencies {
@@ -373,27 +383,26 @@ fn scan_commonjs_module(
     scan
 }
 
-fn scan_esm_module(
-    module: &Module,
+fn scan_esm_program(
+    program: &OxcProgram<'_>,
+    identity: &super::identity_oxc::ModuleIdentity,
     file_path: &Path,
     resolution_context: &TranspileContext,
 ) -> ModuleScan {
     let mut scan = ModuleScan::default();
-    // local import binding name -> (target module id, imported export name).
-    // Namespace imports map to None so exporting one falls back to registry.
     let mut import_locals = HashMap::<String, Option<(String, String)>>::new();
-    let namespace_usage = scan_namespace_usage(module);
-    let used_binding_ids = collect_used_binding_ids(module);
+    let namespace_usage = super::hoist_oxc::scan_namespace_usage(program, identity);
+    let used_binding_ids = super::hoist_oxc::collect_used_binding_ids(program, identity);
 
-    for item in &module.body {
-        match item {
-            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import_decl)) => {
-                if import_decl.type_only {
+    for statement in &program.body {
+        match statement {
+            Statement::ImportDeclaration(import) => {
+                if import.import_kind == ImportOrExportKind::Type {
                     continue;
                 }
                 let Ok(target) = resolve_module_id_for_specifier(
                     file_path,
-                    &import_decl.src.value.to_string_lossy(),
+                    import.source.value.as_str(),
                     resolution_context,
                 ) else {
                     scan.scan_failed = true;
@@ -403,97 +412,81 @@ fn scan_esm_module(
                     target_module_id: target.clone(),
                     ..Default::default()
                 };
-                for specifier in &import_decl.specifiers {
+                for specifier in import.specifiers.iter().flatten() {
                     match specifier {
-                        ImportSpecifier::Named(named) if named.is_type_only => {}
-                        ImportSpecifier::Named(named) => {
-                            let imported = named
-                                .imported
-                                .as_ref()
-                                .map(module_export_name_to_string)
-                                .unwrap_or_else(|| named.local.sym.to_string());
-                            import_locals.insert(
-                                named.local.sym.to_string(),
-                                Some((target.clone(), imported.clone())),
-                            );
-                            if used_binding_ids.contains(&BindingKey::of(&named.local)) {
+                        ImportDeclarationSpecifier::ImportSpecifier(specifier)
+                            if specifier.import_kind == ImportOrExportKind::Type => {}
+                        ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                            let imported = module_export_name(&specifier.imported);
+                            let local = specifier.local.name.to_string();
+                            import_locals.insert(local, Some((target.clone(), imported.clone())));
+                            if used_binding_ids.contains(&identity.key_of_binding(&specifier.local))
+                            {
                                 edge.used_named.push(imported.clone());
                             }
                             edge.named.push(imported);
                         }
-                        ImportSpecifier::Default(default_specifier) => {
-                            import_locals.insert(
-                                default_specifier.local.sym.to_string(),
-                                Some((target.clone(), "default".to_string())),
-                            );
-                            if used_binding_ids.contains(&BindingKey::of(&default_specifier.local)) {
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                            let local = specifier.local.name.to_string();
+                            import_locals
+                                .insert(local, Some((target.clone(), "default".to_string())));
+                            if used_binding_ids.contains(&identity.key_of_binding(&specifier.local))
+                            {
                                 edge.used_named.push("default".to_string());
                             }
                             edge.named.push("default".to_string());
                         }
-                        ImportSpecifier::Namespace(namespace_specifier) => {
-                            import_locals.insert(namespace_specifier.local.sym.to_string(), None);
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                            import_locals.insert(specifier.local.name.to_string(), None);
                             edge.namespace = true;
                             edge.namespace_members = namespace_usage
-                                .member_only_usage(&BindingKey::of(&namespace_specifier.local));
+                                .member_only_usage(identity.key_of_binding(&specifier.local));
                         }
                     }
                 }
                 scan.import_edges.push(edge);
             }
-            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDecl(export_decl)) => {
-                for name in exported_decl_names(&export_decl.decl) {
-                    scan.own_exports.insert(name.clone(), name);
-                }
-            }
-            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportNamed(named_export)) => {
-                if named_export.type_only {
+            Statement::ExportNamedDeclaration(export) => {
+                if export.export_kind == ImportOrExportKind::Type {
                     continue;
                 }
-                if let Some(src) = &named_export.src {
+                if let Some(declaration) = &export.declaration {
+                    for name in declaration_names(declaration) {
+                        scan.own_exports.insert(name.clone(), name);
+                    }
+                }
+                if let Some(source) = &export.source {
                     let Ok(target) = resolve_module_id_for_specifier(
                         file_path,
-                        &src.value.to_string_lossy(),
+                        source.value.as_str(),
                         resolution_context,
                     ) else {
                         scan.scan_failed = true;
                         continue;
                     };
                     scan.reexport_targets.push(target.clone());
-                    for specifier in &named_export.specifiers {
-                        let swc_core::ecma::ast::ExportSpecifier::Named(named) = specifier else {
-                            scan.scan_failed = true;
+                    for specifier in &export.specifiers {
+                        if specifier.export_kind == ImportOrExportKind::Type {
                             continue;
-                        };
-                        let orig = module_export_name_to_string(&named.orig);
-                        let export_name = named
-                            .exported
-                            .as_ref()
-                            .map(module_export_name_to_string)
-                            .unwrap_or_else(|| orig.clone());
-                        scan.reexports.insert(export_name, (target.clone(), orig));
+                        }
+                        scan.reexports.insert(
+                            module_export_name(&specifier.exported),
+                            (target.clone(), module_export_name(&specifier.local)),
+                        );
                     }
                 } else {
-                    for specifier in &named_export.specifiers {
-                        let swc_core::ecma::ast::ExportSpecifier::Named(named) = specifier else {
-                            scan.scan_failed = true;
+                    for specifier in &export.specifiers {
+                        if specifier.export_kind == ImportOrExportKind::Type {
                             continue;
-                        };
-                        let local = module_export_name_to_string(&named.orig);
-                        let export_name = named
-                            .exported
-                            .as_ref()
-                            .map(module_export_name_to_string)
-                            .unwrap_or_else(|| local.clone());
+                        }
+                        let local = module_export_name(&specifier.local);
+                        let export_name = module_export_name(&specifier.exported);
                         match import_locals.get(&local) {
                             Some(Some((target, imported))) => {
                                 scan.reexports
                                     .insert(export_name, (target.clone(), imported.clone()));
                             }
-                            Some(None) => {
-                                // Exporting a namespace binding: registry only.
-                                scan.scan_failed = true;
-                            }
+                            Some(None) => scan.scan_failed = true,
                             None => {
                                 scan.own_exports.insert(export_name, local);
                             }
@@ -501,56 +494,120 @@ fn scan_esm_module(
                     }
                 }
             }
-            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDefaultDecl(
-                default_decl,
-            )) => {
-                let local = match &default_decl.decl {
-                    swc_core::ecma::ast::DefaultDecl::Fn(function_expr) => function_expr
-                        .ident
-                        .as_ref()
-                        .map(|ident| ident.sym.to_string()),
-                    swc_core::ecma::ast::DefaultDecl::Class(class_expr) => {
-                        class_expr.ident.as_ref().map(|ident| ident.sym.to_string())
+            Statement::ExportDefaultDeclaration(export) => {
+                let local = match &export.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                        function.id.as_ref().map(|id| id.name.to_string())
+                    }
+                    ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                        class.id.as_ref().map(|id| id.name.to_string())
                     }
                     _ => None,
                 };
+                if let Some(expression) = export.declaration.as_expression() {
+                    if let oxc_ast::ast::Expression::Identifier(identifier) = expression {
+                        if let Some(Some((target, imported))) =
+                            import_locals.get(identifier.name.as_str())
+                        {
+                            scan.reexports
+                                .insert("default".to_string(), (target.clone(), imported.clone()));
+                            continue;
+                        }
+                    }
+                }
                 scan.own_exports.insert(
                     "default".to_string(),
                     local.unwrap_or_else(|| DEFAULT_EXPORT_LOCAL.to_string()),
                 );
             }
-            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDefaultExpr(
-                default_expr,
-            )) => {
-                if let Expr::Ident(ident) = &*default_expr.expr {
-                    if let Some(Some((target, imported))) =
-                        import_locals.get(&ident.sym.to_string())
-                    {
-                        scan.reexports
-                            .insert("default".to_string(), (target.clone(), imported.clone()));
-                        continue;
-                    }
-                }
+            Statement::TSExportAssignment(_) => {
                 scan.own_exports
                     .insert("default".to_string(), DEFAULT_EXPORT_LOCAL.to_string());
             }
-            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportAll(export_all)) => {
+            Statement::ExportAllDeclaration(export) => {
                 let Ok(target) = resolve_module_id_for_specifier(
                     file_path,
-                    &export_all.src.value.to_string_lossy(),
+                    export.source.value.as_str(),
                     resolution_context,
                 ) else {
                     scan.scan_failed = true;
                     continue;
                 };
                 scan.reexport_targets.push(target.clone());
-                scan.stars.push(target);
+                if export.exported.is_some() {
+                    scan.scan_failed = true;
+                } else {
+                    scan.stars.push(target);
+                }
             }
             _ => {}
         }
     }
-
     scan
+}
+
+fn declaration_names(declaration: &Declaration<'_>) -> Vec<String> {
+    let mut names = Vec::new();
+    match declaration {
+        Declaration::VariableDeclaration(declaration) => {
+            for declarator in &declaration.declarations {
+                collect_pattern_names(&declarator.id, &mut names);
+            }
+        }
+        Declaration::FunctionDeclaration(function) => {
+            if let Some(id) = &function.id {
+                names.push(id.name.to_string());
+            }
+        }
+        Declaration::ClassDeclaration(class) => {
+            if let Some(id) = &class.id {
+                names.push(id.name.to_string());
+            }
+        }
+        Declaration::TSEnumDeclaration(declaration) => {
+            names.push(declaration.id.name.to_string());
+        }
+        Declaration::TSModuleDeclaration(declaration) => {
+            if let oxc_ast::ast::TSModuleDeclarationName::Identifier(id) = &declaration.id {
+                names.push(id.name.to_string());
+            }
+        }
+        _ => {}
+    }
+    names
+}
+
+fn collect_pattern_names(pattern: &BindingPattern<'_>, names: &mut Vec<String>) {
+    match pattern {
+        BindingPattern::BindingIdentifier(identifier) => names.push(identifier.name.to_string()),
+        BindingPattern::ArrayPattern(array) => {
+            for pattern in array.elements.iter().flatten() {
+                collect_pattern_names(pattern, names);
+            }
+            if let Some(rest) = &array.rest {
+                collect_pattern_names(&rest.argument, names);
+            }
+        }
+        BindingPattern::ObjectPattern(object) => {
+            for property in &object.properties {
+                collect_pattern_names(&property.value, names);
+            }
+            if let Some(rest) = &object.rest {
+                collect_pattern_names(&rest.argument, names);
+            }
+        }
+        BindingPattern::AssignmentPattern(assignment) => {
+            collect_pattern_names(&assignment.left, names);
+        }
+    }
+}
+
+fn module_export_name(name: &ModuleExportName<'_>) -> String {
+    match name {
+        ModuleExportName::IdentifierName(identifier) => identifier.name.to_string(),
+        ModuleExportName::IdentifierReference(identifier) => identifier.name.to_string(),
+        ModuleExportName::StringLiteral(literal) => literal.value.to_string(),
+    }
 }
 
 fn resolve_all_export_bindings(
@@ -646,161 +703,6 @@ fn resolve_export_binding(
     visiting.remove(module_id);
     memo.insert(key, resolved.clone());
     resolved
-}
-
-/// Ids referenced anywhere except import declarations and source-less named
-/// exports (pure re-exports are not uses).
-pub(super) fn collect_used_binding_ids(module: &Module) -> BindingKeySet {
-    let mut collector = UsedBindingCollector {
-        used: HashSet::new(),
-    };
-    for item in &module.body {
-        match item {
-            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(_)) => {}
-            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportNamed(named_export))
-                if named_export.src.is_none() => {}
-            _ => item.visit_with(&mut collector),
-        }
-    }
-    collector.used
-}
-
-struct UsedBindingCollector {
-    used: BindingKeySet,
-}
-
-impl Visit for UsedBindingCollector {
-    fn visit_ident(&mut self, ident: &Ident) {
-        self.used.insert(BindingKey::of(&ident));
-    }
-}
-
-struct NamespaceUsage {
-    disqualified: BindingKeySet,
-    members: BindingKeyMap<BTreeSet<String>>,
-}
-
-impl NamespaceUsage {
-    fn member_only_usage(&self, binding_id: &BindingKey) -> Option<BTreeSet<String>> {
-        if self.disqualified.contains(binding_id) {
-            return None;
-        }
-        Some(self.members.get(binding_id).cloned().unwrap_or_default())
-    }
-}
-
-/// Records, for every namespace import binding, which members are accessed and
-/// whether the binding ever escapes as a value.
-fn scan_namespace_usage(module: &Module) -> NamespaceUsage {
-    let mut candidates = HashSet::new();
-    for item in &module.body {
-        let ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import_decl)) = item
-        else {
-            continue;
-        };
-        for specifier in &import_decl.specifiers {
-            if let ImportSpecifier::Namespace(namespace_specifier) = specifier {
-                candidates.insert(BindingKey::of(&namespace_specifier.local));
-            }
-        }
-    }
-    let mut scanner = NamespaceMemberScanner {
-        candidates,
-        usage: NamespaceUsage {
-            disqualified: HashSet::new(),
-            members: HashMap::new(),
-        },
-    };
-    // Import specifiers and re-export specifiers are not expression contexts,
-    // so visiting every item (including default exports) is safe.
-    module.visit_with(&mut scanner);
-    scanner.usage
-}
-
-struct NamespaceMemberScanner {
-    candidates: BindingKeySet,
-    usage: NamespaceUsage,
-}
-
-impl Visit for NamespaceMemberScanner {
-    fn visit_expr(&mut self, expr: &Expr) {
-        if let Expr::Member(member) = expr {
-            if let Expr::Ident(object_ident) = &*member.obj {
-                let binding_id = BindingKey::of(&object_ident);
-                if self.candidates.contains(&binding_id) {
-                    // Identifier and quoted-string members both count as
-                    // plain member access (preserved-property quoting turns
-                    // `ns.state` into `ns["state"]` before emission).
-                    match &member.prop {
-                        MemberProp::Ident(prop_ident) => {
-                            self.usage
-                                .members
-                                .entry(binding_id)
-                                .or_default()
-                                .insert(prop_ident.sym.to_string());
-                            return;
-                        }
-                        MemberProp::Computed(computed) => {
-                            if let Expr::Lit(Lit::Str(value)) = &*computed.expr {
-                                self.usage
-                                    .members
-                                    .entry(binding_id)
-                                    .or_default()
-                                    .insert(value.value.to_string_lossy().to_string());
-                                return;
-                            }
-                            self.usage.disqualified.insert(binding_id);
-                            computed.visit_children_with(self);
-                            return;
-                        }
-                        MemberProp::PrivateName(_) => {}
-                    }
-                }
-            }
-        }
-        if let Expr::Ident(ident) = expr {
-            if self.candidates.contains(&BindingKey::of(&ident)) {
-                self.usage.disqualified.insert(BindingKey::of(&ident));
-            }
-        }
-        expr.visit_children_with(self);
-    }
-}
-
-#[cfg(test)]
-pub(super) fn usage_facts_for_test(
-    module: &Module,
-) -> (
-    BTreeSet<String>,
-    BTreeMap<String, Option<BTreeSet<String>>>,
-) {
-    let used = collect_used_binding_ids(module);
-    let namespace_usage = scan_namespace_usage(module);
-    let mut used_imports = BTreeSet::new();
-    let mut namespaces = BTreeMap::new();
-    for item in &module.body {
-        let ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import)) = item else {
-            continue;
-        };
-        for specifier in &import.specifiers {
-            let local = match specifier {
-                ImportSpecifier::Named(specifier) => &specifier.local,
-                ImportSpecifier::Default(specifier) => &specifier.local,
-                ImportSpecifier::Namespace(specifier) => {
-                    let local = &specifier.local;
-                    namespaces.insert(
-                        local.sym.to_string(),
-                        namespace_usage.member_only_usage(&BindingKey::of(local)),
-                    );
-                    local
-                }
-            };
-            if used.contains(&BindingKey::of(local)) {
-                used_imports.insert(local.sym.to_string());
-            }
-        }
-    }
-    (used_imports, namespaces)
 }
 
 struct FacadeNeeds<'a> {

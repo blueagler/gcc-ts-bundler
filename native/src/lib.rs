@@ -4,7 +4,6 @@ mod commonjs;
 mod exports;
 mod fs_state;
 mod graph;
-mod module_cache;
 mod pathing;
 mod shims;
 mod support_files;
@@ -13,7 +12,6 @@ mod utils;
 
 use napi::{Error, Result};
 use napi_derive::napi;
-use swc_core::common::{Globals, GLOBALS};
 
 fn into_napi<T>(result: std::result::Result<T, String>) -> Result<T> {
     result.map_err(Error::from_reason)
@@ -23,7 +21,7 @@ fn with_globals<T, F>(callback: F) -> Result<T>
 where
     F: FnOnce() -> std::result::Result<T, String>,
 {
-    GLOBALS.set(&Globals::new(), || into_napi(callback()))
+    into_napi(callback())
 }
 
 #[napi(js_name = "resolveGraph")]

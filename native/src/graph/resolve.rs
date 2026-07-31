@@ -21,7 +21,6 @@ pub(super) fn resolve_graph_impl(
     let mut file_hashes = BTreeMap::new();
     let mut graph = BTreeMap::new();
     let mut lazy_imports = BTreeMap::<String, LazyImportEntry>::new();
-    let mut module_cache = HashMap::new();
     let mut package_aliases = BTreeMap::<String, PackageAliasEntry>::new();
     let mut resolved_imports = BTreeMap::<String, ResolvedImportEntry>::new();
     let mut pending = entries.clone();
@@ -37,8 +36,7 @@ pub(super) fn resolve_graph_impl(
         let relative = path_relative_to(&current_file, context.workspace_dir);
         file_hashes.insert(relative, hash_content(&contents));
 
-        let module = parse_module(&current_file, &contents)?;
-        let commonjs_analysis = analyze_commonjs_module(&module);
+        let commonjs_analysis = analyze_commonjs_source(&current_file, &contents)?;
         if commonjs_analysis.has_commonjs {
             validate_commonjs_usage(&current_file, &commonjs_analysis, &context)?;
         }
@@ -114,7 +112,6 @@ pub(super) fn resolve_graph_impl(
                 .collect::<Vec<_>>(),
         );
 
-        module_cache.insert(current_file.clone(), module);
         pending.extend(dependencies);
     }
 
@@ -127,15 +124,7 @@ pub(super) fn resolve_graph_impl(
     let mut export_cache = HashMap::<PathBuf, EntryExportMetadata>::new();
     let entries_metadata = entries
         .iter()
-        .map(|entry| {
-            collect_exports(
-                entry,
-                &mut commonjs_cache,
-                &mut module_cache,
-                &mut export_cache,
-                &context,
-            )
-        })
+        .map(|entry| collect_exports(entry, &mut commonjs_cache, &mut export_cache, &context))
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
     let package_json_files = consulted_package_jsons

@@ -251,7 +251,8 @@ mod flagged_sites {
     /// port — this test is the evidence for deleting them.
     #[test]
     fn a_symbol_keeps_its_key_across_a_rename() {
-        let (allocator, source) = model("let value = 1;\nexport function read() { return value; }\n");
+        let (allocator, source) =
+            model("let value = 1;\nexport function read() { return value; }\n");
         let parsed = oxc_parser::Parser::new(&allocator, &source, SourceType::mjs()).parse();
         let scoping = SemanticBuilder::new()
             .with_build_nodes(true)
@@ -263,7 +264,8 @@ mod flagged_sites {
         let Statement::VariableDeclaration(decl) = &parsed.program.body[0] else {
             panic!("expected a variable declaration");
         };
-        let key = identity.key_of_binding(decl.declarations[0].id.get_binding_identifier().unwrap());
+        let key =
+            identity.key_of_binding(decl.declarations[0].id.get_binding_identifier().unwrap());
         assert_eq!(identity.symbol(key), "value");
 
         identity.rename(key, FromIn::from_in("value_3", &allocator));

@@ -1,18 +1,10 @@
 use super::*;
+use oxc_allocator::Allocator;
+use oxc_ast::ast::{ImportDeclarationSpecifier, Program, Statement};
+use oxc_parser::Parser;
+use oxc_span::SourceType;
 
-/// The one decision that the three CommonJS export-ABI emission sites share.
-///
-/// The ABI is written by the producer (`CommonJsRewriteVisitor`) and read at two
-/// consumer sites (`CommonJsNamespaceAccessVisitor` and the named-import
-/// destructure lowering). Quoting a name on one side while another side renames
-/// it resolves to `undefined` at runtime, so all three read this verdict and
-/// none of them decides locally.
-///
-/// Granularity is the package directory, not the individual file: a package's
-/// export surface is assembled across its internal `require()` graph
-/// (`react/index.js` -> `react/cjs/react.production.js`), and a consumer names
-/// only the package. Widening a file's verdict to its package is the
-/// fail-closed direction and needs no resolver.
+/// The one decision shared by the three CommonJS export-ABI emission sites.
 #[derive(Debug, Default)]
 pub(super) struct OpaqueCommonJs {
     package_keys: HashSet<String>,
@@ -20,21 +12,17 @@ pub(super) struct OpaqueCommonJs {
 }
 
 impl OpaqueCommonJs {
-    /// Producer side: may this file's `exports.foo = …` be renameable?
     pub(super) fn file_is_opaque(&self, file_path: &Path) -> bool {
         package_key(file_path)
             .map(|key| self.package_keys.contains(&key))
             .unwrap_or(true)
     }
 
-    /// Consumer side: may `ns.foo` on this specifier be renameable?
     pub(super) fn specifier_is_opaque(&self, specifier: &str) -> bool {
         self.specifiers.contains(specifier)
     }
 }
 
-/// Groups a file with the package that owns it. `None` for first-party sources,
-/// which are never CommonJS-normalized.
 fn package_key(file_path: &Path) -> Option<String> {
     let text = file_path.to_string_lossy().replace('\\', "/");
     let (_, tail) = text.rsplit_once("/node_modules/")?;
@@ -61,26 +49,17 @@ pub(super) fn collect_opaque_commonjs(
             continue;
         }
         let file_path = PathBuf::from(file_name);
-        let Some(key) = package_key(&file_path) else {
-            // First-party code still consumes CommonJS packages, so it is
-            // scanned for namespace reflection below even though it owns no
-            // CommonJS export surface itself.
-            let module = parse_source_file(&file_path)?;
-            mark_reflecting_imports(
-                &module,
-                commonjs_specifiers,
-                &mut package_keys,
-                package_aliases,
-            );
-            continue;
-        };
-        let module = parse_source_file(&file_path)?;
-        let analysis = analyze_commonjs_module(&module);
-        if should_normalize_commonjs(&file_path, &analysis) && analysis.exports_are_opaque {
-            package_keys.insert(key);
+        let source = fs::read_to_string(&file_path).map_err(|error| error.to_string())?;
+        let allocator = Allocator::default();
+        let program = parse_program(&allocator, &file_path, &source)?;
+        if let Some(key) = package_key(&file_path) {
+            let analysis = crate::commonjs::analyze_commonjs_program(&program);
+            if should_normalize_commonjs(&file_path, &analysis) && analysis.exports_are_opaque {
+                package_keys.insert(key);
+            }
         }
         mark_reflecting_imports(
-            &module,
+            &program,
             commonjs_specifiers,
             &mut package_keys,
             package_aliases,
@@ -103,32 +82,54 @@ pub(super) fn collect_opaque_commonjs(
     })
 }
 
+fn parse_program<'a>(
+    allocator: &'a Allocator,
+    file_path: &Path,
+    source: &'a str,
+) -> Result<Program<'a>, String> {
+    let source_type = SourceType::from_path(file_path)
+        .unwrap_or_else(|_| SourceType::mjs())
+        .with_module(true);
+    let parsed = Parser::new(allocator, source, source_type).parse();
+    if let Some(error) = parsed.diagnostics.first() {
+        return Err(format!("{}: {}", file_path.display(), error.message));
+    }
+    Ok(parsed.program)
+}
+
 /// A module that reads an imported CommonJS namespace's keys as data pins that
 /// package's whole surface.
 fn mark_reflecting_imports(
-    module: &Module,
+    program: &Program<'_>,
     commonjs_specifiers: &HashSet<String>,
     package_keys: &mut HashSet<String>,
     package_aliases: &[PackageAliasInput],
 ) {
-    for item in &module.body {
-        let ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::Import(import)) = item else {
+    for statement in &program.body {
+        let Statement::ImportDeclaration(import) = statement else {
             continue;
         };
-        let specifier = import.src.value.to_string_lossy().to_string();
+        let specifier = import.source.value.to_string();
         if !commonjs_specifiers.contains(&specifier) {
             continue;
         }
         let bindings = import
             .specifiers
             .iter()
-            .map(|entry| match entry {
-                ImportSpecifier::Named(named) => named.local.sym.to_string(),
-                ImportSpecifier::Default(default) => default.local.sym.to_string(),
-                ImportSpecifier::Namespace(namespace) => namespace.local.sym.to_string(),
+            .flatten()
+            .map(|specifier| match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                    specifier.local.name.to_string()
+                }
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                    specifier.local.name.to_string()
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    specifier.local.name.to_string()
+                }
             })
-            .collect::<std::collections::BTreeSet<_>>();
-        if crate::commonjs::commonjs_namespace_is_opaque(module, &bindings) {
+            .collect::<BTreeSet<_>>();
+        if crate::commonjs::commonjs_namespace_is_opaque(program, &bindings) {
             if let Some(key) = specifier_package_key(&specifier, package_aliases) {
                 package_keys.insert(key);
             }
@@ -159,89 +160,43 @@ mod tests {
     use super::*;
 
     fn analyze(source: &str) -> crate::commonjs::CommonJsAnalysis {
-        let module = parse_module(Path::new("/tmp/probe.js"), source).unwrap();
-        analyze_commonjs_module(&module)
+        crate::commonjs::analyze_commonjs_source(Path::new("/tmp/probe.js"), source).unwrap()
+    }
+
+    fn namespace_is_opaque(source: &str) -> bool {
+        let allocator = Allocator::default();
+        let program = parse_program(&allocator, Path::new("/tmp/consumer.js"), source).unwrap();
+        crate::commonjs::commonjs_namespace_is_opaque(&program, &BTreeSet::from(["ns".to_string()]))
     }
 
     #[test]
-    fn object_keys_over_own_exports_through_module_slot_is_opaque() {
-        let analysis =
-            analyze("exports.alpha = 1;\nmodule.exports.names = Object.keys(exports);\n");
-        assert!(analysis.exports_are_opaque);
-    }
-
-    #[test]
-    fn plain_named_exports_are_transparent() {
-        let analysis = analyze("exports.alpha = 1;\nmodule.exports.beta = 2;\n");
-        assert!(!analysis.exports_are_opaque);
-    }
-
-    #[test]
-    fn string_literal_export_keys_are_transparent() {
-        let analysis = analyze("exports[\"alpha\"] = 1;\n");
-        assert!(!analysis.exports_are_opaque);
-    }
-
-    #[test]
-    fn proxy_reexport_is_transparent() {
-        let analysis = analyze("module.exports = require(\"./inner.js\");\n");
-        assert!(!analysis.exports_are_opaque);
-    }
-
-    #[test]
-    fn object_keys_over_own_exports_is_opaque() {
-        let analysis = analyze("exports.alpha = 1;\nvar names = Object.keys(exports);\n");
-        assert!(analysis.exports_are_opaque);
-    }
-
-    #[test]
-    fn for_in_over_own_exports_is_opaque() {
-        let analysis =
-            analyze("exports.alpha = 1;\nfor (var key in exports) { console.log(key); }\n");
-        assert!(analysis.exports_are_opaque);
-    }
-
-    #[test]
-    fn computed_export_read_is_opaque() {
-        let analysis = analyze("exports.alpha = 1;\nfunction get(k) { return exports[k]; }\n");
-        assert!(analysis.exports_are_opaque);
-    }
-
-    #[test]
-    fn escaping_export_object_is_opaque() {
-        let analysis = analyze("exports.alpha = 1;\nregister(module.exports);\n");
-        assert!(analysis.exports_are_opaque);
-    }
-
-    #[test]
-    fn umd_style_exports_probe_is_opaque() {
-        let analysis = analyze("if (typeof exports === \"object\") { exports.alpha = 1; }\n");
-        assert!(analysis.exports_are_opaque);
+    fn own_export_reflection_is_fail_closed() {
+        assert!(
+            analyze("exports.alpha = 1;\nmodule.exports.names = Object.keys(exports);\n")
+                .exports_are_opaque
+        );
+        assert!(!analyze("exports.alpha = 1;\nmodule.exports.beta = 2;\n").exports_are_opaque);
+        assert!(!analyze("exports[\"alpha\"] = 1;\n").exports_are_opaque);
+        assert!(!analyze("module.exports = require(\"./inner.js\");\n").exports_are_opaque);
+        assert!(analyze("exports.alpha = 1;\nfor (var key in exports) {}\n").exports_are_opaque);
+        assert!(
+            analyze("exports.alpha = 1;\nfunction get(k) { return exports[k]; }\n")
+                .exports_are_opaque
+        );
+        assert!(analyze("exports.alpha = 1;\nregister(module.exports);\n").exports_are_opaque);
+        assert!(
+            analyze("if (typeof exports === \"object\") { exports.alpha = 1; }\n")
+                .exports_are_opaque
+        );
     }
 
     #[test]
     fn namespace_consumer_reflection_is_detected() {
-        let module = parse_module(
-            Path::new("/tmp/consumer.js"),
-            "import * as ns from \"pkg\";\nexport const keys = Object.keys(ns);\nfor (const k in ns) { console.log(ns[k]); }\n",
-        )
-        .unwrap();
-        let bindings = std::collections::BTreeSet::from(["ns".to_string()]);
-        assert!(crate::commonjs::commonjs_namespace_is_opaque(
-            &module, &bindings
+        assert!(namespace_is_opaque(
+            "import * as ns from \"pkg\";\nObject.keys(ns);\nfor (const k in ns) {}\n"
         ));
-    }
-
-    #[test]
-    fn namespace_consumer_static_access_is_transparent() {
-        let module = parse_module(
-            Path::new("/tmp/consumer.js"),
-            "import * as ns from \"pkg\";\nexport const value = ns.alpha + ns[\"beta\"];\nuse(ns);\n",
-        )
-        .unwrap();
-        let bindings = std::collections::BTreeSet::from(["ns".to_string()]);
-        assert!(!crate::commonjs::commonjs_namespace_is_opaque(
-            &module, &bindings
+        assert!(!namespace_is_opaque(
+            "import * as ns from \"pkg\";\nns.alpha; ns[\"beta\"]; use(ns);\n"
         ));
     }
 

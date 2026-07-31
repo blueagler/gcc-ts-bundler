@@ -5,14 +5,12 @@
 //! expression node, and one of the 15 generated-snippet parses. What it cost and
 //! what it forced is recorded in `/tmp/gcc-oxd2.md`.
 
-use oxc_ast::ast::{
-    Expression, IdentifierName, MemberExpression, Program, VariableDeclarator,
-};
-use oxc_ast::builder::AstBuilder;
 use oxc_allocator::{Allocator, FromIn};
-use oxc_str::Ident;
+use oxc_ast::ast::{Expression, IdentifierName, MemberExpression, Program, VariableDeclarator};
+use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_span::SPAN;
+use oxc_str::Ident;
 
 use std::collections::HashSet;
 
@@ -168,8 +166,7 @@ mod tests {
     /// Parse -> semantic -> our ported passes -> print, on the real oxc stack.
     fn run(source: &str) -> (Vec<String>, String) {
         let allocator = Allocator::default();
-        let parsed =
-            oxc_parser::Parser::new(&allocator, source, SourceType::mjs()).parse();
+        let parsed = oxc_parser::Parser::new(&allocator, source, SourceType::mjs()).parse();
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         let mut program = parsed.program;
         let scoping = SemanticBuilder::new()
@@ -184,11 +181,8 @@ mod tests {
             .collect::<Vec<_>>();
         names.sort();
 
-        let mut visitor = GlobalThisCompatVisitor::new(
-            &allocator,
-            &identity,
-            names.iter().cloned().collect(),
-        );
+        let mut visitor =
+            GlobalThisCompatVisitor::new(&allocator, &identity, names.iter().cloned().collect());
         visitor.visit_program(&mut program);
         (names, Codegen::new().build(&program).code)
     }

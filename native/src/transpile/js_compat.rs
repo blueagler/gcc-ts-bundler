@@ -1,13 +1,25 @@
-use super::*;
+use std::collections::HashSet;
+use std::path::Path;
 
-mod ast;
+use super::compat::collect_class_static_assignments;
+
 mod text;
 
-#[cfg(test)]
-pub(super) use self::ast::transform_js_pass_through_module;
-pub(super) use self::ast::{
-    apply_resolver_and_global_this_compat, ResolverMarks, normalize_commonjs_module, parse_module_items,
-    should_normalize_commonjs, to_emitted_commonjs_specifier, transform_js_pass_through_program,
-    DirectoryModuleSpecifierVisitor,
-};
 pub(super) use self::text::apply_js_compat_text_fixes;
+
+pub(crate) fn should_normalize_commonjs(
+    file_path: &Path,
+    analysis: &crate::commonjs::CommonJsAnalysis,
+) -> bool {
+    analysis.has_commonjs
+        && file_path.to_string_lossy().contains("/node_modules/")
+        && !file_path.to_string_lossy().ends_with(".d.ts")
+}
+
+pub(crate) fn to_emitted_commonjs_specifier(specifier: &str) -> String {
+    if specifier.starts_with('.') {
+        specifier.replace(".cjs", ".js").replace(".cts", ".js")
+    } else {
+        specifier.to_string()
+    }
+}

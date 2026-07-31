@@ -13,10 +13,8 @@ use std::path::{Path, PathBuf};
 
 use napi_derive::napi;
 use serde_json::Value;
-use swc_core::ecma::ast::*;
 
-use crate::commonjs::{analyze_commonjs_module, CommonJsAnalysis};
-use crate::module_cache::{parse_module, parse_source_file};
+use crate::commonjs::{analyze_commonjs_source, CommonJsAnalysis};
 use crate::pathing::to_goog_module_id;
 
 use self::chunk_plan::*;

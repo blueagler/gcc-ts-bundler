@@ -1,4 +1,9 @@
 use super::*;
+use oxc_allocator::Allocator;
+use oxc_ast::ast::{
+    BindingPattern, Declaration, ExportDefaultDeclarationKind, ImportOrExportKind,
+    ModuleExportName, Program as OxcProgram, Statement,
+};
 
 pub(super) fn parse_chunk_mode(value: &str) -> std::result::Result<ChunkMode, String> {
     match value {
@@ -14,28 +19,18 @@ pub(super) struct TranspileContext {
     pub(super) bundler_runtime_logical_ids: HashMap<String, String>,
     pub(super) chunk_mode: ChunkMode,
     pub(super) class_map_calls: Vec<ClassMapCallInput>,
-    /// Callees whose results are pure; declarations initialized by them stay
-    /// movable across chunks. Supplied by framework presets.
     pub(super) pure_callees: HashSet<String>,
     pub(super) commonjs_specifiers: HashSet<String>,
-    /// Shared verdict for the three CommonJS export-ABI emission sites; see
-    /// `cjs_opacity::OpaqueCommonJs`.
     pub(super) opaque_commonjs: std::sync::Arc<OpaqueCommonJs>,
     pub(super) file_metadata: HashMap<String, ClosureFileMetadata>,
     pub(super) hoist_plan: Option<std::sync::Arc<HoistPlan>>,
     pub(super) lazy_imports_by_file: HashMap<String, Vec<LazyImportInput>>,
-    /// Logical module ids that are dynamic-import targets. They require numeric
-    /// registry slots plus a named namespace facade for external consumers.
     pub(super) lazy_target_module_ids: HashSet<String>,
     pub(super) package_aliases: Vec<PackageAliasInput>,
     pub(super) resolved_module_ids: HashMap<String, String>,
     pub(super) preserved_property_names: HashSet<String>,
     pub(super) static_property_names: HashSet<String>,
-    /// Optional optimization metadata is omitted under the inference escape hatch;
-    /// semantic enum/decorator lowering remains enabled.
     pub(super) type_metadata_enabled: bool,
-    /// Module ids that the chunk plan placed in the vendor chunk. Empty
-    /// unless `chunks.vendorChunk` produced one; see `transpile::assigners`.
     pub(super) vendor_module_ids: HashSet<String>,
     pub(super) workspace_dir: PathBuf,
 }
@@ -81,9 +76,6 @@ pub(super) struct RawBundlerExportInfo {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ChunkMode {
     Off,
-    /// Every chunked build. The public `split` mode name parses to this: it
-    /// names the same emission shape, so there is one variant per shape rather
-    /// than one per mode name.
     BundlerRuntime,
 }
 
@@ -122,8 +114,20 @@ pub(super) fn collect_bundler_module_slots(
         }
         let file_path = PathBuf::from(file_name);
         let module_id = to_goog_module_id(&file_path, workspace_dir);
-        let module = parse_source_file(&file_path)?;
-        let commonjs_analysis = analyze_commonjs_module(&module);
+        let authored_source = fs::read_to_string(&file_path).map_err(|error| error.to_string())?;
+        let metadata = file_metadata.get(&closure_metadata_key(&file_path));
+        let source = metadata
+            .and_then(|metadata| metadata.decorated_output_text.as_deref())
+            .unwrap_or(&authored_source);
+        let effective_path =
+            if metadata.is_some_and(|metadata| metadata.decorated_output_text.is_some()) {
+                file_path.with_extension("js")
+            } else {
+                file_path.clone()
+            };
+        let allocator = Allocator::default();
+        let program = super::parse_oxc_program(&allocator, &effective_path, source)?;
+        let commonjs_analysis = crate::commonjs::analyze_commonjs_program(&program);
         let mut raw_exports = if should_normalize_commonjs(&file_path, &commonjs_analysis) {
             RawBundlerExportInfo {
                 explicit_exports: BTreeSet::from([
@@ -133,9 +137,9 @@ pub(super) fn collect_bundler_module_slots(
                 export_all_modules: Vec::new(),
             }
         } else {
-            collect_raw_bundler_exports(&module, &file_path, &resolution_context)?
+            collect_raw_bundler_exports(&program, &file_path, &resolution_context)?
         };
-        if let Some(metadata) = file_metadata.get(&closure_metadata_key(&file_path)) {
+        if let Some(metadata) = metadata {
             raw_exports.explicit_exports.extend(
                 metadata
                     .enums
@@ -151,7 +155,6 @@ pub(super) fn collect_bundler_module_slots(
         .iter()
         .map(|(module_id, raw)| (module_id.clone(), raw.explicit_exports.clone()))
         .collect::<HashMap<_, _>>();
-
     loop {
         let mut changed = false;
         for (module_id, raw_exports) in &raw_exports_by_module {
@@ -164,10 +167,9 @@ pub(super) fn collect_bundler_module_slots(
                 };
                 let resolved_names = resolved_export_names.entry(module_id.clone()).or_default();
                 for export_name in target_names {
-                    if export_name == "default" {
-                        continue;
+                    if export_name != "default" {
+                        changed |= resolved_names.insert(export_name);
                     }
-                    changed |= resolved_names.insert(export_name);
                 }
             }
         }
@@ -188,90 +190,123 @@ pub(super) fn collect_bundler_module_slots(
 }
 
 pub(super) fn collect_raw_bundler_exports(
-    module: &Module,
+    program: &OxcProgram<'_>,
     file_path: &Path,
     context: &TranspileContext,
 ) -> std::result::Result<RawBundlerExportInfo, String> {
     let mut raw_exports = RawBundlerExportInfo::default();
-
-    for item in &module.body {
-        match item {
-            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDecl(export_decl)) => {
-                raw_exports
-                    .explicit_exports
-                    .extend(exported_decl_names(&export_decl.decl));
-            }
-            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportNamed(named_export)) => {
-                if named_export.type_only {
+    for statement in &program.body {
+        match statement {
+            Statement::ExportNamedDeclaration(export) => {
+                if export.export_kind == ImportOrExportKind::Type {
                     continue;
                 }
-                if let Some(src) = &named_export.src {
-                    for specifier in &named_export.specifiers {
-                        match specifier {
-                            swc_core::ecma::ast::ExportSpecifier::Named(named) => {
-                                let local_name = module_export_name_to_string(&named.orig);
-                                let export_name = named
-                                    .exported
-                                    .as_ref()
-                                    .map(module_export_name_to_string)
-                                    .unwrap_or(local_name);
-                                raw_exports.explicit_exports.insert(export_name);
-                            }
-                            swc_core::ecma::ast::ExportSpecifier::Namespace(_) => {
-                                return Err(format!(
-                                    "bundler-runtime does not support namespace re-exports in {}",
-                                    file_path.display()
-                                ));
-                            }
-                            _ => {}
-                        }
-                    }
-                    if named_export.specifiers.is_empty() {
-                        let module_id = resolve_module_id_for_specifier(
-                            file_path,
-                            &src.value.to_string_lossy(),
-                            context,
-                        )?;
-                        raw_exports.export_all_modules.push(module_id);
-                    }
-                } else {
-                    for specifier in &named_export.specifiers {
-                        match specifier {
-                            swc_core::ecma::ast::ExportSpecifier::Named(named) => {
-                                let local_name = module_export_name_to_string(&named.orig);
-                                let export_name = named
-                                    .exported
-                                    .as_ref()
-                                    .map(module_export_name_to_string)
-                                    .unwrap_or(local_name);
-                                raw_exports.explicit_exports.insert(export_name);
-                            }
-                            swc_core::ecma::ast::ExportSpecifier::Namespace(_) => {
-                                return Err(format!(
-                                    "bundler-runtime does not support namespace re-exports in {}",
-                                    file_path.display()
-                                ));
-                            }
-                            _ => {}
-                        }
+                if let Some(declaration) = &export.declaration {
+                    collect_declaration_names(declaration, &mut raw_exports.explicit_exports);
+                }
+                for specifier in &export.specifiers {
+                    if specifier.export_kind == ImportOrExportKind::Value {
+                        raw_exports
+                            .explicit_exports
+                            .insert(module_export_name(&specifier.exported));
                     }
                 }
             }
-            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDefaultExpr(_))
-            | ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportDefaultDecl(_)) => {
+            Statement::ExportDefaultDeclaration(export) => {
+                if !matches!(
+                    export.declaration,
+                    ExportDefaultDeclarationKind::TSInterfaceDeclaration(_)
+                ) {
+                    raw_exports.explicit_exports.insert("default".to_string());
+                }
+            }
+            Statement::TSExportAssignment(_) => {
                 raw_exports.explicit_exports.insert("default".to_string());
             }
-            ModuleItem::ModuleDecl(swc_core::ecma::ast::ModuleDecl::ExportAll(export_all)) => {
-                let module_id = resolve_module_id_for_specifier(
-                    file_path,
-                    &export_all.src.value.to_string_lossy(),
-                    context,
-                )?;
-                raw_exports.export_all_modules.push(module_id);
+            Statement::ExportAllDeclaration(export) => {
+                if export.export_kind == ImportOrExportKind::Type {
+                    continue;
+                }
+                if export.exported.is_some() {
+                    return Err(format!(
+                        "bundler-runtime does not support namespace re-exports in {}",
+                        file_path.display()
+                    ));
+                }
+                raw_exports
+                    .export_all_modules
+                    .push(resolve_module_id_for_specifier(
+                        file_path,
+                        export.source.value.as_str(),
+                        context,
+                    )?);
             }
             _ => {}
         }
     }
-
     Ok(raw_exports)
+}
+
+fn collect_declaration_names(declaration: &Declaration<'_>, names: &mut BTreeSet<String>) {
+    match declaration {
+        Declaration::VariableDeclaration(declaration) => {
+            for declarator in &declaration.declarations {
+                collect_pattern_names(&declarator.id, names);
+            }
+        }
+        Declaration::FunctionDeclaration(declaration) => {
+            if let Some(id) = &declaration.id {
+                names.insert(id.name.to_string());
+            }
+        }
+        Declaration::ClassDeclaration(declaration) => {
+            if let Some(id) = &declaration.id {
+                names.insert(id.name.to_string());
+            }
+        }
+        Declaration::TSEnumDeclaration(declaration) => {
+            names.insert(declaration.id.name.to_string());
+        }
+        Declaration::TSModuleDeclaration(declaration) => {
+            if let oxc_ast::ast::TSModuleDeclarationName::Identifier(id) = &declaration.id {
+                names.insert(id.name.to_string());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_pattern_names(pattern: &BindingPattern<'_>, names: &mut BTreeSet<String>) {
+    match pattern {
+        BindingPattern::BindingIdentifier(identifier) => {
+            names.insert(identifier.name.to_string());
+        }
+        BindingPattern::ArrayPattern(array) => {
+            for pattern in array.elements.iter().flatten() {
+                collect_pattern_names(pattern, names);
+            }
+            if let Some(rest) = &array.rest {
+                collect_pattern_names(&rest.argument, names);
+            }
+        }
+        BindingPattern::ObjectPattern(object) => {
+            for property in &object.properties {
+                collect_pattern_names(&property.value, names);
+            }
+            if let Some(rest) = &object.rest {
+                collect_pattern_names(&rest.argument, names);
+            }
+        }
+        BindingPattern::AssignmentPattern(assignment) => {
+            collect_pattern_names(&assignment.left, names);
+        }
+    }
+}
+
+fn module_export_name(name: &ModuleExportName<'_>) -> String {
+    match name {
+        ModuleExportName::IdentifierName(identifier) => identifier.name.to_string(),
+        ModuleExportName::IdentifierReference(identifier) => identifier.name.to_string(),
+        ModuleExportName::StringLiteral(literal) => literal.value.to_string(),
+    }
 }

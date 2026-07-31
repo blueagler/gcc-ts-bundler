@@ -1,7 +1,13 @@
 use std::collections::BTreeSet;
+use std::path::Path;
 
-use swc_core::ecma::ast::*;
-use swc_core::ecma::visit::{Visit, VisitWith};
+use oxc_allocator::Allocator;
+use oxc_ast::ast::*;
+use oxc_ast_visit::{walk, Visit};
+use oxc_parser::Parser;
+use oxc_span::SourceType;
+use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator};
+use oxc_syntax::scope::ScopeFlags;
 
 #[derive(Clone, Debug, Default)]
 pub struct CommonJsAnalysis {
@@ -9,26 +15,34 @@ pub struct CommonJsAnalysis {
     pub export_names: Vec<String>,
     pub has_commonjs: bool,
     pub has_default_export: bool,
-    /// The module observes its own export surface as data: a computed key, an
-    /// enumeration, or the export object itself escaping into an expression we
-    /// cannot follow. Such a module's export names must stay literal, because
-    /// something can read them as strings at runtime.
-    ///
-    /// This is the fail-closed half of the export-name decision; see
-    /// `transpile::collect_opaque_commonjs`. Three constructs that would also
-    /// belong here are already rejected outright by `CommonJsCollector` and can
-    /// never reach normalization: computed export writes, non-literal
-    /// `require()`, and `Object.defineProperty` exports other than
-    /// `__esModule`.
     pub exports_are_opaque: bool,
     pub proxy_export: Option<String>,
     pub unsupported: Vec<String>,
 }
 
-pub fn analyze_commonjs_module(module: &Module) -> CommonJsAnalysis {
-    let mut collector = CommonJsCollector::default();
-    collector.visit_module_items(&module.body);
+pub fn analyze_commonjs_source(file_path: &Path, source: &str) -> Result<CommonJsAnalysis, String> {
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(file_path)
+        .map_err(|error| error.to_string())?
+        .with_module(true);
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if !parsed.diagnostics.is_empty() {
+        return Err(parsed
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {diagnostic}", file_path.display()))
+            .collect::<Vec<_>>()
+            .join("\n"));
+    }
+    Ok(analyze_commonjs_program(&parsed.program))
+}
 
+pub fn analyze_commonjs_program(program: &Program<'_>) -> CommonJsAnalysis {
+    let mut collector = CommonJsCollector {
+        esm_syntax: program.body.iter().any(is_module_declaration),
+        ..CommonJsCollector::default()
+    };
+    collector.visit_program(program);
     if collector.has_commonjs && collector.esm_syntax {
         collector
             .unsupported
@@ -36,7 +50,7 @@ pub fn analyze_commonjs_module(module: &Module) -> CommonJsAnalysis {
     }
 
     let mut opacity = ExportsOpacityVisitor::default();
-    module.visit_with(&mut opacity);
+    opacity.visit_program(program);
 
     CommonJsAnalysis {
         dependencies: collector.dependencies.into_iter().collect(),
@@ -49,89 +63,140 @@ pub fn analyze_commonjs_module(module: &Module) -> CommonJsAnalysis {
     }
 }
 
-/// Decides whether a CommonJS module can ever observe its own export names as
-/// strings.
-///
-/// The walk is inverted on purpose: instead of enumerating the shapes that leak
-/// (an open-ended list), it enumerates the two shapes that provably cannot —
-/// a statically-named member access on the export object, and an assignment to
-/// the export slot itself — and consumes them without descending into the
-/// export object. Anything that still reaches the export object through normal
-/// recursion is, by construction, an occurrence we did not prove safe, and the
-/// module is marked opaque. New syntax therefore fails closed by default.
+fn is_module_declaration(statement: &Statement<'_>) -> bool {
+    matches!(
+        statement,
+        Statement::ImportDeclaration(_)
+            | Statement::ExportAllDeclaration(_)
+            | Statement::ExportDefaultDeclaration(_)
+            | Statement::ExportNamedDeclaration(_)
+            | Statement::TSExportAssignment(_)
+            | Statement::TSNamespaceExportDeclaration(_)
+    )
+}
+
+fn evaluate_boolean_expr(expression: &Expression<'_>) -> Option<bool> {
+    match expression.without_parentheses() {
+        Expression::BooleanLiteral(boolean) => Some(boolean.value),
+        Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
+            evaluate_boolean_expr(&unary.argument).map(|value| !value)
+        }
+        Expression::LogicalExpression(logical) => match logical.operator {
+            LogicalOperator::And => Some(
+                evaluate_boolean_expr(&logical.left)? && evaluate_boolean_expr(&logical.right)?,
+            ),
+            LogicalOperator::Or => Some(
+                evaluate_boolean_expr(&logical.left)? || evaluate_boolean_expr(&logical.right)?,
+            ),
+            LogicalOperator::Coalesce => None,
+        },
+        Expression::BinaryExpression(binary) => match binary.operator {
+            BinaryOperator::Equality | BinaryOperator::StrictEquality => {
+                Some(static_value(&binary.left)? == static_value(&binary.right)?)
+            }
+            BinaryOperator::Inequality | BinaryOperator::StrictInequality => {
+                Some(static_value(&binary.left)? != static_value(&binary.right)?)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn static_value(expression: &Expression<'_>) -> Option<String> {
+    match expression.without_parentheses() {
+        Expression::StringLiteral(value) => Some(value.value.to_string()),
+        Expression::BooleanLiteral(value) => Some(value.value.to_string()),
+        Expression::StaticMemberExpression(node_env)
+            if node_env.property.name == "NODE_ENV"
+                && matches!(&node_env.object, Expression::StaticMemberExpression(env)
+                    if env.property.name == "env"
+                        && matches!(&env.object, Expression::Identifier(process) if process.name == "process")) =>
+        {
+            Some("production".to_string())
+        }
+        _ => None,
+    }
+}
+
 #[derive(Default)]
 struct ExportsOpacityVisitor {
     opaque: bool,
 }
 
 impl ExportsOpacityVisitor {
-    /// A statically-named read/write: `exports.foo`, `module.exports["foo"]`.
-    /// Returns false when the key is computed and not a string literal.
-    fn visit_static_member(&mut self, member: &MemberExpr) -> bool {
-        if !is_commonjs_export_object(&member.obj) {
-            return false;
-        }
-        match &member.prop {
-            MemberProp::Ident(_) => true,
-            MemberProp::Computed(computed) => {
-                if string_literal_expr(&computed.expr).is_some() {
-                    true
-                } else {
-                    // `exports[k]` — the key is data.
-                    self.opaque = true;
-                    true
-                }
+    fn visit_static_member(&mut self, expression: &Expression<'_>) -> bool {
+        match expression.without_parentheses() {
+            Expression::StaticMemberExpression(member)
+                if is_commonjs_export_object(&member.object) =>
+            {
+                true
             }
-            MemberProp::PrivateName(_) => false,
+            Expression::ComputedMemberExpression(member)
+                if is_commonjs_export_object(&member.object) =>
+            {
+                if string_literal_expr(&member.expression).is_none() {
+                    self.opaque = true;
+                }
+                true
+            }
+            _ => false,
         }
     }
 }
 
-impl Visit for ExportsOpacityVisitor {
-    fn visit_expr(&mut self, expression: &Expr) {
-        if let Expr::Member(member) = expression {
-            if self.visit_static_member(member) {
-                // Consumed: deliberately do not descend into `member.obj`, so a
-                // bare export-object reference can only be reached when no
-                // safe shape claimed it.
-                return;
-            }
+impl<'a> Visit<'a> for ExportsOpacityVisitor {
+    fn visit_expression(&mut self, expression: &Expression<'a>) {
+        if self.visit_static_member(expression) {
+            return;
         }
         if is_commonjs_export_object(expression) {
             self.opaque = true;
             return;
         }
-        expression.visit_children_with(self);
+        walk::walk_expression(self, expression);
     }
 
-    fn visit_assign_expr(&mut self, expression: &AssignExpr) {
-        if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &expression.left {
-            // `module.exports = …` replaces the slot; `exports.foo = …` names a
-            // key. Neither exposes a name as data.
-            if is_module_exports_target(member) || self.visit_static_member(member) {
-                expression.right.visit_with(self);
+    fn visit_assignment_expression(&mut self, assignment: &AssignmentExpression<'a>) {
+        if let Some(target) = assignment.left.as_simple_assignment_target() {
+            if is_module_exports_target(target) || is_static_export_member_target(target, self) {
+                self.visit_expression(&assignment.right);
                 return;
             }
         }
-        expression.visit_children_with(self);
+        walk::walk_assignment_expression(self, assignment);
     }
 
-    fn visit_for_in_stmt(&mut self, statement: &ForInStmt) {
+    fn visit_for_in_statement(&mut self, statement: &ForInStatement<'a>) {
         if is_commonjs_export_object(&statement.right) {
-            // `for (const key in exports)` reads every name as a string.
             self.opaque = true;
         }
-        statement.visit_children_with(self);
+        walk::walk_for_in_statement(self, statement);
     }
 }
 
-/// Consumer-side counterpart: does `module` observe any of `bindings` (locals
-/// bound to an imported CommonJS namespace) as data?
-///
-/// Only key-reading shapes count here. Passing the namespace object around is
-/// safe under whole-program renaming, because every access site renames with
-/// it; what is not safe is turning a name into a string.
-pub fn commonjs_namespace_is_opaque(module: &Module, bindings: &BTreeSet<String>) -> bool {
+fn is_static_export_member_target(
+    target: &SimpleAssignmentTarget<'_>,
+    visitor: &mut ExportsOpacityVisitor,
+) -> bool {
+    match target {
+        SimpleAssignmentTarget::StaticMemberExpression(member) => {
+            is_commonjs_export_object(&member.object)
+        }
+        SimpleAssignmentTarget::ComputedMemberExpression(member) => {
+            if !is_commonjs_export_object(&member.object) {
+                return false;
+            }
+            if string_literal_expr(&member.expression).is_none() {
+                visitor.opaque = true;
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+pub fn commonjs_namespace_is_opaque(program: &Program<'_>, bindings: &BTreeSet<String>) -> bool {
     if bindings.is_empty() {
         return false;
     }
@@ -139,7 +204,7 @@ pub fn commonjs_namespace_is_opaque(module: &Module, bindings: &BTreeSet<String>
         bindings,
         opaque: false,
     };
-    module.visit_with(&mut visitor);
+    visitor.visit_program(program);
     visitor.opaque
 }
 
@@ -149,28 +214,28 @@ struct NamespaceOpacityVisitor<'a> {
 }
 
 impl NamespaceOpacityVisitor<'_> {
-    fn is_namespace(&self, expression: &Expr) -> bool {
-        matches!(expression, Expr::Ident(ident) if self.bindings.contains(ident.sym.as_ref()))
+    fn is_namespace(&self, expression: &Expression<'_>) -> bool {
+        matches!(expression.without_parentheses(), Expression::Identifier(identifier) if self.bindings.contains(identifier.name.as_str()))
     }
 }
 
-impl Visit for NamespaceOpacityVisitor<'_> {
-    fn visit_member_expr(&mut self, member: &MemberExpr) {
-        if self.is_namespace(&member.obj) {
-            if let MemberProp::Computed(computed) = &member.prop {
-                if string_literal_expr(&computed.expr).is_none() {
-                    self.opaque = true;
-                }
-            }
-        }
-        member.visit_children_with(self);
+impl<'a> Visit<'a> for NamespaceOpacityVisitor<'_> {
+    fn visit_static_member_expression(&mut self, member: &StaticMemberExpression<'a>) {
+        walk::walk_static_member_expression(self, member);
     }
 
-    fn visit_for_in_stmt(&mut self, statement: &ForInStmt) {
+    fn visit_computed_member_expression(&mut self, member: &ComputedMemberExpression<'a>) {
+        if self.is_namespace(&member.object) && string_literal_expr(&member.expression).is_none() {
+            self.opaque = true;
+        }
+        walk::walk_computed_member_expression(self, member);
+    }
+
+    fn visit_for_in_statement(&mut self, statement: &ForInStatement<'a>) {
         if self.is_namespace(&statement.right) {
             self.opaque = true;
         }
-        statement.visit_children_with(self);
+        walk::walk_for_in_statement(self, statement);
     }
 }
 
@@ -183,85 +248,10 @@ struct CommonJsCollector {
     has_default_export: bool,
     proxy_export: Option<String>,
     unsupported: Vec<String>,
-    /// Depth of enclosing function scopes that bind `exports`/`module` as
-    /// parameters. Bundlers wrap CommonJS package sources in
-    /// `__commonJS({ "file.js"(exports, module) { ... } })` inside an
-    /// otherwise pure ESM file; those assignments write to a local parameter,
-    /// not to a module record, so they must not mark the file as CommonJS.
     shadowed_exports_depth: u32,
 }
 
 impl CommonJsCollector {
-    fn visit_module_items(&mut self, items: &[ModuleItem]) {
-        for item in items {
-            self.visit_module_item(item);
-        }
-    }
-
-    fn visit_module_item(&mut self, item: &ModuleItem) {
-        match item {
-            ModuleItem::ModuleDecl(_) => {
-                self.esm_syntax = true;
-            }
-            ModuleItem::Stmt(statement) => self.visit_stmt(statement),
-        }
-    }
-
-    fn visit_stmt(&mut self, statement: &Stmt) {
-        match statement {
-            Stmt::Block(block) => {
-                for statement in &block.stmts {
-                    self.visit_stmt(statement);
-                }
-            }
-            Stmt::If(if_statement) => match evaluate_boolean_expr(&if_statement.test) {
-                Some(true) => self.visit_stmt(&if_statement.cons),
-                Some(false) => {
-                    if let Some(alt) = &if_statement.alt {
-                        self.visit_stmt(alt);
-                    }
-                }
-                None => {
-                    if_statement.test.visit_with(self);
-                    self.visit_stmt(&if_statement.cons);
-                    if let Some(alt) = &if_statement.alt {
-                        self.visit_stmt(alt);
-                    }
-                }
-            },
-            Stmt::Labeled(labeled) => self.visit_stmt(&labeled.body),
-            Stmt::With(with_statement) => {
-                with_statement.obj.visit_with(self);
-                self.visit_stmt(&with_statement.body);
-            }
-            Stmt::Switch(switch_statement) => {
-                switch_statement.discriminant.visit_with(self);
-                for case in &switch_statement.cases {
-                    case.test.visit_with(self);
-                    for statement in &case.cons {
-                        self.visit_stmt(statement);
-                    }
-                }
-            }
-            Stmt::Try(try_statement) => {
-                for statement in &try_statement.block.stmts {
-                    self.visit_stmt(statement);
-                }
-                if let Some(handler) = &try_statement.handler {
-                    for statement in &handler.body.stmts {
-                        self.visit_stmt(statement);
-                    }
-                }
-                if let Some(finalizer) = &try_statement.finalizer {
-                    for statement in &finalizer.stmts {
-                        self.visit_stmt(statement);
-                    }
-                }
-            }
-            _ => statement.visit_with(self),
-        }
-    }
-
     fn record_dependency(&mut self, specifier: String) {
         self.has_commonjs = true;
         self.dependencies.insert(specifier);
@@ -300,269 +290,246 @@ impl CommonJsCollector {
         }
     }
 
-    /// Visits a function body with `exports`/`module` treated as local when the
-    /// parameter list binds either name.
-    fn visit_shadowing_scope<T: VisitWith<Self>>(&mut self, shadows: bool, node: &T) {
+    fn visit_shadowing_scope<'a, F>(&mut self, shadows: bool, visit: F)
+    where
+        F: FnOnce(&mut Self),
+    {
         if shadows {
             self.shadowed_exports_depth += 1;
-            node.visit_children_with(self);
+            visit(self);
             self.shadowed_exports_depth -= 1;
-            return;
+        } else {
+            visit(self);
         }
-        node.visit_children_with(self);
     }
 }
 
-/// True when any parameter pattern binds `exports` or `module` directly.
-fn binds_commonjs_wrapper_names<'a>(patterns: impl Iterator<Item = &'a Pat>) -> bool {
-    patterns.into_iter().any(|pattern| {
-        matches!(pattern, Pat::Ident(ident) if ident.id.sym == *"exports" || ident.id.sym == *"module")
-    })
-}
-
-impl Visit for CommonJsCollector {
-    fn visit_function(&mut self, node: &Function) {
-        let shadows = binds_commonjs_wrapper_names(node.params.iter().map(|param| &param.pat));
-        self.visit_shadowing_scope(shadows, node);
-    }
-
-    fn visit_arrow_expr(&mut self, node: &ArrowExpr) {
-        let shadows = binds_commonjs_wrapper_names(node.params.iter());
-        self.visit_shadowing_scope(shadows, node);
-    }
-
-    fn visit_assign_expr(&mut self, expression: &AssignExpr) {
-        if self.shadowed_exports_depth > 0 {
-            expression.visit_children_with(self);
+impl<'a> Visit<'a> for CommonJsCollector {
+    fn visit_statement(&mut self, statement: &Statement<'a>) {
+        if let Statement::IfStatement(if_statement) = statement {
+            match evaluate_boolean_expr(&if_statement.test) {
+                Some(true) => self.visit_statement(&if_statement.consequent),
+                Some(false) => {
+                    if let Some(alternate) = &if_statement.alternate {
+                        self.visit_statement(alternate);
+                    }
+                }
+                None => walk::walk_if_statement(self, if_statement),
+            }
             return;
         }
-        if expression.op != AssignOp::Assign {
-            expression.visit_children_with(self);
+        walk::walk_statement(self, statement);
+    }
+
+    fn visit_function(&mut self, function: &Function<'a>, flags: ScopeFlags) {
+        let shadows = function
+            .params
+            .items
+            .iter()
+            .any(|parameter| binds_commonjs_wrapper_name(&parameter.pattern));
+        self.visit_shadowing_scope(shadows, |visitor| {
+            walk::walk_function(visitor, function, flags)
+        });
+    }
+
+    fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+        let shadows = arrow
+            .params
+            .items
+            .iter()
+            .any(|parameter| binds_commonjs_wrapper_name(&parameter.pattern));
+        self.visit_shadowing_scope(shadows, |visitor| {
+            walk::walk_arrow_function_expression(visitor, arrow)
+        });
+    }
+
+    fn visit_assignment_expression(&mut self, assignment: &AssignmentExpression<'a>) {
+        if self.shadowed_exports_depth > 0 || assignment.operator != AssignmentOperator::Assign {
+            walk::walk_assignment_expression(self, assignment);
             return;
         }
-
-        if let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = &expression.left {
-            if is_module_exports_target(member) {
+        if let Some(target) = assignment.left.as_simple_assignment_target() {
+            if is_module_exports_target(target) {
                 self.record_default_export();
-                if let Expr::Call(call_expr) = &*expression.right {
-                    if let Some(specifier) = require_call_specifier(call_expr) {
+                if let Expression::CallExpression(call) = assignment.right.without_parentheses() {
+                    if let Some(specifier) = require_specifier(call) {
                         self.record_dependency(specifier.clone());
                         self.record_proxy_export(specifier);
                     }
-                } else if let Some(object_keys) = object_literal_export_names(&expression.right) {
-                    for key in object_keys {
-                        self.record_named_export(key);
+                } else if let Some(names) = object_literal_export_names(&assignment.right) {
+                    for name in names {
+                        self.record_named_export(name);
                     }
                 }
-            } else if is_commonjs_export_object(&member.obj) {
-                if let Some(export_name) = member_prop_name(&member.prop) {
-                    self.record_named_export(export_name);
-                } else {
-                    self.has_commonjs = true;
-                    self.unsupported.push(
-                        "Computed CommonJS export names must be string literals.".to_string(),
-                    );
-                }
+            } else if let Some(name) = export_member_name(target) {
+                self.record_named_export(name);
+            } else if is_export_member_target(target) {
+                self.has_commonjs = true;
+                self.unsupported
+                    .push("Computed CommonJS export names must be string literals.".to_string());
             }
         }
-
-        expression.visit_children_with(self);
+        walk::walk_assignment_expression(self, assignment);
     }
 
-    fn visit_call_expr(&mut self, expression: &CallExpr) {
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
         if self.shadowed_exports_depth > 0 {
-            expression.visit_children_with(self);
+            walk::walk_call_expression(self, call);
             return;
         }
-        if let Some(specifier) = require_call_specifier(expression) {
+        if let Some(specifier) = require_specifier(call) {
             self.record_dependency(specifier);
             return;
         }
-
-        if is_commonjs_require_call(expression) {
+        if is_commonjs_require_call(call) {
             self.has_commonjs = true;
             self.unsupported
                 .push("Only string-literal require() calls are supported.".to_string());
         }
-
-        if let Some(export_name) = object_define_property_export(expression) {
+        if let Some(export_name) = object_define_property_export(call) {
             if export_name != "__esModule" {
                 self.has_commonjs = true;
                 self.unsupported.push(format!(
-                    "CommonJS Object.defineProperty export for \"{export_name}\" is not supported.",
+                    "CommonJS Object.defineProperty export for \"{export_name}\" is not supported."
                 ));
             }
         }
-
-        expression.visit_children_with(self);
+        walk::walk_call_expression(self, call);
     }
 }
 
-pub fn evaluate_boolean_expr(expression: &Expr) -> Option<bool> {
-    match expression {
-        Expr::Lit(Lit::Bool(boolean)) => Some(boolean.value),
-        Expr::Paren(parenthesized) => evaluate_boolean_expr(&parenthesized.expr),
-        Expr::Unary(unary) if unary.op == UnaryOp::Bang => {
-            evaluate_boolean_expr(&unary.arg).map(|value| !value)
-        }
-        Expr::Bin(binary) => match binary.op {
-            BinaryOp::LogicalAnd => {
-                Some(evaluate_boolean_expr(&binary.left)? && evaluate_boolean_expr(&binary.right)?)
-            }
-            BinaryOp::LogicalOr => {
-                Some(evaluate_boolean_expr(&binary.left)? || evaluate_boolean_expr(&binary.right)?)
-            }
-            BinaryOp::EqEq | BinaryOp::EqEqEq => {
-                Some(compare_literal_exprs(&binary.left, &binary.right)? == 0)
-            }
-            BinaryOp::NotEq | BinaryOp::NotEqEq => {
-                Some(compare_literal_exprs(&binary.left, &binary.right)? != 0)
-            }
-            _ => None,
-        },
-        _ => None,
-    }
+fn binds_commonjs_wrapper_name(pattern: &BindingPattern<'_>) -> bool {
+    matches!(pattern, BindingPattern::BindingIdentifier(identifier) if identifier.name == "exports" || identifier.name == "module")
 }
 
-fn compare_literal_exprs(left: &Expr, right: &Expr) -> Option<i32> {
-    let left_value = static_env_value(left)?;
-    let right_value = static_env_value(right)?;
-    Some(if left_value == right_value { 0 } else { 1 })
-}
-
-fn static_env_value(expression: &Expr) -> Option<String> {
-    match expression {
-        Expr::Lit(Lit::Str(value)) => Some(value.value.to_string_lossy().to_string()),
-        Expr::Lit(Lit::Bool(value)) => Some(value.value.to_string()),
-        Expr::Member(member) if is_process_env_node_env(member) => Some("production".to_string()),
-        Expr::Paren(parenthesized) => static_env_value(&parenthesized.expr),
-        _ => None,
-    }
-}
-
-fn is_process_env_node_env(member: &MemberExpr) -> bool {
-    let MemberProp::Ident(node_env) = &member.prop else {
-        return false;
-    };
-    if node_env.sym != *"NODE_ENV" {
-        return false;
-    }
-    let Expr::Member(env_member) = &*member.obj else {
-        return false;
-    };
-    let MemberProp::Ident(env_ident) = &env_member.prop else {
-        return false;
-    };
-    if env_ident.sym != *"env" {
-        return false;
-    }
-    matches!(&*env_member.obj, Expr::Ident(process_ident) if process_ident.sym == *"process")
-}
-
-fn require_call_specifier(expression: &CallExpr) -> Option<String> {
-    let Callee::Expr(callee) = &expression.callee else {
-        return None;
-    };
-    let Expr::Ident(ident) = &**callee else {
-        return None;
-    };
-    if ident.sym != *"require" || expression.args.len() != 1 {
-        return None;
-    }
-
-    string_literal_expr(&expression.args[0].expr)
-}
-
-fn is_commonjs_require_call(expression: &CallExpr) -> bool {
-    let Callee::Expr(callee) = &expression.callee else {
-        return false;
-    };
-    matches!(&**callee, Expr::Ident(ident) if ident.sym == *"require")
-}
-
-fn object_define_property_export(expression: &CallExpr) -> Option<String> {
-    let Callee::Expr(callee) = &expression.callee else {
-        return None;
-    };
-    let Expr::Member(member) = &**callee else {
-        return None;
-    };
-    let MemberProp::Ident(ident) = &member.prop else {
-        return None;
-    };
-    if ident.sym != *"defineProperty" {
-        return None;
-    }
-    let Expr::Ident(object_ident) = &*member.obj else {
-        return None;
-    };
-    if object_ident.sym != *"Object" || expression.args.len() < 2 {
-        return None;
-    }
-    let target = &expression.args[0].expr;
-    if !matches!(&**target, Expr::Ident(ident) if ident.sym == *"exports")
-        && !matches!(&**target, Expr::Member(member) if is_module_exports_target(member))
+fn require_specifier(call: &CallExpression<'_>) -> Option<String> {
+    if call.arguments.len() != 1
+        || !matches!(&call.callee, Expression::Identifier(identifier) if identifier.name == "require")
     {
         return None;
     }
-
-    string_literal_expr(&expression.args[1].expr)
+    string_literal_argument(&call.arguments[0])
 }
 
-fn is_module_exports_target(member: &MemberExpr) -> bool {
-    let MemberProp::Ident(exports_ident) = &member.prop else {
-        return false;
+fn is_commonjs_require_call(call: &CallExpression<'_>) -> bool {
+    matches!(&call.callee, Expression::Identifier(identifier) if identifier.name == "require")
+}
+
+fn object_define_property_export(call: &CallExpression<'_>) -> Option<String> {
+    if call.arguments.len() < 2 {
+        return None;
+    }
+    let Expression::StaticMemberExpression(callee) = &call.callee else {
+        return None;
     };
-    if exports_ident.sym != *"exports" {
-        return false;
+    if callee.property.name != "defineProperty"
+        || !matches!(&callee.object, Expression::Identifier(object) if object.name == "Object")
+    {
+        return None;
     }
-    matches!(&*member.obj, Expr::Ident(module_ident) if module_ident.sym == *"module")
+    let target = call.arguments[0].as_expression()?;
+    if !is_commonjs_export_object(target) {
+        return None;
+    }
+    string_literal_argument(&call.arguments[1])
 }
 
-fn is_commonjs_export_object(expression: &Expr) -> bool {
-    if matches!(expression, Expr::Ident(ident) if ident.sym == *"exports") {
-        return true;
+fn is_module_exports_target(target: &SimpleAssignmentTarget<'_>) -> bool {
+    match target {
+        SimpleAssignmentTarget::StaticMemberExpression(member) => {
+            matches!(&member.object, Expression::Identifier(identifier) if identifier.name == "module")
+                && member.property.name == "exports"
+        }
+        SimpleAssignmentTarget::ComputedMemberExpression(member) => {
+            matches!(&member.object, Expression::Identifier(identifier) if identifier.name == "module")
+                && string_literal_expr(&member.expression).as_deref() == Some("exports")
+        }
+        _ => false,
     }
-
-    matches!(expression, Expr::Member(member) if is_module_exports_target(member))
 }
 
-fn member_prop_name(prop: &MemberProp) -> Option<String> {
-    match prop {
-        MemberProp::Ident(ident) => Some(ident.sym.to_string()),
-        MemberProp::Computed(computed) => string_literal_expr(&computed.expr),
+fn is_commonjs_export_object(expression: &Expression<'_>) -> bool {
+    match expression.without_parentheses() {
+        Expression::Identifier(identifier) => identifier.name == "exports",
+        Expression::StaticMemberExpression(member) => {
+            matches!(&member.object, Expression::Identifier(identifier) if identifier.name == "module")
+                && member.property.name == "exports"
+        }
+        Expression::ComputedMemberExpression(member) => {
+            matches!(&member.object, Expression::Identifier(identifier) if identifier.name == "module")
+                && string_literal_expr(&member.expression).as_deref() == Some("exports")
+        }
+        _ => false,
+    }
+}
+
+fn is_export_member_target(target: &SimpleAssignmentTarget<'_>) -> bool {
+    match target {
+        SimpleAssignmentTarget::StaticMemberExpression(member) => {
+            is_commonjs_export_object(&member.object)
+        }
+        SimpleAssignmentTarget::ComputedMemberExpression(member) => {
+            is_commonjs_export_object(&member.object)
+        }
+        _ => false,
+    }
+}
+
+fn export_member_name(target: &SimpleAssignmentTarget<'_>) -> Option<String> {
+    match target {
+        SimpleAssignmentTarget::StaticMemberExpression(member)
+            if is_commonjs_export_object(&member.object) =>
+        {
+            Some(member.property.name.to_string())
+        }
+        SimpleAssignmentTarget::ComputedMemberExpression(member)
+            if is_commonjs_export_object(&member.object) =>
+        {
+            string_literal_expr(&member.expression)
+        }
         _ => None,
     }
 }
 
-fn object_literal_export_names(expression: &Expr) -> Option<Vec<String>> {
-    let Expr::Object(object) = expression else {
+fn object_literal_export_names(expression: &Expression<'_>) -> Option<Vec<String>> {
+    let Expression::ObjectExpression(object) = expression.without_parentheses() else {
         return None;
     };
-
-    let mut export_names = Vec::new();
-    for property in &object.props {
-        let PropOrSpread::Prop(property) = property else {
+    let mut names = Vec::new();
+    for property in &object.properties {
+        let ObjectPropertyKind::ObjectProperty(property) = property else {
             return None;
         };
-        let Prop::KeyValue(key_value) = &**property else {
+        if property.kind != PropertyKind::Init || property.method || property.shorthand {
             return None;
-        };
-        match &key_value.key {
-            PropName::Ident(ident) => export_names.push(ident.sym.to_string()),
-            PropName::Str(string) => export_names.push(string.value.to_string_lossy().to_string()),
+        }
+        match &property.key {
+            PropertyKey::StaticIdentifier(identifier) => names.push(identifier.name.to_string()),
+            PropertyKey::StringLiteral(literal) => names.push(literal.value.to_string()),
             _ => return None,
         }
     }
-
-    Some(export_names)
+    Some(names)
 }
 
-fn string_literal_expr(expression: &Expr) -> Option<String> {
-    match expression {
-        Expr::Lit(Lit::Str(string)) => Some(string.value.to_string_lossy().to_string()),
-        Expr::Tpl(template) if template.exprs.is_empty() && template.quasis.len() == 1 => {
-            Some(template.quasis[0].raw.to_string())
+fn string_literal_argument(argument: &Argument<'_>) -> Option<String> {
+    string_literal_expr(argument.as_expression()?)
+}
+
+fn string_literal_expr(expression: &Expression<'_>) -> Option<String> {
+    match expression.without_parentheses() {
+        Expression::StringLiteral(literal) => Some(literal.value.to_string()),
+        Expression::TemplateLiteral(template)
+            if template.expressions.is_empty() && template.quasis.len() == 1 =>
+        {
+            Some(
+                template.quasis[0]
+                    .value
+                    .cooked
+                    .as_ref()
+                    .unwrap_or(&template.quasis[0].value.raw)
+                    .to_string(),
+            )
         }
         _ => None,
     }
@@ -570,14 +537,10 @@ fn string_literal_expr(expression: &Expr) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::analyze_commonjs_module;
-    use crate::module_cache::parse_module;
-    use std::path::PathBuf;
+    use super::*;
 
-    fn analyze(source: &str) -> super::CommonJsAnalysis {
-        let file_path = PathBuf::from("/tmp/cjs-test.js");
-        let module = parse_module(&file_path, source).unwrap();
-        analyze_commonjs_module(&module)
+    fn analyze(source: &str) -> CommonJsAnalysis {
+        analyze_commonjs_source(Path::new("/tmp/cjs-test.js"), source).unwrap()
     }
 
     #[test]
@@ -599,7 +562,6 @@ mod tests {
 
     #[test]
     fn ignores_exports_shadowed_by_bundler_wrapper_parameters() {
-        // esbuild's `__commonJS` wrapper shape inside a pure ESM bundle.
         let analysis = analyze(
             "var require_a = __commonJS({ \"a.js\"(exports, module) { exports.jsx = 1; module.exports = null; } });\nexport { require_a };",
         );
@@ -610,36 +572,31 @@ mod tests {
 
     #[test]
     fn still_detects_commonjs_outside_shadowing_scopes() {
-        let analysis = analyze(
-            "function wrap(exports) { exports.inner = 1; }\nmodule.exports.outer = 2;",
-        );
+        let analysis =
+            analyze("function wrap(exports) { exports.inner = 1; }\nmodule.exports.outer = 2;");
         assert!(analysis.has_commonjs);
         assert_eq!(analysis.export_names, vec!["outer".to_string()]);
     }
 
     #[test]
-    fn detects_proxy_exports() {
-        let analysis = analyze("module.exports = require('./dep');");
-        assert_eq!(analysis.proxy_export.as_deref(), Some("./dep"));
-    }
-
-    #[test]
-    fn folds_production_env_condition() {
+    fn detects_proxy_exports_and_folds_production_branch() {
         let analysis = analyze(
             "if (process.env.NODE_ENV === 'production') { module.exports = require('./prod'); } else { module.exports = require('./dev'); }",
         );
         assert_eq!(analysis.dependencies, vec!["./prod".to_string()]);
+        assert_eq!(analysis.proxy_export.as_deref(), Some("./prod"));
     }
 
     #[test]
-    fn rejects_dynamic_require() {
-        let analysis = analyze("require(name);");
-        assert!(!analysis.unsupported.is_empty());
+    fn rejects_dynamic_require_and_computed_export_names() {
+        assert!(!analyze("require(name);").unsupported.is_empty());
+        assert!(!analyze("exports[name] = 1;").unsupported.is_empty());
     }
 
     #[test]
-    fn rejects_computed_export_names() {
-        let analysis = analyze("exports[name] = 1;");
-        assert!(!analysis.unsupported.is_empty());
+    fn opacity_is_fail_closed() {
+        assert!(!analyze("exports.alpha = 1;").exports_are_opaque);
+        assert!(analyze("exports.alpha = 1; Object.keys(exports);").exports_are_opaque);
+        assert!(analyze("exports.alpha = 1; exports[key];").exports_are_opaque);
     }
 }

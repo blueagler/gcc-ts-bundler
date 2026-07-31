@@ -24,6 +24,141 @@ pub(crate) fn apply<'a>(
     visitor.visit_program(program);
 }
 
+pub(crate) fn collect_pair_array_class_map_property_names(
+    program: &Program<'_>,
+    calls: &[ClassMapCallInput],
+) -> Result<HashSet<String>, String> {
+    struct PairRule {
+        arg_index: usize,
+        callee: String,
+        module_pattern: Option<regex::Regex>,
+        key_pattern: Option<regex::Regex>,
+        key_exclude_pattern: Option<regex::Regex>,
+    }
+
+    let compile = |callee: &str, field: &str, pattern: Option<&str>| {
+        pattern.map(regex::Regex::new).transpose().map_err(|error| {
+            format!("Invalid compat.classMapCalls {field} for {callee:?}: {error}")
+        })
+    };
+    let mut rules = Vec::new();
+    for call in calls {
+        if call.keySource.as_deref() != Some("pairArray") {
+            continue;
+        }
+        rules.push(PairRule {
+            arg_index: call.argIndex as usize,
+            callee: call.callee.clone(),
+            module_pattern: compile(
+                &call.callee,
+                "calleeModulePattern",
+                call.calleeModulePattern.as_deref(),
+            )?,
+            key_pattern: compile(&call.callee, "keyPattern", call.keyPattern.as_deref())?,
+            key_exclude_pattern: compile(
+                &call.callee,
+                "keyExcludePattern",
+                call.keyExcludePattern.as_deref(),
+            )?,
+        });
+    }
+    if rules.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let mut identities = HashMap::<String, (String, String)>::new();
+    for statement in &program.body {
+        let Statement::ImportDeclaration(import) = statement else {
+            continue;
+        };
+        let source = import.source.value.to_string();
+        for specifier in import.specifiers.iter().flatten() {
+            match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                    identities.insert(
+                        specifier.local.name.to_string(),
+                        (module_export_name(&specifier.imported), source.clone()),
+                    );
+                }
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                    identities.insert(
+                        specifier.local.name.to_string(),
+                        ("default".to_string(), source.clone()),
+                    );
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
+            }
+        }
+    }
+
+    let mut names = HashSet::new();
+    struct Collector<'a> {
+        identities: &'a HashMap<String, (String, String)>,
+        names: &'a mut HashSet<String>,
+        rules: &'a [PairRule],
+    }
+    impl<'a> Visit<'a> for Collector<'_> {
+        fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+            walk::walk_call_expression(self, call);
+            let Expression::Identifier(identifier) = &call.callee else {
+                return;
+            };
+            let Some((imported, source)) = self.identities.get(identifier.name.as_str()) else {
+                return;
+            };
+            for rule in self.rules {
+                if imported != &rule.callee
+                    || rule
+                        .module_pattern
+                        .as_ref()
+                        .is_some_and(|pattern| !pattern.is_match(source))
+                {
+                    continue;
+                }
+                let Some(Expression::ArrayExpression(entries)) = call
+                    .arguments
+                    .get(rule.arg_index)
+                    .and_then(Argument::as_expression)
+                else {
+                    continue;
+                };
+                for entry in &entries.elements {
+                    let Some(Expression::ArrayExpression(pair)) = entry.as_expression() else {
+                        continue;
+                    };
+                    let Some(Expression::StringLiteral(key)) = pair
+                        .elements
+                        .first()
+                        .and_then(ArrayExpressionElement::as_expression)
+                    else {
+                        continue;
+                    };
+                    let key = key.value.to_string();
+                    if rule
+                        .key_exclude_pattern
+                        .as_ref()
+                        .is_some_and(|pattern| pattern.is_match(&key))
+                        || rule
+                            .key_pattern
+                            .as_ref()
+                            .is_some_and(|pattern| !pattern.is_match(&key))
+                    {
+                        continue;
+                    }
+                    self.names.insert(key);
+                }
+            }
+        }
+    }
+    Collector {
+        identities: &identities,
+        names: &mut names,
+        rules: &rules,
+    }
+    .visit_program(program);
+    Ok(names)
+}
+
 #[derive(Clone)]
 struct Rule {
     arg_index: usize,

@@ -11,8 +11,11 @@ use oxc_ast::ast::{
     TSModuleDeclarationBody, TSModuleDeclarationName, UnaryOperator, VariableDeclaration,
     VariableDeclarationKind,
 };
+#[cfg(test)]
 use oxc_codegen::Codegen;
+#[cfg(test)]
 use oxc_semantic::SemanticBuilder;
+#[cfg(test)]
 use oxc_span::SourceType;
 use oxc_transformer::{JsxOptions, JsxRuntime, TransformOptions, Transformer};
 use std::collections::{HashMap, HashSet};
@@ -20,6 +23,7 @@ use std::path::Path;
 
 use super::identity_oxc::ModuleIdentity;
 
+#[cfg(test)]
 pub(crate) fn transform_program<'a>(
     allocator: &'a Allocator,
     path: &Path,
@@ -73,6 +77,7 @@ pub(crate) fn transform_program_with_enum_values<'a>(
     }
     Ok(ModuleIdentity::new(result.scoping))
 }
+#[cfg(test)]
 /// parse -> semantic -> oxc TS/JSX lowering -> print. The baseline the owned
 /// passes are measured against.
 pub(crate) fn lower_with_oxc(path: &Path, source: &str) -> Result<String, String> {

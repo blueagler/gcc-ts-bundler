@@ -14,7 +14,6 @@ out/
 *.tsbuildinfo
 native/index.node
 native/target/
-native/oxc-probe/target/
 bin/
 dist/
 npm/

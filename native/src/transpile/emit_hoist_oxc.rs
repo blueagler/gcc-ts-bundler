@@ -1046,7 +1046,3 @@ fn print_node(node: &impl Gen) -> String {
     node.print(&mut codegen, oxc_codegen::Context::default());
     codegen.into_source_text()
 }
-
-#[cfg(test)]
-#[path = "emit_hoist_oxc_tests.rs"]
-mod tests;

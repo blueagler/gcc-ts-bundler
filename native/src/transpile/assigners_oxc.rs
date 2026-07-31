@@ -284,16 +284,8 @@ mod tests {
             .collect()
     }
 
-    fn swc_names(source: &str, bindings: &[&str]) -> Vec<String> {
-        let bindings = bindings
-            .iter()
-            .map(|name| name.to_string())
-            .collect::<HashSet<_>>();
-        super::super::assigners::assigner_function_names_for_test(source, &bindings)
-    }
-
     #[test]
-    fn every_assignment_target_shape_matches_the_swc_contract() {
+    fn every_assignment_target_shape_is_detected() {
         let source = concat!(
             "function plain() { state = 1; }\n",
             "function compound() { state += 1; }\n",
@@ -311,7 +303,6 @@ mod tests {
             "const fn = function () { return () => { state ??= 3; }; };\n",
         );
         let oxc = names(source, &["state"]);
-        assert_eq!(oxc, swc_names(source, &["state"]));
         assert_eq!(
             oxc,
             vec![

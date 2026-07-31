@@ -28,6 +28,7 @@ pub struct ClosureFileMetadata {
     pub enums: Vec<ClosureEnumDeclaration>,
     /// Const enums TypeScript erases. Only the names travel: the declaration is
     /// dropped and nothing is emitted in its place.
+    #[allow(dead_code)]
     #[serde(default)]
     pub erased_const_enums: Vec<String>,
     pub file_path: String,

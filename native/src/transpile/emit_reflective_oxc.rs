@@ -506,16 +506,13 @@ mod tests {
         collect_reflective_property_names(&parsed.program, &identity)
     }
 
-    fn assert_parity(source: &str, expected: BTreeSet<String>) {
-        let oxc = collect(source);
-        let swc = super::super::emit_reflective::collect_reflective_property_names_for_test(source);
-        assert_eq!(oxc, swc);
-        assert_eq!(oxc, expected);
+    fn assert_names(source: &str, expected: BTreeSet<String>) {
+        assert_eq!(collect(source), expected);
     }
 
     #[test]
-    fn direct_and_cross_function_reflective_flows_match_swc() {
-        assert_parity(
+    fn direct_and_cross_function_reflective_flows_are_collected() {
+        assert_names(
             r#"
 for (const key in attrs) {
   if (key === "class" || key !== "style") use(key);
@@ -552,7 +549,7 @@ ignored(props, "wrong");
 
     #[test]
     fn shadowed_callee_binding_does_not_inherit_outer_function_roles() {
-        assert_parity(
+        assert_names(
             r#"
 function prop(object, key) { return object[key]; }
 function invoke(prop) { prop(source, "shadowed"); }

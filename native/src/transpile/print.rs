@@ -49,6 +49,7 @@ pub(super) fn transform_source_with_oxc(
             .join("\n"));
     }
     let mut program = parsed.program;
+    rewrite_ts_export_assignments(&allocator, &mut program);
     let mut enum_values = collect_imported_enum_values(file_path, &program);
     let local_enum_values = super::lowering_oxc::collect_enum_values(&program);
     let imported_enum_names = enum_values.keys().cloned().collect::<HashSet<_>>();
@@ -118,6 +119,25 @@ pub(super) fn transform_source_with_oxc(
         file_metadata,
         commonjs_export_name,
     )
+}
+
+fn rewrite_ts_export_assignments<'a>(
+    allocator: &'a Allocator,
+    program: &mut oxc_ast::ast::Program<'a>,
+) {
+    let builder = AstBuilder::new(allocator);
+    for statement in &mut program.body {
+        let Statement::TSExportAssignment(assignment) = statement else {
+            continue;
+        };
+        let span = assignment.span;
+        let expression = assignment.expression.take_in(&builder);
+        *statement = Statement::new_export_default_declaration(
+            span,
+            oxc_ast::ast::ExportDefaultDeclarationKind::from(expression),
+            &builder,
+        );
+    }
 }
 
 fn quote_runtime_enum_members<'a>(

@@ -3,7 +3,7 @@
 `gcc-ts-bundler` is a Node package with three cooperating compiler layers:
 
 1. **TypeScript/JavaScript orchestration** resolves options, manages workspaces and caches, performs type-aware analysis, invokes Closure Compiler, and publishes outputs.
-2. **The Rust native addon** resolves module graphs, parses and rewrites modules with SWC, plans chunks, transpiles sources, generates Closure inputs, and performs output rewrites.
+2. **The Rust native addon** resolves module graphs, parses and rewrites modules with Oxc, plans chunks, transpiles sources, generates Closure inputs, and performs output rewrites.
 3. **Google Closure Compiler** performs the final optimization and property renaming pass.
 
 The Vite plugin is an adapter around the same core build pipeline rather than a separate compiler.
@@ -21,7 +21,7 @@ Runtime data crossing filesystem, native-addon, compiler-package, or generated-m
 | `src/build/closure`   | Closure job execution, job caching, postprocessing, output publication                    |
 | `src/vite`            | Vite graph capture, materialization, dependency prebundling, CSS/HTML integration         |
 | `src/native`          | Platform binding loader and typed JavaScript wrappers around N-API                        |
-| `native/src`          | Rust graph resolver, chunk planner, SWC transforms, extern emission, Closure job planning |
+| `native/src`          | Rust graph resolver, chunk planner, Oxc transforms, extern emission, Closure job planning |
 | `closure-externs`     | Extra browser, CommonJS, worker, Closure, and tslib externs                               |
 | `closure-lib`         | Closure support library shipped with the package                                          |
 
@@ -36,7 +36,7 @@ BuildOptions
   -> resolve module graph and entry exports (Rust)
   -> plan off-mode or bundler-runtime chunks (Rust)
   -> run TypeScript preflight and collect Closure IR
-  -> transpile TS/JS/CommonJS into Closure-ready JS (Rust + SWC)
+  -> transpile TS/JS/CommonJS into Closure-ready JS (Rust + Oxc)
   -> generate native property externs
   -> prepare Closure compile jobs (Rust)
   -> run Google Closure Compiler
@@ -109,7 +109,7 @@ module code lives inside the chunk wrapper function, so it never pays the
 
 The JavaScript layer uses one TypeScript checker/extractor for standalone and Vite. It serializes tokenized binding/member annotations, declarations, enums, canonical symbol identities, provenance, and non-fatal degradation diagnostics through `closure-ir.json`. Plain JavaScript files can take a faster scan path when no semantic work is needed.
 
-Rust resolves that metadata against the final SWC/import/hoist plan, transforms files in parallel, and returns exact delivered counts and diagnostics per emitted JavaScript file. The same stage strips TypeScript, lowers JSX where needed, normalizes supported CommonJS, rewrites imports/exports, emits support files, and generates proven property rename barriers.
+Rust resolves that metadata against the final Oxc/import/hoist plan, transforms files in parallel, and returns exact delivered counts and diagnostics per emitted JavaScript file. The same stage strips TypeScript, lowers JSX where needed, normalizes supported CommonJS, rewrites imports/exports, emits support files, and generates proven property rename barriers.
 
 Three things that used to be patched into Closure's *output* are decided here
 instead, because this is the last point at which the provenance they need still

@@ -187,22 +187,10 @@ var ordinary = function(a) { return a; };
             })
             .collect::<Vec<_>>();
         assert_eq!(initializers.len(), 2);
-        let swc_initializers =
-            super::super::emit_helpers::helper_initializer_sources_for_test(source);
-        assert_eq!(swc_initializers.len(), 2);
-        assert_ne!(initializers, swc_initializers);
         let canonical = super::super::emit_helpers::canonical_shared_helper_name(
             "__runInitializers",
             &initializers[0],
         );
-        let swc_canonical = super::super::emit_helpers::canonical_shared_helper_name(
-            "__runInitializers",
-            &swc_initializers[0],
-        );
-        // The printer is part of the content address. Oxc adds expression
-        // parentheses here, so the suffix changes, but every declaration and
-        // reference in the oxc pipeline derives from the same canonical name.
-        assert_ne!(canonical, swc_canonical);
 
         let allocator = Allocator::default();
         let source = format!("var {canonical} = function(a) {{ return a; }};\nvar keep = 1;");
@@ -219,7 +207,7 @@ var ordinary = function(a) { return a; };
     }
 
     #[test]
-    fn decorator_metadata_names_match_swc() {
+    fn decorator_metadata_names_are_collected() {
         let source = r#"
 __decorateClass([], Example.prototype, "legacy", void 0);
 __esDecorate(null, null, null, { kind: "field", name: "modern" }, null, null);
@@ -228,9 +216,6 @@ _ts_decorate([], Example.prototype, "swcLegacy", void 0);
         let allocator = Allocator::default();
         let program = parse(&allocator, source);
         let oxc = collect_decorator_metadata_property_names(&program);
-        let swc =
-            super::super::emit_helpers::collect_decorator_metadata_property_names_for_test(source);
-        assert_eq!(oxc, swc);
         assert_eq!(
             oxc,
             BTreeSet::from([

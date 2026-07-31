@@ -473,10 +473,25 @@ function buildViteExample(example: ExampleDescriptor) {
   if (copy.status !== 0) {
     return { error: `copy failed: ${copy.stderr}`, outDir: "", cacheDir: "" };
   }
-  fs.symlinkSync(
-    path.join(projectRoot, "node_modules"),
-    path.join(probeDir, "node_modules"),
+  // A symlinked node_modules root changes package realpaths while leaving Vite's
+  // captured ids under the probe root. That split made dependency materialization
+  // drop CommonJS wrappers, so the ledger had been broken since the official-example
+  // corpus was introduced. Copy the small Bun install trees and relink only this package.
+  const dependencies = run(
+    "cp",
+    ["-a", path.join(projectRoot, "node_modules"), path.join(probeDir, "node_modules")],
+    probeDir,
   );
+  if (dependencies.status !== 0) {
+    return {
+      error: `dependency copy failed: ${dependencies.stderr}`,
+      outDir: "",
+      cacheDir: "",
+    };
+  }
+  const linkedPackage = path.join(probeDir, "node_modules", "gcc-ts-bundler");
+  fs.rmSync(linkedPackage, { force: true, recursive: true });
+  fs.symlinkSync(REPO_ROOT, linkedPackage, "dir");
   const outDir = path.join(probeDir, "dist");
   // The plugin does not take a cache dir from us, and defaults to the user
   // persistent cache root. Redirect that root into the probe so the sweep
@@ -484,7 +499,7 @@ function buildViteExample(example: ExampleDescriptor) {
   const cacheHome = path.join(probeDir, "xdg-cache");
   fs.mkdirSync(cacheHome, { recursive: true });
   const outcome = run(
-    path.join(projectRoot, "node_modules/.bin/vite"),
+    path.join(probeDir, "node_modules/.bin/vite"),
     ["build", "--config", example.viteConfig ?? "vite.config.ts", "--outDir", outDir, "--emptyOutDir"],
     probeDir,
     { XDG_CACHE_HOME: cacheHome },
