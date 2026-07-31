@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use oxc_allocator::{Allocator, FromIn};
+use oxc_allocator::{Allocator, FromIn, TakeIn};
 use oxc_ast::ast::*;
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
@@ -19,6 +19,22 @@ use super::apply_js_compat_text_fixes;
 use super::global_this_oxc::{collect_global_this_compat_property_names, GlobalThisCompatVisitor};
 use super::identity_oxc::ModuleIdentity;
 use super::lowering_oxc::closure_input_codegen_options;
+
+pub(crate) fn apply_program_transforms<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    identity: &ModuleIdentity,
+    source: &str,
+) {
+    strip_helper_global_fallback(allocator, program);
+    let properties = collect_global_this_compat_property_names(program, identity);
+    if !properties.is_empty() {
+        GlobalThisCompatVisitor::new(allocator, identity, properties).visit_program(program);
+    }
+    ProcessEnvNodeEnvVisitor::new(allocator, identity).visit_program(program);
+    JsCompatAstVisitor::new(allocator, source_declares_ident(source, "T")).visit_program(program);
+    DirectoryModuleSpecifierVisitor::new(allocator).visit_program(program);
+}
 
 pub(crate) fn transform_js_pass_through_source(
     file_path: &Path,
@@ -52,14 +68,7 @@ pub(crate) fn transform_js_pass_through_source(
     let identity = ModuleIdentity::new(semantic.semantic.into_scoping());
     let mut program = parsed.program;
 
-    let properties = collect_global_this_compat_property_names(&program, &identity);
-    if !properties.is_empty() {
-        GlobalThisCompatVisitor::new(&allocator, &identity, properties).visit_program(&mut program);
-    }
-    ProcessEnvNodeEnvVisitor::new(&allocator, &identity).visit_program(&mut program);
-    JsCompatAstVisitor::new(&allocator, source_declares_ident(source, "T"))
-        .visit_program(&mut program);
-    DirectoryModuleSpecifierVisitor::new(&allocator).visit_program(&mut program);
+    apply_program_transforms(&allocator, &mut program, &identity, source);
 
     Ok(apply_js_compat_text_fixes(
         Codegen::new()
@@ -67,6 +76,29 @@ pub(crate) fn transform_js_pass_through_source(
             .build(&program)
             .code,
     ))
+}
+
+fn strip_helper_global_fallback<'a>(allocator: &'a Allocator, program: &mut Program<'a>) {
+    let builder = AstBuilder::new(allocator);
+    for statement in &mut program.body {
+        let Statement::VariableDeclaration(declaration) = statement else {
+            continue;
+        };
+        for declarator in &mut declaration.declarations {
+            let BindingPattern::BindingIdentifier(binding) = &declarator.id else {
+                continue;
+            };
+            if !super::emit_helpers::is_shared_helper_base_name(binding.name.as_str()) {
+                continue;
+            }
+            let Some(Expression::LogicalExpression(initializer)) = &mut declarator.init else {
+                continue;
+            };
+            if initializer.operator == LogicalOperator::Or {
+                declarator.init = Some(initializer.right.take_in(&builder));
+            }
+        }
+    }
 }
 
 struct ProcessEnvNodeEnvVisitor<'a, 'i> {

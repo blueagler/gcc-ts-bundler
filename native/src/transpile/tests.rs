@@ -1525,11 +1525,8 @@ fn inlines_const_enum_members_defined_by_constant_expressions() {
 
     // Up=1, Down=2, Both=8, Neg=-2, Mask=9, Half=2, Next=3 (auto-numbering
     // resumes from the folded value, as TypeScript does).
-    assert!(
-        transformed.contains("[\n    1,\n    2,\n    8,\n    -2,\n    9,\n    2,\n    3\n]")
-            || transformed.contains("[1, 2, 8, -2, 9, 2, 3]"),
-        "{transformed}"
-    );
+    let compact = transformed.split_whitespace().collect::<String>();
+    assert!(compact.contains("[1,2,8,-2,9,2,3]"), "{transformed}");
     assert!(!transformed.contains("Dir."), "{transformed}");
 }
 
@@ -1608,7 +1605,10 @@ fn lowers_an_exported_enum_to_a_hoisted_binding_not_a_dead_zone_one() {
     // *unless* the initialiser is emitted before every reader; the metadata
     // `@enum` shape does exactly that (it is emitted at the top of the module),
     // which is why this asserts on the lowered-object shape only.
-    assert!(!transformed.contains("const Kind = function"), "{transformed}");
+    assert!(
+        !transformed.contains("const Kind = function"),
+        "{transformed}"
+    );
 }
 
 #[test]
@@ -1633,11 +1633,15 @@ fn merges_split_namespace_declaration_blocks_before_lowering() {
     );
 
     assert!(
-        transformed.contains("Outer.Inner.twice(Outer.version)"),
+        transformed.contains("return Inner.twice(version);"),
         "{transformed}"
     );
     // One lowered block, so one IIFE and one `Outer ||` initializer.
-    assert_eq!(transformed.matches("Outer || (Outer = {})").count(), 1, "{transformed}");
+    assert_eq!(
+        transformed.matches("Outer || (Outer = {})").count(),
+        1,
+        "{transformed}"
+    );
 }
 
 #[test]
@@ -1662,10 +1666,16 @@ fn merges_split_namespace_blocks_across_declarations_and_at_every_depth() {
         ),
     );
 
-    assert!(transformed.contains("Inner.tag"), "{transformed}");
-    assert_eq!(transformed.matches("Outer || (Outer = {})").count(), 1, "{transformed}");
+    assert!(transformed.contains("_Inner.tag"), "{transformed}");
     assert_eq!(
-        transformed.matches("Outer.Inner || (Outer.Inner = {})").count(),
+        transformed.matches("Outer || (Outer = {})").count(),
+        1,
+        "{transformed}"
+    );
+    assert_eq!(
+        transformed
+            .matches("_Outer.Inner || (_Outer.Inner = {})")
+            .count(),
         1,
         "{transformed}"
     );
@@ -1689,9 +1699,15 @@ fn leaves_split_namespace_blocks_alone_when_merging_would_reorder_work() {
         ),
     );
 
-    assert_eq!(transformed.matches("Outer || (Outer = {})").count(), 2, "{transformed}");
+    assert_eq!(
+        transformed.matches("Outer || (Outer = {})").count(),
+        2,
+        "{transformed}"
+    );
     let between = transformed.find("between").expect("{transformed}");
-    let second = transformed.rfind("Outer || (Outer = {})").expect("{transformed}");
+    let second = transformed
+        .rfind("Outer || (Outer = {})")
+        .expect("{transformed}");
     assert!(between < second, "{transformed}");
 }
 
@@ -2041,7 +2057,8 @@ fn bundler_runtime_keeps_named_imports_live_instead_of_snapshotting_slots() {
         "{transformed}"
     );
     assert!(
-        transformed.contains("__gcc_import_0[0].title = 'ok';"),
+        transformed.contains("__gcc_import_0[0].title = \"ok\";")
+            || transformed.contains("__gcc_import_0[0].title = 'ok';"),
         "{transformed}"
     );
     assert!(
@@ -2704,9 +2721,7 @@ fn collects_realistic_helper_wrapped_object_and_promise_carriers() {
         "{wrappers:?}"
     );
     assert!(
-        object_carriers
-            .keys()
-            .any(|id| id.symbol() == "nextEntry"),
+        object_carriers.keys().any(|id| id.symbol() == "nextEntry"),
         "{object_carriers:?}"
     );
     assert!(
@@ -4172,6 +4187,8 @@ fn cjs_export_marker_is_never_reachable_through_a_rename_primitive() {
     }
     let expected: BTreeSet<String> = [
         "support_files.rs",
+        "transpile.rs",
+        "transpile/commonjs_oxc.rs",
         "transpile/context.rs",
         "transpile/emit_hoist.rs",
         "transpile/emit_hoist_oxc.rs",
@@ -4258,13 +4275,11 @@ fn pair_array_rule() -> super::ClassMapCallInput {
 
 fn pair_array_names(source: &str) -> Vec<String> {
     let module = parse_module(&PathBuf::from("fixture.js"), source).unwrap();
-    let mut names = super::compat::collect_pair_array_class_map_property_names(
-        &module,
-        &[pair_array_rule()],
-    )
-    .unwrap()
-    .into_iter()
-    .collect::<Vec<_>>();
+    let mut names =
+        super::compat::collect_pair_array_class_map_property_names(&module, &[pair_array_rule()])
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>();
     names.sort();
     names
 }

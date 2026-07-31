@@ -76,8 +76,9 @@ shipping crate does not see it. Its swc versions must stay byte-identical to
 
 - **swc** — parse → resolver → \[JSX classic] → TS strip → codegen, mirroring
   `native/src/transpile.rs`.
-- **swc_norm** — the same, plus the `precedence.rs` paren normalizer. This is
-  what our pipeline actually emits, and it is the side the harness compares.
+- **swc_norm** — the frozen S3 shipping baseline: swc plus the retired paren
+  normalizer. It remains in the probe only to classify the S4 re-baseline; shipping
+  code now emits through oxc. The harness compares this historical baseline to oxc.
 - **oxc** — parse → `SemanticBuilder` → `Transformer` (TS strip + JSX classic) →
   `Codegen`.
 

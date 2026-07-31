@@ -18,6 +18,61 @@ use oxc_transformer::{JsxOptions, JsxRuntime, TransformOptions, Transformer};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use super::identity_oxc::ModuleIdentity;
+
+pub(crate) fn transform_program<'a>(
+    allocator: &'a Allocator,
+    path: &Path,
+    program: &mut Program<'a>,
+    scoping: oxc_semantic::Scoping,
+    run_jsx: bool,
+) -> Result<ModuleIdentity, String> {
+    transform_program_with_enum_values(allocator, path, program, scoping, run_jsx, HashMap::new())
+}
+
+pub(crate) fn transform_program_with_enum_values<'a>(
+    allocator: &'a Allocator,
+    path: &Path,
+    program: &mut Program<'a>,
+    scoping: oxc_semantic::Scoping,
+    run_jsx: bool,
+    mut enum_values: HashMap<String, HashMap<String, EnumValue>>,
+) -> Result<ModuleIdentity, String> {
+    merge_namespace_blocks(&mut program.body);
+    let lowered_names = hoisted_lowering_names(program);
+    let const_enum_values = collect_const_enum_values(program);
+    for (name, members) in &const_enum_values {
+        enum_values.insert(name.clone(), members.clone());
+    }
+    let mut options = TransformOptions::default();
+    if run_jsx {
+        options.jsx = JsxOptions {
+            runtime: JsxRuntime::Classic,
+            development: false,
+            ..JsxOptions::default()
+        };
+    }
+    let result = Transformer::new(allocator, path, &options).build_with_scoping(scoping, program);
+    if !result.diagnostics.is_empty() {
+        return Err(result
+            .diagnostics
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"));
+    }
+    force_var_for_lowered_declarations(program, &lowered_names);
+    if !enum_values.is_empty() {
+        let mut inliner = ConstEnumInliner {
+            allocator,
+            builder: oxc_ast::builder::AstBuilder::new(allocator),
+            values: &enum_values,
+        };
+        oxc_ast_visit::VisitMut::visit_program(&mut inliner, program);
+        erase_const_enum_objects(program, &const_enum_values);
+    }
+    Ok(ModuleIdentity::new(result.scoping))
+}
 /// parse -> semantic -> oxc TS/JSX lowering -> print. The baseline the owned
 /// passes are measured against.
 pub(crate) fn lower_with_oxc(path: &Path, source: &str) -> Result<String, String> {
@@ -38,33 +93,15 @@ pub(crate) fn lower_with_oxc(path: &Path, source: &str) -> Result<String, String
         .build(&program)
         .semantic
         .into_scoping();
-    // Ours, not the transformer's: both recorded before lowering erases the
-    // evidence they are read from.
-    merge_namespace_blocks(&mut program.body);
-    let lowered_names = hoisted_lowering_names(&program);
-    let const_enum_values = collect_const_enum_values(&program);
-    let mut options = TransformOptions::default();
-    options.jsx = JsxOptions {
-        runtime: JsxRuntime::Classic,
-        development: false,
-        ..JsxOptions::default()
-    };
-    let result = Transformer::new(&allocator, path, &options).build_with_scoping(scoping, &mut program);
-    if let Some(error) = result.diagnostics.first() {
-        return Err(format!("{}: {}", path.display(), error.message));
-    }
-    force_var_for_lowered_declarations(&mut program, &lowered_names);
-    if !const_enum_values.is_empty() {
-        // Inline the reads, then drop the object oxc emitted for a construct
-        // TypeScript erases entirely.
-        let mut inliner = ConstEnumInliner {
-            allocator: &allocator,
-            builder: oxc_ast::builder::AstBuilder::new(&allocator),
-            values: &const_enum_values,
-        };
-        oxc_ast_visit::VisitMut::visit_program(&mut inliner, &mut program);
-        erase_const_enum_objects(&mut program, &const_enum_values);
-    }
+    transform_program(
+        &allocator,
+        path,
+        &mut program,
+        scoping,
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "jsx" | "tsx")),
+    )?;
     Ok(Codegen::new().build(&program).code)
 }
 
@@ -98,7 +135,9 @@ fn merge_namespace_blocks<'a>(statements: &mut ArenaVec<'a, Statement<'a>>) {
             return None;
         };
         match &declaration.body {
-            Some(TSModuleDeclarationBody::TSModuleBlock(_)) => Some((id.name.to_string(), exported)),
+            Some(TSModuleDeclarationBody::TSModuleBlock(_)) => {
+                Some((id.name.to_string(), exported))
+            }
             _ => None,
         }
     }
@@ -161,7 +200,8 @@ fn merge_namespace_blocks<'a>(statements: &mut ArenaVec<'a, Statement<'a>>) {
         }
         let first = indexes[0];
         let last = *indexes.last().unwrap_or(&first);
-        if !(first + 1..last).all(|index| indexes.contains(&index) || order_neutral(&statements[index]))
+        if !(first + 1..last)
+            .all(|index| indexes.contains(&index) || order_neutral(&statements[index]))
         {
             continue;
         }
@@ -220,7 +260,8 @@ fn hoisted_lowering_names(program: &Program<'_>) -> HashSet<String> {
                             names.insert(enum_declaration.id.name.to_string());
                         }
                         Declaration::TSModuleDeclaration(module_declaration) => {
-                            if let TSModuleDeclarationName::Identifier(id) = &module_declaration.id {
+                            if let TSModuleDeclarationName::Identifier(id) = &module_declaration.id
+                            {
                                 names.insert(id.name.to_string());
                             }
                         }
@@ -315,7 +356,10 @@ mod what_oxc_gets_wrong {
     /// it, and must not touch authored `let`s that merely share a name shape.
     #[test]
     fn authored_let_bindings_are_untouched() {
-        let code = lower("m.ts", "enum Kind { A = 1 }\nlet other = 2;\nexport { other };\n");
+        let code = lower(
+            "m.ts",
+            "enum Kind { A = 1 }\nlet other = 2;\nexport { other };\n",
+        );
         assert!(code.contains("var Kind"), "{code}");
         assert!(code.contains("let other"), "{code}");
     }
@@ -327,7 +371,10 @@ mod what_oxc_gets_wrong {
     /// literal.
     #[test]
     fn a_const_enum_is_inlined_and_erased() {
-        let code = lower("m.ts", "const enum Dir { Up = 1, Down = 1 + Up }\nexport const d = Dir.Down;\n");
+        let code = lower(
+            "m.ts",
+            "const enum Dir { Up = 1, Down = 1 + Up }\nexport const d = Dir.Down;\n",
+        );
         assert!(!code.contains("Dir"), "{code}");
         assert!(code.contains("export const d = 2"), "{code}");
     }
@@ -337,8 +384,14 @@ mod what_oxc_gets_wrong {
     /// pre-rewrite (to `export default`).
     #[test]
     fn export_assignment_needs_our_prerewrite() {
-        let code = lower("m.ts", "function greet(): string { return 'hi'; }\nexport = greet;\n");
-        assert!(code.contains("module.exports") || code.contains("export default"), "{code}");
+        let code = lower(
+            "m.ts",
+            "function greet(): string { return 'hi'; }\nexport = greet;\n",
+        );
+        assert!(
+            code.contains("module.exports") || code.contains("export default"),
+            "{code}"
+        );
     }
 
     /// JSX classic production, which we do want from the transformer.
@@ -396,12 +449,19 @@ mod executing {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("m.mjs");
-        std::fs::write(&file, format!("{code}\nconsole.log(JSON.stringify(probe));\n")).unwrap();
+        std::fs::write(
+            &file,
+            format!("{code}\nconsole.log(JSON.stringify(probe));\n"),
+        )
+        .unwrap();
         let output = Command::new("node").arg(&file).output().expect("node");
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         std::fs::remove_dir_all(&dir).ok();
-        assert!(output.status.success(), "node failed: {stderr}\n--- emitted:\n{code}");
+        assert!(
+            output.status.success(),
+            "node failed: {stderr}\n--- emitted:\n{code}"
+        );
         stdout
     }
 
@@ -452,8 +512,9 @@ pub(crate) enum EnumValue {
 }
 
 /// `enum name -> member name -> value`, for enums whose members all fold.
-pub(crate) fn collect_const_enum_values(
+fn collect_enum_values_where(
     program: &Program<'_>,
+    only_const: bool,
 ) -> HashMap<String, HashMap<String, EnumValue>> {
     let mut enums = HashMap::new();
     for statement in &program.body {
@@ -468,7 +529,7 @@ pub(crate) fn collect_const_enum_values(
         let Some(declaration) = declaration else {
             continue;
         };
-        if !declaration.r#const {
+        if only_const && !declaration.r#const {
             continue;
         }
         let mut members = HashMap::new();
@@ -482,7 +543,8 @@ pub(crate) fn collect_const_enum_values(
             };
             let value = match &member.initializer {
                 Some(initializer) => {
-                    let Some(value) = fold_enum_initializer(initializer, &declaration.id.name, &members)
+                    let Some(value) =
+                        fold_enum_initializer(initializer, &declaration.id.name, &members)
                     else {
                         auto_numbering = false;
                         continue;
@@ -509,6 +571,37 @@ pub(crate) fn collect_const_enum_values(
         }
     }
     enums
+}
+
+pub(crate) fn collect_enum_values(
+    program: &Program<'_>,
+) -> HashMap<String, HashMap<String, EnumValue>> {
+    collect_enum_values_where(program, false)
+}
+
+pub(crate) fn collect_const_enum_values(
+    program: &Program<'_>,
+) -> HashMap<String, HashMap<String, EnumValue>> {
+    collect_enum_values_where(program, true)
+}
+
+pub(crate) fn remove_enum_declarations(program: &mut Program<'_>, names: &HashSet<String>) {
+    if names.is_empty() {
+        return;
+    }
+    program.body.retain(|statement| {
+        let name = match statement {
+            Statement::TSEnumDeclaration(declaration) => Some(declaration.id.name.as_str()),
+            Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
+                Some(Declaration::TSEnumDeclaration(declaration)) => {
+                    Some(declaration.id.name.as_str())
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        name.is_none_or(|name| !names.contains(name))
+    });
 }
 
 /// The TypeScript constant-expression grammar, matching `enums.rs`'s folder.
@@ -651,7 +744,10 @@ impl<'a> oxc_ast_visit::VisitMut<'a> for ConstEnumInliner<'a, '_> {
 /// would ship bytes no legal program can reach *and* make the erased value
 /// observable (`import * as m; m.ConstEnum` would return an object where `tsc`
 /// gives `undefined`) -- the divergence the tsickle export corpus caught.
-fn erase_const_enum_objects(program: &mut Program<'_>, inlined: &HashMap<String, HashMap<String, EnumValue>>) {
+fn erase_const_enum_objects(
+    program: &mut Program<'_>,
+    inlined: &HashMap<String, HashMap<String, EnumValue>>,
+) {
     program.body.retain(|statement| {
         let declared = match statement {
             Statement::VariableDeclaration(declaration) => declaration
@@ -703,7 +799,9 @@ mod const_enums {
     #[test]
     fn string_members_fold() {
         let allocator = Allocator::default();
-        let parsed = oxc_parser::Parser::new(&allocator, "const enum L { S = \"s\" }\n", SourceType::ts()).parse();
+        let parsed =
+            oxc_parser::Parser::new(&allocator, "const enum L { S = \"s\" }\n", SourceType::ts())
+                .parse();
         let values = collect_const_enum_values(&parsed.program);
         assert_eq!(
             values.get("L").and_then(|members| members.get("S")),
@@ -714,7 +812,8 @@ mod const_enums {
     #[test]
     fn a_plain_enum_is_not_a_const_enum() {
         let allocator = Allocator::default();
-        let parsed = oxc_parser::Parser::new(&allocator, "enum Plain { A = 1 }\n", SourceType::ts()).parse();
+        let parsed =
+            oxc_parser::Parser::new(&allocator, "enum Plain { A = 1 }\n", SourceType::ts()).parse();
         assert!(collect_const_enum_values(&parsed.program).is_empty());
     }
 }
@@ -738,12 +837,19 @@ mod const_enum_end_to_end {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("m.mjs");
-        std::fs::write(&file, format!("{code}\nconsole.log(JSON.stringify(probe));\n")).unwrap();
+        std::fs::write(
+            &file,
+            format!("{code}\nconsole.log(JSON.stringify(probe));\n"),
+        )
+        .unwrap();
         let output = Command::new("node").arg(&file).output().expect("node");
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         std::fs::remove_dir_all(&dir).ok();
-        assert!(output.status.success(), "node failed: {stderr}\n--- emitted:\n{code}");
+        assert!(
+            output.status.success(),
+            "node failed: {stderr}\n--- emitted:\n{code}"
+        );
         stdout
     }
 
@@ -783,12 +889,19 @@ mod namespaces {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("m.mjs");
-        std::fs::write(&file, format!("{code}\nconsole.log(JSON.stringify(probe));\n")).unwrap();
+        std::fs::write(
+            &file,
+            format!("{code}\nconsole.log(JSON.stringify(probe));\n"),
+        )
+        .unwrap();
         let output = Command::new("node").arg(&file).output().expect("node");
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         std::fs::remove_dir_all(&dir).ok();
-        assert!(output.status.success(), "node failed: {stderr}\n--- emitted:\n{code}");
+        assert!(
+            output.status.success(),
+            "node failed: {stderr}\n--- emitted:\n{code}"
+        );
         stdout
     }
 
@@ -848,7 +961,10 @@ mod namespace_merge_guards {
         .unwrap();
         // Two IIFEs still, in source order: the console.log did not move.
         let between = code.find("between").expect("kept");
-        let second = code.rfind("A ||").or_else(|| code.rfind("A)")).expect("second block");
+        let second = code
+            .rfind("A ||")
+            .or_else(|| code.rfind("A)"))
+            .expect("second block");
         assert!(between < second, "{code}");
     }
 

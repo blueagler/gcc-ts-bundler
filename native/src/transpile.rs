@@ -4,7 +4,9 @@ pub(crate) mod assigners;
 mod assigners_oxc;
 mod cjs_opacity;
 mod commonjs;
+mod commonjs_oxc;
 pub(crate) mod compat;
+mod compat_properties_oxc;
 mod context;
 mod emit;
 mod emit_goog;
@@ -22,18 +24,18 @@ mod externs;
 pub(crate) mod fresh;
 mod fresh_oxc;
 mod global_this;
+mod global_this_oxc;
 mod hoist;
 mod hoist_oxc;
 mod identity;
 mod identity_oxc;
-mod lowering_oxc;
-mod global_this_oxc;
 mod imports_exports;
 mod js_compat;
 mod js_compat_oxc;
+mod lowering_oxc;
 mod namespace;
-mod precedence;
 mod print;
+mod print_swc;
 mod pure_calls;
 mod type_metadata;
 mod type_metadata_oxc;
@@ -88,6 +90,7 @@ use self::imports_exports::*;
 use self::js_compat::*;
 use self::namespace::*;
 use self::print::*;
+use self::print_swc::*;
 use self::type_metadata::*;
 
 #[allow(non_snake_case)]
@@ -539,32 +542,39 @@ fn transform_source_file(
         .file_metadata
         .get(&closure_metadata_key(file_path))
         .cloned();
-    let module = if let Some(decorated_output_text) = file_metadata
+    let decorated_output_text = file_metadata
         .as_ref()
-        .and_then(|metadata| metadata.decorated_output_text.clone())
-    {
-        parse_module(&file_path.with_extension("js"), &decorated_output_text)?
+        .and_then(|metadata| metadata.decorated_output_text.as_deref());
+    let effective_path = if decorated_output_text.is_some() {
+        file_path.with_extension("js")
     } else {
-        parse_source_file(file_path)?
+        file_path.to_path_buf()
     };
+    let emitted_source = decorated_output_text.unwrap_or(&source_text);
+    let module = parse_module(&effective_path, emitted_source)?;
     let commonjs_analysis = analyze_commonjs_module(&module);
-
     if should_normalize_commonjs(file_path, &commonjs_analysis) {
-        return normalize_commonjs_module(
-            module,
+        let normalized = commonjs_oxc::normalize_source(
+            &effective_path,
+            emitted_source,
             &commonjs_analysis,
-            file_path,
+            context.opaque_commonjs.file_is_opaque(file_path),
+        )?;
+        return transform_source_with_oxc(
+            &file_path.with_extension("js"),
+            &normalized,
             context,
             file_metadata.as_ref(),
+            Some("__cjsExports"),
         );
     }
-
-    let program = if should_run_resolver(file_path) {
-        transform_program(module, file_path, context, file_metadata.as_ref())?
-    } else {
-        transform_js_pass_through_program(module, source_text, file_path, context)
-    };
-    emit_module_program(file_path, program, context, file_metadata.as_ref(), None)
+    transform_source_with_oxc(
+        &effective_path,
+        emitted_source,
+        context,
+        file_metadata.as_ref(),
+        None,
+    )
 }
 
 fn is_typescript_source_file(file_path: &Path) -> bool {

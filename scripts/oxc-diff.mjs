@@ -21,9 +21,10 @@
 //
 // The Rust side lives in native/oxc-probe (its own cargo workspace, so the oxc
 // dependency tree never enters the shipping crate). It emits three variants per
-// file: `swc` (raw), `swc_norm` (swc + the precedence.rs paren normalizer, i.e.
-// what our pipeline really produces) and `oxc`. This script compares
-// `swc_norm` against `oxc`.
+// file: `swc` (raw), `swc_norm` (the frozen S3 swc baseline plus the now-retired
+// paren normalizer), and `oxc`. The frozen baseline remains only to classify the S4
+// re-baseline; shipping code no longer calls it. This script compares `swc_norm`
+// against `oxc`.
 
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";

@@ -26,6 +26,73 @@ impl std::fmt::Display for EmittedProgram {
     }
 }
 
+pub(super) fn emit_module_program_oxc<'a>(
+    allocator: &'a oxc_allocator::Allocator,
+    file_path: &Path,
+    program: &mut oxc_ast::ast::Program<'a>,
+    identity: &mut super::identity_oxc::ModuleIdentity,
+    context: &TranspileContext,
+    file_metadata: Option<&ClosureFileMetadata>,
+    commonjs_export_name: Option<&str>,
+) -> std::result::Result<EmittedProgram, String> {
+    strip_runtime_directives_oxc(program);
+    let reflective_property_names =
+        super::emit_reflective_oxc::collect_reflective_property_names(program, identity);
+    let mut emitted = match context.chunk_mode {
+        ChunkMode::BundlerRuntime => {
+            if let Some(plan) = context.hoist_plan.clone() {
+                let module_id = to_goog_module_id(file_path, &context.workspace_dir);
+                if plan.is_hoisted(&module_id) {
+                    let mut emitted = super::emit_hoist_oxc::emit_hoisted_module_text(
+                        allocator,
+                        file_path,
+                        program,
+                        identity,
+                        context,
+                        &plan,
+                        file_metadata,
+                        commonjs_export_name,
+                    )?;
+                    emitted.reflective_property_names = reflective_property_names;
+                    return Ok(emitted);
+                }
+            }
+            let emitted = super::emit_runtime_oxc::emit_bundler_runtime_module_text(
+                allocator,
+                file_path,
+                program,
+                identity,
+                context,
+                file_metadata,
+                commonjs_export_name,
+            )?;
+            EmittedProgram {
+                code: emitted.code,
+                shared_helpers: Vec::new(),
+                reflective_property_names: Default::default(),
+                type_metadata: emitted.type_metadata,
+            }
+        }
+        ChunkMode::Off => super::emit_goog_oxc::emit_goog_module_program(
+            allocator,
+            file_path,
+            program,
+            identity,
+            context,
+            file_metadata,
+            commonjs_export_name,
+        )?,
+    };
+    emitted.reflective_property_names = reflective_property_names;
+    Ok(emitted)
+}
+
+fn strip_runtime_directives_oxc(program: &mut oxc_ast::ast::Program<'_>) {
+    program
+        .directives
+        .retain(|directive| !matches!(directive.directive.as_str(), "use client" | "use server"));
+}
+
 pub(super) fn emit_module_program(
     file_path: &Path,
     program: Program,

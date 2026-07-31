@@ -19,23 +19,27 @@ use oxc_semantic::SemanticBuilder;
 use oxc_span::{SourceType, SPAN};
 use oxc_str::Ident;
 
+use super::emit::EmittedProgram;
 use super::emit_runtime_oxc::{binding_names_with_ids, collect_reassigned_binding_ids};
 use super::fresh_oxc::FreshNameAllocator;
 use super::identity_oxc::{BindingKeyMap, BindingKeySet, ModuleIdentity};
 use super::lowering_oxc::closure_input_codegen_options;
+use super::type_metadata_oxc::{runtime_type_names_from_program, BoundTypeMetadata};
 use super::{
     apply_js_compat_text_fixes, is_valid_js_identifier, live_export_accessor_name, member_access,
     resolve_module_id_for_specifier, resolve_relative_module, to_goog_module_id, TranspileContext,
 };
+use crate::closure_metadata::ClosureFileMetadata;
 
-pub(crate) fn emit_goog_module_text<'a>(
+pub(crate) fn emit_goog_module_program<'a>(
     allocator: &'a Allocator,
     file_path: &Path,
     program: &mut Program<'a>,
     identity: &ModuleIdentity,
     context: &TranspileContext,
+    file_metadata: Option<&ClosureFileMetadata>,
     commonjs_export_name: Option<&str>,
-) -> std::result::Result<String, String> {
+) -> std::result::Result<EmittedProgram, String> {
     let live_imported_ids = collect_live_imported_binding_ids(program, identity, file_path);
     if !live_imported_ids.is_empty() {
         LiveImportCallRewriter::new(allocator, identity, live_imported_ids.clone())
@@ -46,17 +50,38 @@ pub(crate) fn emit_goog_module_text<'a>(
         .map(|binding| identity.symbol(*binding).to_string())
         .collect::<HashSet<_>>();
     let live_exports = live_export_bindings(file_path);
+    let bound = BoundTypeMetadata::bind(
+        program,
+        identity,
+        file_metadata,
+        context.type_metadata_enabled,
+    );
+    let runtime_type_names = runtime_type_names_from_program(program, identity, &bound);
     let mut fresh_names = FreshNameAllocator::from_program(program, identity);
+    let mut type_metadata = bound.prepare(&mut fresh_names, &runtime_type_names, None);
     let module_id = to_goog_module_id(file_path, &context.workspace_dir);
     let mut output = vec![format!("goog.module({module_id:?});")];
+    output.extend(type_metadata.take_declaration_lines());
+    let enum_declarations = type_metadata.enum_declarations().to_vec();
+    for declaration in enum_declarations {
+        let emitted_name = type_metadata.enum_name(&declaration);
+        output.push(super::render_closure_enum(&declaration, &emitted_name));
+        type_metadata.count_enum();
+        if declaration.exported {
+            output.push(format!(
+                "exports.{} = {};",
+                declaration.binding_name, emitted_name
+            ));
+        }
+    }
     let mut import_counter = 0usize;
     let mut export_counter = 0usize;
-
-    for statement in &program.body {
+    let body = std::mem::replace(&mut program.body, ArenaVec::new_in(&allocator));
+    for statement in body {
         match statement {
             Statement::ImportDeclaration(import) => output.extend(convert_import_decl(
                 file_path,
-                import,
+                &import,
                 identity,
                 context,
                 &mut import_counter,
@@ -64,15 +89,24 @@ pub(crate) fn emit_goog_module_text<'a>(
                 &live_imported_ids,
             )?),
             Statement::ExportNamedDeclaration(export) => {
-                if let Some(declaration) = &export.declaration {
-                    output.push(print_declaration(declaration));
-                    for export_name in exported_decl_names(declaration, identity) {
+                let export = export.unbox();
+                if export.export_kind == ImportOrExportKind::Type {
+                    continue;
+                }
+                if let Some(declaration) = export.declaration {
+                    let exported_names = exported_decl_names(&declaration, identity);
+                    output.push(type_metadata.render_statement(
+                        identity,
+                        declaration.into(),
+                        &[],
+                    )?);
+                    for export_name in exported_names {
                         output.push(format!("exports.{export_name} = {export_name};"));
                     }
                 } else {
                     output.extend(convert_named_export(
                         file_path,
-                        export,
+                        &export,
                         context,
                         &mut export_counter,
                         &mut fresh_names,
@@ -81,48 +115,89 @@ pub(crate) fn emit_goog_module_text<'a>(
                 }
             }
             Statement::ExportDefaultDeclaration(export) => {
+                let export = export.unbox();
                 let local_name = default_declaration_name(&export.declaration)
                     .map(str::to_string)
                     .unwrap_or_else(|| {
                         fresh_names.fresh(&format!("__goog_default_export_{export_counter}"))
                     });
                 export_counter += 1;
-                if default_declaration_name(&export.declaration).is_some() {
-                    output.push(print_node(&export.declaration));
-                } else {
-                    let printed = print_node(&export.declaration);
-                    output.push(format!(
-                        "const {local_name} = {};",
-                        printed.trim().trim_end_matches(';')
-                    ));
+                match export.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(function)
+                        if function.id.is_some() =>
+                    {
+                        output.push(type_metadata.render_statement(
+                            identity,
+                            Statement::FunctionDeclaration(function),
+                            &[],
+                        )?);
+                    }
+                    ExportDefaultDeclarationKind::ClassDeclaration(class) if class.id.is_some() => {
+                        output.push(type_metadata.render_statement(
+                            identity,
+                            Statement::ClassDeclaration(class),
+                            &[],
+                        )?);
+                    }
+                    declaration => {
+                        let printed = print_node(&declaration);
+                        output.push(format!(
+                            "const {local_name} = {};",
+                            printed.trim().trim_end_matches(';')
+                        ));
+                    }
                 }
                 output.push(format!("exports.default = {local_name};"));
             }
             Statement::ExportAllDeclaration(export) => output.extend(convert_export_all(
                 file_path,
-                export,
+                &export,
                 context,
                 &mut export_counter,
                 &mut fresh_names,
             )?),
-            _ if statement.is_typescript_syntax() => {}
-            _ => output.push(print_node(statement)),
+            statement if statement.is_typescript_syntax() => {}
+            statement => output.push(type_metadata.render_statement(identity, statement, &[])?),
         }
     }
-
     if let Some(export_name) = commonjs_export_name {
         output.push(format!("exports.{export_name} = {export_name};"));
         output.push(format!("exports.default = {export_name};"));
     }
     output.extend(render_live_export_accessors(&live_exports));
+    Ok(EmittedProgram {
+        code: apply_js_compat_text_fixes(
+            output
+                .into_iter()
+                .filter(|line| !line.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        shared_helpers: Vec::new(),
+        reflective_property_names: Default::default(),
+        type_metadata: type_metadata.finish(),
+    })
+}
 
-    Ok(apply_js_compat_text_fixes(
-        output
-            .into_iter()
-            .filter(|line| !line.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join("\n"),
-    ))
+#[cfg(test)]
+pub(crate) fn emit_goog_module_text<'a>(
+    allocator: &'a Allocator,
+    file_path: &Path,
+    program: &mut Program<'a>,
+    identity: &ModuleIdentity,
+    context: &TranspileContext,
+    commonjs_export_name: Option<&str>,
+) -> std::result::Result<String, String> {
+    emit_goog_module_program(
+        allocator,
+        file_path,
+        program,
+        identity,
+        context,
+        None,
+        commonjs_export_name,
+    )
+    .map(|emitted| emitted.code)
 }
 
 fn print_node(node: &impl Gen) -> String {

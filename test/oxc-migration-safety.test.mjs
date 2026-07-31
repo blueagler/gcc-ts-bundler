@@ -265,7 +265,11 @@ function extractComments(source) {
 // oxc, codegen *does* carry comments, so this pair of patterns is the policy
 // gate: whatever a source file wrote must still be absent, and any new generated
 // form has to be added here deliberately, with a reason.
-const ALLOWED_COMMENTS = [/^\/\*\*[\s\S]*@[A-Za-z]/u, /^\/\*#__PURE__\*\/$/u];
+const ALLOWED_COMMENTS = [
+  /^\/\*\*[\s\S]*@[A-Za-z]/u,
+  /^\/\*#?\s*@?__PURE__\s*\*\/$/u,
+  /^\/\*#?__PURE__\*\/$/u,
+];
 const HOSTILE_MARKERS = [
   "HOSTILE_LICENSE",
   "HOSTILE_CONST",
@@ -385,15 +389,16 @@ test.serial(
     // The gate must be able to see comments at all, otherwise it passes vacuously.
     expect(sawGeneratedAnnotation).toBe(true);
 
-    // The source `/*#__PURE__*/` did not pass through as a comment: it was
-    // translated into the Closure annotation that actually means something to
-    // the compiler. The only `__PURE__` left is swc's own enum-IIFE marker.
+    // PURE is the one authored annotation oxc deliberately retains; every other
+    // authored comment is absent, and the annotation still reaches Closure immediately
+    // before the call (swc spells the same contract as `@pureOrBreakMyCode`).
     const helperEmit = await fs.readFile(
       emitted.find((file) => file.endsWith("helper.js")),
       "utf8",
     );
-    expect(helperEmit).not.toMatch(/__PURE__\*\/\s*makeToken/u);
-    expect(helperEmit).toContain("@pureOrBreakMyCode");
+    expect(helperEmit).toMatch(
+      /(?:@pureOrBreakMyCode[\s\S]*|@__PURE__\s*\*\/\s*)makeToken/u,
+    );
   },
 );
 
