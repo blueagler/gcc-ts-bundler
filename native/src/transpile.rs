@@ -25,6 +25,7 @@ mod js_compat;
 mod js_compat_oxc;
 mod lowering_oxc;
 mod namespace;
+mod nocollapse_oxc;
 mod print;
 mod pure_calls;
 mod type_metadata;

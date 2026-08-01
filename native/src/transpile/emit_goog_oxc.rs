@@ -24,6 +24,7 @@ use super::emit_runtime_oxc::{binding_names_with_ids, collect_reassigned_binding
 use super::fresh_oxc::FreshNameAllocator;
 use super::identity_oxc::{BindingKeyMap, BindingKeySet, ModuleIdentity};
 use super::lowering_oxc::closure_input_codegen_options;
+use super::nocollapse_oxc::NocollapseAssignments;
 use super::type_metadata_oxc::{runtime_type_names_from_program, BoundTypeMetadata};
 use super::{
     apply_js_compat_text_fixes, is_valid_js_identifier, live_export_accessor_name, member_access,
@@ -56,6 +57,7 @@ pub(crate) fn emit_goog_module_program<'a>(
         file_metadata,
         context.type_metadata_enabled,
     );
+    let nocollapse_assignments = NocollapseAssignments::collect(program);
     let runtime_type_names = runtime_type_names_from_program(program, identity, &bound);
     let mut fresh_names = FreshNameAllocator::from_program(program, identity);
     let mut type_metadata = bound.prepare(&mut fresh_names, &runtime_type_names, None);
@@ -95,10 +97,11 @@ pub(crate) fn emit_goog_module_program<'a>(
                 }
                 if let Some(declaration) = export.declaration {
                     let exported_names = exported_decl_names(&declaration, identity);
-                    output.push(type_metadata.render_statement(
+                    output.push(type_metadata.render_statement_with_nocollapse(
                         identity,
                         declaration.into(),
                         &[],
+                        Some(&nocollapse_assignments),
                     )?);
                     for export_name in exported_names {
                         output.push(format!("exports.{export_name} = {export_name};"));
@@ -126,17 +129,19 @@ pub(crate) fn emit_goog_module_program<'a>(
                     ExportDefaultDeclarationKind::FunctionDeclaration(function)
                         if function.id.is_some() =>
                     {
-                        output.push(type_metadata.render_statement(
+                        output.push(type_metadata.render_statement_with_nocollapse(
                             identity,
                             Statement::FunctionDeclaration(function),
                             &[],
+                            Some(&nocollapse_assignments),
                         )?);
                     }
                     ExportDefaultDeclarationKind::ClassDeclaration(class) if class.id.is_some() => {
-                        output.push(type_metadata.render_statement(
+                        output.push(type_metadata.render_statement_with_nocollapse(
                             identity,
                             Statement::ClassDeclaration(class),
                             &[],
+                            Some(&nocollapse_assignments),
                         )?);
                     }
                     declaration => {
@@ -157,7 +162,12 @@ pub(crate) fn emit_goog_module_program<'a>(
                 &mut fresh_names,
             )?),
             statement if statement.is_typescript_syntax() => {}
-            statement => output.push(type_metadata.render_statement(identity, statement, &[])?),
+            statement => output.push(type_metadata.render_statement_with_nocollapse(
+                identity,
+                statement,
+                &[],
+                Some(&nocollapse_assignments),
+            )?),
         }
     }
     if let Some(export_name) = commonjs_export_name {

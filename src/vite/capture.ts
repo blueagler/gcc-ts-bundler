@@ -5,6 +5,7 @@ import ts from "@typescript/typescript6";
 import type { ResolvedConfig, transformWithEsbuild } from "vite";
 
 import { hashJson } from "../shared/hash";
+import { applyTextEdits } from "../shared/text-edits";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type {
   CapturedModule,
@@ -182,7 +183,125 @@ async function normalizeCapturedCode(
     }).outputText;
   }
 
-  return nextCode;
+  return annotateAliasedStaticClassMemberWrites(id, nextCode);
+}
+
+/**
+ * Vite's decorator lowering can place static class-field initializers on a
+ * temporary class alias inside a comma expression. Closure does not connect
+ * those writes with static reads inherited through `this`, so annotate the
+ * assignments in place instead of changing their evaluation order.
+ */
+export function annotateAliasedStaticClassMemberWrites(
+  id: string,
+  code: string,
+) {
+  const sourceFile = ts.createSourceFile(
+    id,
+    code,
+    ts.ScriptTarget.Latest,
+    true,
+    resolveScriptKind(id),
+  );
+  const edits: Array<{ end: number; start: number; text: string }> = [];
+
+  const visit = (node: ts.Node) => {
+    if (!ts.isVariableStatement(node)) {
+      ts.forEachChild(node, visit);
+      return;
+    }
+
+    const declaration = node.declarationList.declarations[0];
+    if (
+      node.declarationList.declarations.length !== 1 ||
+      !declaration ||
+      !ts.isIdentifier(declaration.name) ||
+      !declaration.initializer
+    ) {
+      return;
+    }
+
+    const expressions = flattenCommaExpression(declaration.initializer);
+    const classAssignment = expressions[0];
+    const finalExpression = expressions.at(-1);
+    if (
+      !classAssignment ||
+      !finalExpression ||
+      expressions.length < 3 ||
+      !isAliasedClassAssignment(classAssignment) ||
+      !ts.isIdentifier(finalExpression) ||
+      finalExpression.text !== classAssignment.left.text
+    ) {
+      return;
+    }
+
+    const staticWrites = expressions.slice(1, -1);
+    if (
+      staticWrites.length === 0 ||
+      !staticWrites.every((write) =>
+        isAliasedStaticMemberWrite(write, classAssignment.left.text),
+      )
+    ) {
+      return;
+    }
+
+    for (const write of staticWrites) {
+      if (
+        !ts.isBinaryExpression(write) ||
+        !ts.isPropertyAccessExpression(write.left) ||
+        code
+          .slice(write.getFullStart(), write.getStart(sourceFile))
+          .includes("@nocollapse")
+      ) {
+        continue;
+      }
+      edits.push({
+        end: write.getStart(sourceFile),
+        start: write.getStart(sourceFile),
+        text: "/** @nocollapse */ ",
+      });
+    }
+  };
+
+  ts.forEachChild(sourceFile, visit);
+  return edits.length === 0 ? code : applyTextEdits(code, edits);
+}
+
+function flattenCommaExpression(expression: ts.Expression): ts.Expression[] {
+  const unwrapped = ts.isParenthesizedExpression(expression)
+    ? expression.expression
+    : expression;
+  if (
+    ts.isBinaryExpression(unwrapped) &&
+    unwrapped.operatorToken.kind === ts.SyntaxKind.CommaToken
+  ) {
+    return [
+      ...flattenCommaExpression(unwrapped.left),
+      ...flattenCommaExpression(unwrapped.right),
+    ];
+  }
+  return [unwrapped];
+}
+
+function isAliasedClassAssignment(
+  expression: ts.Expression,
+): expression is ts.BinaryExpression & { left: ts.Identifier } {
+  return (
+    ts.isBinaryExpression(expression) &&
+    expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+    ts.isIdentifier(expression.left) &&
+    ts.isClassExpression(expression.right)
+  );
+}
+
+function isAliasedStaticMemberWrite(expression: ts.Expression, alias: string) {
+  return (
+    ts.isBinaryExpression(expression) &&
+    expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+    ts.isPropertyAccessExpression(expression.left) &&
+    ts.isIdentifier(expression.left.expression) &&
+    expression.left.expression.text === alias
+  );
 }
 
 export async function normalizeRetainedCapturedModules(input: {

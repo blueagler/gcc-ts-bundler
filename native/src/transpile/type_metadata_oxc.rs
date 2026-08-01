@@ -16,6 +16,7 @@ use super::emit_runtime_oxc::binding_names_with_ids;
 use super::fresh_oxc::FreshNameAllocator;
 use super::identity_oxc::{BindingKey, BindingKeyMap, ModuleIdentity};
 use super::lowering_oxc::closure_input_codegen_options;
+use super::nocollapse_oxc::NocollapseAssignments;
 use super::suffixed_name;
 use super::type_metadata::{
     annotation_target_label, apply_source_edits, compose_annotations, empty_metadata,
@@ -313,8 +314,18 @@ impl PreparedTypeMetadata {
     pub(crate) fn render_statement(
         &mut self,
         identity: &ModuleIdentity,
+        statement: Statement<'_>,
+        tags: &[&str],
+    ) -> std::result::Result<String, String> {
+        self.render_statement_with_nocollapse(identity, statement, tags, None)
+    }
+
+    pub(crate) fn render_statement_with_nocollapse(
+        &mut self,
+        identity: &ModuleIdentity,
         mut statement: Statement<'_>,
         tags: &[&str],
+        nocollapse_assignments: Option<&NocollapseAssignments>,
     ) -> std::result::Result<String, String> {
         let binding_ids = declared_statement_ids(&statement, identity);
         if binding_ids.len() > 1 {
@@ -394,6 +405,9 @@ impl PreparedTypeMetadata {
         remove_bound_valueless_class_fields(&mut statement, &rendered_members);
         let owner_name = annotation_owner.map(|binding| identity.symbol(binding).to_string());
         let mut code = print_statement(&statement);
+        if let Some(nocollapse_assignments) = nocollapse_assignments {
+            code = nocollapse_assignments.annotate_rendered_statement(&statement, code)?;
+        }
         let mut after = Vec::new();
         for rendered in rendered_members {
             let ClosureAnnotationTarget::Member {

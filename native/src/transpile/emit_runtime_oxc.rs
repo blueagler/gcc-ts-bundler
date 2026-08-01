@@ -20,6 +20,7 @@ use super::imports_exports::{
     render_grouped_live_slot_exports_with, BundlerExportSlotMode, ImportBindingSlotAlias,
 };
 use super::lowering_oxc::closure_input_codegen_options;
+use super::nocollapse_oxc::NocollapseAssignments;
 use super::type_metadata::{RuntimeTypeName, TypeMetadataDelivery};
 use super::type_metadata_oxc::{runtime_type_names_from_program, BoundTypeMetadata};
 use super::{
@@ -415,6 +416,7 @@ pub(crate) fn emit_bundler_runtime_module_text<'a>(
         file_metadata,
         context.type_metadata_enabled,
     );
+    let nocollapse_assignments = NocollapseAssignments::collect(program);
     let module_id = to_goog_module_id(file_path, &context.workspace_dir);
     let runtime_module_id = to_bundler_runtime_module_id(&module_id);
     let current_slots = context
@@ -533,10 +535,11 @@ pub(crate) fn emit_bundler_runtime_module_text<'a>(
                     let exported_names = exported_decl_names(&declaration, identity);
                     let slot_mode =
                         slot_mode_for_export_decl(&declaration, identity, &local_export_modes);
-                    output.push(type_metadata.render_statement(
+                    output.push(type_metadata.render_statement_with_nocollapse(
                         identity,
                         declaration.into(),
                         &[],
+                        Some(&nocollapse_assignments),
                     )?);
                     for export_name in exported_names {
                         let slot = current_slots.slot_for(&export_name).ok_or_else(|| {
@@ -580,10 +583,11 @@ pub(crate) fn emit_bundler_runtime_module_text<'a>(
                 match export.declaration {
                     ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
                         if function.id.is_some() {
-                            output.push(type_metadata.render_statement(
+                            output.push(type_metadata.render_statement_with_nocollapse(
                                 identity,
                                 Statement::FunctionDeclaration(function),
                                 &[],
+                                Some(&nocollapse_assignments),
                             )?);
                         } else {
                             output.push(format!(
@@ -598,10 +602,11 @@ pub(crate) fn emit_bundler_runtime_module_text<'a>(
                     }
                     ExportDefaultDeclarationKind::ClassDeclaration(class) => {
                         if class.id.is_some() {
-                            output.push(type_metadata.render_statement(
+                            output.push(type_metadata.render_statement_with_nocollapse(
                                 identity,
                                 Statement::ClassDeclaration(class),
                                 &[],
+                                Some(&nocollapse_assignments),
                             )?);
                         } else {
                             output.push(format!(
@@ -687,7 +692,12 @@ pub(crate) fn emit_bundler_runtime_module_text<'a>(
                 ));
             }
             statement if statement.is_typescript_syntax() => {}
-            statement => output.push(type_metadata.render_statement(identity, statement, &[])?),
+            statement => output.push(type_metadata.render_statement_with_nocollapse(
+                identity,
+                statement,
+                &[],
+                Some(&nocollapse_assignments),
+            )?),
         }
     }
 

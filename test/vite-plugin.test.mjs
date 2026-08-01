@@ -8,6 +8,7 @@ import { expect, onTestFinished, test } from "bun:test";
 import {
   getCapturedModuleAnalysis,
   normalizeRetainedCapturedModules,
+  annotateAliasedStaticClassMemberWrites,
   resolveViteCaptureRootPath,
 } from "../src/vite/capture.ts";
 import { resolveNormalizedBridgeModuleIds } from "../src/vite/graph.ts";
@@ -192,6 +193,70 @@ function createCapturePluginContext() {
     },
   };
 }
+
+test("annotates aliased static class writes in place", () => {
+  const source = [
+    "var _a;",
+    'let Derived = (_a = class extends Base {}, _a.value = "retained", _a);',
+    "",
+  ].join("\n");
+
+  expect(
+    annotateAliasedStaticClassMemberWrites("/src/main.js", source),
+  ).toBe(
+    [
+      "var _a;",
+      'let Derived = (_a = class extends Base {}, /** @nocollapse */ _a.value = "retained", _a);',
+      "",
+    ].join("\n"),
+  );
+});
+
+test("aliased static write annotation preserves a declared binding TDZ", () => {
+  const source = [
+    "var _a;",
+    "let C = (_a = class {}, _a.value = (() => C)(), _a);",
+    "",
+  ].join("\n");
+
+  for (const candidate of [
+    source,
+    annotateAliasedStaticClassMemberWrites("/src/main.js", source),
+  ]) {
+    expect(() => new Function(candidate)()).toThrow(ReferenceError);
+  }
+});
+
+test("aliased static write annotation preserves throwing RHS binding state", () => {
+  const source = [
+    "var _a;",
+    "let captured;",
+    "let result;",
+    "try {",
+    '  let C = (_a = class {}, _a.value = (() => { captured = () => C; throw new Error("boom"); })(), _a);',
+    "} catch (error) {",
+    "  try {",
+    '    captured(); result = { error: error.message, binding: "initialized" };',
+    "  } catch (bindingError) {",
+    "    result = { error: error.message, binding: bindingError.name };",
+    "  }",
+    "}",
+    'globalThis["__throwingAliasedStaticWrite"] = result;',
+    "",
+  ].join("\n");
+  const execute = (candidate) => {
+    const runtimeGlobal = {};
+    new Function("globalThis", candidate)(runtimeGlobal);
+    return runtimeGlobal.__throwingAliasedStaticWrite;
+  };
+
+  const original = execute(source);
+  const annotated = execute(
+    annotateAliasedStaticClassMemberWrites("/src/main.js", source),
+  );
+  expect(original).toEqual({ error: "boom", binding: "ReferenceError" });
+  expect(annotated).toEqual(original);
+});
 
 test("captured module analysis ignores comment-only hash text for compat downlevel", () => {
   const record = {
@@ -927,6 +992,43 @@ test.serial(
     expect(await fixture.read(path.join("dist", jsFile))).toContain(
       "EXPECTED_DEFAULT",
     );
+  },
+);
+
+test.serial(
+  "full Vite pipeline preserves aliased static writes read through superclass this",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<script type="module" src="/src/main.js"></script>\n',
+    );
+    await fixture.write(
+      "src/main.js",
+      [
+        "class Base {",
+        "  static read() { return this.value; }",
+        "}",
+        "var _a;",
+        'let Derived = (_a = class extends Base {}, _a.value = "retained", _a);',
+        'globalThis["__aliasedStaticWrite"] = Base.read.call(Derived);',
+        "",
+      ].join("\n"),
+    );
+
+    await buildViteFixture(fixture, {
+      compilerLines: ['        chunks: { outputType: "script" },'],
+    });
+
+    const html = await fixture.read("dist/index.html");
+    const entryScript = readRewrittenEntryScript(html);
+    const source = await fixture.read(
+      path.join("dist", toDistRelativeFile(entryScript)),
+    );
+    const runtimeGlobal = { location: new URL("http://example.test/") };
+    new Function("globalThis", source)(runtimeGlobal);
+    expect(runtimeGlobal.__aliasedStaticWrite).toBe("retained");
   },
 );
 

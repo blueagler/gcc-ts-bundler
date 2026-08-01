@@ -29,6 +29,7 @@ use super::imports_exports::{
     BundlerExportSlotMode, ImportBindingSlotAlias,
 };
 use super::lowering_oxc::closure_input_codegen_options;
+use super::nocollapse_oxc::NocollapseAssignments;
 use super::pure_calls::collect_pure_annotated_binding_names;
 use super::type_metadata::{RuntimeTypeName, PURE_TAG};
 use super::type_metadata_oxc::{
@@ -67,6 +68,7 @@ pub(crate) fn emit_hoisted_module_text<'a>(
         file_metadata,
         context.type_metadata_enabled,
     );
+    let nocollapse_assignments = NocollapseAssignments::collect(program);
     let module_id = to_goog_module_id(file_path, &context.workspace_dir);
     let ordinal = plan
         .ordinal_of(&module_id)
@@ -185,6 +187,7 @@ pub(crate) fn emit_hoisted_module_text<'a>(
                         &module_bindings,
                         context,
                         ordinal,
+                        &nocollapse_assignments,
                     )?);
                 } else if let Some(source) = export.source {
                     output.extend(render_execution_require(
@@ -218,6 +221,7 @@ pub(crate) fn emit_hoisted_module_text<'a>(
                                 &module_bindings,
                                 context,
                                 ordinal,
+                                &nocollapse_assignments,
                             )?);
                         } else {
                             let local_name =
@@ -242,6 +246,7 @@ pub(crate) fn emit_hoisted_module_text<'a>(
                                 &module_bindings,
                                 context,
                                 ordinal,
+                                &nocollapse_assignments,
                             )?);
                         } else {
                             let local_name =
@@ -273,6 +278,7 @@ pub(crate) fn emit_hoisted_module_text<'a>(
                 &module_bindings,
                 context,
                 ordinal,
+                &nocollapse_assignments,
             )?),
         }
     }
@@ -302,6 +308,7 @@ pub(crate) fn emit_hoisted_module_text<'a>(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_hoisted_statement(
     type_metadata: &mut PreparedTypeMetadata,
     identity: &ModuleIdentity,
@@ -310,6 +317,7 @@ fn render_hoisted_statement(
     module_bindings: &HashSet<String>,
     context: &TranspileContext,
     ordinal: usize,
+    nocollapse_assignments: &NocollapseAssignments,
 ) -> std::result::Result<String, String> {
     let mut tags = Vec::new();
     if is_pure_statement(&statement, pure_names, &context.pure_callees, |name| {
@@ -321,7 +329,12 @@ fn render_hoisted_statement(
     if assigner_function_name(&statement, module_bindings).is_some() {
         tags.push(NOINLINE_TAG);
     }
-    type_metadata.render_statement(identity, statement, &tags)
+    type_metadata.render_statement_with_nocollapse(
+        identity,
+        statement,
+        &tags,
+        Some(nocollapse_assignments),
+    )
 }
 
 fn render_execution_require(
