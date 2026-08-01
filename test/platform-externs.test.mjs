@@ -1,5 +1,4 @@
 import fs from "node:fs/promises";
-import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { expect, test } from "bun:test";
@@ -8,12 +7,11 @@ import { generatePlatformExternsText } from "../src/build/closure/platform-exter
 import {
   loadPlatformExternArchive,
   readPlatformExternArchive,
+  resolvePlatformExternCompilerJarPath,
 } from "../src/build/closure/platform-externs/archive.ts";
 import { getPlatformExternIndex } from "../src/build/closure/platform-externs/index.ts";
 import { getDefaultPersistentCacheRoot } from "../src/shared/cache-store.ts";
 import { platformExternParserDigest } from "../src/build/closure/platform-externs/index.ts";
-
-const requireFromHere = createRequire(import.meta.url);
 
 /**
  * A token unique to this file's process, stamped into every identity this file
@@ -79,6 +77,14 @@ function isLegitimateSharedEntry(name) {
 // Taken at module load, before any test body runs, so the assertion cannot
 // pass merely because an earlier test in this file already wrote the entry.
 const sharedCacheBeforeFile = new Set(await listSharedCacheEntries());
+
+test("loads the compiler extern archive through its package dependency context", async () => {
+  const archive = await loadPlatformExternArchive(testCacheRoot);
+  expect(archive).not.toBeNull();
+  expect((await archive?.entries()).some((entry) => entry.name.startsWith("browser/"))).toBe(
+    true,
+  );
+});
 
 test("indexes typed declarations, owners, heritage, and overrides", async () => {
   const archive = await loadPlatformExternArchive(testCacheRoot);
@@ -272,9 +278,9 @@ test("the generated slice passes Closure type validation", async () => {
     expect(text).not.toBeNull();
     await fs.writeFile(externs, text);
 
-    const compilerJar = requireFromHere
-      .resolve("google-closure-compiler-java/package.json")
-      .replace(/package\.json$/, "compiler.jar");
+    const compilerJar = resolvePlatformExternCompilerJarPath();
+    expect(compilerJar).not.toBeNull();
+    if (!compilerJar) throw new Error("Closure compiler jar is unavailable");
     const process = Bun.spawn([
       "java",
       "-jar",

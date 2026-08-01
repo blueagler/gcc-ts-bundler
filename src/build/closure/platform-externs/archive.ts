@@ -99,7 +99,7 @@ async function writeIdentityRecord(
 async function loadInstalledArchive(options: {
   cacheRoot: string;
 }): Promise<PlatformExternArchive | null> {
-  const jarPath = resolveCompilerJarPath();
+  const jarPath = resolvePlatformExternCompilerJarPath();
   if (!jarPath) return null;
   const { cacheRoot } = options;
 
@@ -153,9 +153,15 @@ export function readPlatformExternArchive(
   };
 }
 
-function resolveCompilerJarPath(): string | null {
+export function resolvePlatformExternCompilerJarPath(): string | null {
   try {
-    return requireFromHere
+    // `google-closure-compiler-java` is transitive, not a direct dependency.
+    // Resolve from the compiler package so Bun/pnpm isolated installs find its
+    // nested dependency instead of requiring it to be hoisted beside us.
+    const compilerPackage = requireFromHere.resolve(
+      "google-closure-compiler/package.json",
+    );
+    return createRequire(compilerPackage)
       .resolve("google-closure-compiler-java/package.json")
       .replace(/package\.json$/, "compiler.jar");
   } catch {

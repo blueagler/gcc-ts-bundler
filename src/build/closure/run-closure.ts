@@ -188,6 +188,17 @@ async function writeGeneratedAssets(
   );
 }
 
+function createPlatformExternFallbackWarning() {
+  let warned = false;
+  return () => {
+    if (warned) return;
+    warned = true;
+    console.warn(
+      'gcc-ts-bundler: platform extern slicing fell back to full browser externs. Set platformExterns: "full" to use full externs intentionally.',
+    );
+  };
+}
+
 async function compilePreparedClosureJobs({
   closureCompilerEnvironment,
   chunkMode,
@@ -212,6 +223,7 @@ async function compilePreparedClosureJobs({
     chunkMode === "off"
       ? 1
       : determineClosureConcurrency(prepared.compileJobs.length);
+  const warnPlatformExternFallback = createPlatformExternFallbackWarning();
   const results = await runWithConcurrency(
     prepared.compileJobs,
     concurrency,
@@ -229,9 +241,11 @@ async function compilePreparedClosureJobs({
             packageRoot,
             closureCompilerEnvironment.typeInferenceDisabled,
             projectCacheDir,
+            warnPlatformExternFallback,
           ),
           cacheDir,
         ),
+        warnPlatformExternFallback,
       }),
   );
   if (cacheDir) {
@@ -401,6 +415,7 @@ async function applyMinimalPlatformExterns(
   packageRoot: string,
   typeInferenceDisabled: boolean,
   projectCacheDir: string,
+  warnPlatformExternFallback: () => void,
 ): Promise<PreparedCompileJob> {
   if (
     platformExterns !== "minimal" ||
@@ -427,6 +442,7 @@ async function applyMinimalPlatformExterns(
     { sliceCacheRoot: projectCacheDir },
   );
   if (externsText === null) {
+    warnPlatformExternFallback();
     logInternalDetail(
       "closure:platform-externs",
       "unavailable, using full browser externs",
@@ -459,10 +475,12 @@ async function runPreparedClosureJob({
   compilerEnvironment,
   cacheDir,
   job,
+  warnPlatformExternFallback,
 }: {
   compilerEnvironment: ClosureCompilerEnvironment;
   cacheDir: string | null;
   job: PreparedCompileJob;
+  warnPlatformExternFallback: () => void;
 }) {
   const cacheJob = {
     ...job,
@@ -549,6 +567,7 @@ async function runPreparedClosureJob({
       job.env === "CUSTOM" &&
       isMissingPlatformExternFailure(capturedStdErr)
     ) {
+      warnPlatformExternFallback();
       logInternalDetail(
         "closure:platform-externs",
         "fallback to full browser externs",
@@ -558,6 +577,7 @@ async function runPreparedClosureJob({
       return runPreparedClosureJob({
         compilerEnvironment,
         cacheDir,
+        warnPlatformExternFallback,
         job: {
           ...fullJob,
           externs: fullJob.externs.filter(
