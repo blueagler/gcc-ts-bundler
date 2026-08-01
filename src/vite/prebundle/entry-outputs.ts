@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import ts from "typescript";
+import ts from "@typescript/typescript6";
 
 import { firstOrUndefined } from "../../shared/arrays";
 import { syncDirectoryEntries } from "../../shared/files";

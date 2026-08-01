@@ -23,5 +23,5 @@
     "module": "ESNext"
   },
   "exclude": ["node_modules", "bin"],
-  "include": ["src/**/*.ts", "scripts/**/*.ts", "eslint.config.ts"]
+  "include": ["src/**/*.ts", "scripts/**/*.ts"]
 }

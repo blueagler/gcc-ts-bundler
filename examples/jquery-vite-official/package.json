@@ -10,9 +10,9 @@
     "build:pure": "vite build --config vite.pure.config.ts"
   },
   "devDependencies": {
-    "typescript": "~6.0.3",
-    "vite": "^8.2.0",
-    "@types/jquery": "^4.0.1"
+    "@types/jquery": "^4.0.1",
+    "typescript": "7.0.2",
+    "vite": "^8.2.0"
   },
   "dependencies": {
     "gcc-ts-bundler": "link:gcc-ts-bundler",

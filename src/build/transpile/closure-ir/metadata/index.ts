@@ -1,4 +1,4 @@
-import ts from "typescript";
+import ts from "@typescript/typescript6";
 
 import { collectClosureIrFileMetadata } from "./collect";
 import { collectUnsafeEnumSymbols } from "./enums";

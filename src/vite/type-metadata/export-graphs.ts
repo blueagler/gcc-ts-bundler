@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import ts from "typescript";
+import ts from "@typescript/typescript6";
 
 import { canonicalSymbolId } from "../../build/transpile/closure-ir/metadata/type-render";
 import { hashTypeMetadataValue } from "./cache";

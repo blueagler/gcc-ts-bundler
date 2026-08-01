@@ -95,7 +95,7 @@ try {
   await run(
     process.execPath,
     [
-      path.join(packageRoot, "node_modules/typescript/bin/tsc"),
+      path.join(packageRoot, "scripts/run-typescript.mjs"),
       "-p",
       "tsconfig.json",
     ],

@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import type ts from "typescript";
+import type ts from "@typescript/typescript6";
 
 import { sanitizeClosureName } from "../build/transpile/closure-ir/metadata/closure-type-strings";
 

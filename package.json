@@ -43,6 +43,7 @@
     "eslint": "10.8.0",
     "eslint-plugin-perfectionist": "^5.10.0",
     "prettier": "^4.0.0-alpha.13",
+    "typescript": "7.0.2",
     "typescript-eslint": "^8.65.0",
     "vite": "^8.2.0"
   },
@@ -60,12 +61,12 @@
     "build:native:all": "node ./scripts/build-native.mjs --all",
     "build:js": "node ./scripts/build-js.mjs",
     "build": "node ./scripts/build.mjs",
-    "typecheck": "bun --bun tsc --noEmit && bun --bun tsc -p tsconfig.types.json --noEmit",
+    "typecheck": "node ./scripts/run-typescript.mjs --noEmit && node ./scripts/run-typescript.mjs -p tsconfig.types.json --noEmit",
     "ledger": "bun --bun ./scripts/property-ledger.ts",
     "format:rust": "cargo fmt --manifest-path native/Cargo.toml -- --check",
     "lint:rust": "cargo clippy --manifest-path native/Cargo.toml --all-targets --all-features -- -D warnings",
-    "lint": "bun run typecheck && bun run format:rust && bun run lint:rust && bun --bun ./scripts/format.ts --check && bun --bun eslint -c eslint.config.ts \"src/**/*.ts\"",
-    "fix": "bun --bun ./scripts/format.ts && bun --bun eslint -c eslint.config.ts \"src/**/*.ts\" --fix",
+    "lint": "bun run typecheck && bun run format:rust && bun run lint:rust && bun --bun ./scripts/format.ts --check && node --require ./scripts/typescript6-register.cjs ./node_modules/eslint/bin/eslint.js -c eslint.config.mjs \"src/**/*.ts\"",
+    "fix": "bun --bun ./scripts/format.ts && node --require ./scripts/typescript6-register.cjs ./node_modules/eslint/bin/eslint.js -c eslint.config.mjs \"src/**/*.ts\" --fix",
     "test": "cargo test --manifest-path native/Cargo.toml && bun run build && bun test ./test/*.test.mjs",
     "preview:examples": "node ./scripts/preview-example.mjs",
     "preview:react": "node ./scripts/preview-example.mjs react",
@@ -82,8 +83,8 @@
     "closure"
   ],
   "dependencies": {
-    "google-closure-compiler": "20260726.0.0",
-    "typescript": "^6.0.3"
+    "@typescript/typescript6": "6.0.2",
+    "google-closure-compiler": "20260726.0.0"
   },
   "optionalDependencies": {
     "gcc-ts-bundler-darwin-arm64": "0.2.0",

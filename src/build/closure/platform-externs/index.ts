@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import * as ts from "typescript";
+import * as ts from "@typescript/typescript6";
 
 import {
   parseClosureTypeReferences,

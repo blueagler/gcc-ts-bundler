@@ -1,5 +1,5 @@
 import fs from "fs/promises";
-import * as ts from "typescript";
+import * as ts from "@typescript/typescript6";
 
 import { parseClosureTypeReferences } from "./closure-type-parser";
 import { parseJavaScriptSource } from "./typescript-parser";

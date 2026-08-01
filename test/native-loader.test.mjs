@@ -81,10 +81,15 @@ async function createLinkedInstall(
   }
   const targetNodeModules = path.join(targetDir, "node_modules");
   await fs.mkdir(targetNodeModules, { recursive: true });
-  for (const dependencyName of ["google-closure-compiler", "typescript"]) {
+  for (const dependencyName of [
+    "@typescript/typescript6",
+    "google-closure-compiler",
+  ]) {
+    const target = path.join(targetNodeModules, dependencyName);
+    await fs.mkdir(path.dirname(target), { recursive: true });
     await fs.symlink(
       path.join(process.cwd(), "node_modules", dependencyName),
-      path.join(targetNodeModules, dependencyName),
+      target,
       process.platform === "win32" ? "junction" : "dir",
     );
   }

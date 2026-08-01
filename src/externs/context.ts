@@ -1,4 +1,4 @@
-import ts from "typescript";
+import ts from "@typescript/typescript6";
 
 import { collectContracts } from "./contracts/registry";
 import { createEmptyContractRegistry, uniqueStrings } from "./shared";

@@ -5,7 +5,7 @@ import prettier from "prettier";
 
 const files = [
   "README.md",
-  "eslint.config.ts",
+  "eslint.config.mjs",
   "package.json",
   "tsconfig.json",
   "tsconfig.types.json",

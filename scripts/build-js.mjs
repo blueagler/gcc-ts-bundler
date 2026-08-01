@@ -4,7 +4,8 @@ import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
-import ts from "typescript";
+// TEMPORARY M0/M1 parser bridge; remove with the legacy compiler-API migration.
+import ts from "@typescript/typescript6";
 
 const BUN = process.platform === "win32" ? "bun.exe" : "bun";
 const SHOW_TIMINGS = process.env.GCC_BUILD_TIMINGS === "1";
@@ -61,9 +62,11 @@ await runCommandsInParallel([
   },
 ]);
 
-await runCommand(BUN, ["--bun", "tsc", "-p", "./tsconfig.types.json"], {
-  label: "build-js:types",
-});
+await runCommand(
+  process.execPath,
+  ["./scripts/run-typescript.mjs", "-p", "./tsconfig.types.json"],
+  { label: "build-js:types" },
+);
 await rewriteDeclarationSpecifiers("./dist");
 
 async function rewriteDeclarationSpecifiers(directory) {

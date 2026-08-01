@@ -1,4 +1,4 @@
-import ts from "typescript";
+import ts from "@typescript/typescript6";
 
 import { containsDecorators } from "../decorators";
 import { containsExplicitTypeSignal } from "../diagnostics";

@@ -1,5 +1,5 @@
 import path from "path";
-import ts from "typescript";
+import ts from "@typescript/typescript6";
 
 import { resolveGraph } from "../../native/load";
 import { loadCompilerOptions } from "../transpile/compiler-options";

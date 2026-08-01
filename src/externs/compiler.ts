@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import ts from "typescript";
+import ts from "@typescript/typescript6";
 
 import { loadCompilerOptions } from "../build/transpile/compiler-options";
 import { hasErrorCode } from "../shared/validation";

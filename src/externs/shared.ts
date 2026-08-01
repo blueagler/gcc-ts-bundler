@@ -1,5 +1,5 @@
 import path from "path";
-import ts from "typescript";
+import ts from "@typescript/typescript6";
 
 export const DECLARATION_EXTENSIONS = [
   ".d.ts",

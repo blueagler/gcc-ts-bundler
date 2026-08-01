@@ -1,5 +1,6 @@
 import fs from "node:fs";
-import ts from "typescript";
+import path from "node:path";
+import ts from "@typescript/typescript6";
 import { expect, test } from "bun:test";
 
 import {
@@ -15,10 +16,9 @@ import {
  * ones — the measured fidelity value of the whole table is ~0.7%.
  */
 
-const LIB_DIR = new URL(
-  "../node_modules/typescript/lib/",
-  import.meta.url,
-).pathname;
+const LIB_DIR = `${path.dirname(
+  ts.getDefaultLibFilePath({ target: ts.ScriptTarget.ESNext }),
+)}${path.sep}`;
 
 /** Renders the declared type of `let v: …` in a one-file program. */
 function render(source) {

@@ -1,4 +1,4 @@
-import ts from "typescript";
+import ts from "@typescript/typescript6";
 
 import type { ClosureEnumDeclaration } from "../types";
 import { getPropertyNameText, hasExportModifier } from "./modifiers";

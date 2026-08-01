@@ -1,4 +1,4 @@
-import * as ts from "typescript";
+import * as ts from "@typescript/typescript6";
 
 export function parseJavaScriptSource(
   fileName: string,

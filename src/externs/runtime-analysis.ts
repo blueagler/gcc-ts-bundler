@@ -1,5 +1,5 @@
 import fs from "fs";
-import ts from "typescript";
+import ts from "@typescript/typescript6";
 
 import {
   getScriptKindForFile,

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import ts from "typescript";
+import ts from "@typescript/typescript6";
 
 import { writeFileIfChanged } from "../shared/files";
 import { assertNever, defineValues, requireChoice } from "../shared/validation";

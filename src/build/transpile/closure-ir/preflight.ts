@@ -1,5 +1,5 @@
 import fs from "fs";
-import ts from "typescript";
+import ts from "@typescript/typescript6";
 
 import type { DiagnosticsPreflight } from "../../../api/types";
 import { logInternalDetail } from "../../../shared/timing";

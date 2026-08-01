@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import ts from "typescript";
+import ts from "@typescript/typescript6";
 
 import { collectDeclarationExportGraph } from "./export-graphs";
 import type {

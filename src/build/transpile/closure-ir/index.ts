@@ -1,5 +1,5 @@
 import path from "path";
-import ts from "typescript";
+import ts from "@typescript/typescript6";
 
 import { logInternalDetail } from "../../../shared/timing";
 import {

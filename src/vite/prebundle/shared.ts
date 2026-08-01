@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 
-import type ts from "typescript";
+import type ts from "@typescript/typescript6";
 
 export const DEP_BUNDLE_INPUT_DIR = "__dep-bundle-inputs";
 
