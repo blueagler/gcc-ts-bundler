@@ -82,6 +82,7 @@ export async function materializeCapturedGraph(
   const filePathByModuleId = new Map<string, string>();
   const modules: CapturedRuntimeModule[] = [];
   const authoredFiles: string[] = [];
+  const dependencySourceFileByMaterializedFile: Record<string, string> = {};
   const runtimeResolutionByKey = new Map<string, RuntimeResolutionIdentity>();
   for (const moduleId of materializedModuleIds) {
     const relativePath = toMaterializedRelativePath(
@@ -98,6 +99,12 @@ export async function materializeCapturedGraph(
     });
     if (isAuthoredModuleId(moduleId, input.config.root)) {
       authoredFiles.push(filePath);
+    } else {
+      const sourceFile = stripQuery(moduleId);
+      if (path.isAbsolute(sourceFile)) {
+        dependencySourceFileByMaterializedFile[path.normalize(filePath)] =
+          path.normalize(sourceFile);
+      }
     }
   }
 
@@ -144,20 +151,20 @@ export async function materializeCapturedGraph(
       };
     }),
   );
-  if (
-    materializedEntries.some((entry) =>
-      entry.relativePath.startsWith("node_modules/"),
-    )
-  ) {
-    // The nearest real package.json above the materialized tree is the app's,
-    // which is usually `"type": "module"` and would force esbuild to read
-    // materialized CommonJS dependency files (react's dev/prod wrappers) as
-    // ESM, leaving `module`/`exports` as dangling globals. Restore the
-    // extension-based default for the materialized dependency copies only.
-    materializedEntries.push({
-      content: '{ "type": "commonjs" }\n',
-      relativePath: "node_modules/package.json",
-    });
+  for (const dependencyRoot of ["node_modules", "__deps__"]) {
+    if (
+      materializedEntries.some((entry) =>
+        entry.relativePath.startsWith(`${dependencyRoot}/`),
+      )
+    ) {
+      // The nearest real package.json above materialized dependency copies is
+      // usually the app's `"type": "module"`. Keep copied CJS wrappers on
+      // extension-based semantics before esbuild prebundles them.
+      materializedEntries.push({
+        content: '{ "type": "commonjs" }\n',
+        relativePath: `${dependencyRoot}/package.json`,
+      });
+    }
   }
   await syncDirectoryEntries(input.srcDir, materializedEntries, {
     preserve(relativePath) {
@@ -180,6 +187,7 @@ export async function materializeCapturedGraph(
     authoredFiles: authoredFiles.sort((left, right) =>
       left.localeCompare(right),
     ),
+    dependencySourceFileByMaterializedFile,
     entries: entryFiles,
     modules,
     prunedEmptyModuleIds: [...prunedEmptyModuleIds].sort((left, right) =>

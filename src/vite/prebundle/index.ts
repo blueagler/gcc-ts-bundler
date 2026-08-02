@@ -1,5 +1,8 @@
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
+
+import type { Plugin } from "esbuild";
 
 import { syncDirectoryEntries } from "../../shared/files";
 import type {
@@ -43,6 +46,9 @@ import {
   toPathIndependentKey,
 } from "./shared";
 import type { ParsedMaterializedModule } from "./shared";
+
+const MATERIALIZED_DEPENDENCY_BUNDLE_MARKER =
+  ".gcc-ts-bundler-materialized-dependency-bundles.json";
 
 interface PrebundleContext {
   authoredFiles: Set<string>;
@@ -110,6 +116,95 @@ export async function prebundleMaterializedDependencies(input: {
     runtimeSrcDir: context.runtimeSrcDir,
   });
   return await assembleGraph(context, bundles, authoredEntries);
+}
+
+function createMaterializedDependencyResolverPlugin(
+  sourceByMaterializedFile: Record<string, string> | undefined,
+): Plugin | undefined {
+  if (!sourceByMaterializedFile) {
+    return undefined;
+  }
+  const sourceByFile = new Map(
+    Object.entries(sourceByMaterializedFile).map(([filePath, sourceFile]) => [
+      normalizePath(filePath),
+      normalizePath(sourceFile),
+    ]),
+  );
+  if (sourceByFile.size === 0) {
+    return undefined;
+  }
+  const materializedBySourceFile = new Map(
+    [...sourceByFile].map(([materializedFile, sourceFile]) => [
+      sourceFile,
+      materializedFile,
+    ]),
+  );
+
+  return {
+    name: "gcc-ts-bundler-materialized-dependency-resolution",
+    setup(build) {
+      build.onResolve({ filter: /.*/ }, (args) => {
+        if (!isBarePackageSpecifier(args.path)) {
+          return undefined;
+        }
+        const sourceFile = sourceByFile.get(normalizePath(args.importer));
+        if (!sourceFile) {
+          return undefined;
+        }
+        try {
+          const resolvedSourceFile = normalizePath(
+            createRequire(sourceFile).resolve(args.path),
+          );
+          // Keep a dependency already retained by Vite in the same esbuild
+          // instance as the graph entry that imported it. Origin-context
+          // resolution remains the fallback for true transitives such as
+          // react-dom's scheduler under Bun's isolated store.
+          return {
+            path:
+              materializedBySourceFile.get(resolvedSourceFile) ??
+              resolvedSourceFile,
+          };
+        } catch {
+          return undefined;
+        }
+      });
+    },
+  };
+}
+
+async function writeMaterializedDependencyBundleMarker(input: {
+  bundleDir: string;
+  files: string[];
+}) {
+  const files = await Promise.all(
+    [...new Set(input.files)]
+      .sort((left, right) => left.localeCompare(right))
+      .map(async (filePath) => ({
+        path: path.relative(input.bundleDir, filePath).replace(/\\/g, "/"),
+        sha256: hashText(await fs.readFile(filePath, "utf8")),
+      })),
+  );
+  await fs.writeFile(
+    path.join(input.bundleDir, MATERIALIZED_DEPENDENCY_BUNDLE_MARKER),
+    `${JSON.stringify(
+      {
+        files,
+        kind: "gcc-ts-bundler-materialized-dependency-bundles",
+        version: 1,
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+}
+
+function isBarePackageSpecifier(specifier: string) {
+  return (
+    !specifier.startsWith(".") &&
+    !path.isAbsolute(specifier) &&
+    !specifier.includes(":")
+  );
 }
 
 function createPrebundleContext(input: {
@@ -374,6 +469,11 @@ async function buildDependencyBundles(
     // it references, which reaches Closure as an undeclared variable. Folding
     // removes the branch instead. Identifiers and whitespace are untouched.
     minifySyntax: true,
+    plugins: [
+      createMaterializedDependencyResolverPlugin(
+        materialized.dependencySourceFileByMaterializedFile,
+      ),
+    ].filter((plugin): plugin is Plugin => plugin !== undefined),
     outdir: DEP_BUNDLE_OUTPUT_DIR,
     outbase: DEP_BUNDLE_INPUT_DIR,
     platform: "browser",
@@ -478,6 +578,11 @@ async function assembleGraph(
     outputSrcDir: runtimeSrcDir,
     originalSourceIdsByFilePath,
     syntheticSourceIdsByFilePath: bundleInputSourceIdsByEntry,
+  });
+
+  await writeMaterializedDependencyBundleMarker({
+    bundleDir: path.join(runtimeSrcDir, DEP_BUNDLE_OUTPUT_DIR),
+    files: bundledModules.map((module) => module.filePath),
   });
 
   return {

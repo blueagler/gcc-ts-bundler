@@ -2,6 +2,8 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
+
 static NEXT_TEST_ID: AtomicUsize = AtomicUsize::new(0);
 
 struct TestDir {
@@ -1230,6 +1232,118 @@ fn a_real_js_extension_is_not_shadowed_by_an_appended_one() {
         candidates.contains(&"/w/src/x.ts".to_string()),
         "{candidates:?}"
     );
+}
+
+#[test]
+fn materialized_dependency_bundle_commonjs_is_allowed_by_signed_marker() {
+    let temp_dir = TestDir::new();
+    let bundle_contents = "module.exports = 7;\n";
+    temp_dir.write("src/__dep-bundles/eager/generated.js", bundle_contents);
+    let hash = Sha256::digest(bundle_contents.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    temp_dir.write(
+        "src/__dep-bundles/.gcc-ts-bundler-materialized-dependency-bundles.json",
+        &format!(
+            r#"{{"files":[{{"path":"eager/generated.js","sha256":"{hash}"}}],"kind":"gcc-ts-bundler-materialized-dependency-bundles","version":1}}"#,
+        ),
+    );
+    temp_dir.write(
+        "src/index.js",
+        "import value from \"./__dep-bundles/eager/generated.js\"; export default value;\n",
+    );
+
+    let result = resolve_graph(
+        vec![temp_dir.join("src/index.js").to_string_lossy().to_string()],
+        temp_dir.join("src").to_string_lossy().to_string(),
+        temp_dir.path.to_string_lossy().to_string(),
+        "esm-only".to_string(),
+    );
+
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
+fn authored_commonjs_stays_rejected_without_materialized_marker() {
+    let temp_dir = TestDir::new();
+    temp_dir.write("src/authored.js", "module.exports = 7;\n");
+    temp_dir.write(
+        "src/index.js",
+        "import value from \"./authored.js\"; export default value;\n",
+    );
+
+    let error = resolve_graph(
+        vec![temp_dir.join("src/index.js").to_string_lossy().to_string()],
+        temp_dir.join("src").to_string_lossy().to_string(),
+        temp_dir.path.to_string_lossy().to_string(),
+        "esm-only".to_string(),
+    )
+    .expect_err("authored CommonJS must remain rejected");
+
+    assert!(error.contains("CommonJS is only supported"), "{error}");
+}
+
+#[test]
+fn authored_commonjs_rejects_forged_source_root_marker() {
+    let temp_dir = TestDir::new();
+    let contents = "module.exports = 7;\n";
+    let hash = Sha256::digest(contents.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    temp_dir.write("src/authored.js", contents);
+    temp_dir.write(
+        "src/.gcc-ts-bundler-materialized-dependency-bundles.json",
+        &format!(
+            r#"{{"files":[{{"path":"authored.js","sha256":"{hash}"}}],"kind":"gcc-ts-bundler-materialized-dependency-bundles","version":1}}"#,
+        ),
+    );
+    temp_dir.write(
+        "src/index.js",
+        "import value from \"./authored.js\"; export default value;\n",
+    );
+
+    let error = resolve_graph(
+        vec![temp_dir.join("src/index.js").to_string_lossy().to_string()],
+        temp_dir.join("src").to_string_lossy().to_string(),
+        temp_dir.path.to_string_lossy().to_string(),
+        "esm-only".to_string(),
+    )
+    .expect_err("a source-root marker must not authorize authored CommonJS");
+
+    assert!(error.contains("CommonJS is only supported"), "{error}");
+}
+
+#[test]
+fn dependency_bundle_marker_rejects_entries_outside_its_root() {
+    let temp_dir = TestDir::new();
+    let contents = "module.exports = 7;\n";
+    let hash = Sha256::digest(contents.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    temp_dir.write("src/authored.js", contents);
+    temp_dir.write(
+        "src/__dep-bundles/.gcc-ts-bundler-materialized-dependency-bundles.json",
+        &format!(
+            r#"{{"files":[{{"path":"../authored.js","sha256":"{hash}"}}],"kind":"gcc-ts-bundler-materialized-dependency-bundles","version":1}}"#,
+        ),
+    );
+    temp_dir.write(
+        "src/index.js",
+        "import value from \"./authored.js\"; export default value;\n",
+    );
+
+    let error = resolve_graph(
+        vec![temp_dir.join("src/index.js").to_string_lossy().to_string()],
+        temp_dir.join("src").to_string_lossy().to_string(),
+        temp_dir.path.to_string_lossy().to_string(),
+        "esm-only".to_string(),
+    )
+    .expect_err("a bundle marker must not authorize paths outside __dep-bundles");
+
+    assert!(error.contains("CommonJS is only supported"), "{error}");
 }
 
 #[test]

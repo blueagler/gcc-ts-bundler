@@ -479,6 +479,140 @@ test.serial(
 );
 
 test.serial(
+  "prebundleMaterializedDependencies resolves CJS through the original package context",
+  async () => {
+    const fixture = await createFixture();
+    const srcDir = path.join(fixture.projectRoot, "captured-src");
+    const authoredEntry = path.join(srcDir, "src", "entry.js");
+    const materializedDependency = path.join(
+      srcDir,
+      "__deps__",
+      "react-dom",
+      "index.js",
+    );
+    const sourceDependency = path.join(
+      fixture.projectRoot,
+      "isolated-store",
+      "node_modules",
+      "react-dom",
+      "index.js",
+    );
+    const materializedReact = path.join(
+      srcDir,
+      "__deps__",
+      "react",
+      "index.js",
+    );
+    const sourceReact = path.join(
+      fixture.projectRoot,
+      "isolated-store",
+      "node_modules",
+      "react",
+      "index.js",
+    );
+    const scheduler = path.join(
+      fixture.projectRoot,
+      "isolated-store",
+      "node_modules",
+      "scheduler",
+      "index.js",
+    );
+
+    await fixture.write(
+      path.relative(fixture.projectRoot, authoredEntry),
+      'import dependency from "../__deps__/react-dom/index.js"; export const value = dependency.value;\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, materializedDependency),
+      'module.exports = { value: require("react").value + require("scheduler").value };\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, materializedReact),
+      "module.exports = { value: 10 };\n",
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, sourceDependency),
+      "module.exports = {};\n",
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, sourceReact),
+      "module.exports = { value: 100 };\n",
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, scheduler),
+      "module.exports = { value: 7 };\n",
+    );
+
+    const materialized = {
+      authoredFiles: [authoredEntry],
+      dependencySourceFileByMaterializedFile: {
+        [materializedDependency]: sourceDependency,
+        [materializedReact]: sourceReact,
+      },
+      entries: ["./src/entry.js"],
+      modules: [
+        {
+          filePath: authoredEntry,
+          id: authoredEntry,
+          relativePath: "src/entry.js",
+          sourceModuleIds: [authoredEntry],
+        },
+        {
+          filePath: materializedDependency,
+          id: sourceDependency,
+          relativePath: "__deps__/react-dom/index.js",
+          sourceModuleIds: [sourceDependency],
+        },
+        {
+          filePath: materializedReact,
+          id: sourceReact,
+          relativePath: "__deps__/react/index.js",
+          sourceModuleIds: [sourceReact],
+        },
+      ],
+      prunedEmptyModuleIds: [],
+      retainedEmptyModuleIds: [],
+      runtimeEntries: [
+        "./src/entry.js",
+        "./__deps__/react-dom/index.js",
+        "./__deps__/react/index.js",
+      ],
+      srcDir,
+    };
+
+    const prebundled = await prebundleMaterializedDependencies({
+      dynamicRootModuleIds: [],
+      materialized,
+    });
+    const bundle = prebundled.modules.find((module) =>
+      module.relativePath.startsWith("__dep-bundles/eager/"),
+    );
+    expect(bundle).toBeDefined();
+    if (!bundle) throw new Error("Expected an eager dependency bundle");
+    const bundleText = await fs.readFile(bundle.filePath, "utf8");
+    expect(bundleText).toContain("module.exports = { value: 10 }");
+    expect(bundleText).not.toContain("value: 100");
+    expect(bundleText).toContain("scheduler");
+    const marker = JSON.parse(
+      await fs.readFile(
+        path.join(
+          srcDir,
+          "__dep-bundles",
+          ".gcc-ts-bundler-materialized-dependency-bundles.json",
+        ),
+        "utf8",
+      ),
+    );
+    expect(marker.kind).toBe(
+      "gcc-ts-bundler-materialized-dependency-bundles",
+    );
+    expect(
+      marker.files.some((file) => file.path.endsWith(path.basename(bundle.filePath))),
+    ).toBe(true);
+  },
+);
+
+test.serial(
   "prebundleMaterializedDependencies keeps aliasing wrapper exports intact",
   async () => {
     const fixture = await createFixture();

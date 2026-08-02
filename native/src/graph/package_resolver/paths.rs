@@ -1,4 +1,8 @@
+use std::fs;
 use std::path::{Path, PathBuf};
+
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::super::ResolveContext;
 use crate::commonjs::CommonJsAnalysis;
@@ -83,7 +87,9 @@ pub(crate) fn validate_commonjs_usage(
     analysis: &CommonJsAnalysis,
     context: &ResolveContext,
 ) -> std::result::Result<(), String> {
-    if !is_package_source_file(file_path, context) {
+    if !is_package_source_file(file_path, context)
+        && !is_materialized_dependency_bundle_file(file_path, context)
+    {
         return Err(format!(
             "CommonJS is only supported for package sources under node_modules: {}",
             file_path.to_string_lossy()
@@ -155,4 +161,58 @@ fn validate_candidate(
 pub(super) fn is_package_source_file(file_path: &Path, context: &ResolveContext) -> bool {
     file_path.starts_with(context.workspace_dir.join("node_modules"))
         || file_path.starts_with(context.src_dir.join("node_modules"))
+}
+
+fn sha256_hex(contents: &[u8]) -> String {
+    Sha256::digest(contents)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn is_materialized_dependency_bundle_file(file_path: &Path, context: &ResolveContext) -> bool {
+    const MARKER: &str = ".gcc-ts-bundler-materialized-dependency-bundles.json";
+    const KIND: &str = "gcc-ts-bundler-materialized-dependency-bundles";
+
+    // This is a generated graph boundary, not a general source-tree marker.
+    // Materialization writes the marker at exactly this root after esbuild has
+    // emitted the bundles, so an authored file cannot opt into CommonJS by
+    // planting marker-shaped JSON in an ancestor directory.
+    let bundle_root = context.src_dir.join("__dep-bundles");
+    if !file_path.starts_with(&bundle_root) {
+        return false;
+    }
+    let Ok(relative_path) = file_path.strip_prefix(&bundle_root) else {
+        return false;
+    };
+    if relative_path.as_os_str().is_empty() {
+        return false;
+    }
+
+    let marker_path = bundle_root.join(MARKER);
+    let Ok(contents) = fs::read_to_string(marker_path) else {
+        return false;
+    };
+    let Ok(marker) = serde_json::from_str::<Value>(&contents) else {
+        return false;
+    };
+    let valid_kind = marker.get("kind").and_then(Value::as_str) == Some(KIND);
+    let valid_version = marker.get("version").and_then(Value::as_u64) == Some(1);
+    let relative_path = relative_path.to_string_lossy().replace('\\', "/");
+    let actual_hash = match fs::read(file_path) {
+        Ok(contents) => sha256_hex(&contents),
+        Err(_) => return false,
+    };
+    valid_kind
+        && valid_version
+        && marker
+            .get("files")
+            .and_then(Value::as_array)
+            .map(|files| {
+                files.iter().any(|file| {
+                    file.get("path").and_then(Value::as_str) == Some(&relative_path)
+                        && file.get("sha256").and_then(Value::as_str) == Some(actual_hash.as_str())
+                })
+            })
+            .unwrap_or(false)
 }

@@ -43,6 +43,8 @@ export interface CapturedRuntimeModule {
 
 export interface MaterializedGraph {
   authoredFiles: string[];
+  /** Physical source files used to resolve bare CJS imports while prebundling. */
+  dependencySourceFileByMaterializedFile?: Record<string, string>;
   entries: string[];
   modules: CapturedRuntimeModule[];
   prunedEmptyModuleIds: string[];
