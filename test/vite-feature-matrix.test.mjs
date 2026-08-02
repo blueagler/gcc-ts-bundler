@@ -261,8 +261,9 @@ test.serial(
   "Vite worker suffix imports remain expected rejections",
   { timeout: 30000 },
   async () => {
-    // Planned feature milestone: worker entry graph capture is intentionally
-    // rejected until its separate graph can be compiled and emitted safely.
+    // Planned Vite-plugin milestone: materialize Vite's worker wrapper module
+    // onto the existing URL-form worker-chunk path; standalone builds remain
+    // intentionally out of scope.
     for (const suffix of ["?worker", "?worker&inline"]) {
       const fixture = await createFixture();
       await writeHtmlFixture(fixture);

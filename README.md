@@ -16,6 +16,10 @@ The npm package uses a JS loader plus platform-specific optional native packages
 - Renames property names in objects for better performance.
 - Radically restructures code for optimal performance.
 
+## Build scope
+
+The standalone/native CLI and API support **BASIC** builds only: TypeScript to optimized JavaScript, chunks, and externs, with future Node/Bun target basics. Workers, WebAssembly, assets, `import.meta.glob`, and CSS are Vite-owned transforms handled through the Vite plugin; `?worker` and `?worker&inline` remain a planned Vite-plugin milestone and are outside the standalone pipeline.
+
 ## Install From NPM using bun
 
 ```sh

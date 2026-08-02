@@ -8,6 +8,10 @@
 
 The Vite plugin is an adapter around the same core build pipeline rather than a separate compiler.
 
+## Build boundary
+
+The standalone/native CLI and programmatic API support **BASIC** builds only: TypeScript to optimized JavaScript, chunks, and externs, with future Node/Bun target basics. They do not handle worker graphs, WebAssembly, or asset transforms. Advanced features such as workers, WebAssembly, assets, `import.meta.glob`, and CSS are Vite-owned: Vite performs those transforms, and the Vite plugin passes the resulting JavaScript to `gcc-ts-bundler` for optimization without breaking Vite behavior; [`test/vite-feature-matrix.test.mjs`](../test/vite-feature-matrix.test.mjs) is that contract. `?worker` and `?worker&inline` are a planned Vite-plugin milestone that will materialize Vite's wrapper module onto the existing URL-form worker-chunk path; they are not part of the standalone pipeline.
+
 Runtime data crossing filesystem, native-addon, compiler-package, or generated-manifest boundaries is parsed as `unknown` and narrowed with explicit validators. Internal TypeScript is compiled with exact optional properties and unchecked index protection; linting rejects `any`, type assertions, non-null assertions, and unsafe `any` propagation.
 
 ## Package boundaries
