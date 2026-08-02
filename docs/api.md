@@ -35,7 +35,8 @@ if (!result.ok) {
 - `srcDir` defaults to `<projectRoot>/src`.
 - `outDir` defaults to `<projectRoot>/dist`.
 - Relative `entries` are resolved from `srcDir`.
-- Relative `externs`, `typedExterns`, `js`, and `cache.dir` paths are resolved from `projectRoot`.
+- Relative `externs`, `typedExterns`, `js`, `preserveModules`, and `cache.dir` paths are resolved from `projectRoot`.
+- `preserveModules` paths are canonicalized before graph resolution. Escaping symlink targets fail closed, and in-tree symlink aliases are also rejected with an explicit policy error.
 - A `tsconfig.json` must be discoverable from `projectRoot`.
 
 ### Build options
@@ -48,11 +49,14 @@ if (!result.ok) {
 | `outDir`           | `dist`            | Published output directory. It is replaced on a non-cached compile.                                                          |
 | `compilationLevel` | `ADVANCED`        | Closure level: `WHITESPACE_ONLY`, `SIMPLE`, or `ADVANCED`.                                                                   |
 | `languageOut`      | `ECMASCRIPT_NEXT` | Closure output syntax: `ECMASCRIPT3`, `ECMASCRIPT5`, `ECMASCRIPT6`, or `ECMASCRIPT_NEXT`.                                    |
+| `externals`        | `[]`              | Exact runtime-owned ESM specifiers preserved as real imports. Requires standalone ESM output.                               |
+| `preserveModules`  | `[]`              | Project-relative authored modules published verbatim; real paths must remain inside `projectRoot` and `srcDir`.              |
 | `externs`          | `[]`              | Explicit externs consumed by Closure and scanned by native as rename-barrier opt-in.                                         |
 | `typedExterns`     | `[]`              | Closure-only owner-qualified typed declarations; native preservation never scans these.                                      |
 | `js`               | `[]`              | Additional JavaScript inputs passed to Closure jobs.                                                                         |
 | `packages`         | `esm-only`        | `esm-only` resolves supported browser package graphs; `off` restricts graph resolution to the materialized source workspace. |
-| `platformExterns`  | `minimal`         | Typed ADVANCED jobs use a dependency-closed browser slice; untyped, unavailable, or failed slices use Closure's full set.    |
+| `platformExterns`  | `minimal`         | Typed ADVANCED browser jobs use a dependency-closed platform slice; server targets use `CUSTOM` plus generated target externs. |
+| `target`           | `browser`         | Target policy: `browser`, `node`, `bun`, `workerd`, or `webworker`. Node/Bun builtins become runtime-owned boundaries.       |
 | `compat`           | empty rules       | Generic property-renaming rules such as framework class-map calls and pure callees.                                          |
 
 ### Cache options
@@ -103,7 +107,7 @@ Both chunked modes are for browser applications:
 - lazy boundaries use native `import("./literal")` syntax;
 - `script` output loads chunks by injecting classic `<script>` elements;
 - `esm` output loads chunks with native dynamic `import()`;
-- standalone `auto` resolves to `script` (Vite selects ESM when its target allows it);
+- standalone `auto` resolves to `script` (Vite selects ESM when its target allows it); basic builds may explicitly request `esm`;
 - `manifestFile`, when non-empty, is a safe relative path emitted inside `outDir`; absolute paths and `..` escapes are rejected.
 
 `vendorChunk: true` moves eager dependencies into a separate vendor chunk only for `bundler-runtime` with resolved ESM output. `"auto"` and the default `false` leave the entry unsplit.

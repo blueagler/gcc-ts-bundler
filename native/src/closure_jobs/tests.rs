@@ -502,9 +502,9 @@ fn prepares_esm_bundler_runtime_jobs() {
 }
 
 #[test]
-fn rejects_esm_output_for_unchunked_mode() {
-    let root = make_temp_dir("esm-mode-guard");
-    let error = prepare_closure_jobs(PrepareClosureJobsInput {
+fn accepts_esm_output_for_unchunked_mode() {
+    let root = make_temp_dir("esm-mode-basic");
+    let output = prepare_closure_jobs(PrepareClosureJobsInput {
         chunkMode: "off".to_string(),
         chunkLoader: "script".to_string(),
         chunkOutputType: "esm".to_string(),
@@ -526,8 +526,11 @@ fn rejects_esm_output_for_unchunked_mode() {
         supportFiles: vec![],
         typeMetadata: vec![],
     })
-    .expect_err("esm requires a chunked mode");
-    assert!(error.contains("requires a chunked mode"), "{error}");
+    .expect("basic builds may request an ESM envelope");
+    assert_eq!(
+        output.compileJobs[0].chunkOutputType.as_deref(),
+        Some("ES_MODULES")
+    );
 }
 
 // --- vendor chunk assembly ----------------------------------------------

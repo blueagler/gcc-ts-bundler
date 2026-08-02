@@ -25,6 +25,7 @@ import {
 import type {
   BuildTypeMetadataSidecar,
   ChunkPlanChunk,
+  ExternalBoundary,
   LazyImport,
   PackageAlias,
   PreservedImport,
@@ -84,13 +85,20 @@ const NATIVE_EMIT_METADATA_VERSION = 14;
  * Hoisted bundler-runtime emission depends on chunk membership, so the native
  * emit cache must be invalidated when the chunk plan changes shape.
  */
-function computeChunkSignature(chunkPlan: ChunkPlanChunk[]): string {
+function computeChunkSignature(
+  chunkPlan: ChunkPlanChunk[],
+  opaqueExternalSpecifiers: string[],
+): string {
   return crypto
     .createHash("sha256")
     .update(
-      JSON.stringify(
-        chunkPlan.map((chunk) => ({ files: chunk.files, name: chunk.name })),
-      ),
+      JSON.stringify({
+        chunks: chunkPlan.map((chunk) => ({
+          files: chunk.files,
+          name: chunk.name,
+        })),
+        opaqueExternalSpecifiers,
+      }),
     )
     .digest("hex");
 }
@@ -104,9 +112,11 @@ interface QuickScannedNativeFile {
 export async function emitNativeStage({
   cacheDir,
   chunkPlan,
+  externalBoundaries,
   fileNames,
   lazyImports,
   metadataPath,
+  opaqueExternalSpecifiers,
   optionsSignature,
   options,
   packageAliases,
@@ -120,9 +130,11 @@ export async function emitNativeStage({
 }: {
   cacheDir: string;
   chunkPlan: ChunkPlanChunk[];
+  externalBoundaries: ExternalBoundary[];
   fileNames: string[];
   lazyImports: LazyImport[];
   metadataPath: string;
+  opaqueExternalSpecifiers: string[];
   optionsSignature: string;
   options: ResolvedBuildOptions;
   packageAliases: PackageAlias[];
@@ -135,7 +147,10 @@ export async function emitNativeStage({
   workspaceDir: string;
 }): Promise<NativeEmitStageResult> {
   const usesPersistentCache = options.cache.mode === "persistent";
-  const chunkSignature = computeChunkSignature(chunkPlan);
+  const chunkSignature = computeChunkSignature(
+    chunkPlan,
+    opaqueExternalSpecifiers,
+  );
   const paths = createNativeEmitPaths({
     cacheDir,
     tsxRuntimeSourceFiles,
@@ -243,15 +258,18 @@ export async function emitNativeStage({
         classMapCalls: options.compat.classMapCalls,
         pureCallees: options.compat.pureCallees,
         combinedFileNames,
+        externalBoundaries,
         explicitExternPaths: options.externs,
         externsPath: paths.externsPath,
         lazyImports,
         metadataPath: paths.metadataPathForNative,
+        opaqueExternalSpecifiers,
         outDir: paths.outDir,
         packageAliases,
         packageJsonFiles,
         preservedModules,
         resolvedImports,
+        target: options.target,
         typeInferenceDisabled,
         workspaceDir,
       }),
@@ -666,15 +684,18 @@ function runNativeTranspile({
   classMapCalls,
   pureCallees,
   combinedFileNames,
+  externalBoundaries,
   explicitExternPaths,
   externsPath,
   lazyImports,
   metadataPath,
+  opaqueExternalSpecifiers,
   outDir,
   packageAliases,
   packageJsonFiles,
   preservedModules,
   resolvedImports,
+  target,
   typeInferenceDisabled,
   workspaceDir,
 }: {
@@ -683,15 +704,18 @@ function runNativeTranspile({
   classMapCalls: CompatClassMapCall[];
   pureCallees: string[];
   combinedFileNames: string[];
+  externalBoundaries: ExternalBoundary[];
   explicitExternPaths: string[];
   externsPath: string;
   lazyImports: LazyImport[];
   metadataPath: string;
+  opaqueExternalSpecifiers: string[];
   outDir: string;
   packageAliases: PackageAlias[];
   packageJsonFiles: string[];
   preservedModules: PreservedModule[];
   resolvedImports: ResolvedImport[];
+  target: string;
   typeInferenceDisabled: boolean;
   workspaceDir: string;
 }) {
@@ -705,10 +729,12 @@ function runNativeTranspile({
     classMapCalls,
     pureCallees,
     explicitExternPaths,
+    externalBoundaries,
     metadataPath,
     externsPath,
     fileNames: combinedFileNames,
     lazyImports,
+    opaqueExternalSpecifiers,
     outDir,
     packageAliases,
     packageJsonFiles,
@@ -716,6 +742,7 @@ function runNativeTranspile({
     resolvedImports,
     runtimeModuleSourceMapFile:
       process.env.GCC_VITE_RUNTIME_SOURCE_MAP_FILE || undefined,
+    target,
     typeInferenceDisabled,
     workspaceDir,
   });
@@ -946,7 +973,9 @@ const isNativeEmittedTypeMetadata = isObjectOf<NativeEmittedTypeMetadata>({
 });
 
 const isPreservedImport = isObjectOf<PreservedImport>({
+  boundaryExports: isStringArray,
   boundaryNames: isStringArray,
+  externalSpecifier: optional(isString),
   importClause: isString,
   importerFilePath: isString,
   targetModuleId: isString,

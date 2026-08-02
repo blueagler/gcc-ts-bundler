@@ -217,7 +217,9 @@ enum ChunkMode {
 }
 
 struct ResolveContext<'a> {
+    external_specifiers: &'a BTreeSet<String>,
     package_mode: PackageMode,
+    preserved_file_paths: &'a BTreeSet<String>,
     target: TargetDescriptor,
     src_dir: &'a Path,
     workspace_dir: &'a Path,
@@ -234,13 +236,39 @@ struct PackageImport {
     subpath: String,
 }
 
+#[cfg(test)]
 pub fn resolve_graph(
     entries: Vec<String>,
     src_dir: String,
     workspace_dir: String,
     package_mode: String,
 ) -> std::result::Result<ResolveGraphOutput, String> {
-    resolve_graph_impl(entries, src_dir, workspace_dir, package_mode)
+    resolve_graph_with_options(
+        entries,
+        src_dir,
+        workspace_dir,
+        package_mode,
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
+pub fn resolve_graph_with_options(
+    entries: Vec<String>,
+    src_dir: String,
+    workspace_dir: String,
+    package_mode: String,
+    external_specifiers: Vec<String>,
+    preserved_file_paths: Vec<String>,
+) -> std::result::Result<ResolveGraphOutput, String> {
+    resolve_graph_impl(
+        entries,
+        src_dir,
+        workspace_dir,
+        package_mode,
+        external_specifiers,
+        preserved_file_paths,
+    )
 }
 
 impl ChunkMode {

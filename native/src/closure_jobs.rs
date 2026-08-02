@@ -153,12 +153,6 @@ pub fn prepare_closure_jobs(
 ) -> std::result::Result<PrepareClosureJobsOutput, String> {
     let chunk_mode = parse_chunk_mode(&input.chunkMode)?;
     let chunk_output_type = parse_chunk_output_type(&input.chunkOutputType)?;
-    if chunk_output_type.is_esm() && chunk_mode == ChunkMode::Off {
-        return Err(format!(
-            "chunks.outputType \"esm\" requires a chunked mode, got {:?}.",
-            input.chunkMode
-        ));
-    }
     let emitted_out_dir = PathBuf::from(&input.emittedOutDir);
     let final_cache_dir = PathBuf::from(&input.finalCacheDir);
     let raw_dir = final_cache_dir.join("raw");
@@ -179,7 +173,13 @@ pub fn prepare_closure_jobs(
             &warning_level,
             chunk_output_type,
         ),
-        ChunkMode::Off => prepare_off_mode_jobs(&input, &resolved_chunks, &raw_dir, &warning_level),
+        ChunkMode::Off => prepare_off_mode_jobs(
+            &input,
+            &resolved_chunks,
+            &raw_dir,
+            &warning_level,
+            chunk_output_type,
+        ),
     }
 }
 

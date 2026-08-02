@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
-use oxc_allocator::{Allocator, FromIn, Vec as ArenaVec};
+use oxc_allocator::{Allocator, FromIn, TakeIn, Vec as ArenaVec};
 use oxc_ast::ast::*;
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk_mut, VisitMut};
@@ -22,13 +22,15 @@ use oxc_str::Ident;
 use super::emit::EmittedProgram;
 use super::emit_runtime_oxc::{binding_names_with_ids, collect_reassigned_binding_ids};
 use super::fresh_oxc::FreshNameAllocator;
+use super::hoist_oxc::{scan_namespace_usage, NamespaceUsage};
 use super::identity_oxc::{BindingKeyMap, BindingKeySet, ModuleIdentity};
 use super::lowering_oxc::closure_input_codegen_options;
 use super::nocollapse_oxc::NocollapseAssignments;
 use super::type_metadata_oxc::{runtime_type_names_from_program, BoundTypeMetadata};
 use super::{
     apply_js_compat_text_fixes, is_valid_js_identifier, live_export_accessor_name, member_access,
-    resolve_module_id_for_specifier, resolve_relative_module, to_goog_module_id, TranspileContext,
+    resolve_module_id_for_specifier, resolve_relative_module, resolved_import_key,
+    to_goog_module_id, PreservedImportPlan, TranspileContext,
 };
 use crate::closure_metadata::ClosureFileMetadata;
 
@@ -41,6 +43,8 @@ pub(crate) fn emit_goog_module_program<'a>(
     file_metadata: Option<&ClosureFileMetadata>,
     commonjs_export_name: Option<&str>,
 ) -> std::result::Result<EmittedProgram, String> {
+    quote_external_namespace_accesses(allocator, file_path, program, identity, context);
+    let namespace_usage = scan_namespace_usage(program, identity);
     let live_imported_ids = collect_live_imported_binding_ids(program, identity, file_path);
     if !live_imported_ids.is_empty() {
         LiveImportCallRewriter::new(allocator, identity, live_imported_ids.clone())
@@ -78,18 +82,63 @@ pub(crate) fn emit_goog_module_program<'a>(
     }
     let mut import_counter = 0usize;
     let mut export_counter = 0usize;
+    let mut preserved_extern_lines = Vec::new();
+    let mut preserved_imports = Vec::new();
     let body = std::mem::replace(&mut program.body, ArenaVec::new_in(&allocator));
     for statement in body {
         match statement {
-            Statement::ImportDeclaration(import) => output.extend(convert_import_decl(
-                file_path,
-                &import,
-                identity,
-                context,
-                &mut import_counter,
-                &mut fresh_names,
-                &live_imported_ids,
-            )?),
+            Statement::ImportDeclaration(import) => {
+                if let Some(specifier) = context.external_specifiers.get(&resolved_import_key(
+                    file_path,
+                    import.source.value.as_str(),
+                )) {
+                    let plan = convert_external_import_decl(
+                        file_path,
+                        &import,
+                        specifier,
+                        None,
+                        context.opaque_external_specifiers.contains(specifier),
+                        &mut import_counter,
+                        &mut fresh_names,
+                    )?;
+                    output.extend(plan.lines);
+                    preserved_extern_lines.extend(plan.extern_lines);
+                    preserved_imports.push(plan.preserved_import);
+                } else {
+                    let target_module_id = resolve_module_id_for_specifier(
+                        file_path,
+                        import.source.value.as_str(),
+                        context,
+                    )?;
+                    if let Some(preserved) = context.preserved_modules.get(&target_module_id) {
+                        validate_preserved_import(&import, preserved)?;
+                        let mut plan = convert_external_import_decl(
+                            file_path,
+                            &import,
+                            import.source.value.as_str(),
+                            Some((identity, &namespace_usage)),
+                            false,
+                            &mut import_counter,
+                            &mut fresh_names,
+                        )?;
+                        plan.preserved_import.external_specifier = None;
+                        plan.preserved_import.target_module_id = preserved.moduleId.clone();
+                        output.extend(plan.lines);
+                        preserved_extern_lines.extend(plan.extern_lines);
+                        preserved_imports.push(plan.preserved_import);
+                    } else {
+                        output.extend(convert_import_decl(
+                            file_path,
+                            &import,
+                            identity,
+                            context,
+                            &mut import_counter,
+                            &mut fresh_names,
+                            &live_imported_ids,
+                        )?);
+                    }
+                }
+            }
             Statement::ExportNamedDeclaration(export) => {
                 let export = export.unbox();
                 if export.export_kind == ImportOrExportKind::Type {
@@ -183,8 +232,8 @@ pub(crate) fn emit_goog_module_program<'a>(
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),
-        preserved_extern_lines: Vec::new(),
-        preserved_imports: Vec::new(),
+        preserved_extern_lines,
+        preserved_imports,
         shared_helpers: Vec::new(),
         reflective_property_names: Default::default(),
         type_metadata: type_metadata.finish(),
@@ -262,6 +311,251 @@ fn exported_decl_names(declaration: &Declaration<'_>, identity: &ModuleIdentity)
         }
         _ => Vec::new(),
     }
+}
+
+fn validate_preserved_import(
+    import: &ImportDeclaration<'_>,
+    preserved: &super::PreservedModuleInput,
+) -> std::result::Result<(), String> {
+    for specifier in import.specifiers.iter().flatten() {
+        match specifier {
+            ImportDeclarationSpecifier::ImportDefaultSpecifier(_)
+                if !preserved.hasDefaultExport =>
+            {
+                return Err(format!(
+                    "Preserved module {} has no default export",
+                    preserved.filePath
+                ));
+            }
+            ImportDeclarationSpecifier::ImportSpecifier(named)
+                if named.import_kind != ImportOrExportKind::Type =>
+            {
+                let imported_name = module_export_name(&named.imported);
+                if !preserved.exportNames.contains(&imported_name) {
+                    return Err(format!(
+                        "Preserved module {} does not export {imported_name:?}",
+                        preserved.filePath
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+struct ExternalImportPlan {
+    extern_lines: Vec<String>,
+    lines: Vec<String>,
+    preserved_import: PreservedImportPlan,
+}
+
+fn quote_external_namespace_accesses<'a>(
+    allocator: &'a Allocator,
+    file_path: &Path,
+    program: &mut Program<'a>,
+    identity: &ModuleIdentity,
+    context: &TranspileContext,
+) {
+    let mut candidates = BindingKeySet::default();
+    for statement in &program.body {
+        let Statement::ImportDeclaration(import) = statement else {
+            continue;
+        };
+        let Some(external_specifier) = context.external_specifiers.get(&resolved_import_key(
+            file_path,
+            import.source.value.as_str(),
+        )) else {
+            continue;
+        };
+        if !context
+            .opaque_external_specifiers
+            .contains(external_specifier)
+        {
+            continue;
+        }
+        for specifier in import.specifiers.iter().flatten() {
+            if let ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) = specifier {
+                candidates.insert(identity.key_of_binding(&namespace.local));
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return;
+    }
+    ExternalNamespaceAccessQuoter {
+        allocator,
+        builder: AstBuilder::new(allocator),
+        candidates,
+        identity,
+    }
+    .visit_program(program);
+}
+
+struct ExternalNamespaceAccessQuoter<'a, 'b> {
+    allocator: &'a Allocator,
+    builder: AstBuilder<'a>,
+    candidates: BindingKeySet,
+    identity: &'b ModuleIdentity,
+}
+
+impl ExternalNamespaceAccessQuoter<'_, '_> {
+    fn is_external_namespace_access(&self, expression: &Expression<'_>) -> bool {
+        match expression {
+            Expression::Identifier(identifier) => self
+                .identity
+                .key_of_reference(identifier)
+                .is_some_and(|binding| self.candidates.contains(&binding)),
+            Expression::StaticMemberExpression(member) => {
+                self.is_external_namespace_access(&member.object)
+            }
+            Expression::ComputedMemberExpression(member) => {
+                self.is_external_namespace_access(&member.object)
+            }
+            _ => false,
+        }
+    }
+}
+
+impl<'a> VisitMut<'a> for ExternalNamespaceAccessQuoter<'a, '_> {
+    fn visit_expression(&mut self, expression: &mut Expression<'a>) {
+        walk_mut::walk_expression(self, expression);
+        let Expression::StaticMemberExpression(member) = expression else {
+            return;
+        };
+        if !self.is_external_namespace_access(&member.object) {
+            return;
+        }
+        let property: Ident<'a> = Ident::from_in(member.property.name.as_str(), self.allocator);
+        *expression = Expression::new_computed_member_expression(
+            member.span,
+            member.object.take_in(&self.builder),
+            Expression::new_string_literal(member.property.span, property, None, &self.builder),
+            member.optional,
+            &self.builder,
+        );
+    }
+}
+
+fn convert_external_import_decl(
+    file_path: &Path,
+    import: &ImportDeclaration<'_>,
+    external_specifier: &str,
+    namespace_externs: Option<(&ModuleIdentity, &NamespaceUsage)>,
+    opaque_external: bool,
+    import_counter: &mut usize,
+    fresh_names: &mut FreshNameAllocator,
+) -> std::result::Result<ExternalImportPlan, String> {
+    if import.import_kind == ImportOrExportKind::Type {
+        return Ok(ExternalImportPlan {
+            extern_lines: Vec::new(),
+            lines: Vec::new(),
+            preserved_import: PreservedImportPlan {
+                boundary_exports: Vec::new(),
+                boundary_names: Vec::new(),
+                external_specifier: Some(external_specifier.to_string()),
+                import_clause: String::new(),
+                target_module_id: String::new(),
+            },
+        });
+    }
+    let import_index = *import_counter;
+    *import_counter += 1;
+    let mut boundary_exports = Vec::new();
+    let mut boundary_names = Vec::new();
+    let mut extern_lines = Vec::new();
+    let mut lines = Vec::new();
+    let mut default_binding = None;
+    let mut namespace_binding = None;
+    let mut named_bindings = Vec::new();
+    for (specifier_index, specifier) in import.specifiers.iter().flatten().enumerate() {
+        if matches!(specifier, ImportDeclarationSpecifier::ImportSpecifier(named) if named.import_kind == ImportOrExportKind::Type)
+        {
+            continue;
+        }
+        let preferred = format!(
+            "__gcc_external_{}_{}_{}",
+            &crate::utils::hash_content(&format!("{}\0{external_specifier}", file_path.display()))
+                [..12],
+            import_index,
+            specifier_index
+        );
+        let boundary = fresh_names.fresh(&preferred);
+        boundary_names.push(boundary.clone());
+        match specifier {
+            ImportDeclarationSpecifier::ImportDefaultSpecifier(default) => {
+                extern_lines.push(format!("/** @type {{?}} */ var {boundary};"));
+                boundary_exports.push("default".to_string());
+                default_binding = Some(boundary.clone());
+                lines.push(format!("const {} = {boundary};", default.local.name));
+            }
+            ImportDeclarationSpecifier::ImportSpecifier(named) => {
+                extern_lines.push(format!("/** @type {{?}} */ var {boundary};"));
+                let imported_name = module_export_name(&named.imported);
+                let rendered_name = if is_valid_js_identifier(&imported_name) {
+                    imported_name.clone()
+                } else {
+                    format!("{imported_name:?}")
+                };
+                boundary_exports.push(imported_name);
+                named_bindings.push(format!("{rendered_name} as {boundary}"));
+                lines.push(format!("const {} = {boundary};", named.local.name));
+            }
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) => {
+                boundary_exports.push("*".to_string());
+                if namespace_externs.is_none() && !opaque_external {
+                    extern_lines.push(format!("/** @const */ var {boundary} = {{}};"));
+                } else {
+                    extern_lines.push(format!("/** @type {{?}} */ var {boundary};"));
+                }
+                if let Some((identity, namespace_usage)) = namespace_externs {
+                    if let Some(member_names) =
+                        namespace_usage.member_only_usage(identity.key_of_binding(&namespace.local))
+                    {
+                        extern_lines.extend(
+                            member_names
+                                .into_iter()
+                                .filter(|name| is_valid_js_identifier(name))
+                                .map(|name| format!("{boundary}.{name};")),
+                        );
+                    }
+                }
+                namespace_binding = Some(boundary.clone());
+                lines.push(format!("const {} = {boundary};", namespace.local.name));
+            }
+        }
+    }
+    let import_clause = match (
+        default_binding,
+        namespace_binding,
+        named_bindings.is_empty(),
+    ) {
+        (None, None, true) => String::new(),
+        (Some(default), None, true) => default,
+        (None, Some(namespace), true) => format!("* as {namespace}"),
+        (Some(default), Some(namespace), true) => format!("{default}, * as {namespace}"),
+        (None, None, false) => format!("{{ {} }}", named_bindings.join(", ")),
+        (Some(default), None, false) => {
+            format!("{default}, {{ {} }}", named_bindings.join(", "))
+        }
+        (_, Some(_), false) => {
+            return Err(format!(
+                "External import in {} has an unsupported namespace/named combination",
+                file_path.display()
+            ));
+        }
+    };
+    Ok(ExternalImportPlan {
+        extern_lines,
+        lines,
+        preserved_import: PreservedImportPlan {
+            boundary_exports,
+            boundary_names,
+            external_specifier: Some(external_specifier.to_string()),
+            import_clause,
+            target_module_id: String::new(),
+        },
+    })
 }
 
 fn convert_import_decl(
@@ -688,6 +982,8 @@ mod tests {
             pure_callees: HashSet::new(),
             commonjs_specifiers: HashSet::new(),
             opaque_commonjs: Default::default(),
+            external_specifiers: HashMap::new(),
+            opaque_external_specifiers: HashSet::new(),
             file_metadata: HashMap::new(),
             hoist_plan: None,
             lazy_imports_by_file: HashMap::new(),

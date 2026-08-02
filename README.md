@@ -82,6 +82,8 @@ Programmatic options:
 - `srcDir`
 - `entries`
 - `outDir`
+- `externals` (runtime-owned ESM specifiers)
+- `preserveModules` (project-relative authored modules shipped verbatim)
 - `packages`
 - `languageOut`
 - `compilationLevel`
@@ -89,6 +91,7 @@ Programmatic options:
 - `cache`
 - `compat`
 - `platformExterns`
+- `target`
 - `diagnostics`
 - `externs` (legacy explicit externs: Closure + native rename-barrier scan)
 - `typedExterns` (Closure-only typed external declarations)
@@ -108,7 +111,7 @@ Defaults:
 
 The runtime path uses a native Rust addon for graph resolution, shim emission, and GCC export rewriting. Closure Compiler remains the final aggressive optimizer.
 
-`packages = "esm-only"` supports browser-safe ESM dependencies from `node_modules`, plus statically analyzable CommonJS package entrypoints and internal package modules. Dynamic `require()`, Node builtins, JSON modules, and native addons are still rejected.
+`packages = "esm-only"` supports browser-safe ESM dependencies from `node_modules`, plus statically analyzable CommonJS package entrypoints and internal package modules. Browser builds reject Node builtins; Node/Bun ESM builds preserve builtins and configured `externals` as runtime imports. Dynamic `require()` remains rejected in compiled modules and is permitted only inside configured `preserveModules`; preserved paths are canonicalized, escaping symlink targets fail closed, and even in-tree symlink aliases are rejected explicitly rather than published under an ambiguous path. JSON modules and native addons are still rejected.
 
 `chunks.mode = "split"` compiles one Closure chunk graph for the strongest cross-module optimization. `chunks.mode = "bundler-runtime"` compiles app-oriented chunks as separate cacheable jobs. Both modes treat entries as bootstrap scripts rather than exported library bundles.
 
@@ -118,7 +121,7 @@ Use native `import()` for explicit lazy loading:
 const loadFeature = () => import("./feature");
 ```
 
-The specifier must be a string literal. `chunks.outputType = "script"` loads lazy chunks by injecting classic scripts; `"esm"` uses native dynamic `import()`. Standalone `"auto"` resolves to `"script"`; the Vite integration selects ESM when its target supports modules. No manifest file is emitted unless `chunks.manifestFile` or `--chunk-manifest` is explicitly set, and safe nested relative paths are preserved inside `outDir`.
+The specifier must be a string literal. `chunks.outputType = "script"` loads lazy chunks by injecting classic scripts; `"esm"` uses native dynamic `import()`. Standalone `"auto"` resolves to `"script"`; standalone basic builds may explicitly request `"esm"`, and the Vite integration selects ESM when its target supports modules. No manifest file is emitted unless `chunks.manifestFile` or `--chunk-manifest` is explicitly set, and safe nested relative paths are preserved inside `outDir`.
 
 Compatibility stays generic and syntax-driven. The bundler preserves runtime contracts that are discoverable from emitted JavaScript patterns, and the core has no framework-specific special cases. Framework runtime knowledge lives in opt-in React, Svelte, and Vue presets (`gcc-ts-bundler/presets/react`, `gcc-ts-bundler/presets/svelte`, and `gcc-ts-bundler/presets/vue`) that configure two generic mechanisms: `compat.classMapCalls` (object-literal keys that must survive renaming at specific calls) and externs `protocolHelpers` (helpers that read or exclude property keys by string). See `docs/vite.md`.
 There is no separate lazy-loading helper package surface; chunked lazy loading is `import()`-driven.

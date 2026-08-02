@@ -207,7 +207,9 @@ export interface NativeEmittedTypeMetadata {
 }
 
 interface NativePreservedImportOutput {
+  boundaryExports: string[];
   boundaryNames: string[];
+  externalSpecifier?: string | undefined;
   importClause: string;
   importerFilePath: string;
   targetModuleId: string;
@@ -290,6 +292,8 @@ interface NativeBinding {
     srcDir: string,
     workspaceDir: string,
     packageMode: string,
+    externalSpecifiers: string[],
+    preservedFilePaths: string[],
   ): NativeResolveGraphOutput;
   rewriteGccExports(code: string): NativeGccExportsRewrite;
   transpileSources(
@@ -299,10 +303,13 @@ interface NativeBinding {
     externsPath: string,
     metadataPath: string,
     chunkMode: string,
+    target: string,
     runtimeModuleSourceMapFile: string | null,
     workspaceDir: string,
     packageAliases: NativeTranspilePackageAlias[],
     resolvedImports: NativeResolvedImportEntry[],
+    externalBoundaries: NativeExternalBoundaryEntry[],
+    opaqueExternalSpecifiers: string[],
     packageJsonFiles: string[],
     preservedModules: NativeTranspilePreservedModule[],
     lazyImports: NativeLazyImportInput[],
@@ -358,7 +365,9 @@ function isNativeBinding(value: unknown): value is NativeBinding {
 
 export function resolveGraph(input: {
   entries: string[];
+  externalSpecifiers?: string[] | undefined;
   packageMode: string;
+  preservedFilePaths?: string[] | undefined;
   srcDir: string;
   target?: string | undefined;
   workspaceDir: string;
@@ -370,6 +379,8 @@ export function resolveGraph(input: {
     input.target && input.target !== "browser"
       ? `${input.packageMode}:${input.target}`
       : input.packageMode,
+    input.externalSpecifiers ?? [],
+    input.preservedFilePaths ?? [],
   );
   return {
     entries: result.entries,
@@ -435,8 +446,11 @@ export function transpileSources(input: {
   fileNames: string[];
   metadataPath: string;
   outDir: string;
+  target: string;
   packageAliases: NativeTranspilePackageAlias[];
   resolvedImports: NativeResolvedImportEntry[];
+  externalBoundaries: NativeExternalBoundaryEntry[];
+  opaqueExternalSpecifiers: string[];
   packageJsonFiles: string[];
   preservedModules: NativeTranspilePreservedModule[];
   lazyImports: NativeLazyImportInput[];
@@ -450,10 +464,13 @@ export function transpileSources(input: {
     input.externsPath,
     input.metadataPath,
     input.chunkMode,
+    input.target,
     input.runtimeModuleSourceMapFile ?? null,
     input.workspaceDir,
     input.packageAliases,
     input.resolvedImports,
+    input.externalBoundaries,
+    input.opaqueExternalSpecifiers,
     input.packageJsonFiles,
     input.preservedModules,
     input.lazyImports,

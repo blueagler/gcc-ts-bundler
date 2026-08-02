@@ -51,6 +51,11 @@ export interface PackageAlias {
   targetPath: string;
 }
 
+export interface ExternalBoundary {
+  importerFilePath: string;
+  specifier: string;
+}
+
 export interface ResolvedImport {
   importerFilePath: string;
   moduleId: string;
@@ -59,7 +64,9 @@ export interface ResolvedImport {
 }
 
 export interface PreservedImport {
+  boundaryExports: string[];
   boundaryNames: string[];
+  externalSpecifier?: string | undefined;
   importClause: string;
   importerFilePath: string;
   targetModuleId: string;
@@ -110,6 +117,7 @@ export interface ResolvedBuild {
   cleanup(): Promise<void>;
   chunkPlan: ChunkPlanChunk[];
   entryFiles: BuildEntry[];
+  externalBoundaries: ExternalBoundary[];
   packageAliases: PackageAlias[];
   packageJsonFiles: string[];
   preservedModules: PreservedModule[];

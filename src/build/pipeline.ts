@@ -39,6 +39,7 @@ import {
   recordOf,
 } from "../shared/validation";
 import { ensureParentDirectory } from "../shared/files";
+import { generateExterns } from "../externs";
 import { writeEntryShims } from "../native/load";
 import { runClosureStage } from "./closure/run-closure";
 import { emitNativeStage } from "./transpile/emit";
@@ -125,6 +126,12 @@ export async function build(
     }
 
     writeBuildEntryShims(context, resolved);
+    const externalExternPlan = await deriveExternalExternPlan({
+      options: context.options,
+      specifiers: resolved.externalBoundaries.map(
+        (boundary) => boundary.specifier,
+      ),
+    });
     const preservedModules = resolved.preservedModules;
     const preservedFilePaths = new Set(
       preservedModules.map((module) => module.filePath),
@@ -132,6 +139,7 @@ export async function build(
     const nativeEmitResult = await emitNativeStage({
       cacheDir: resolved.nativeEmitCacheDir,
       chunkPlan: resolved.chunkPlan,
+      externalBoundaries: resolved.externalBoundaries,
       fileNames:
         context.options.chunks.mode === "off"
           ? [
@@ -145,6 +153,7 @@ export async function build(
             ),
       lazyImports: resolved.lazyImports,
       metadataPath: path.join(resolved.nativeEmitCacheDir, "meta.json"),
+      opaqueExternalSpecifiers: externalExternPlan.opaqueSpecifiers,
       options: context.options,
       optionsSignature: context.optionsSignature,
       packageAliases: resolved.packageAliases,
@@ -166,6 +175,12 @@ export async function build(
       );
     }
 
+    await appendExternalTypedExterns({
+      externsPath: nativeEmitResult.externsPath,
+      imports: nativeEmitResult.preservedImports,
+      typedResolutions: externalExternPlan.typedResolutions,
+    });
+
     staging = await createInvocationStaging(
       context.options.outDir,
       resolved.finalCacheDir,
@@ -174,6 +189,10 @@ export async function build(
       chunkPlan: resolved.chunkPlan,
       closureCompilerEnvironment: context.closureCompilerEnvironment,
       emittedOutDir: nativeEmitResult.outDir,
+      entryShebangs:
+        context.options.target === "node"
+          ? await collectEntryShebangs(resolved.entryFiles)
+          : [],
       explicitExternPaths: context.options.externs,
       finalCacheDir: staging.finalCacheDir,
       generatedExternPaths: context.options.typedExterns,
@@ -189,6 +208,7 @@ export async function build(
           return preserved
             ? [
                 {
+                  boundaryExports: [],
                   boundaryNames: [],
                   importClause: "",
                   importerFilePath: entry.sourcePath,
@@ -410,7 +430,10 @@ async function restoreCachedBuild(
   resolved: ResolvedBuild,
   cachePaths: FinalCachePaths,
 ): Promise<BuildResult | null> {
-  if (context.options.cache.mode !== "persistent") {
+  if (
+    context.options.cache.mode !== "persistent" ||
+    resolved.externalBoundaries.length > 0
+  ) {
     return null;
   }
   return (
@@ -504,14 +527,29 @@ function validateBuildShape(
   context: BuildContext,
   resolved: ResolvedBuild,
 ): BuildFailure | null {
+  const outputType = resolveChunkOutputType({
+    chunkMode: context.options.chunks.mode,
+    languageOut: context.options.languageOut,
+    outputType: context.options.chunks.outputType,
+  });
   if (
-    resolved.preservedModules.length > 0 &&
-    resolveChunkOutputType({
-      chunkMode: context.options.chunks.mode,
-      languageOut: context.options.languageOut,
-      outputType: context.options.chunks.outputType,
-    }) !== "esm"
+    resolved.externalBoundaries.length > 0 &&
+    context.options.chunks.mode !== "off"
   ) {
+    return failedBuild([
+      createBuildDiagnostic(
+        "External runtime imports are supported only by the standalone basic build path in this phase.",
+      ),
+    ]);
+  }
+  if (resolved.externalBoundaries.length > 0 && outputType !== "esm") {
+    return failedBuild([
+      createBuildDiagnostic(
+        'External runtime imports require ESM output. Set chunks.outputType to "esm".',
+      ),
+    ]);
+  }
+  if (resolved.preservedModules.length > 0 && outputType !== "esm") {
     return failedBuild([
       createBuildDiagnostic(
         'Preserved modules require ESM output. Set chunks.outputType to "esm".',
@@ -542,6 +580,149 @@ function validateBuildShape(
     ]);
   }
   return null;
+}
+
+type GeneratedExternalExterns = Awaited<ReturnType<typeof generateExterns>>;
+
+interface ExternalExternPlan {
+  opaqueSpecifiers: string[];
+  typedResolutions: Array<{
+    generated: GeneratedExternalExterns;
+    specifier: string;
+  }>;
+}
+
+async function deriveExternalExternPlan(input: {
+  options: BuildContext["options"];
+  specifiers: string[];
+}): Promise<ExternalExternPlan> {
+  const specifiers = [...new Set(input.specifiers)].sort((left, right) =>
+    left.localeCompare(right),
+  );
+  const opaqueSpecifiers: string[] = [];
+  const typedResolutions: ExternalExternPlan["typedResolutions"] = [];
+  for (const specifier of specifiers) {
+    try {
+      const generated = await generateExterns({
+        appEntryFiles: input.options.entries.map((entry) => entry.file),
+        mode: "boundary-aware",
+        modules: [{ exports: "used", runtime: "external", specifier }],
+        projectRoot: input.options.projectRoot,
+        srcDir: input.options.srcDir,
+        target: input.options.target,
+      });
+      if (
+        !generated.typedDeclarations.moduleExports.some(
+          (module) => module.specifier === specifier,
+        )
+      ) {
+        throw new Error("no declaration module surface was produced");
+      }
+      typedResolutions.push({ generated, specifier });
+      for (const warning of generated.warnings) {
+        console.warn(`gcc-ts-bundler: ${warning}`);
+      }
+      for (const warning of generated.barrierWarnings) {
+        console.warn(`gcc-ts-bundler: ${warning.message}`);
+      }
+    } catch (error) {
+      opaqueSpecifiers.push(specifier);
+      console.warn(
+        `gcc-ts-bundler: using opaque externs for external module ${JSON.stringify(specifier)} because declarations could not be resolved: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  return { opaqueSpecifiers, typedResolutions };
+}
+
+async function appendExternalTypedExterns(input: {
+  externsPath: string;
+  imports: Array<{
+    boundaryExports: string[];
+    boundaryNames: string[];
+    externalSpecifier?: string | undefined;
+  }>;
+  typedResolutions: ExternalExternPlan["typedResolutions"];
+}) {
+  const typedTexts = input.typedResolutions.map(({ generated, specifier }) => {
+    const moduleSurface = generated.typedDeclarations.moduleExports.find(
+      (module) => module.specifier === specifier,
+    );
+    const boundaryLines = input.imports
+      .filter((item) => item.externalSpecifier === specifier)
+      .flatMap((item) =>
+        item.boundaryExports.flatMap((exportName, index) => {
+          const boundaryName = item.boundaryNames[index];
+          if (!boundaryName || !moduleSurface) return [];
+          if (exportName === "*") {
+            return moduleSurface.exports
+              .filter(({ exportName: name }) =>
+                /^[$A-Z_a-z][$\w]*$/u.test(name),
+              )
+              .flatMap((exported) =>
+                renderTypedBoundaryDeclaration(
+                  generated.typedDeclarations.text,
+                  exported.qualifiedName,
+                  `${boundaryName}.${exported.exportName}`,
+                  false,
+                ),
+              );
+          }
+          const exported = moduleSurface.exports.find(
+            (item) => item.exportName === exportName,
+          );
+          return exported
+            ? renderTypedBoundaryDeclaration(
+                generated.typedDeclarations.text,
+                exported.qualifiedName,
+                boundaryName,
+              )
+            : [];
+        }),
+      );
+    return `${generated.typedDeclarations.text}\n// Exact typed external boundaries.\n${boundaryLines.join("\n")}\n`;
+  });
+  if (typedTexts.length > 0) {
+    await fs.appendFile(
+      input.externsPath,
+      `\n// Typed external runtime declarations.\n${typedTexts.join("\n")}`,
+      "utf8",
+    );
+  }
+}
+
+function renderTypedBoundaryDeclaration(
+  externText: string,
+  qualifiedName: string,
+  boundaryName: string,
+  declareVariable = true,
+) {
+  const referenceIndex = externText.indexOf(qualifiedName);
+  if (referenceIndex < 0) return [];
+  const commentIndex = externText.lastIndexOf("/**", referenceIndex);
+  const statementEnd = externText.indexOf(";", referenceIndex);
+  if (commentIndex < 0 || statementEnd < 0) return [];
+  const declaration = externText.slice(commentIndex, statementEnd + 1);
+  const replaced = declaration.replaceAll(qualifiedName, boundaryName);
+  const bareReference = `${boundaryName};`;
+  return [
+    declareVariable && replaced.endsWith(bareReference)
+      ? `${replaced.slice(0, -bareReference.length)}var ${bareReference}`
+      : replaced,
+  ];
+}
+
+async function collectEntryShebangs(entries: ResolvedBuild["entryFiles"]) {
+  const shebangs = await Promise.all(
+    entries.map(async (entry) => {
+      const source = await fs.readFile(entry.sourcePath, "utf8");
+      const shebang = source.match(/^#![^\r\n]*/u)?.[0];
+      return shebang ? { shebang, sourcePath: entry.sourcePath } : null;
+    }),
+  );
+  return shebangs.filter(
+    (entry): entry is { shebang: string; sourcePath: string } => entry !== null,
+  );
 }
 
 function writeBuildEntryShims(context: BuildContext, resolved: ResolvedBuild) {

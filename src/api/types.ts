@@ -163,12 +163,15 @@ export interface BuildOptions {
    * Explicit externs keep their historical dual meaning: Closure consumes
    * them and native preservation scans them for rename barriers.
    */
+  externals?: readonly string[] | undefined;
   externs?: readonly string[] | undefined;
   js?: readonly string[] | undefined;
   languageOut?: LanguageOut | undefined;
   outDir?: string | undefined;
   packages?: PackageMode | undefined;
   platformExterns?: PlatformExternsMode | undefined;
+  /** Project-relative authored modules published verbatim. */
+  preserveModules?: readonly string[] | undefined;
   projectRoot?: string | undefined;
   srcDir?: string | undefined;
   /** Additive target policy; browser is the unchanged default. */
@@ -222,12 +225,14 @@ export interface ResolvedBuildOptions {
   };
   /** Absolute entry file paths with explicit or `null` (derived) names. */
   entries: Array<{ file: string; name: string | null }>;
+  externals: string[];
   externs: string[];
   js: string[];
   languageOut: LanguageOut;
   outDir: string;
   packages: PackageMode;
   platformExterns: PlatformExternsMode;
+  preserveModules: string[];
   projectRoot: string;
   srcDir: string;
   target: TargetName;
@@ -268,12 +273,14 @@ export const DEFAULT_BUILD_OPTIONS = deepFreeze({
     verbose: false,
   },
   entries: [],
+  externals: [],
   externs: [],
   js: [],
   languageOut: "ECMASCRIPT_NEXT",
   outDir: "",
   packages: "esm-only",
   platformExterns: "minimal",
+  preserveModules: [],
   projectRoot: "",
   srcDir: "",
   target: "browser",

@@ -6,6 +6,7 @@ pub(crate) fn prepare_off_mode_jobs(
     resolved_chunks: &[ResolvedClosureChunk],
     raw_dir: &Path,
     warning_level: &str,
+    chunk_output_type: ChunkOutputType,
 ) -> std::result::Result<PrepareClosureJobsOutput, String> {
     let mut generated_assets = Vec::new();
     let closure_lib_files = select_closure_lib_files(
@@ -62,7 +63,7 @@ pub(crate) fn prepare_off_mode_jobs(
             .collect::<Vec<_>>(),
     )?;
 
-    let compile_jobs = if resolved_chunks.len() == 1 {
+    let compile_jobs = if resolved_chunks.len() == 1 && !chunk_output_type.is_esm() {
         let entry_chunk = resolved_chunks
             .first()
             .ok_or_else(|| "Chunk plan must contain at least one chunk.".to_string())?;
@@ -141,7 +142,7 @@ pub(crate) fn prepare_off_mode_jobs(
                 raw_dir.to_string_lossy(),
                 std::path::MAIN_SEPARATOR
             )),
-            chunkOutputType: None,
+            chunkOutputType: chunk_output_type.is_esm().then(|| "ES_MODULES".to_string()),
             compilationLevel: input.compilationLevel.clone(),
             dependencyMode: Some("PRUNE".to_string()),
             entryPoint: (!entry_points.is_empty()).then_some(entry_points),

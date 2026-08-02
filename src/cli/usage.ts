@@ -20,10 +20,14 @@ Build flags:
   --language-out        ECMASCRIPT3 | ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT_NEXT
   --compilation-level   WHITESPACE_ONLY | SIMPLE | ADVANCED
   --chunks              off | split | bundler-runtime
+  --chunk-output-type   auto | script | esm
   --chunk-public-path   Public URL prefix for chunk files in chunk mode
   --chunk-base-name     Base chunk output name in chunk mode
   --chunk-manifest      Relative manifest path in chunk mode
   --packages            off | esm-only
+  --target              browser | node | bun | workerd | webworker
+  --external            Runtime-owned ESM module specifier. Repeatable
+  --preserve-module     Project-relative authored module published verbatim. Repeatable
   --platform-externs    minimal | full (default minimal: typed per-job platform slice)
   --extern              Explicit extern file consumed by Closure and native preservation. Repeatable
   --typed-extern        Closure-only typed extern declaration file. Repeatable

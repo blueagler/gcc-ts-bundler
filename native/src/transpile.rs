@@ -95,10 +95,20 @@ pub struct PreservedModuleInput {
 #[napi(object)]
 #[derive(Clone, Debug)]
 pub struct PreservedImportOutput {
+    pub boundaryExports: Vec<String>,
     pub boundaryNames: Vec<String>,
+    pub externalSpecifier: Option<String>,
     pub importClause: String,
     pub importerFilePath: String,
     pub targetModuleId: String,
+}
+
+#[allow(non_snake_case)]
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct ExternalBoundaryInput {
+    pub importerFilePath: String,
+    pub specifier: String,
 }
 
 #[allow(non_snake_case)]
@@ -175,10 +185,13 @@ pub fn transpile_sources(
     externs_path: String,
     metadata_path: String,
     chunk_mode: String,
+    target: String,
     runtime_module_source_map_file: Option<String>,
     workspace_dir: String,
     package_aliases: Vec<PackageAliasInput>,
     resolved_imports: Vec<ResolvedImportInput>,
+    external_boundaries: Vec<ExternalBoundaryInput>,
+    opaque_external_specifiers: Vec<String>,
     package_json_files: Vec<String>,
     preserved_modules: Vec<PreservedModuleInput>,
     lazy_imports: Vec<LazyImportInput>,
@@ -227,6 +240,16 @@ pub fn transpile_sources(
             )
         })
         .collect::<HashMap<_, _>>();
+    let external_specifiers = external_boundaries
+        .into_iter()
+        .map(|boundary| {
+            (
+                resolved_import_key(Path::new(&boundary.importerFilePath), &boundary.specifier),
+                boundary.specifier,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let preserves_node_import_meta = target == "node";
     let file_metadata = load_closure_metadata(&metadata_path)?;
     let bundler_module_slots = if chunk_mode == ChunkMode::BundlerRuntime {
         collect_bundler_module_slots(
@@ -279,6 +302,11 @@ pub fn transpile_sources(
         &compiled_file_names,
         &class_map_calls,
     )?);
+    if preserves_node_import_meta {
+        // `import.meta` is a host-provided Node ESM object. Quote its standard
+        // `url` member before Closure so the envelope contract survives ADVANCED.
+        preserved_property_names.insert("url".to_string());
+    }
     if type_inference_disabled {
         // The escape hatch omits @enum metadata, so keep emitted TS enum keys stable.
         preserved_property_names.extend(
@@ -308,6 +336,8 @@ pub fn transpile_sources(
             &commonjs_specifiers,
             &package_aliases,
         )?),
+        external_specifiers,
+        opaque_external_specifiers: opaque_external_specifiers.into_iter().collect(),
         file_metadata,
         hoist_plan: hoist_plan.map(std::sync::Arc::new),
         lazy_imports_by_file: group_lazy_imports_by_file(lazy_imports),
@@ -387,7 +417,9 @@ pub fn transpile_sources(
         }
         preserved_imports.extend(emitted.preserved_imports.iter().map(|import| {
             PreservedImportOutput {
+                boundaryExports: import.boundary_exports.clone(),
                 boundaryNames: import.boundary_names.clone(),
+                externalSpecifier: import.external_specifier.clone(),
                 importClause: import.import_clause.clone(),
                 importerFilePath: file_path.to_string_lossy().to_string(),
                 targetModuleId: import.target_module_id.clone(),

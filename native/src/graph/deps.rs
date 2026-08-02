@@ -78,6 +78,29 @@ pub(super) fn has_top_level_await(program: &Program<'_>) -> bool {
     visitor.found
 }
 
+pub(super) fn collect_export_source_specifiers(program: &Program<'_>) -> Vec<String> {
+    program
+        .body
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::ExportNamedDeclaration(export)
+                if export.export_kind == ImportOrExportKind::Value =>
+            {
+                export
+                    .source
+                    .as_ref()
+                    .map(|source| source.value.to_string())
+            }
+            Statement::ExportAllDeclaration(export)
+                if export.export_kind == ImportOrExportKind::Value =>
+            {
+                Some(export.source.value.to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 pub(super) fn extract_dependencies(program: &Program<'_>) -> Vec<String> {
     let mut dependencies = Vec::new();
 

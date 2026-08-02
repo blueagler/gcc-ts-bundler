@@ -20,6 +20,7 @@ import type {
   BuildContext,
   BuildEntry,
   ChunkPlanChunk,
+  ExternalBoundary,
   LazyImport,
   PackageAlias,
   PreservedModule,
@@ -67,6 +68,7 @@ interface ResolveEnv {
 }
 
 interface FreshGraph {
+  externalBoundaries: ExternalBoundary[];
   graphResult: ReturnType<typeof resolveGraph>;
   outputNames: string[];
   packageAliases: PackageAlias[];
@@ -190,6 +192,7 @@ async function restoreResolveSnapshot(
 
   return assembleResolvedBuild(env, {
     chunkPlan,
+    externalBoundaries: snapshot.externalBoundaries,
     entryFiles: snapshot.entryFiles.map(
       (entry): BuildEntry => toBuildEntry(entry, env.sourceRoot),
     ),
@@ -218,19 +221,15 @@ async function resolveFreshGraph(
     entries: options.entries.map((entry) =>
       path.join(env.sourceRoot, path.relative(options.srcDir, entry.file)),
     ),
+    externalSpecifiers: options.externals,
     packageMode: options.packages,
+    preservedFilePaths: options.preserveModules.map((filePath) =>
+      path.join(env.sourceRoot, path.relative(options.srcDir, filePath)),
+    ),
     srcDir: env.sourceRoot,
     target: options.target,
     workspaceDir: env.cacheStore.workspaceDir,
   });
-  if (graphResult.externalBoundaries.length > 0) {
-    const boundaries = graphResult.externalBoundaries
-      .map((item) => JSON.stringify(item.specifier))
-      .join(", ");
-    throw new Error(
-      `Target ${JSON.stringify(options.target)} resolved external builtin boundaries (${boundaries}), but preserved runtime imports are M2 pending.`,
-    );
-  }
   const preservedModules = graphResult.preservedModules.map(
     (module): PreservedModule => ({
       ...module,
@@ -251,6 +250,7 @@ async function resolveFreshGraph(
     workspaceDir: env.cacheStore.workspaceDir,
   });
   return {
+    externalBoundaries: graphResult.externalBoundaries,
     graphResult,
     outputNames,
     packageAliases: mergePackageAliases([
@@ -295,6 +295,7 @@ async function loadOrCreateResolveMetadata(
     : null;
   if (cached?.optionsSignature === context.optionsSignature) {
     const needsUpgrade =
+      !Array.isArray(cached.externalBoundaries) ||
       !Array.isArray(cached.packageAliases) ||
       !Array.isArray(cached.packageJsonFiles) ||
       !Array.isArray(cached.preservedModules) ||
@@ -302,6 +303,7 @@ async function loadOrCreateResolveMetadata(
       !Array.isArray(cached.tsxRuntimeSourceFiles);
     const metadata = {
       ...cached,
+      externalBoundaries: cached.externalBoundaries ?? fresh.externalBoundaries,
       packageAliases: cached.packageAliases ?? fresh.packageAliases,
       packageJsonFiles: cached.packageJsonFiles ?? fresh.packageJsonFiles,
       preservedModules: cached.preservedModules ?? fresh.preservedModules,
@@ -381,6 +383,7 @@ function createResolveMetadata(
   return {
     optionsSignature: context.optionsSignature,
     chunkPlan,
+    externalBoundaries: fresh.externalBoundaries,
     entryFiles: entryFiles.map((entry) => ({
       chunkName: entry.chunkName,
       exportNames: entry.exportNames,
@@ -447,6 +450,7 @@ async function finalizeResolvedBuild(
     await writeJson(resolveSnapshotPath(env), {
       compilerOptionsHash: env.compilerOptionsHash,
       entryFiles: metadata.entryFiles,
+      externalBoundaries: fresh.externalBoundaries,
       finalKey,
       lazyImports: fresh.graphResult.lazyImports,
       nativeEmitKey,
@@ -465,6 +469,7 @@ async function finalizeResolvedBuild(
 
   return assembleResolvedBuild(env, {
     chunkPlan: metadata.chunkPlan,
+    externalBoundaries: fresh.externalBoundaries,
     entryFiles: metadata.entryFiles.map(
       (entry): BuildEntry => toBuildEntry(entry, env.sourceRoot),
     ),
@@ -485,6 +490,7 @@ function assembleResolvedBuild(
   env: ResolveEnv,
   parts: {
     chunkPlan: ChunkPlanChunk[];
+    externalBoundaries: ExternalBoundary[];
     entryFiles: BuildEntry[];
     finalKey: string;
     lazyImports: LazyImport[];
@@ -503,6 +509,7 @@ function assembleResolvedBuild(
     cleanup: env.cacheStore.cleanup,
     chunkPlan: parts.chunkPlan,
     entryFiles: parts.entryFiles,
+    externalBoundaries: parts.externalBoundaries,
     lazyImports: parts.lazyImports,
     packageAliases: parts.packageAliases,
     packageJsonFiles: parts.packageJsonFiles,
@@ -537,7 +544,7 @@ function toPreservedOutputRelativePath(sourceRoot: string, filePath: string) {
     path.isAbsolute(relativePath)
   ) {
     throw new Error(
-      `Preserved module ${filePath} is outside the Vite materialized source root. Phase 1 supports only captured Vite ESM modules.`,
+      `Preserved module ${filePath} is outside the authored source root.`,
     );
   }
   return path.posix.join(

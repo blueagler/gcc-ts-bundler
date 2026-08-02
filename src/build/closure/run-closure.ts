@@ -46,6 +46,7 @@ export async function runClosureStage({
   closureCompilerEnvironment,
   chunkPlan,
   emittedOutDir,
+  entryShebangs,
   explicitExternPaths,
   finalCacheDir,
   generatedExternPaths,
@@ -62,6 +63,7 @@ export async function runClosureStage({
   closureCompilerEnvironment: ClosureCompilerEnvironment;
   chunkPlan: ChunkPlanChunk[];
   emittedOutDir: string;
+  entryShebangs: Array<{ shebang: string; sourcePath: string }>;
   explicitExternPaths: string[];
   finalCacheDir: string;
   generatedExternPaths: string[];
@@ -117,6 +119,7 @@ export async function runClosureStage({
       closureCompilerEnvironment,
       chunkMode: options.chunks.mode,
       platformExterns: options.platformExterns,
+      target: options.target,
       packageRoot,
       prepared,
       projectCacheDir,
@@ -141,6 +144,11 @@ export async function runClosureStage({
     imports: preservedImports,
     modules: preservedModules,
     outDir,
+    postprocessActions: prepared.postprocessActions,
+  });
+  await prependEntryShebangs({
+    chunkPlan,
+    entryShebangs,
     postprocessActions: prepared.postprocessActions,
   });
   let publishedOutputs = [
@@ -185,7 +193,7 @@ async function emitPreservedModules(input: {
     typeof prepareClosureJobs
   >["postprocessActions"];
 }) {
-  if (input.modules.length === 0) {
+  if (input.modules.length === 0 && input.imports.length === 0) {
     return [];
   }
   if (input.chunkPlan.length !== input.postprocessActions.length) {
@@ -224,8 +232,10 @@ async function emitPreservedModules(input: {
   );
   const importLinesByOutput = new Map<string, Set<string>>();
   for (const preservedImport of input.imports) {
-    const target = moduleById.get(preservedImport.targetModuleId);
-    if (!target) {
+    const target = preservedImport.externalSpecifier
+      ? undefined
+      : moduleById.get(preservedImport.targetModuleId);
+    if (!preservedImport.externalSpecifier && !target) {
       throw new Error(
         `Missing preserved-module plan for ${preservedImport.targetModuleId}.`,
       );
@@ -257,12 +267,21 @@ async function emitPreservedModules(input: {
         consumerOutputs.add(outputPath);
       }
     }
-    const targetPath = path.resolve(input.outDir, target.outputRelativePath);
+    const targetPath = target
+      ? path.resolve(input.outDir, target.outputRelativePath)
+      : undefined;
     for (const outputPath of consumerOutputs) {
-      const relative = path
-        .relative(path.dirname(outputPath), targetPath)
-        .replace(/\\/g, "/");
-      const specifier = relative.startsWith(".") ? relative : `./${relative}`;
+      const specifier = preservedImport.externalSpecifier
+        ? preservedImport.externalSpecifier
+        : (() => {
+            if (!targetPath) {
+              throw new Error("Missing preserved-module target path.");
+            }
+            const relative = path
+              .relative(path.dirname(outputPath), targetPath)
+              .replace(/\\/g, "/");
+            return relative.startsWith(".") ? relative : `./${relative}`;
+          })();
       const line = preservedImport.importClause
         ? `import ${preservedImport.importClause} from ${JSON.stringify(specifier)};`
         : `import ${JSON.stringify(specifier)};`;
@@ -286,6 +305,33 @@ async function emitPreservedModules(input: {
     }),
   );
   return outputFiles;
+}
+
+async function prependEntryShebangs(input: {
+  chunkPlan: ChunkPlanChunk[];
+  entryShebangs: Array<{ shebang: string; sourcePath: string }>;
+  postprocessActions: ReturnType<
+    typeof prepareClosureJobs
+  >["postprocessActions"];
+}) {
+  for (const entry of input.entryShebangs) {
+    const normalizedSource = normalizeFilePath(entry.sourcePath);
+    const chunkIndex = input.chunkPlan.findIndex((chunk) =>
+      [...chunk.files, ...(chunk.entryFiles ?? [])].some((filePath) =>
+        normalizedSource.endsWith(`/${normalizeFilePath(filePath)}`),
+      ),
+    );
+    const outputPath = input.postprocessActions[chunkIndex]?.outputPath;
+    if (!outputPath) {
+      throw new Error(
+        `Could not assign shebang entry ${entry.sourcePath} to output.`,
+      );
+    }
+    const source = await fs.readFile(outputPath, "utf8");
+    if (!source.startsWith(`${entry.shebang}\n`)) {
+      await fs.writeFile(outputPath, `${entry.shebang}\n${source}`, "utf8");
+    }
+  }
 }
 
 function normalizeFilePath(filePath: string) {
@@ -338,6 +384,7 @@ async function compilePreparedClosureJobs({
   closureCompilerEnvironment,
   chunkMode,
   platformExterns,
+  target,
   packageRoot,
   prepared,
   projectCacheDir,
@@ -346,6 +393,7 @@ async function compilePreparedClosureJobs({
   closureCompilerEnvironment: ClosureCompilerEnvironment;
   chunkMode: string;
   platformExterns: string;
+  target: ResolvedBuildOptions["target"];
   packageRoot: string;
   prepared: ReturnType<typeof prepareClosureJobs>;
   projectCacheDir: string;
@@ -373,6 +421,7 @@ async function compilePreparedClosureJobs({
               closureCompilerEnvironment.typeInferenceDisabled,
             ),
             platformExterns,
+            target,
             packageRoot,
             closureCompilerEnvironment.typeInferenceDisabled,
             projectCacheDir,
@@ -547,11 +596,22 @@ async function persistRenamingMaps(
 async function applyMinimalPlatformExterns(
   job: PreparedCompileJob,
   platformExterns: string,
+  target: ResolvedBuildOptions["target"],
   packageRoot: string,
   typeInferenceDisabled: boolean,
   projectCacheDir: string,
   warnPlatformExternFallback: () => void,
 ): Promise<PreparedCompileJob> {
+  if (target !== "browser") {
+    return {
+      ...job,
+      env: "CUSTOM",
+      externs: job.externs.filter(
+        (filePath) =>
+          !["browser-extra.js", "worker.js"].includes(path.basename(filePath)),
+      ),
+    };
+  }
   if (
     platformExterns !== "minimal" ||
     job.compilationLevel !== "ADVANCED" ||

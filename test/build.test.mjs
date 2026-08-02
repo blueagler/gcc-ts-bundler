@@ -13,7 +13,7 @@ import {
   TYPE_INFERENCE_OPTIONS,
 } from "../src/build/closure/compiler.ts";
 import { generatePlatformExternsText } from "../src/build/closure/platform-externs.ts";
-import { createFixture } from "./helpers.mjs";
+import { createFixture, execFileAsync, findFilesNamed } from "./helpers.mjs";
 
 test.serial(
   "builds an ESM package from node_modules in ADVANCED mode",
@@ -50,6 +50,439 @@ test.serial(
     expect(output).not.toMatch(/demo-pkg/);
   },
 );
+
+test.serial("emits and executes all external ESM import forms", async () => {
+  const fixture = await createFixture();
+  await fixture.write("package.json", '{"type":"module"}\n');
+  await fixture.write(
+    "node_modules/runtime-ext/package.json",
+    '{"name":"runtime-ext","type":"module","exports":"./index.js","types":"./index.d.ts"}\n',
+  );
+  await fixture.write(
+    "node_modules/runtime-ext/index.js",
+    [
+      "globalThis.__runtimeExtLoaded = true;",
+      "export default 2;",
+      "export const named = 3;",
+      "export const side = 1;",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "node_modules/runtime-ext/index.d.ts",
+    [
+      "declare const value: number;",
+      "export default value;",
+      "export declare const named: number;",
+      "export declare const side: number;",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "src/index.ts",
+    [
+      'import "runtime-ext";',
+      'import value from "runtime-ext";',
+      'import { named as alias } from "runtime-ext";',
+      'import * as namespace from "runtime-ext";',
+      'if (value + alias + namespace.named + namespace.side !== 9) throw new Error("external import mismatch");',
+      "",
+    ].join("\n"),
+  );
+
+  const result = await build({
+    cache: { mode: "off" },
+    chunks: { mode: "off", outputType: "esm" },
+    entries: ["./index.ts"],
+    externals: ["runtime-ext"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+    target: "node",
+  });
+
+  expect(result.ok).toBe(true);
+  const output = await fixture.read("dist/index.js");
+  expect(output).toContain('import "runtime-ext";');
+  expect(output).toMatch(/import __gcc_external_[^ ]+ from "runtime-ext";/u);
+  expect(output).toMatch(/import \{ named as __gcc_external_/u);
+  expect(output).toMatch(/import \* as __gcc_external_/u);
+  await execFileAsync(
+    process.execPath,
+    [path.join(fixture.outDir, "index.js")],
+    {
+      cwd: fixture.projectRoot,
+    },
+  );
+});
+
+test.serial(
+  "uses typed external declarations and warns on opaque fallback",
+  async () => {
+    const fixture = await createFixture();
+    const cacheDir = path.join(fixture.projectRoot, "cache");
+    await fixture.write("package.json", '{"type":"module"}\n');
+    await fixture.write(
+      "node_modules/typed-ext/package.json",
+      '{"name":"typed-ext","type":"module","exports":"./index.js","types":"./index.d.ts"}\n',
+    );
+    await fixture.write(
+      "node_modules/typed-ext/index.js",
+      "export const count = 1;\n",
+    );
+    await fixture.write(
+      "node_modules/typed-ext/index.d.ts",
+      "export declare const count: number;\n",
+    );
+    await fixture.write(
+      "node_modules/opaque-ext/package.json",
+      '{"name":"opaque-ext","type":"module","exports":"./index.js"}\n',
+    );
+    await fixture.write(
+      "node_modules/opaque-ext/index.js",
+      "export const extra = 2;\n",
+    );
+    await fixture.write(
+      "src/index.ts",
+      [
+        'import { count } from "typed-ext";',
+        'import * as opaque from "opaque-ext";',
+        "if (count + opaque.extra !== 3) throw new Error();",
+        "",
+      ].join("\n"),
+    );
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (message) => warnings.push(String(message));
+    try {
+      const result = await build({
+        cache: { dir: cacheDir, mode: "persistent" },
+        chunks: { mode: "off", outputType: "esm" },
+        entries: ["./index.ts"],
+        externals: ["typed-ext", "opaque-ext"],
+        outDir: fixture.outDir,
+        projectRoot: fixture.projectRoot,
+        srcDir: fixture.srcDir,
+        target: "node",
+      });
+      expect(result.ok).toBe(true);
+      await execFileAsync(
+        process.execPath,
+        [path.join(fixture.outDir, "index.js")],
+        { cwd: fixture.projectRoot },
+      );
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    const nativeInputs = await findFilesNamed(cacheDir, "index.js");
+    const nativeInputTexts = await Promise.all(
+      nativeInputs.map((filePath) => fs.readFile(filePath, "utf8")),
+    );
+    const nativeInput = nativeInputTexts.find(
+      (text) => text.includes("goog.module(") && text.includes("extra"),
+    );
+    expect(nativeInput).toContain('opaque["extra"]');
+
+    const externFiles = await findFilesNamed(
+      cacheDir,
+      "native-generated.externs.js",
+    );
+    expect(externFiles).toHaveLength(1);
+    const externText = await fs.readFile(externFiles[0], "utf8");
+    expect(externText).toContain("Typed external runtime declarations");
+    expect(externText).toContain("@type {number}");
+    expect(externText).toMatch(/@type \{\?\} \*\/ var __gcc_external_/u);
+    expect(externText).not.toMatch(/__gcc_external_[^.\s]+\.extra;/u);
+    expect(warnings.join("\n")).toContain("using opaque externs");
+  },
+);
+
+test.serial(
+  "keeps typed Node namespace accesses unquoted and protects them with externs",
+  async () => {
+    const fixture = await createFixture();
+    const cacheDir = path.join(fixture.projectRoot, "cache");
+    await fixture.write("package.json", '{"type":"module"}\n');
+    await fixture.write(
+      "node_modules/@types/node/package.json",
+      '{"name":"@types/node","version":"1.0.0","types":"index.d.ts"}\n',
+    );
+    await fixture.write(
+      "node_modules/@types/node/index.d.ts",
+      [
+        'declare module "node:fs" {',
+        "  export function existsSync(path: string): boolean;",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/index.ts",
+      [
+        'import * as fs from "node:fs";',
+        'if (!fs.existsSync("package.json")) throw new Error("missing package");',
+        "",
+      ].join("\n"),
+    );
+
+    const result = await build({
+      cache: { dir: cacheDir, mode: "persistent" },
+      chunks: { mode: "off", outputType: "esm" },
+      entries: ["./index.ts"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+      target: "node",
+    });
+    expect(result.ok).toBe(true);
+
+    const nativeInputs = await findFilesNamed(cacheDir, "index.js");
+    const nativeInputTexts = await Promise.all(
+      nativeInputs.map((filePath) => fs.readFile(filePath, "utf8")),
+    );
+    const nativeInput = nativeInputTexts.find(
+      (text) => text.includes("goog.module(") && text.includes("existsSync"),
+    );
+    expect(nativeInput).toMatch(/\.existsSync\(/u);
+    expect(nativeInput).not.toContain('["existsSync"]');
+
+    const [externFile] = await findFilesNamed(
+      cacheDir,
+      "native-generated.externs.js",
+    );
+    expect(externFile).toBeTruthy();
+    const externText = await fs.readFile(externFile, "utf8");
+    expect(externText).toMatch(
+      /__gcc_external_[^.\s]+\.existsSync = function\(path\) \{\};/u,
+    );
+    expect(externText).toContain("@param {string} path");
+
+    await execFileAsync(
+      process.execPath,
+      [path.join(fixture.outDir, "index.js")],
+      { cwd: fixture.projectRoot },
+    );
+  },
+);
+
+test.serial("rejects export-from external modules", async () => {
+  const fixture = await createFixture();
+  await fixture.write("src/index.ts", 'export { value } from "runtime-ext";\n');
+  const result = await build({
+    cache: { mode: "off" },
+    chunks: { mode: "off", outputType: "esm" },
+    entries: ["./index.ts"],
+    externals: ["runtime-ext"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+  expect(result.ok).toBe(false);
+  expect(result.diagnostics[0]?.message).toContain(
+    "Export-from external module",
+  );
+});
+
+test.serial(
+  "publishes configured modules verbatim and permits their dynamic require",
+  async () => {
+    const fixture = await createFixture();
+    const loaderSource = [
+      "export function load(name) {",
+      "  return require(name);",
+      "}",
+      "",
+    ].join("\n");
+    await fixture.write("src/loader.js", loaderSource);
+    await fixture.write(
+      "src/index.js",
+      'import { load } from "./loader.js";\nglobalThis.savedLoad = load;\n',
+    );
+    const preserved = await build({
+      cache: { mode: "off" },
+      chunks: { mode: "off", outputType: "esm" },
+      entries: ["./index.js"],
+      outDir: fixture.outDir,
+      preserveModules: ["src/loader.js"],
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+    expect(preserved.ok).toBe(true);
+    expect(await fixture.read("dist/__gcc_preserved/loader.js")).toBe(
+      loaderSource,
+    );
+
+    await fixture.write(
+      "src/compiled.js",
+      "const name = './loader.js';\nexport const loaded = require(name);\n",
+    );
+    const compiled = await build({
+      cache: { mode: "off" },
+      entries: ["./compiled.js"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+    expect(compiled.ok).toBe(false);
+  },
+);
+
+test.serial(
+  "rejects preserved symlinks whose real target escapes the project",
+  async () => {
+    const fixture = await createFixture();
+    const outsidePath = path.join(
+      path.dirname(fixture.projectRoot),
+      `${path.basename(fixture.projectRoot)}-outside.js`,
+    );
+    await fs.writeFile(outsidePath, "export const escaped = true;\n", "utf8");
+    await fixture.write(
+      "src/index.js",
+      'import { escaped } from "./linked.js";\nconsole.log(escaped);\n',
+    );
+    await fs.symlink(outsidePath, path.join(fixture.srcDir, "linked.js"));
+    try {
+      const result = await build({
+        cache: { mode: "off" },
+        chunks: { mode: "off", outputType: "esm" },
+        entries: ["./index.js"],
+        outDir: fixture.outDir,
+        preserveModules: ["src/linked.js"],
+        projectRoot: fixture.projectRoot,
+        srcDir: fixture.srcDir,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.diagnostics[0]?.message).toContain(
+        "preserveModules path resolves outside projectRoot or srcDir",
+      );
+      expect(result.diagnostics[0]?.message).toContain(outsidePath);
+    } finally {
+      await fs.rm(outsidePath, { force: true });
+    }
+  },
+);
+
+test.serial(
+  "rejects in-tree preserved symlink aliases with a clear policy error",
+  async () => {
+    const fixture = await createFixture();
+    const preservedSource =
+      "export function load(name) { return require(name); }\n";
+    await fixture.write("src/real-loader.js", preservedSource);
+    await fs.symlink(
+      path.join(fixture.srcDir, "real-loader.js"),
+      path.join(fixture.srcDir, "linked-loader.js"),
+    );
+    await fixture.write(
+      "src/index.js",
+      'import { load } from "./linked-loader.js";\nglobalThis.savedLoad = load;\n',
+    );
+    const result = await build({
+      cache: { mode: "off" },
+      chunks: { mode: "off", outputType: "esm" },
+      entries: ["./index.js"],
+      outDir: fixture.outDir,
+      preserveModules: ["src/linked-loader.js"],
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.diagnostics[0]?.message).toContain(
+      "preserveModules symlink aliases are unsupported",
+    );
+    expect(result.diagnostics[0]?.message).toContain("real-loader.js");
+  },
+);
+
+test.serial("rejects lexical preserveModules path escapes", async () => {
+  const fixture = await createFixture();
+  await fixture.write("src/index.js", "console.log('entry');\n");
+  let thrown;
+  try {
+    await build({
+      cache: { mode: "off" },
+      entries: ["./index.js"],
+      outDir: fixture.outDir,
+      preserveModules: ["../outside.js"],
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+  } catch (error) {
+    thrown = error;
+  }
+  expect(String(thrown)).toContain(
+    "preserveModules path must be inside srcDir",
+  );
+});
+
+test.serial(
+  "node-target CLI output preserves shebang and import.meta and runs",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write("package.json", '{"type":"module"}\n');
+    await fixture.write("data.txt", "node-fixture\n");
+    await fixture.write(
+      "src/cli.ts",
+      [
+        "#!/usr/bin/env node",
+        'import { readFileSync } from "node:fs";',
+        'if (readFileSync("data.txt", "utf8").trim() !== "node-fixture") throw new Error("read failed");',
+        'if (!import.meta.url.startsWith("file:")) throw new Error("import.meta lost");',
+        "",
+      ].join("\n"),
+    );
+    const binPath = new URL("../bin/gcc-ts-bundler.mjs", import.meta.url)
+      .pathname;
+    await execFileAsync(
+      process.execPath,
+      [
+        binPath,
+        "build",
+        `--project-root=${fixture.projectRoot}`,
+        "--src-dir=src",
+        "--entry=./cli.ts",
+        "--out-dir=dist",
+        "--target=node",
+        "--chunks=off",
+        "--chunk-output-type=esm",
+        "--cache-mode=off",
+        "--preflight=off",
+      ],
+      { cwd: fixture.projectRoot },
+    );
+    const output = await fixture.read("dist/cli.js");
+    expect(output.startsWith("#!/usr/bin/env node\nimport ")).toBe(true);
+    expect(output).toContain("import.meta.url");
+    await execFileAsync(
+      process.execPath,
+      [path.join(fixture.outDir, "cli.js")],
+      {
+        cwd: fixture.projectRoot,
+      },
+    );
+  },
+);
+
+test.serial("browser target still rejects Node builtins", async () => {
+  const fixture = await createFixture();
+  await fixture.write(
+    "src/index.ts",
+    'import { readFileSync } from "node:fs";\nreadFileSync("x");\n',
+  );
+  const result = await build({
+    cache: { mode: "off" },
+    chunks: { mode: "off", outputType: "esm" },
+    entries: ["./index.ts"],
+    outDir: fixture.outDir,
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+  expect(result.ok).toBe(false);
+  expect(result.diagnostics[0]?.message).toContain(
+    "Unsupported Node builtin import",
+  );
+});
 
 test.serial(
   "minimal platform externs preserve referenced platform APIs",

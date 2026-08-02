@@ -7,13 +7,26 @@ pub(super) fn resolve_graph_impl(
     src_dir: String,
     workspace_dir: String,
     package_mode: String,
+    external_specifiers: Vec<String>,
+    preserved_file_paths: Vec<String>,
 ) -> std::result::Result<ResolveGraphOutput, String> {
     let src_dir = PathBuf::from(src_dir);
     let workspace_dir = PathBuf::from(workspace_dir);
     let entries: Vec<PathBuf> = entries.into_iter().map(PathBuf::from).collect();
+    let external_specifiers = external_specifiers.into_iter().collect::<BTreeSet<_>>();
+    let authored_preserved_file_paths = preserved_file_paths
+        .into_iter()
+        .map(|file_path| {
+            normalize_path(Path::new(&file_path))
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
     let (package_mode, target) = PackageMode::parse(&package_mode)?;
     let context = ResolveContext {
+        external_specifiers: &external_specifiers,
         package_mode,
+        preserved_file_paths: &authored_preserved_file_paths,
         target,
         src_dir: &src_dir,
         workspace_dir: &workspace_dir,
@@ -41,25 +54,43 @@ pub(super) fn resolve_graph_impl(
         let relative = path_relative_to(&current_file, context.workspace_dir);
         file_hashes.insert(relative, hash_content(&contents));
 
-        let commonjs_analysis = analyze_commonjs_source(&current_file, &contents)?;
+        let normalized_current = normalize_path(&current_file).to_string_lossy().to_string();
+        let authored_preserved = context.preserved_file_paths.contains(&normalized_current);
+        let commonjs_analysis = if authored_preserved {
+            CommonJsAnalysis::default()
+        } else {
+            analyze_commonjs_source(&current_file, &contents)?
+        };
         if commonjs_analysis.has_commonjs {
             validate_commonjs_usage(&current_file, &commonjs_analysis, &context)?;
         }
         commonjs_cache.insert(current_file.clone(), commonjs_analysis.clone());
 
-        // The scanner owns this parse. Only the non-CommonJS path needs it, so
-        // the extra parse is skipped exactly where its answers are unused.
+        // Explicitly preserved files ship byte-for-byte, so dynamic import and
+        // require are runtime-owned. They are still parsed for static ESM edges.
         let scan_allocator = Allocator::default();
         let (specifiers, lazy_specifiers) = if commonjs_analysis.has_commonjs {
             (commonjs_analysis.dependencies.clone(), Vec::new())
         } else {
             let scanned = parse_scanned_module(&scan_allocator, &current_file, &contents)?;
-            if has_top_level_await(&scanned) {
+            if authored_preserved || has_top_level_await(&scanned) {
                 top_level_await_modules.insert(current_file.to_string_lossy().to_string());
+            }
+            for specifier in collect_export_source_specifiers(&scanned) {
+                if is_external_boundary_specifier(&specifier, &context) {
+                    return Err(format!(
+                        "Export-from external module {specifier:?} is unsupported in this phase ({})",
+                        current_file.display()
+                    ));
+                }
             }
             (
                 extract_dependencies(&scanned),
-                collect_dynamic_import_specifiers(&scanned)?,
+                if authored_preserved {
+                    Vec::new()
+                } else {
+                    collect_dynamic_import_specifiers(&scanned)?
+                },
             )
         };
 
@@ -103,16 +134,10 @@ pub(super) fn resolve_graph_impl(
         }
         for specifier in lazy_specifiers {
             if is_external_boundary_specifier(&specifier, &context) {
-                let importer_file_path =
-                    normalize_path(&current_file).to_string_lossy().to_string();
-                external_boundaries.insert(
-                    format!("{importer_file_path}\0{specifier}"),
-                    ExternalBoundaryEntry {
-                        importerFilePath: importer_file_path,
-                        specifier,
-                    },
-                );
-                continue;
+                return Err(format!(
+                    "Dynamic import of external module {specifier:?} is unsupported in this phase ({})",
+                    current_file.display()
+                ));
             }
             if let Some(resolved) = resolve_module_specifier(&specifier, &current_file, &context)? {
                 consulted_package_jsons.extend(resolved.package_json_files.iter().cloned());
@@ -151,6 +176,22 @@ pub(super) fn resolve_graph_impl(
         let contents = fs::read_to_string(package_json_file).map_err(|error| error.to_string())?;
         let relative = path_relative_to(package_json_file, context.workspace_dir);
         file_hashes.insert(relative, hash_content(&contents));
+    }
+
+    let missing_preserved = authored_preserved_file_paths
+        .difference(
+            &visited
+                .iter()
+                .map(|path| normalize_path(path).to_string_lossy().to_string())
+                .collect(),
+        )
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing_preserved.is_empty() {
+        return Err(format!(
+            "Configured preserveModules paths are not reachable from an entry: {}",
+            missing_preserved.join(", ")
+        ));
     }
 
     let preserved_file_paths = classify_preserved_modules(&graph, &top_level_await_modules)?;

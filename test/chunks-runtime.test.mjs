@@ -1048,12 +1048,13 @@ test("resolves chunk output type through the auto gates", () => {
   );
 
   // Forced-script gates outrank an explicit esm request: Closure will happily
-  // emit ES5 bodies *with* import statements, and script/worker consumers
-  // cannot load module output at all.
+  // emit ES5 bodies *with* import statements, and worker consumers cannot load
+  // module output at all. Basic builds keep auto as script but may opt into ESM.
   for (const languageOut of ["ECMASCRIPT3", "ECMASCRIPT5"]) {
     expect(resolve({ languageOut, outputType: "esm" })).toBe("script");
   }
-  expect(resolve({ chunkMode: "off", outputType: "esm" })).toBe("script");
+  expect(resolve({ chunkMode: "off" })).toBe("script");
+  expect(resolve({ chunkMode: "off", outputType: "esm" })).toBe("esm");
   expect(resolve({ outputType: "esm", worker: true })).toBe("script");
 });
 

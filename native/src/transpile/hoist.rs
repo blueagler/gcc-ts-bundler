@@ -193,6 +193,8 @@ pub(super) fn build_hoist_plan(
         pure_callees: HashSet::new(),
         commonjs_specifiers: HashSet::new(),
         opaque_commonjs: Default::default(),
+        external_specifiers: HashMap::new(),
+        opaque_external_specifiers: HashSet::new(),
         file_metadata: HashMap::new(),
         hoist_plan: None,
         lazy_imports_by_file: HashMap::new(),

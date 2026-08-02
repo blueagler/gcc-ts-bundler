@@ -5,6 +5,7 @@ import type { collectTrackedFiles } from "../../shared/file-state";
 import { CHUNK_KINDS } from "../types";
 import type {
   ChunkPlanChunk,
+  ExternalBoundary,
   LazyImport,
   PackageAlias,
   PreservedModule,
@@ -25,6 +26,7 @@ import {
 export interface ResolveMetadata {
   optionsSignature: string;
   chunkPlan: ChunkPlanChunk[];
+  externalBoundaries?: ExternalBoundary[];
   entryFiles: Array<{
     chunkName: string;
     exportNames: string[];
@@ -43,6 +45,7 @@ export interface ResolveMetadata {
 export interface ResolveSnapshot {
   compilerOptionsHash: string;
   entryFiles: ResolveMetadata["entryFiles"];
+  externalBoundaries: ExternalBoundary[];
   finalKey: string;
   lazyImports: LazyImport[];
   nativeEmitKey: string;
@@ -83,6 +86,11 @@ const isResolveEntry = isObjectOf<ResolveMetadata["entryFiles"][number]>({
   hasDefaultExport: isBoolean,
   outputName: isString,
   sourceRelativePath: isString,
+});
+
+const isExternalBoundary = isObjectOf<ExternalBoundary>({
+  importerFilePath: isString,
+  specifier: isString,
 });
 
 const isLazyImport = isObjectOf<LazyImport>({
@@ -132,6 +140,7 @@ const isFileStateSnapshot = isObjectOf<ResolveSnapshot["trackedFiles"][string]>(
 
 export const isResolveMetadata = isObjectOf<ResolveMetadata>({
   optionsSignature: isString,
+  externalBoundaries: optional(arrayOf(isExternalBoundary)),
   chunkPlan: arrayOf(isChunkPlanChunk),
   entryFiles: arrayOf(isResolveEntry),
   lazyImports: arrayOf(isLazyImport),
@@ -145,6 +154,7 @@ export const isResolveMetadata = isObjectOf<ResolveMetadata>({
 export const isResolveSnapshot = isObjectOf<ResolveSnapshot>({
   compilerOptionsHash: isString,
   entryFiles: arrayOf(isResolveEntry),
+  externalBoundaries: arrayOf(isExternalBoundary),
   finalKey: isString,
   lazyImports: arrayOf(isLazyImport),
   nativeEmitKey: isString,

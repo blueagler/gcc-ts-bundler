@@ -3,7 +3,9 @@ use super::*;
 
 #[derive(Clone, Debug)]
 pub(super) struct PreservedImportPlan {
+    pub(super) boundary_exports: Vec<String>,
     pub(super) boundary_names: Vec<String>,
+    pub(super) external_specifier: Option<String>,
     pub(super) import_clause: String,
     pub(super) target_module_id: String,
 }

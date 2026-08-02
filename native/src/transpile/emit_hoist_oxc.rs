@@ -666,6 +666,7 @@ impl<'a> HoistedImportPlanner<'a> {
         }
         let import_index = self.preserved_import_count;
         self.preserved_import_count += 1;
+        let mut boundary_exports = Vec::new();
         let mut boundary_names = Vec::new();
         let mut extern_lines = Vec::new();
         let mut rewrites = Vec::new();
@@ -690,6 +691,7 @@ impl<'a> HoistedImportPlanner<'a> {
                             preserved.filePath
                         ));
                     }
+                    boundary_exports.push("default".to_string());
                     default_binding = Some(boundary.clone());
                     rewrites.push(ImportBindingRewrite {
                         binding_id: self.identity.key_of_binding(&default.local),
@@ -714,6 +716,7 @@ impl<'a> HoistedImportPlanner<'a> {
                             preserved.filePath
                         ));
                     }
+                    boundary_exports.push(imported_name.clone());
                     named_bindings.push(format!("{imported_name} as {boundary}"));
                     rewrites.push(ImportBindingRewrite {
                         binding_id: self.identity.key_of_binding(&named.local),
@@ -722,6 +725,7 @@ impl<'a> HoistedImportPlanner<'a> {
                     });
                 }
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) => {
+                    boundary_exports.push("*".to_string());
                     namespace_binding = Some(boundary.clone());
                     for export_name in &preserved.exportNames {
                         if is_valid_js_identifier(export_name) {
@@ -765,7 +769,9 @@ impl<'a> HoistedImportPlanner<'a> {
             extern_lines,
             lines: Vec::new(),
             preserved_imports: vec![PreservedImportPlan {
+                boundary_exports,
                 boundary_names,
+                external_specifier: None,
                 import_clause,
                 target_module_id: preserved.moduleId.clone(),
             }],

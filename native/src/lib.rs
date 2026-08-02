@@ -30,8 +30,19 @@ pub fn resolve_graph(
     src_dir: String,
     workspace_dir: String,
     package_mode: String,
+    external_specifiers: Vec<String>,
+    preserved_file_paths: Vec<String>,
 ) -> Result<graph::ResolveGraphOutput> {
-    with_globals(|| graph::resolve_graph(entries, src_dir, workspace_dir, package_mode))
+    with_globals(|| {
+        graph::resolve_graph_with_options(
+            entries,
+            src_dir,
+            workspace_dir,
+            package_mode,
+            external_specifiers,
+            preserved_file_paths,
+        )
+    })
 }
 
 #[napi(js_name = "planChunks")]
@@ -85,10 +96,13 @@ pub fn transpile_sources(
     externs_path: String,
     metadata_path: String,
     chunk_mode: String,
+    target: String,
     runtime_module_source_map_file: Option<String>,
     workspace_dir: String,
     package_aliases: Vec<transpile::PackageAliasInput>,
     resolved_imports: Vec<transpile::ResolvedImportInput>,
+    external_boundaries: Vec<transpile::ExternalBoundaryInput>,
+    opaque_external_specifiers: Vec<String>,
     package_json_files: Vec<String>,
     preserved_modules: Vec<transpile::PreservedModuleInput>,
     lazy_imports: Vec<transpile::LazyImportInput>,
@@ -104,10 +118,13 @@ pub fn transpile_sources(
         externs_path,
         metadata_path,
         chunk_mode,
+        target,
         runtime_module_source_map_file,
         workspace_dir,
         package_aliases,
         resolved_imports,
+        external_boundaries,
+        opaque_external_specifiers,
         package_json_files,
         preserved_modules,
         lazy_imports,

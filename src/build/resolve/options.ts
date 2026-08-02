@@ -121,6 +121,7 @@ export function normalizeBuildOptions(
         DEFAULT_BUILD_OPTIONS.diagnostics.verbose,
     },
     entries: options.entries.map((entry) => normalizeEntry(entry, srcDir)),
+    externals: normalizeExternalSpecifiers(options.externals ?? []),
     externs: [...(options.externs ?? [])].map((filePath) =>
       path.isAbsolute(filePath)
         ? filePath
@@ -142,6 +143,11 @@ export function normalizeBuildOptions(
       options.platformExterns ?? DEFAULT_BUILD_OPTIONS.platformExterns,
       PLATFORM_EXTERNS_MODES,
       "platformExterns",
+    ),
+    preserveModules: normalizePreserveModules(
+      options.preserveModules ?? [],
+      projectRoot,
+      srcDir,
     ),
     projectRoot,
     srcDir,
@@ -184,6 +190,50 @@ const AUTO_CHUNK_OUTPUT_TYPE: ResolvedChunkOutputType = "esm";
  * `script`. The gates outrank an explicit `esm` request, so a forced-script
  * consumer can never be handed module output.
  */
+function normalizeExternalSpecifiers(specifiers: readonly string[]) {
+  return [...new Set(specifiers.map((specifier) => specifier.trim()))]
+    .map((specifier) => {
+      if (
+        !specifier ||
+        specifier.startsWith(".") ||
+        specifier.startsWith("/")
+      ) {
+        throw new Error(
+          `externals entries must be non-relative module specifiers, got ${JSON.stringify(specifier)}.`,
+        );
+      }
+      return specifier;
+    })
+    .sort((left, right) => left.localeCompare(right));
+}
+
+function normalizePreserveModules(
+  modules: readonly string[],
+  projectRoot: string,
+  srcDir: string,
+) {
+  const resolvedSrcDir = path.resolve(srcDir);
+  return [
+    ...new Set(
+      modules.map((modulePath) => path.resolve(projectRoot, modulePath)),
+    ),
+  ]
+    .map((modulePath) => {
+      const relative = path.relative(resolvedSrcDir, modulePath);
+      if (
+        relative === ".." ||
+        relative.startsWith(`..${path.sep}`) ||
+        path.isAbsolute(relative)
+      ) {
+        throw new Error(
+          `preserveModules path must be inside srcDir: ${modulePath}`,
+        );
+      }
+      return modulePath;
+    })
+    .sort((left, right) => left.localeCompare(right));
+}
+
 export function resolveChunkOutputType({
   chunkMode,
   languageOut,
@@ -196,12 +246,14 @@ export function resolveChunkOutputType({
   worker?: boolean;
 }): ResolvedChunkOutputType {
   if (
-    chunkMode === "off" ||
     worker ||
     languageOut === "ECMASCRIPT3" ||
     languageOut === "ECMASCRIPT5"
   ) {
     return "script";
+  }
+  if (chunkMode === "off") {
+    return outputType === "esm" ? "esm" : "script";
   }
   return outputType === "auto" ? AUTO_CHUNK_OUTPUT_TYPE : outputType;
 }
@@ -294,6 +346,7 @@ export async function validateOutputPathBoundaries(
   cacheWorkspaceDir: string | null,
   extraInputPaths: string[] = [],
 ) {
+  await canonicalizePreservedModules(options);
   const outDir = await canonicalPath(options.outDir);
   const protectedInputs = [
     ["projectRoot", options.projectRoot],
@@ -330,6 +383,42 @@ export async function validateOutputPathBoundaries(
       );
     }
   }
+}
+
+async function canonicalizePreservedModules(options: ResolvedBuildOptions) {
+  if (options.preserveModules.length === 0) {
+    return;
+  }
+  const [projectRoot, srcDir] = await Promise.all([
+    fs.realpath(options.projectRoot),
+    fs.realpath(options.srcDir),
+  ]);
+  const canonicalModules = await Promise.all(
+    options.preserveModules.map(async (modulePath) => {
+      const realModulePath = await fs.realpath(modulePath);
+      if (
+        !isSameOrDescendant(realModulePath, projectRoot) ||
+        !isSameOrDescendant(realModulePath, srcDir)
+      ) {
+        throw new TypeError(
+          `preserveModules path resolves outside projectRoot or srcDir: ${modulePath} -> ${realModulePath}`,
+        );
+      }
+      const canonicalLexicalPath = path.resolve(
+        srcDir,
+        path.relative(options.srcDir, modulePath),
+      );
+      if (path.relative(canonicalLexicalPath, realModulePath) !== "") {
+        throw new TypeError(
+          `preserveModules symlink aliases are unsupported: ${modulePath} -> ${realModulePath}`,
+        );
+      }
+      return realModulePath;
+    }),
+  );
+  options.preserveModules = [...new Set(canonicalModules)].sort((left, right) =>
+    left.localeCompare(right),
+  );
 }
 
 async function canonicalPath(filePath: string) {
