@@ -5,6 +5,10 @@ const workflow = readFileSync(
   new URL("../.github/workflows/native-packages.yml", import.meta.url),
   "utf8",
 );
+const rootLockfile = readFileSync(new URL("../bun.lock", import.meta.url), "utf8");
+const rootLockfileVersion = rootLockfile.match(
+  /"lockfileVersion":\s*(?<version>\d+)/u,
+)?.groups?.version;
 const zigInstaller = workflow.match(
   /      - if: \$\{\{ matrix\.cargo_command == 'zigbuild' \}\}\n        name: Install Zig 0\.15\.2[\s\S]*?(?=\n      - if: \$\{\{ matrix\.cargo_command == 'zigbuild' \}\})/u,
 )?.[0];
@@ -99,10 +103,9 @@ test("root publishing restores native artifacts before installing dependencies",
   );
 });
 
-test("root publishing uses a Bun version compatible with bun.lock", () => {
-  expect(bunVersion).toBeDefined();
-  const [major, minor] = bunVersion.split(".").map(Number);
-  expect(major > 1 || (major === 1 && minor >= 4)).toBe(true);
+test("root publishing pins released Bun compatible with bun.lock", () => {
+  expect(bunVersion).toBe("1.3.14");
+  expect(rootLockfileVersion).toBe("1");
 });
 
 test("native package publishing is release-only except opt-in dry runs", () => {
