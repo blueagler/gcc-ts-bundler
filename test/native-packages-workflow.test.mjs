@@ -8,6 +8,11 @@ const workflow = readFileSync(
 const zigInstaller = workflow.match(
   /      - if: \$\{\{ matrix\.cargo_command == 'zigbuild' \}\}\n        name: Install Zig 0\.15\.2[\s\S]*?(?=\n      - if: \$\{\{ matrix\.cargo_command == 'zigbuild' \}\})/u,
 )?.[0];
+const rootPublishJob = workflow.match(
+  /  publish-root-package:\n[\s\S]*$/u,
+)?.[0];
+const publishCondition =
+  "${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == true) }}";
 
 function readZigArchitectureMapping(runnerArchitecture) {
   const mapping = zigInstaller?.match(
@@ -68,11 +73,45 @@ test("musl jobs install Zig 0.15.2 from verified official archives", () => {
     'echo "Unsupported runner.arch: $RUNNER_ARCH" >&2',
   );
   expect(zigInstaller).toContain('"$zig_dir/zig" version');
+  expect(workflow).toContain(
+    "cargo install cargo-zigbuild --version 0.23.0 --locked",
+  );
 });
 
-test("native package publishing stays release-only", () => {
-  expect(workflow).toContain("if: ${{ github.event_name == 'release' }}");
+test("workflow actions use current Node 24-runtime majors", () => {
+  expect(workflow).toContain("actions/checkout@v7");
+  expect(workflow).toContain("actions/setup-node@v7");
+  expect(workflow).toContain("actions/upload-artifact@v7");
+  expect(workflow).toContain("actions/download-artifact@v8");
+  expect(workflow).not.toMatch(
+    /actions\/(?:checkout|setup-node|upload-artifact)@v4/u,
+  );
+});
+
+test("root publishing restores native artifacts before installing dependencies", () => {
+  expect(rootPublishJob).toBeDefined();
+  expect(rootPublishJob).toContain("merge-multiple: false");
+  expect(rootPublishJob).toMatch(
+    /actions\/download-artifact@v8\n        with:\n          pattern: gcc-ts-bundler-\*\n          path: npm[\s\S]*?cp npm\/gcc-ts-bundler-linux-x64-gnu\/index\.node native\/index\.node[\s\S]*?bun install --frozen-lockfile/u,
+  );
+});
+
+test("native package publishing is release-only except opt-in dry runs", () => {
+  expect(workflow).toContain("workflow_dispatch:\n    inputs:\n      dry_run:");
+  expect(workflow).toContain("type: boolean");
   expect(
-    workflow.match(/if: \$\{\{ github\.event_name == 'release' \}\}/gu),
+    workflow.match(
+      new RegExp(
+        publishCondition.replace(/[${}()[\].+*?^$|\\]/gu, "\\$&"),
+        "gu",
+      ),
+    ),
   ).toHaveLength(2);
+  expect(workflow).toContain(
+    'if [ "${{ inputs.dry_run }}" = "true" ]; then\n            args+=(--dry-run)',
+  );
+  expect(workflow).toContain("release:\n    types:\n      - published");
+  expect(workflow).not.toContain(
+    "github.event_name == 'workflow_dispatch' && !inputs.dry_run",
+  );
 });
