@@ -98,10 +98,38 @@ jobs:
           targets: ${{ matrix.target }}
 
       - if: ${{ matrix.cargo_command == 'zigbuild' }}
-        # mlugg/setup-zig v1.2.2
-        uses: mlugg/setup-zig@53fc45b17fe98b52f92ee5ea08ff48a85a3e7eb7
-        with:
-          version: 0.15.2
+        name: Install Zig 0.15.2
+        shell: bash
+        env:
+          RUNNER_ARCH: ${{ runner.arch }}
+          ZIG_VERSION: 0.15.2
+        run: |
+          set -euo pipefail
+          case "$RUNNER_ARCH" in
+            X64)
+              zig_arch=x86_64
+              zig_sha256=02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+              ;;
+            ARM64)
+              zig_arch=aarch64
+              zig_sha256=958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f
+              ;;
+            *)
+              echo "Unsupported runner.arch: $RUNNER_ARCH" >&2
+              exit 1
+              ;;
+          esac
+
+          archive="zig-${zig_arch}-linux-${ZIG_VERSION}.tar.xz"
+          archive_path="$RUNNER_TEMP/$archive"
+          zig_dir="$RUNNER_TEMP/zig-${zig_arch}-linux-${ZIG_VERSION}"
+          curl --fail --location --retry 3 --retry-all-errors --output "$archive_path" \
+            "https://ziglang.org/download/${ZIG_VERSION}/${archive}"
+          printf '%s  %s\n' "$zig_sha256" "$archive_path" | sha256sum --check --status
+          tar -xJf "$archive_path" -C "$RUNNER_TEMP"
+          test -x "$zig_dir/zig"
+          echo "$zig_dir" >> "$GITHUB_PATH"
+          "$zig_dir/zig" version
 
       - if: ${{ matrix.cargo_command == 'zigbuild' }}
         shell: bash
