@@ -22,6 +22,7 @@ import type {
   ChunkPlanChunk,
   LazyImport,
   PackageAlias,
+  PreservedModule,
   ResolvedBuild,
   ResolvedImport,
   ResolvedBuildOptions,
@@ -70,6 +71,7 @@ interface FreshGraph {
   outputNames: string[];
   packageAliases: PackageAlias[];
   packageJsonFiles: string[];
+  preservedModules: PreservedModule[];
   resolvedImports: ResolvedImport[];
   resolveKey: string;
   tsxRuntimeSupport: Awaited<ReturnType<typeof collectTsxRuntimeSupport>>;
@@ -196,6 +198,7 @@ async function restoreResolveSnapshot(
     nativeEmitKey: snapshot.nativeEmitKey,
     packageAliases: snapshot.packageAliases,
     packageJsonFiles: snapshot.packageJsonFiles,
+    preservedModules: snapshot.preservedModules,
     resolvedImports: snapshot.resolvedImports,
     sourceFiles: snapshot.sourceFiles,
     trackedFiles: snapshot.trackedFiles,
@@ -228,6 +231,15 @@ async function resolveFreshGraph(
       `Target ${JSON.stringify(options.target)} resolved external builtin boundaries (${boundaries}), but preserved runtime imports are M2 pending.`,
     );
   }
+  const preservedModules = graphResult.preservedModules.map(
+    (module): PreservedModule => ({
+      ...module,
+      outputRelativePath: toPreservedOutputRelativePath(
+        env.sourceRoot,
+        module.filePath,
+      ),
+    }),
+  );
   const outputNames = resolveOutputNames(
     zipExact(options.entries, entryRelativePaths, "entries").map(
       ([entry, relativePath]) => ({ name: entry.name, relativePath }),
@@ -249,6 +261,7 @@ async function resolveFreshGraph(
       graphResult.packageJsonFiles,
       tsxRuntimeSupport.packageJsonFiles,
     ),
+    preservedModules,
     resolvedImports: mergeResolvedImports([
       ...graphResult.resolvedImports,
       ...tsxRuntimeSupport.resolvedImports,
@@ -284,12 +297,14 @@ async function loadOrCreateResolveMetadata(
     const needsUpgrade =
       !Array.isArray(cached.packageAliases) ||
       !Array.isArray(cached.packageJsonFiles) ||
+      !Array.isArray(cached.preservedModules) ||
       !Array.isArray(cached.resolvedImports) ||
       !Array.isArray(cached.tsxRuntimeSourceFiles);
     const metadata = {
       ...cached,
       packageAliases: cached.packageAliases ?? fresh.packageAliases,
       packageJsonFiles: cached.packageJsonFiles ?? fresh.packageJsonFiles,
+      preservedModules: cached.preservedModules ?? fresh.preservedModules,
       resolvedImports: cached.resolvedImports ?? fresh.resolvedImports,
       tsxRuntimeSourceFiles:
         cached.tsxRuntimeSourceFiles ?? fresh.tsxRuntimeSupport.sourceFiles,
@@ -329,6 +344,9 @@ function createResolveMetadata(
   );
   const shimDir = path.join(env.cacheStore.workspaceDir, "entries");
   const shimFiles = toShimFiles(entryFiles, shimDir);
+  const preservedFilePaths = new Set(
+    fresh.preservedModules.map((module) => module.filePath),
+  );
   const chunkPlan = planChunks({
     baseChunkName: options.chunks.baseChunkName,
     chunkMode: options.chunks.mode,
@@ -338,12 +356,14 @@ function createResolveMetadata(
       sourcePath: entry.sourcePath,
     })),
     graphEntries: [
-      ...Object.entries(fresh.graphResult.graph).map(
-        ([filePath, dependencies]) => ({
-          dependencies,
+      ...Object.entries(fresh.graphResult.graph)
+        .filter(([filePath]) => !preservedFilePaths.has(filePath))
+        .map(([filePath, dependencies]) => ({
+          dependencies: dependencies.filter(
+            (dependency) => !preservedFilePaths.has(dependency),
+          ),
           filePath,
-        }),
-      ),
+        })),
       ...zipExact(
         shimFiles,
         entryFiles,
@@ -371,6 +391,7 @@ function createResolveMetadata(
     lazyImports: fresh.graphResult.lazyImports,
     packageAliases: fresh.packageAliases,
     packageJsonFiles: fresh.packageJsonFiles,
+    preservedModules: fresh.preservedModules,
     resolvedImports: fresh.resolvedImports,
     tsxRuntimeSourceFiles: fresh.tsxRuntimeSupport.sourceFiles,
   };
@@ -432,6 +453,7 @@ async function finalizeResolvedBuild(
       optionsSignature: context.optionsSignature,
       packageAliases: fresh.packageAliases,
       packageJsonFiles: fresh.packageJsonFiles,
+      preservedModules: fresh.preservedModules,
       resolvedImports: fresh.resolvedImports,
       packageSignature: context.packageSignature,
       resolveKey: fresh.resolveKey,
@@ -451,6 +473,7 @@ async function finalizeResolvedBuild(
     nativeEmitKey,
     packageAliases: fresh.packageAliases,
     packageJsonFiles: fresh.packageJsonFiles,
+    preservedModules: fresh.preservedModules,
     resolvedImports: fresh.resolvedImports,
     sourceFiles: fresh.graphResult.sourceFiles,
     trackedFiles,
@@ -468,6 +491,7 @@ function assembleResolvedBuild(
     nativeEmitKey: string;
     packageAliases: PackageAlias[];
     packageJsonFiles: string[];
+    preservedModules: PreservedModule[];
     resolvedImports: ResolvedImport[];
     sourceFiles: string[];
     trackedFiles: ResolveSnapshot["trackedFiles"];
@@ -482,6 +506,7 @@ function assembleResolvedBuild(
     lazyImports: parts.lazyImports,
     packageAliases: parts.packageAliases,
     packageJsonFiles: parts.packageJsonFiles,
+    preservedModules: parts.preservedModules,
     resolvedImports: parts.resolvedImports,
     finalCacheDir: path.join(
       env.cacheStore.projectCacheDir,
@@ -502,6 +527,23 @@ function assembleResolvedBuild(
     tsConfigPath: env.tsConfigPath,
     workspaceDir: env.cacheStore.workspaceDir,
   };
+}
+
+function toPreservedOutputRelativePath(sourceRoot: string, filePath: string) {
+  const relativePath = path.relative(sourceRoot, filePath).replace(/\\/g, "/");
+  if (
+    relativePath === ".." ||
+    relativePath.startsWith("../") ||
+    path.isAbsolute(relativePath)
+  ) {
+    throw new Error(
+      `Preserved module ${filePath} is outside the Vite materialized source root. Phase 1 supports only captured Vite ESM modules.`,
+    );
+  }
+  return path.posix.join(
+    "__gcc_preserved",
+    relativePath.replace(/\.[^/.]+$/u, ".js"),
+  );
 }
 
 function resolveSnapshotPath(env: ResolveEnv) {

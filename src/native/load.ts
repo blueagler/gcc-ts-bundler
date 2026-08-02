@@ -23,6 +23,11 @@ interface NativeDependencyGraphEntry {
   filePath: string;
 }
 
+interface NativeModuleKindEntry {
+  filePath: string;
+  kind: "compiled" | "preserved";
+}
+
 interface NativeChunkPlanEntryInput {
   chunkName: string;
   outputName: string;
@@ -135,15 +140,24 @@ interface NativeLazyImportEntry {
   targetPath: string;
 }
 
+export interface NativePreservedModuleEntry {
+  exportNames: string[];
+  filePath: string;
+  hasDefaultExport: boolean;
+  moduleId: string;
+}
+
 interface NativeResolveGraphOutput {
   entries: NativeEntryExportMetadata[];
   externalBoundaries: NativeExternalBoundaryEntry[];
   fileHashes: NativeFileHashEntry[];
   graph: NativeDependencyGraphEntry[];
   lazyImports: NativeLazyImportEntry[];
+  moduleKinds: NativeModuleKindEntry[];
   packageAliases: NativePackageAliasEntry[];
   resolvedImports: NativeResolvedImportEntry[];
   packageJsonFiles: string[];
+  preservedModules: NativePreservedModuleEntry[];
   sourceFiles: string[];
   trackedFiles: string[];
 }
@@ -192,10 +206,18 @@ export interface NativeEmittedTypeMetadata {
   hasTypeMetadata: boolean;
 }
 
+interface NativePreservedImportOutput {
+  boundaryNames: string[];
+  importClause: string;
+  importerFilePath: string;
+  targetModuleId: string;
+}
+
 interface NativeTranspileOutput {
   emittedFiles: string[];
   explicitExternPropertyCount: number;
   externsPath: string;
+  preservedImports: NativePreservedImportOutput[];
   preservedPropertyCount: number;
   supportFiles: string[];
   typeMetadata: NativeEmittedTypeMetadata[];
@@ -206,6 +228,14 @@ interface NativeLazyImportInput {
   moduleId: string;
   specifier: string;
   targetPath: string;
+}
+
+interface NativeTranspilePreservedModule {
+  exportNames: string[];
+  filePath: string;
+  hasDefaultExport: boolean;
+  moduleId: string;
+  outputRelativePath: string;
 }
 
 interface NativeTranspilePackageAlias {
@@ -274,6 +304,7 @@ interface NativeBinding {
     packageAliases: NativeTranspilePackageAlias[],
     resolvedImports: NativeResolvedImportEntry[],
     packageJsonFiles: string[],
+    preservedModules: NativeTranspilePreservedModule[],
     lazyImports: NativeLazyImportInput[],
     chunkGraph: NativeTranspileChunkInput[],
     classMapCalls: NativeClassMapCallInput[],
@@ -356,9 +387,11 @@ export function resolveGraph(input: {
       ]),
     ),
     lazyImports: result.lazyImports,
+    moduleKinds: result.moduleKinds,
     packageAliases: result.packageAliases,
     resolvedImports: result.resolvedImports,
     packageJsonFiles: result.packageJsonFiles,
+    preservedModules: result.preservedModules,
     sourceFiles: result.sourceFiles,
     trackedFiles: result.trackedFiles,
   };
@@ -405,6 +438,7 @@ export function transpileSources(input: {
   packageAliases: NativeTranspilePackageAlias[];
   resolvedImports: NativeResolvedImportEntry[];
   packageJsonFiles: string[];
+  preservedModules: NativeTranspilePreservedModule[];
   lazyImports: NativeLazyImportInput[];
   runtimeModuleSourceMapFile: string | undefined;
   workspaceDir: string;
@@ -421,6 +455,7 @@ export function transpileSources(input: {
     input.packageAliases,
     input.resolvedImports,
     input.packageJsonFiles,
+    input.preservedModules,
     input.lazyImports,
     input.chunkGraph,
     input.classMapCalls,

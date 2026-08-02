@@ -452,20 +452,20 @@ test.serial(
 );
 
 test.serial(
-  "Vite vite-plugin-wasm-style top-level await remains an expected Closure failure",
+  "Vite vite-plugin-wasm-style top-level await builds and executes through a preserved ESM edge",
   { timeout: 30000 },
   async () => {
     const fixture = await createFixture();
     await writeHtmlFixture(fixture);
     await fixture.write(
       "src/main.js",
-      'import wasmModule from "virtual:vite-plugin-wasm"; globalThis.__wasmModule = wasmModule;\n',
+      'import wasmAnswer, { answer as namedAnswer } from "virtual:vite-plugin-wasm"; import * as wasmNamespace from "virtual:vite-plugin-wasm"; globalThis["__wasmAnswer"] = [wasmAnswer(), namedAnswer(), wasmNamespace.answer()];\n',
     );
     const wasmPlugin = [
       "{",
       '  name: "vite-plugin-wasm-tla-fixture",',
       '  resolveId(id) { return id === "virtual:vite-plugin-wasm" ? "\\0virtual:vite-plugin-wasm" : null; },',
-      '  load(id) { return id === "\\0virtual:vite-plugin-wasm" ? "const __vite__wasmModule = await Promise.resolve({}); export default __vite__wasmModule;" : null; }',
+      '  load(id) { return id === "\\0virtual:vite-plugin-wasm" ? "const bytes = new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,3,2,1,0,7,10,1,6,97,110,115,119,101,114,0,0,10,6,1,4,0,65,42,11]); const { instance } = await WebAssembly.instantiate(bytes); const answer = instance.exports.answer; export { answer }; export default answer;" : null; }',
       "}",
     ].join("\n");
     expect(
@@ -475,15 +475,188 @@ test.serial(
         buildLines: ['    target: "esnext",'],
       })).ok,
     ).toBe(true);
+    const cacheDir = path.join(fixture.projectRoot, "compiler-cache");
     const gcc = await buildViteFixture(fixture, {
       pluginEntries: [
         wasmPlugin,
+        `gccTsBundler({ compiler: { cache: { mode: "persistent", dir: ${JSON.stringify(cacheDir)} } } })`,
+      ],
+      buildLines: ['    target: "esnext",'],
+    });
+    expect(gcc.ok).toBe(true);
+    const files = await listFiles(fixture.outDir);
+    const entryFile = files.find(
+      (filePath) =>
+        filePath.endsWith(".js") && !filePath.startsWith("__gcc_preserved/"),
+    );
+    const preservedFile = files.find((filePath) =>
+      filePath.startsWith("__gcc_preserved/"),
+    );
+    expect(entryFile).toBeDefined();
+    expect(preservedFile).toBeDefined();
+    expect(await fixture.read(path.join("dist", entryFile))).toContain(
+      "__gcc_preserved/",
+    );
+    const cacheFiles = await listFiles(cacheDir);
+    const nativeExtern = cacheFiles.find((filePath) =>
+      filePath.endsWith("native-generated.externs.js"),
+    );
+    expect(nativeExtern).toBeDefined();
+    const externText = await fs.readFile(path.join(cacheDir, nativeExtern), "utf8");
+    expect(externText).toContain("// Preserved ESM import bindings.");
+    expect(externText.match(/var __gcc_preserved_/gu)?.length).toBe(3);
+    expect(externText).toMatch(/__gcc_preserved_[\w$]+\.answer;/u);
+    const preservedUrl = pathToFileURL(
+      path.join(fixture.outDir, preservedFile),
+    ).href;
+    const preserved = await import(
+      `${preservedUrl}?preserved-wasm=${Date.now()}`
+    );
+    expect(preserved.default()).toBe(42);
+    expect(preserved.answer()).toBe(42);
+  },
+);
+
+test.serial(
+  "Vite top-level for-await-of builds through a preserved ESM edge",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await writeHtmlFixture(fixture);
+    await fixture.write(
+      "src/main.js",
+      'import value from "virtual:for-await"; globalThis["__forAwait"] = value;\n',
+    );
+    const forAwaitPlugin = [
+      "{",
+      '  name: "virtual-for-await",',
+      '  resolveId(id) { return id === "virtual:for-await" ? "\\0virtual:for-await" : null; },',
+      '  load(id) { return id === "\\0virtual:for-await" ? "const values = []; try { if (true) { for await (const value of [Promise.resolve(2), Promise.resolve(3)]) { values.push(value); } } } finally {} export default values.join(\',\');" : null; }',
+      "}",
+    ].join("\n");
+    const result = await buildViteFixture(fixture, {
+      pluginEntries: [
+        forAwaitPlugin,
         'gccTsBundler({ compiler: { cache: { mode: "off" } } })',
       ],
       buildLines: ['    target: "esnext",'],
     });
-    expect(gcc.ok).toBe(false);
-    expect(buildErrorText(gcc)).toContain("await must be inside asynchronous function");
+    expect(result.ok).toBe(true);
+    const files = await listFiles(fixture.outDir);
+    const entryFile = files.find(
+      (filePath) =>
+        filePath.endsWith(".js") && !filePath.startsWith("__gcc_preserved/"),
+    );
+    const preservedFile = files.find((filePath) =>
+      filePath.startsWith("__gcc_preserved/"),
+    );
+    expect(entryFile).toBeDefined();
+    expect(preservedFile).toBeDefined();
+    expect(await fixture.read(path.join("dist", entryFile))).toContain(
+      "__gcc_preserved/",
+    );
+    expect(await fixture.read(path.join("dist", preservedFile))).toContain(
+      "for await",
+    );
+    const preservedUrl = pathToFileURL(
+      path.join(fixture.outDir, preservedFile),
+    ).href;
+    const preserved = await import(
+      `${preservedUrl}?preserved-for-await=${Date.now()}`
+    );
+    expect(preserved.default).toBe("2,3");
+  },
+);
+
+test.serial(
+  "Vite nested await stays in the compiled graph",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await writeHtmlFixture(fixture);
+    await fixture.write(
+      "src/main.js",
+      'import { nested } from "virtual:nested-await"; globalThis["__nestedAwait"] = nested;\n',
+    );
+    const nestedPlugin = [
+      "{",
+      '  name: "virtual-nested-await",',
+      '  resolveId(id) { return id === "virtual:nested-await" ? "\\0virtual:nested-await" : null; },',
+      '  load(id) { return id === "\\0virtual:nested-await" ? "export async function nested() { return await Promise.resolve(3); }" : null; }',
+      "}",
+    ].join("\n");
+    const result = await buildViteFixture(fixture, {
+      pluginEntries: [
+        nestedPlugin,
+        'gccTsBundler({ compiler: { cache: { mode: "off" } } })',
+      ],
+      buildLines: ['    target: "esnext",'],
+    });
+    expect(result.ok).toBe(true);
+    expect(
+      (await listFiles(fixture.outDir)).some((filePath) =>
+        filePath.startsWith("__gcc_preserved/"),
+      ),
+    ).toBe(false);
+  },
+);
+
+test.serial(
+  "Vite preserved and compiled cycles fail closed",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await writeHtmlFixture(fixture);
+    await fixture.write("src/main.js", 'import "virtual:cycle-a";\n');
+    const cyclePlugin = [
+      "{",
+      '  name: "virtual-preserved-cycle",',
+      '  resolveId(id) { return id === "virtual:cycle-a" ? "\\0virtual:cycle-a" : id === "virtual:cycle-b" ? "\\0virtual:cycle-b" : null; },',
+      '  load(id) { if (id === "\\0virtual:cycle-a") return "import { b } from \'virtual:cycle-b\'; export const a = await Promise.resolve(b);"; if (id === "\\0virtual:cycle-b") return "import { a } from \'virtual:cycle-a\'; export const b = a ?? 1;"; return null; }',
+      "}",
+    ].join("\n");
+    const result = await buildViteFixture(fixture, {
+      pluginEntries: [
+        cyclePlugin,
+        'gccTsBundler({ compiler: { cache: { mode: "off" } } })',
+      ],
+      buildLines: ['    target: "esnext",'],
+    });
+    expect(result.ok).toBe(false);
+    expect(buildErrorText(result)).toContain(
+      "Preserved/compiled module cycle is unsupported in phase 1",
+    );
+  },
+);
+
+test.serial(
+  "Vite preserved modules fail closed for script output",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await writeHtmlFixture(fixture);
+    await fixture.write(
+      "src/main.js",
+      'import value from "virtual:tla"; globalThis.__value = value;\n',
+    );
+    const tlaPlugin = [
+      "{",
+      '  name: "virtual-tla",',
+      '  resolveId(id) { return id === "virtual:tla" ? "\\0virtual:tla" : null; },',
+      '  load(id) { return id === "\\0virtual:tla" ? "export default await Promise.resolve(1);" : null; }',
+      "}",
+    ].join("\n");
+    const result = await buildViteFixture(fixture, {
+      pluginEntries: [
+        tlaPlugin,
+        'gccTsBundler({ compiler: { cache: { mode: "off" }, chunks: { outputType: "script" } } })',
+      ],
+      buildLines: ['    target: "esnext",'],
+    });
+    expect(result.ok).toBe(false);
+    expect(buildErrorText(result)).toContain(
+      'Preserved modules require ESM output. Set chunks.outputType to "esm".',
+    );
   },
 );
 

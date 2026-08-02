@@ -111,6 +111,24 @@ pub struct ExternalBoundaryEntry {
 
 #[allow(non_snake_case)]
 #[napi(object)]
+#[derive(Clone, Debug)]
+pub struct ModuleKindEntry {
+    pub filePath: String,
+    pub kind: String,
+}
+
+#[allow(non_snake_case)]
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct PreservedModuleEntry {
+    pub exportNames: Vec<String>,
+    pub filePath: String,
+    pub hasDefaultExport: bool,
+    pub moduleId: String,
+}
+
+#[allow(non_snake_case)]
+#[napi(object)]
 #[derive(Debug)]
 pub struct ResolveGraphOutput {
     pub entries: Vec<EntryExportMetadata>,
@@ -118,9 +136,11 @@ pub struct ResolveGraphOutput {
     pub fileHashes: Vec<FileHashEntry>,
     pub graph: Vec<DependencyGraphEntry>,
     pub lazyImports: Vec<LazyImportEntry>,
+    pub moduleKinds: Vec<ModuleKindEntry>,
     pub packageAliases: Vec<PackageAliasEntry>,
     pub resolvedImports: Vec<ResolvedImportEntry>,
     pub packageJsonFiles: Vec<String>,
+    pub preservedModules: Vec<PreservedModuleEntry>,
     pub sourceFiles: Vec<String>,
     pub trackedFiles: Vec<String>,
 }

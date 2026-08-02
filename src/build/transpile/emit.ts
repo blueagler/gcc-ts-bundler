@@ -27,6 +27,8 @@ import type {
   ChunkPlanChunk,
   LazyImport,
   PackageAlias,
+  PreservedImport,
+  PreservedModule,
   ResolvedBuildOptions,
   ResolvedImport,
 } from "../types";
@@ -54,6 +56,7 @@ export interface NativeEmitStageResult {
   emittedFiles: string[];
   externsPath: string;
   outDir: string;
+  preservedImports: PreservedImport[];
   supportFiles: string[];
   typeMetadata: NativeEmittedTypeMetadata[];
   typeMetadataDependencies: FileContentSnapshot;
@@ -68,13 +71,14 @@ interface NativeEmitMetadata {
   externsPath: string;
   metadataPath: string;
   optionsSignature: string;
+  preservedImports: PreservedImport[];
   supportFiles: string[];
   typeMetadata: NativeEmittedTypeMetadata[];
   typeMetadataDependencies: FileContentSnapshot;
   version: number;
 }
 
-const NATIVE_EMIT_METADATA_VERSION = 13;
+const NATIVE_EMIT_METADATA_VERSION = 14;
 
 /**
  * Hoisted bundler-runtime emission depends on chunk membership, so the native
@@ -107,6 +111,7 @@ export async function emitNativeStage({
   options,
   packageAliases,
   packageJsonFiles,
+  preservedModules,
   resolvedImports,
   tsxRuntimeSourceFiles,
   typeInferenceDisabled,
@@ -122,6 +127,7 @@ export async function emitNativeStage({
   options: ResolvedBuildOptions;
   packageAliases: PackageAlias[];
   packageJsonFiles: string[];
+  preservedModules: PreservedModule[];
   resolvedImports: ResolvedImport[];
   tsxRuntimeSourceFiles: string[];
   typeInferenceDisabled: boolean;
@@ -179,6 +185,7 @@ export async function emitNativeStage({
       emittedFiles: [],
       externsPath: paths.externsPath,
       outDir: paths.outDir,
+      preservedImports: [],
       supportFiles: [],
       typeMetadata: [],
       typeMetadataDependencies: {},
@@ -208,6 +215,7 @@ export async function emitNativeStage({
       emittedFiles: [],
       externsPath: paths.externsPath,
       outDir: paths.outDir,
+      preservedImports: [],
       supportFiles: [],
       typeMetadata: [],
       typeMetadataDependencies: {},
@@ -242,6 +250,7 @@ export async function emitNativeStage({
         outDir: paths.outDir,
         packageAliases,
         packageJsonFiles,
+        preservedModules,
         resolvedImports,
         typeInferenceDisabled,
         workspaceDir,
@@ -277,6 +286,7 @@ export async function emitNativeStage({
       metadataPath,
       optionsSignature,
       metadataPathForNative: paths.metadataPathForNative,
+      preservedImports: result.preservedImports,
       supportFiles: finalSupportFiles,
       typeMetadata: result.typeMetadata,
       typeMetadataDependencies,
@@ -291,6 +301,7 @@ export async function emitNativeStage({
     emittedFiles: result.emittedFiles,
     externsPath: result.externsPath,
     outDir: paths.outDir,
+    preservedImports: result.preservedImports,
     supportFiles: finalSupportFiles,
     typeMetadata: result.typeMetadata,
     typeMetadataDependencies,
@@ -637,6 +648,7 @@ async function restoreCachedNativeEmitResult({
     emittedFiles: cachedMetadata.emittedFiles,
     externsPath: cachedMetadata.externsPath,
     outDir,
+    preservedImports: cachedMetadata.preservedImports,
     supportFiles: cachedMetadata.supportFiles,
     typeMetadata: cachedMetadata.typeMetadata,
     typeMetadataDependencies: cachedMetadata.typeMetadataDependencies,
@@ -661,6 +673,7 @@ function runNativeTranspile({
   outDir,
   packageAliases,
   packageJsonFiles,
+  preservedModules,
   resolvedImports,
   typeInferenceDisabled,
   workspaceDir,
@@ -677,6 +690,7 @@ function runNativeTranspile({
   outDir: string;
   packageAliases: PackageAlias[];
   packageJsonFiles: string[];
+  preservedModules: PreservedModule[];
   resolvedImports: ResolvedImport[];
   typeInferenceDisabled: boolean;
   workspaceDir: string;
@@ -698,6 +712,7 @@ function runNativeTranspile({
     outDir,
     packageAliases,
     packageJsonFiles,
+    preservedModules,
     resolvedImports,
     runtimeModuleSourceMapFile:
       process.env.GCC_VITE_RUNTIME_SOURCE_MAP_FILE || undefined,
@@ -716,6 +731,7 @@ async function persistNativeEmitMetadata({
   metadataPath,
   optionsSignature,
   metadataPathForNative,
+  preservedImports,
   supportFiles,
   typeMetadata,
   typeMetadataDependencies,
@@ -729,6 +745,7 @@ async function persistNativeEmitMetadata({
   metadataPath: string;
   optionsSignature: string;
   metadataPathForNative: string;
+  preservedImports: PreservedImport[];
   supportFiles: string[];
   typeMetadata: NativeEmittedTypeMetadata[];
   typeMetadataDependencies: FileContentSnapshot;
@@ -742,6 +759,7 @@ async function persistNativeEmitMetadata({
     externsPath,
     metadataPath: metadataPathForNative,
     optionsSignature,
+    preservedImports,
     supportFiles,
     typeMetadata,
     typeMetadataDependencies,
@@ -927,6 +945,13 @@ const isNativeEmittedTypeMetadata = isObjectOf<NativeEmittedTypeMetadata>({
   hasTypeMetadata: isBoolean,
 });
 
+const isPreservedImport = isObjectOf<PreservedImport>({
+  boundaryNames: isStringArray,
+  importClause: isString,
+  importerFilePath: isString,
+  targetModuleId: isString,
+});
+
 const isNativeEmitMetadata = isObjectOf<NativeEmitMetadata>({
   artifacts: recordOf(isContentIdentity),
   chunkSignature: isString,
@@ -936,6 +961,7 @@ const isNativeEmitMetadata = isObjectOf<NativeEmitMetadata>({
   externsPath: isString,
   metadataPath: isString,
   optionsSignature: isString,
+  preservedImports: arrayOf(isPreservedImport),
   supportFiles: isStringArray,
   typeMetadata: arrayOf(isNativeEmittedTypeMetadata),
   typeMetadataDependencies: recordOf(isContentIdentity),

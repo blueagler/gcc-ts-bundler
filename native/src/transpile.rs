@@ -65,6 +65,7 @@ pub struct TranspileOutput {
     pub emittedFiles: Vec<String>,
     pub explicitExternPropertyCount: u32,
     pub externsPath: String,
+    pub preservedImports: Vec<PreservedImportOutput>,
     pub preservedPropertyCount: u32,
     pub supportFiles: Vec<String>,
     pub typeMetadata: Vec<EmittedTypeMetadata>,
@@ -77,6 +78,27 @@ pub struct PackageAliasInput {
     pub packageName: String,
     pub subpath: String,
     pub targetPath: String,
+}
+
+#[allow(non_snake_case)]
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct PreservedModuleInput {
+    pub exportNames: Vec<String>,
+    pub filePath: String,
+    pub hasDefaultExport: bool,
+    pub moduleId: String,
+    pub outputRelativePath: String,
+}
+
+#[allow(non_snake_case)]
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct PreservedImportOutput {
+    pub boundaryNames: Vec<String>,
+    pub importClause: String,
+    pub importerFilePath: String,
+    pub targetModuleId: String,
 }
 
 #[allow(non_snake_case)]
@@ -158,6 +180,7 @@ pub fn transpile_sources(
     package_aliases: Vec<PackageAliasInput>,
     resolved_imports: Vec<ResolvedImportInput>,
     package_json_files: Vec<String>,
+    preserved_modules: Vec<PreservedModuleInput>,
     lazy_imports: Vec<LazyImportInput>,
     chunk_graph: Vec<TranspileChunkInput>,
     class_map_calls: Vec<ClassMapCallInput>,
@@ -172,6 +195,29 @@ pub fn transpile_sources(
     let workspace_dir = PathBuf::from(workspace_dir);
     let out_dir = PathBuf::from(out_dir);
     let chunk_mode = parse_chunk_mode(&chunk_mode)?;
+    let preserved_modules = preserved_modules
+        .into_iter()
+        .map(|module| (module.moduleId.clone(), module))
+        .collect::<HashMap<_, _>>();
+    let preserved_file_paths = preserved_modules
+        .values()
+        .map(|module| {
+            normalize_path(Path::new(&module.filePath))
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect::<HashSet<_>>();
+    let compiled_file_names = file_names
+        .iter()
+        .filter(|file_name| {
+            !preserved_file_paths.contains(
+                &normalize_path(Path::new(file_name))
+                    .to_string_lossy()
+                    .to_string(),
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     let resolved_module_ids = resolved_imports
         .into_iter()
         .map(|resolved| {
@@ -184,7 +230,7 @@ pub fn transpile_sources(
     let file_metadata = load_closure_metadata(&metadata_path)?;
     let bundler_module_slots = if chunk_mode == ChunkMode::BundlerRuntime {
         collect_bundler_module_slots(
-            &file_names,
+            &compiled_file_names,
             &workspace_dir,
             &package_aliases,
             &resolved_module_ids,
@@ -199,7 +245,7 @@ pub fn transpile_sources(
         .collect::<HashMap<_, _>>();
     let hoist_plan = if chunk_mode == ChunkMode::BundlerRuntime {
         build_hoist_plan(
-            &file_names,
+            &compiled_file_names,
             &workspace_dir,
             &package_aliases,
             &resolved_module_ids,
@@ -215,7 +261,7 @@ pub fn transpile_sources(
         explicit_extern_property_names,
         mut preserved_property_names,
         static_property_names,
-    } = collect_extern_property_names_with_externs(&file_names, &explicit_extern_paths)?;
+    } = collect_extern_property_names_with_externs(&compiled_file_names, &explicit_extern_paths)?;
     // Decorator metadata carries property keys as string literals; preserving
     // those keys keeps the literals valid instead of rewriting Closure output.
     preserved_property_names.extend(collect_decorated_metadata_property_names(&file_metadata)?);
@@ -223,12 +269,14 @@ pub fn transpile_sources(
     // `experimentalDecorators` before this stage sees the module), in which
     // case there is no decorator metadata and the literals live in the source
     // itself: `__decorateClass([property(...)], MyElement.prototype, "count")`.
-    preserved_property_names.extend(collect_prelowered_decorator_property_names(&file_names)?);
+    preserved_property_names.extend(collect_prelowered_decorator_property_names(
+        &compiled_file_names,
+    )?);
     // `classMapCalls` rules with `keySource: "pairArray"` pin keys that a
     // helper splats onto a target by string while the runtime reads them as
     // dot properties.
     preserved_property_names.extend(collect_pair_array_property_names(
-        &file_names,
+        &compiled_file_names,
         &class_map_calls,
     )?);
     if type_inference_disabled {
@@ -265,6 +313,7 @@ pub fn transpile_sources(
         lazy_imports_by_file: group_lazy_imports_by_file(lazy_imports),
         lazy_target_module_ids,
         package_aliases,
+        preserved_modules,
         resolved_module_ids,
         preserved_property_names,
         static_property_names,
@@ -272,7 +321,7 @@ pub fn transpile_sources(
         vendor_module_ids: collect_vendor_module_ids(&chunk_graph, &workspace_dir),
         workspace_dir: workspace_dir.clone(),
     };
-    let emitted_outputs = file_names
+    let emitted_outputs = compiled_file_names
         .par_iter()
         .filter(|file_name| !file_name.ends_with(".d.ts"))
         .map(|file_name| {
@@ -304,15 +353,26 @@ pub fn transpile_sources(
         .flat_map(|metadata| metadata.ambient_globals.iter().cloned())
         .filter(|name| !program_declared_names.contains(name))
         .collect::<HashSet<_>>();
-    fs::write(
-        &externs_path,
-        render_generated_externs(
-            &preserved_property_names,
-            &context.static_property_names,
-            &ambient_global_names,
-        ),
-    )
-    .map_err(|error| error.to_string())?;
+    let mut externs_text = render_generated_externs(
+        &preserved_property_names,
+        &context.static_property_names,
+        &ambient_global_names,
+    );
+    let preserved_extern_lines = emitted_outputs
+        .iter()
+        .flat_map(|(_, _, emitted)| emitted.preserved_extern_lines.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    if !preserved_extern_lines.is_empty() {
+        externs_text.push_str("\n// Preserved ESM import bindings.\n");
+        externs_text.push_str(
+            &preserved_extern_lines
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        externs_text.push('\n');
+    }
+    fs::write(&externs_path, externs_text).map_err(|error| error.to_string())?;
 
     let shared_helper_prefixes =
         plan_shared_helper_placement(&emitted_outputs, &chunk_graph, &out_dir, &workspace_dir);
@@ -320,10 +380,19 @@ pub fn transpile_sources(
     let mut runtime_module_source_map = BTreeMap::new();
     let mut emitted_files = Vec::with_capacity(emitted_outputs.len());
     let mut emitted_type_metadata = Vec::with_capacity(emitted_outputs.len());
+    let mut preserved_imports = Vec::new();
     for (file_path, output_path, emitted) in emitted_outputs {
         if let Some(parent) = output_path.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
+        preserved_imports.extend(emitted.preserved_imports.iter().map(|import| {
+            PreservedImportOutput {
+                boundaryNames: import.boundary_names.clone(),
+                importClause: import.import_clause.clone(),
+                importerFilePath: file_path.to_string_lossy().to_string(),
+                targetModuleId: import.target_module_id.clone(),
+            }
+        }));
         let code = match shared_helper_prefixes.get(&output_path) {
             Some(prefix) => format!("{prefix}\n{}", emitted.code),
             None => emitted.code,
@@ -362,6 +431,13 @@ pub fn transpile_sources(
 
     emitted_files.sort();
     emitted_type_metadata.sort_by(|left, right| left.emittedFile.cmp(&right.emittedFile));
+    preserved_imports.sort_by(|left, right| {
+        left.importerFilePath
+            .cmp(&right.importerFilePath)
+            .then(left.targetModuleId.cmp(&right.targetModuleId))
+            .then(left.importClause.cmp(&right.importClause))
+            .then(left.boundaryNames.cmp(&right.boundaryNames))
+    });
     let support_files = emit_package_support_files(
         &out_dir,
         &workspace_dir,
@@ -373,6 +449,7 @@ pub fn transpile_sources(
         emittedFiles: emitted_files,
         explicitExternPropertyCount: explicit_extern_property_names.len() as u32,
         externsPath: externs_path,
+        preservedImports: preserved_imports,
         preservedPropertyCount: preserved_property_names.len() as u32,
         supportFiles: support_files,
         typeMetadata: emitted_type_metadata,

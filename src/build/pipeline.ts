@@ -54,6 +54,7 @@ import {
   normalizeBuildOptions,
   resolveBuild,
 } from "./resolve";
+import { resolveChunkOutputType } from "./resolve/options";
 
 interface FinalCacheMetadata {
   artifacts: FileContentSnapshot;
@@ -124,19 +125,31 @@ export async function build(
     }
 
     writeBuildEntryShims(context, resolved);
+    const preservedModules = resolved.preservedModules;
+    const preservedFilePaths = new Set(
+      preservedModules.map((module) => module.filePath),
+    );
     const nativeEmitResult = await emitNativeStage({
       cacheDir: resolved.nativeEmitCacheDir,
       chunkPlan: resolved.chunkPlan,
       fileNames:
         context.options.chunks.mode === "off"
-          ? [...resolved.sourceFiles, ...resolved.shimFiles]
-          : resolved.sourceFiles,
+          ? [
+              ...resolved.sourceFiles.filter(
+                (filePath) => !preservedFilePaths.has(filePath),
+              ),
+              ...resolved.shimFiles,
+            ]
+          : resolved.sourceFiles.filter(
+              (filePath) => !preservedFilePaths.has(filePath),
+            ),
       lazyImports: resolved.lazyImports,
       metadataPath: path.join(resolved.nativeEmitCacheDir, "meta.json"),
       options: context.options,
       optionsSignature: context.optionsSignature,
       packageAliases: resolved.packageAliases,
       packageJsonFiles: resolved.packageJsonFiles,
+      preservedModules,
       resolvedImports: resolved.resolvedImports,
       tsConfigPath: resolved.tsConfigPath,
       tsxRuntimeSourceFiles: resolved.tsxRuntimeSourceFiles,
@@ -167,6 +180,25 @@ export async function build(
       nativeExternPath: nativeEmitResult.externsPath,
       options: context.options,
       outDir: staging.outDir,
+      preservedImports: [
+        ...nativeEmitResult.preservedImports,
+        ...resolved.entryFiles.flatMap((entry) => {
+          const preserved = preservedModules.find(
+            (module) => module.filePath === entry.sourcePath,
+          );
+          return preserved
+            ? [
+                {
+                  boundaryNames: [],
+                  importClause: "",
+                  importerFilePath: entry.sourcePath,
+                  targetModuleId: preserved.moduleId,
+                },
+              ]
+            : [];
+        }),
+      ],
+      preservedModules,
       packageRoot: context.packageRoot,
       projectCacheDir: path.dirname(path.dirname(resolved.finalCacheDir)),
       supportFiles: nativeEmitResult.supportFiles,
@@ -472,6 +504,20 @@ function validateBuildShape(
   context: BuildContext,
   resolved: ResolvedBuild,
 ): BuildFailure | null {
+  if (
+    resolved.preservedModules.length > 0 &&
+    resolveChunkOutputType({
+      chunkMode: context.options.chunks.mode,
+      languageOut: context.options.languageOut,
+      outputType: context.options.chunks.outputType,
+    }) !== "esm"
+  ) {
+    return failedBuild([
+      createBuildDiagnostic(
+        'Preserved modules require ESM output. Set chunks.outputType to "esm".',
+      ),
+    ]);
+  }
   if (
     context.options.chunks.mode !== "off" &&
     resolved.entryFiles.some(

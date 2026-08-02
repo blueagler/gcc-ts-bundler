@@ -2,8 +2,17 @@ use super::type_metadata::TypeMetadataDelivery;
 use super::*;
 
 #[derive(Clone, Debug)]
+pub(super) struct PreservedImportPlan {
+    pub(super) boundary_names: Vec<String>,
+    pub(super) import_clause: String,
+    pub(super) target_module_id: String,
+}
+
+#[derive(Clone, Debug)]
 pub(super) struct EmittedProgram {
     pub(super) code: String,
+    pub(super) preserved_extern_lines: Vec<String>,
+    pub(super) preserved_imports: Vec<PreservedImportPlan>,
     pub(super) shared_helpers: Vec<emit_helpers::SharedHelperDeclaration>,
     pub(super) reflective_property_names: std::collections::BTreeSet<String>,
     pub(super) type_metadata: TypeMetadataDelivery,
@@ -67,6 +76,8 @@ pub(super) fn emit_module_program_oxc<'a>(
             )?;
             EmittedProgram {
                 code: emitted.code,
+                preserved_extern_lines: Vec::new(),
+                preserved_imports: Vec::new(),
                 shared_helpers: Vec::new(),
                 reflective_property_names: Default::default(),
                 type_metadata: emitted.type_metadata,

@@ -1,9 +1,14 @@
 use super::*;
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{Expression, ImportOrExportKind, Program, Statement, TemplateLiteral};
+use oxc_ast::ast::{
+    Expression, ForOfStatement, ImportOrExportKind, Program, Statement, TemplateLiteral,
+    VariableDeclaration, VariableDeclarationKind,
+};
 use oxc_ast::AstKind;
+use oxc_ast_visit::{walk, Visit};
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
+use oxc_syntax::scope::ScopeFlags;
 
 /// Parses one source file for the import scan.
 ///
@@ -36,6 +41,43 @@ pub(super) fn parse_scanned_module<'a>(
 
 /// Static import edges, in source order. Type-only forms carry no runtime
 /// dependency and are skipped.
+pub(super) fn has_top_level_await(program: &Program<'_>) -> bool {
+    struct TopLevelAwaitVisitor {
+        found: bool,
+    }
+
+    // Oxc represents await-bearing module syntax in three places: ordinary
+    // AwaitExpression nodes, ForOfStatement's await flag, and AwaitUsing
+    // declarations. Keep all three here while function visitors remain sealed.
+    impl<'a> Visit<'a> for TopLevelAwaitVisitor {
+        fn visit_await_expression(&mut self, _expression: &oxc_ast::ast::AwaitExpression<'a>) {
+            self.found = true;
+        }
+
+        fn visit_for_of_statement(&mut self, statement: &ForOfStatement<'a>) {
+            self.found |= statement.r#await;
+            walk::walk_for_of_statement(self, statement);
+        }
+
+        fn visit_variable_declaration(&mut self, declaration: &VariableDeclaration<'a>) {
+            self.found |= declaration.kind == VariableDeclarationKind::AwaitUsing;
+            walk::walk_variable_declaration(self, declaration);
+        }
+
+        fn visit_function(&mut self, _function: &oxc_ast::ast::Function<'a>, _flags: ScopeFlags) {}
+
+        fn visit_arrow_function_expression(
+            &mut self,
+            _function: &oxc_ast::ast::ArrowFunctionExpression<'a>,
+        ) {
+        }
+    }
+
+    let mut visitor = TopLevelAwaitVisitor { found: false };
+    visitor.visit_program(program);
+    visitor.found
+}
+
 pub(super) fn extract_dependencies(program: &Program<'_>) -> Vec<String> {
     let mut dependencies = Vec::new();
 

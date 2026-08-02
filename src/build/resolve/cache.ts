@@ -7,6 +7,7 @@ import type {
   ChunkPlanChunk,
   LazyImport,
   PackageAlias,
+  PreservedModule,
   ResolvedImport,
 } from "../types";
 import {
@@ -34,6 +35,7 @@ export interface ResolveMetadata {
   lazyImports: LazyImport[];
   packageAliases?: PackageAlias[];
   packageJsonFiles?: string[];
+  preservedModules?: PreservedModule[];
   resolvedImports?: ResolvedImport[];
   tsxRuntimeSourceFiles?: string[];
 }
@@ -47,6 +49,7 @@ export interface ResolveSnapshot {
   optionsSignature: string;
   packageAliases: PackageAlias[];
   packageJsonFiles: string[];
+  preservedModules: PreservedModule[];
   resolvedImports: ResolvedImport[];
   packageSignature: string;
   resolveKey: string;
@@ -95,6 +98,14 @@ const isPackageAlias = isObjectOf<PackageAlias>({
   targetPath: isString,
 });
 
+const isPreservedModule = isObjectOf<PreservedModule>({
+  exportNames: isStringArray,
+  filePath: isString,
+  hasDefaultExport: isBoolean,
+  moduleId: isString,
+  outputRelativePath: isString,
+});
+
 const isResolvedImport = isObjectOf<ResolvedImport>({
   importerFilePath: isString,
   moduleId: isString,
@@ -126,6 +137,7 @@ export const isResolveMetadata = isObjectOf<ResolveMetadata>({
   lazyImports: arrayOf(isLazyImport),
   packageAliases: optional(arrayOf(isPackageAlias)),
   packageJsonFiles: optional(isStringArray),
+  preservedModules: optional(arrayOf(isPreservedModule)),
   resolvedImports: optional(arrayOf(isResolvedImport)),
   tsxRuntimeSourceFiles: optional(isStringArray),
 });
@@ -139,6 +151,7 @@ export const isResolveSnapshot = isObjectOf<ResolveSnapshot>({
   optionsSignature: isString,
   packageAliases: arrayOf(isPackageAlias),
   packageJsonFiles: isStringArray,
+  preservedModules: arrayOf(isPreservedModule),
   resolvedImports: arrayOf(isResolvedImport),
   packageSignature: isString,
   resolveKey: isString,

@@ -71,6 +71,7 @@ import {
   listJavaScriptChunks,
   removeRollupJavaScript,
   resolveViteAssetUrls,
+  rewritePreservedImportSpecifiers,
   rewriteHtmlAssets,
 } from "./output";
 import { prebundleMaterializedDependencies } from "./prebundle";
@@ -668,6 +669,10 @@ async function emitViteGraph(
     });
   }
 
+  await rewritePreservedImportSpecifiers({
+    outDir: compiled.compiledCoreOutputs.finalOutDir,
+    outputFiles: finalizedBaseOutput.emittedOutputFiles,
+  });
   removeRollupJavaScript(input.bundle);
   const emittedOutputFiles = filterInternalOutputs(
     finalizedBaseOutput.emittedOutputFiles,

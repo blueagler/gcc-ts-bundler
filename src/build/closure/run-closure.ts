@@ -3,7 +3,12 @@ import path from "path";
 
 import { ensureDirectory, ensureParentDirectory } from "../../shared/files";
 import { logInternalDetail, withInternalTiming } from "../../shared/timing";
-import type { ChunkPlanChunk, ResolvedBuildOptions } from "../types";
+import type {
+  ChunkPlanChunk,
+  PreservedImport,
+  PreservedModule,
+  ResolvedBuildOptions,
+} from "../types";
 import { prepareClosureJobs } from "../../native/load";
 import type { NativeEmittedTypeMetadata } from "../../native/load";
 import {
@@ -51,6 +56,8 @@ export async function runClosureStage({
   supportFiles,
   typeMetadata,
   packageRoot,
+  preservedImports,
+  preservedModules,
 }: {
   closureCompilerEnvironment: ClosureCompilerEnvironment;
   chunkPlan: ChunkPlanChunk[];
@@ -65,6 +72,8 @@ export async function runClosureStage({
   supportFiles: string[];
   typeMetadata: NativeEmittedTypeMetadata[];
   packageRoot: string;
+  preservedImports: PreservedImport[];
+  preservedModules: PreservedModule[];
 }): Promise<ClosureStageResult> {
   const { cacheOutputDir } = await prepareClosureStageDirectories({
     finalCacheDir,
@@ -127,7 +136,17 @@ export async function runClosureStage({
     }),
   );
 
-  let publishedOutputs = prepared.publishedOutputs;
+  const preservedOutputFiles = await emitPreservedModules({
+    chunkPlan,
+    imports: preservedImports,
+    modules: preservedModules,
+    outDir,
+    postprocessActions: prepared.postprocessActions,
+  });
+  let publishedOutputs = [
+    ...prepared.publishedOutputs,
+    ...preservedOutputFiles,
+  ];
 
   if (options.chunks.mode !== "off") {
     publishedOutputs = await withInternalTiming(
@@ -155,6 +174,122 @@ export async function runClosureStage({
     exitCode: 0,
     outputFiles: publishedOutputs,
   };
+}
+
+async function emitPreservedModules(input: {
+  chunkPlan: ChunkPlanChunk[];
+  imports: PreservedImport[];
+  modules: PreservedModule[];
+  outDir: string;
+  postprocessActions: ReturnType<
+    typeof prepareClosureJobs
+  >["postprocessActions"];
+}) {
+  if (input.modules.length === 0) {
+    return [];
+  }
+  if (input.chunkPlan.length !== input.postprocessActions.length) {
+    throw new Error(
+      "Preserved-module emission could not align Closure chunks with output actions.",
+    );
+  }
+
+  const moduleById = new Map(
+    input.modules.map((module) => [module.moduleId, module]),
+  );
+  const resolvedOutDir = path.resolve(input.outDir);
+  const outputFiles = await Promise.all(
+    input.modules.map(async (module) => {
+      const outputPath = path.resolve(input.outDir, module.outputRelativePath);
+      if (!outputPath.startsWith(`${resolvedOutDir}${path.sep}`)) {
+        throw new Error(
+          `Preserved module output escapes the build directory: ${module.outputRelativePath}`,
+        );
+      }
+      await ensureParentDirectory(outputPath);
+      await fs.copyFile(module.filePath, outputPath);
+      return outputPath;
+    }),
+  );
+  const sourceByOutput = new Map(
+    await Promise.all(
+      input.postprocessActions.map(
+        async (action) =>
+          [
+            action.outputPath,
+            await fs.readFile(action.outputPath, "utf8"),
+          ] as const,
+      ),
+    ),
+  );
+  const importLinesByOutput = new Map<string, Set<string>>();
+  for (const preservedImport of input.imports) {
+    const target = moduleById.get(preservedImport.targetModuleId);
+    if (!target) {
+      throw new Error(
+        `Missing preserved-module plan for ${preservedImport.targetModuleId}.`,
+      );
+    }
+    const importerPath = normalizeFilePath(preservedImport.importerFilePath);
+    const chunkIndex = input.chunkPlan.findIndex((chunk) =>
+      [...chunk.files, ...(chunk.entryFiles ?? [])].some((filePath) =>
+        importerPath.endsWith(`/${normalizeFilePath(filePath)}`),
+      ),
+    );
+    if (chunkIndex < 0) {
+      throw new Error(
+        `Could not assign preserved import from ${preservedImport.importerFilePath} to a compiled chunk.`,
+      );
+    }
+    const originOutputPath = input.postprocessActions[chunkIndex]?.outputPath;
+    if (!originOutputPath) {
+      throw new Error(
+        `Missing Closure output action for preserved import from ${preservedImport.importerFilePath}.`,
+      );
+    }
+    const consumerOutputs = new Set([originOutputPath]);
+    for (const [outputPath, source] of sourceByOutput) {
+      if (
+        preservedImport.boundaryNames.some((boundaryName) =>
+          source.includes(boundaryName),
+        )
+      ) {
+        consumerOutputs.add(outputPath);
+      }
+    }
+    const targetPath = path.resolve(input.outDir, target.outputRelativePath);
+    for (const outputPath of consumerOutputs) {
+      const relative = path
+        .relative(path.dirname(outputPath), targetPath)
+        .replace(/\\/g, "/");
+      const specifier = relative.startsWith(".") ? relative : `./${relative}`;
+      const line = preservedImport.importClause
+        ? `import ${preservedImport.importClause} from ${JSON.stringify(specifier)};`
+        : `import ${JSON.stringify(specifier)};`;
+      let lines = importLinesByOutput.get(outputPath);
+      if (!lines) {
+        lines = new Set<string>();
+        importLinesByOutput.set(outputPath, lines);
+      }
+      lines.add(line);
+    }
+  }
+
+  await Promise.all(
+    [...importLinesByOutput].map(async ([outputPath, lines]) => {
+      const source = await fs.readFile(outputPath, "utf8");
+      await fs.writeFile(
+        outputPath,
+        `${[...lines].join("\n")}\n${source}`,
+        "utf8",
+      );
+    }),
+  );
+  return outputFiles;
+}
+
+function normalizeFilePath(filePath: string) {
+  return filePath.replace(/\\/g, "/").replace(/^\.\//u, "");
 }
 
 async function prepareClosureStageDirectories({

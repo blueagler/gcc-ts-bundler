@@ -58,6 +58,21 @@ export interface ResolvedImport {
   targetPath: string;
 }
 
+export interface PreservedImport {
+  boundaryNames: string[];
+  importClause: string;
+  importerFilePath: string;
+  targetModuleId: string;
+}
+
+export interface PreservedModule {
+  exportNames: string[];
+  filePath: string;
+  hasDefaultExport: boolean;
+  moduleId: string;
+  outputRelativePath: string;
+}
+
 export const CHUNK_KINDS = defineValues(
   "base",
   "entry",
@@ -97,6 +112,7 @@ export interface ResolvedBuild {
   entryFiles: BuildEntry[];
   packageAliases: PackageAlias[];
   packageJsonFiles: string[];
+  preservedModules: PreservedModule[];
   lazyImports: LazyImport[];
   resolvedImports: ResolvedImport[];
   sourceFiles: string[];

@@ -183,6 +183,8 @@ pub(crate) fn emit_goog_module_program<'a>(
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),
+        preserved_extern_lines: Vec::new(),
+        preserved_imports: Vec::new(),
         shared_helpers: Vec::new(),
         reflective_property_names: Default::default(),
         type_metadata: type_metadata.finish(),
@@ -691,6 +693,7 @@ mod tests {
             lazy_imports_by_file: HashMap::new(),
             lazy_target_module_ids: HashSet::new(),
             package_aliases: Vec::new(),
+            preserved_modules: HashMap::new(),
             resolved_module_ids: HashMap::new(),
             preserved_property_names: HashSet::new(),
             static_property_names: HashSet::new(),

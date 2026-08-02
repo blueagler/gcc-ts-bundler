@@ -483,6 +483,9 @@ impl<'a> VisitMut<'a> for BundlerRuntimeNamespaceVisitor<'a, '_> {
             ) else {
                 continue;
             };
+            if self.context.preserved_modules.contains_key(&module_id) {
+                continue;
+            }
             for specifier in import.specifiers.iter().flatten() {
                 if let ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) = specifier {
                     let binding = self.identity.key_of_binding(&namespace.local);

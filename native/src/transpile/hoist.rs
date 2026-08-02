@@ -198,6 +198,7 @@ pub(super) fn build_hoist_plan(
         lazy_imports_by_file: HashMap::new(),
         lazy_target_module_ids: HashSet::new(),
         package_aliases: package_aliases.to_vec(),
+        preserved_modules: HashMap::new(),
         resolved_module_ids: resolved_module_ids.clone(),
         preserved_property_names: HashSet::new(),
         static_property_names: HashSet::new(),

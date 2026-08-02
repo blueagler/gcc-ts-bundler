@@ -42,6 +42,102 @@ impl Drop for TestDir {
 }
 
 #[test]
+fn top_level_await_classifies_preserved_modules_without_nested_false_positives() {
+    let temp_dir = TestDir::new();
+    temp_dir.write(
+        "src/index.js",
+        "import { value } from './tla.js'; import { sum } from './for-await.js'; import { nested } from './nested.js'; import { nestedForAwait } from './nested-for-await.js'; import { usingValue } from './await-using.js'; import { nestedUsing } from './nested-await-using.js'; console.log(value, sum, nested, nestedForAwait, usingValue, nestedUsing);",
+    );
+    temp_dir.write(
+        "src/tla.js",
+        "export const value = await Promise.resolve(1); export default value;",
+    );
+    temp_dir.write(
+        "src/for-await.js",
+        "let sum = 0; try { if (true) { for await (const value of [Promise.resolve(2)]) { sum += value; } } } finally {} export { sum };",
+    );
+    temp_dir.write(
+        "src/nested.js",
+        "export async function nested() { return await Promise.resolve(2); }",
+    );
+    temp_dir.write(
+        "src/nested-for-await.js",
+        "export async function nestedForAwait() { for await (const value of [Promise.resolve(3)]) { return value; } }",
+    );
+    temp_dir.write(
+        "src/await-using.js",
+        "await using resource = null; export const usingValue = resource;",
+    );
+    temp_dir.write(
+        "src/nested-await-using.js",
+        "export async function nestedUsing() { await using resource = null; return resource; }",
+    );
+
+    let result = resolve_graph(
+        vec![temp_dir.join("src/index.js").to_string_lossy().to_string()],
+        temp_dir.join("src").to_string_lossy().to_string(),
+        temp_dir.path.to_string_lossy().to_string(),
+        "esm-only".to_string(),
+    )
+    .unwrap();
+
+    assert_eq!(result.preservedModules.len(), 3);
+    let preserved = result
+        .preservedModules
+        .iter()
+        .find(|entry| entry.filePath.ends_with("src/tla.js"))
+        .unwrap();
+    assert_eq!(preserved.exportNames, vec!["value"]);
+    assert!(preserved.hasDefaultExport);
+    assert!(result
+        .preservedModules
+        .iter()
+        .any(|entry| entry.filePath.ends_with("src/for-await.js")));
+    assert!(result
+        .preservedModules
+        .iter()
+        .any(|entry| entry.filePath.ends_with("src/await-using.js")));
+    for compiled_path in [
+        "src/nested.js",
+        "src/nested-for-await.js",
+        "src/nested-await-using.js",
+    ] {
+        let nested = result
+            .moduleKinds
+            .iter()
+            .find(|entry| entry.filePath.ends_with(compiled_path))
+            .unwrap();
+        assert_eq!(nested.kind, "compiled");
+    }
+}
+
+#[test]
+fn preserved_compiled_cycles_fail_closed() {
+    let temp_dir = TestDir::new();
+    temp_dir.write("src/index.js", "import './a.js';");
+    temp_dir.write(
+        "src/a.js",
+        "import { b } from './b.js'; export const a = await Promise.resolve(b);",
+    );
+    temp_dir.write(
+        "src/b.js",
+        "import { a } from './a.js'; export const b = a ?? 1;",
+    );
+
+    let error = resolve_graph(
+        vec![temp_dir.join("src/index.js").to_string_lossy().to_string()],
+        temp_dir.join("src").to_string_lossy().to_string(),
+        temp_dir.path.to_string_lossy().to_string(),
+        "esm-only".to_string(),
+    )
+    .unwrap_err();
+
+    assert!(error.contains("Preserved/compiled module cycle is unsupported in phase 1"));
+    assert!(error.contains("a.js"));
+    assert!(error.contains("b.js"));
+}
+
+#[test]
 fn resolves_package_root_from_exports_browser_condition() {
     let temp_dir = TestDir::new();
     temp_dir.write(
