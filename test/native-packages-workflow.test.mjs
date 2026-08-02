@@ -20,6 +20,27 @@ function readZigArchitectureMapping(runnerArchitecture) {
   return mapping.groups;
 }
 
+function readNativePackageMatrixEntry(packageName) {
+  const entry = workflow.match(
+    new RegExp(
+      `\\n          - package_name: ${packageName}\\n(?<entry>[\\s\\S]*?)(?=\\n          - package_name:|\\n    steps:)`,
+      "u",
+    ),
+  )?.groups?.entry;
+  expect(entry).toBeDefined();
+  return entry;
+}
+
+test("Darwin native package matrix uses the supported runner mappings", () => {
+  expect(workflow).not.toContain("macos-13");
+  expect(readNativePackageMatrixEntry("gcc-ts-bundler-darwin-x64")).toMatch(
+    /runs_on: macos-15-intel\n\s+target: x86_64-apple-darwin\n\s+platform: darwin\n\s+arch: x64/u,
+  );
+  expect(readNativePackageMatrixEntry("gcc-ts-bundler-darwin-arm64")).toMatch(
+    /runs_on: macos-14\n\s+target: aarch64-apple-darwin\n\s+platform: darwin\n\s+arch: arm64/u,
+  );
+});
+
 test("musl jobs install Zig 0.15.2 from verified official archives", () => {
   expect(workflow).not.toContain("mlugg/setup-zig");
   expect(zigInstaller).toBeDefined();

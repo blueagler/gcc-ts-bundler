@@ -50,7 +50,7 @@ jobs:
             platform: darwin
             arch: arm64
           - package_name: gcc-ts-bundler-darwin-x64
-            runs_on: macos-13
+            runs_on: macos-15-intel
             target: x86_64-apple-darwin
             platform: darwin
             arch: x64
