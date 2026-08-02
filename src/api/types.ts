@@ -1,4 +1,8 @@
 import { defineValues } from "../shared/validation";
+import type { TargetName } from "../targets";
+
+export { TARGET_NAMES } from "../targets";
+export type { TargetName } from "../targets";
 
 export const COMPILATION_LEVELS = defineValues(
   "WHITESPACE_ONLY",
@@ -167,6 +171,8 @@ export interface BuildOptions {
   platformExterns?: PlatformExternsMode | undefined;
   projectRoot?: string | undefined;
   srcDir?: string | undefined;
+  /** Additive target policy; browser is the unchanged default. */
+  target?: TargetName | undefined;
   /** Closure-only typed declarations. Native preservation never scans these. */
   typedExterns?: readonly string[] | undefined;
 }
@@ -224,6 +230,7 @@ export interface ResolvedBuildOptions {
   platformExterns: PlatformExternsMode;
   projectRoot: string;
   srcDir: string;
+  target: TargetName;
   typedExterns: string[];
 }
 
@@ -269,5 +276,6 @@ export const DEFAULT_BUILD_OPTIONS = deepFreeze({
   platformExterns: "minimal",
   projectRoot: "",
   srcDir: "",
+  target: "browser",
   typedExterns: [],
 } satisfies ResolvedBuildOptions);

@@ -672,6 +672,90 @@ fn rejects_node_builtin_imports() {
 }
 
 #[test]
+fn target_matrix_selects_conditional_exports_and_external_boundaries() {
+    let temp_dir = TestDir::new();
+    temp_dir.write(
+        "src/conditions.ts",
+        "import pkg from \"demo-pkg\";\nexport default pkg;\n",
+    );
+    temp_dir.write(
+        "src/node-boundaries.ts",
+        "import nodeFs from \"node:fs\";\nimport barePath from \"path\";\nexport default [nodeFs, barePath];\n",
+    );
+    temp_dir.write(
+        "src/bun-boundaries.ts",
+        "import nodeFs from \"node:fs\";\nimport barePath from \"path\";\nimport bunTest from \"bun:test\";\nexport default [nodeFs, barePath, bunTest];\n",
+    );
+    temp_dir.write(
+        "node_modules/demo-pkg/package.json",
+        r#"{"name":"demo-pkg","exports":{"browser":"./browser.js","node":"./node.js","bun":"./bun.js","workerd":"./workerd.js","import":"./import.js","require":"./require.js","default":"./default.js"}}"#,
+    );
+    for (name, value) in [
+        ("browser", "browser"),
+        ("node", "node"),
+        ("bun", "bun"),
+        ("workerd", "workerd"),
+        ("import", "import"),
+        ("require", "require"),
+        ("default", "default"),
+    ] {
+        temp_dir.write(
+            &format!("node_modules/demo-pkg/{name}.js"),
+            &format!("export default {value:?};\n"),
+        );
+    }
+
+    for (target, expected) in [
+        ("bun", "bun.js"),
+        ("node", "node.js"),
+        ("workerd", "workerd.js"),
+    ] {
+        let result = resolve_graph(
+            vec![temp_dir
+                .join("src/conditions.ts")
+                .to_string_lossy()
+                .to_string()],
+            temp_dir.join("src").to_string_lossy().to_string(),
+            temp_dir.path.to_string_lossy().to_string(),
+            format!("esm-only:{target}"),
+        )
+        .unwrap();
+        assert!(
+            result
+                .sourceFiles
+                .iter()
+                .any(|path| path.ends_with(expected)),
+            "{target} did not select {expected}"
+        );
+    }
+
+    for (target, entry, expected_boundaries) in [
+        ("node", "src/node-boundaries.ts", vec!["node:fs", "path"]),
+        (
+            "bun",
+            "src/bun-boundaries.ts",
+            vec!["bun:test", "node:fs", "path"],
+        ),
+    ] {
+        let result = resolve_graph(
+            vec![temp_dir.join(entry).to_string_lossy().to_string()],
+            temp_dir.join("src").to_string_lossy().to_string(),
+            temp_dir.path.to_string_lossy().to_string(),
+            format!("esm-only:{target}"),
+        )
+        .unwrap();
+        assert_eq!(
+            result
+                .externalBoundaries
+                .iter()
+                .map(|item| item.specifier.as_str())
+                .collect::<Vec<_>>(),
+            expected_boundaries
+        );
+    }
+}
+
+#[test]
 fn resolves_js_specifier_to_ts_source() {
     let temp_dir = TestDir::new();
     temp_dir.write("src/index.ts", "export { value } from \"./support.js\";\n");

@@ -104,8 +104,17 @@ pub struct ChunkPlanChunkOutput {
 #[allow(non_snake_case)]
 #[napi(object)]
 #[derive(Debug)]
+pub struct ExternalBoundaryEntry {
+    pub importerFilePath: String,
+    pub specifier: String,
+}
+
+#[allow(non_snake_case)]
+#[napi(object)]
+#[derive(Debug)]
 pub struct ResolveGraphOutput {
     pub entries: Vec<EntryExportMetadata>,
+    pub externalBoundaries: Vec<ExternalBoundaryEntry>,
     pub fileHashes: Vec<FileHashEntry>,
     pub graph: Vec<DependencyGraphEntry>,
     pub lazyImports: Vec<LazyImportEntry>,
@@ -120,6 +129,57 @@ pub struct ResolveGraphOutput {
 enum PackageMode {
     EsmOnly,
     Off,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum BuiltinPolicy {
+    ExternalBoundary,
+    Reject,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct TargetDescriptor {
+    pub builtin_policy: BuiltinPolicy,
+    pub export_conditions: &'static [&'static str],
+}
+
+const BROWSER_TARGET: TargetDescriptor = TargetDescriptor {
+    builtin_policy: BuiltinPolicy::Reject,
+    export_conditions: &["browser", "production", "import", "default"],
+};
+const NODE_TARGET: TargetDescriptor = TargetDescriptor {
+    builtin_policy: BuiltinPolicy::ExternalBoundary,
+    export_conditions: &["node", "production", "import", "require", "default"],
+};
+const BUN_TARGET: TargetDescriptor = TargetDescriptor {
+    builtin_policy: BuiltinPolicy::ExternalBoundary,
+    export_conditions: &["bun", "node", "production", "import", "require", "default"],
+};
+const WORKERD_TARGET: TargetDescriptor = TargetDescriptor {
+    builtin_policy: BuiltinPolicy::Reject,
+    export_conditions: &[
+        "workerd",
+        "worker",
+        "browser",
+        "production",
+        "import",
+        "default",
+    ],
+};
+const WEBWORKER_TARGET: TargetDescriptor = TargetDescriptor {
+    builtin_policy: BuiltinPolicy::Reject,
+    export_conditions: &["worker", "browser", "production", "import", "default"],
+};
+
+pub(super) fn target_descriptor(name: &str) -> std::result::Result<TargetDescriptor, String> {
+    match name {
+        "browser" => Ok(BROWSER_TARGET),
+        "node" => Ok(NODE_TARGET),
+        "bun" => Ok(BUN_TARGET),
+        "workerd" => Ok(WORKERD_TARGET),
+        "webworker" => Ok(WEBWORKER_TARGET),
+        _ => Err(format!("Unsupported target: {name}")),
+    }
 }
 
 /// Emission shape for chunked output.
@@ -138,6 +198,7 @@ enum ChunkMode {
 
 struct ResolveContext<'a> {
     package_mode: PackageMode,
+    target: TargetDescriptor,
     src_dir: &'a Path,
     workspace_dir: &'a Path,
 }

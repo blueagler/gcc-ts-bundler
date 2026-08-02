@@ -9,6 +9,7 @@ import {
   loadExternCompilerOptions,
   resolveAnalysisEntryFiles,
   resolveModuleTypeEntries,
+  resolveModuleTypeEntry,
 } from "./compiler";
 import { accountBarriers, formatBarrierWarning } from "./barriers";
 import { createExternAnalysisContext } from "./context";
@@ -17,6 +18,7 @@ import {
   renderRuntimeAwareExterns,
 } from "./render";
 import { renderTypedExternalDeclarations } from "./typed-render";
+import type { TargetName } from "../targets";
 import type {
   ExternBarrierWarning,
   ExternModuleInput,
@@ -27,11 +29,13 @@ import type {
 
 export type {
   ExternBarrierWarning,
+  ExternDegradationStats,
   ExternModuleInput,
   ExternRuntimePlacement,
   ExternTypeDiagnostic,
   GeneratedExternArtifact,
   GeneratedExternExport,
+  GeneratedGlobalSurface,
   GeneratedExternModule,
   GeneratedRenameBarrierArtifact,
   GeneratedTypedExternArtifact,
@@ -63,6 +67,7 @@ export interface GenerateExternsOptions {
   protocolHelpers?: ExternsProtocolHelpers | undefined;
   runtimeEntryFiles?: readonly string[] | undefined;
   srcDir?: string | undefined;
+  target?: TargetName | undefined;
   tsConfigPath?: string | undefined;
   typedOutputFile?: string | undefined;
 }
@@ -86,6 +91,7 @@ export interface GenerateExternsResult {
   scannedFiles: readonly string[];
   text: string;
   typedDeclarations: GeneratedTypedExternArtifact;
+  warnings: readonly string[];
 }
 
 type ResolvedExternOptions = {
@@ -103,7 +109,10 @@ type ResolvedExternOptions = {
   };
   runtimeEntryFiles: string[];
   srcDir: string;
+  target: TargetName;
   typedOutputFile: string | undefined;
+  unresolvedDeclarationDependencies: Map<string, number>;
+  warnings: string[];
 };
 
 export async function generateExterns(
@@ -163,6 +172,8 @@ export async function generateExterns(
     text: barrierText,
   };
   const typedDeclarations: GeneratedTypedExternArtifact = {
+    degradations: typed.degradations,
+    globalSurfaces: typed.globalSurfaces,
     moduleExports: typed.moduleExports,
     outputFile: resolved.typedOutputFile,
     propertyNames: typedAccounting.propertyNames,
@@ -178,6 +189,13 @@ export async function generateExterns(
     scannedFiles,
     text: barrierText,
     typedDeclarations,
+    warnings: [
+      ...resolved.warnings,
+      ...formatUnresolvedDeclarationWarnings(
+        resolved.unresolvedDeclarationDependencies,
+      ),
+      ...typed.warnings,
+    ],
   };
 }
 
@@ -236,6 +254,7 @@ async function resolveExternOptions(
     appEntryFiles,
     compilerOptions: await loadExternCompilerOptions({
       projectRoot,
+      target: options.target ?? "browser",
       tsConfigPath:
         options.tsConfigPath === undefined
           ? undefined
@@ -258,6 +277,9 @@ async function resolveExternOptions(
     },
     runtimeEntryFiles,
     srcDir,
+    target: options.target ?? "browser",
+    unresolvedDeclarationDependencies: new Map(),
+    warnings: [],
     typedOutputFile:
       options.typedOutputFile === undefined
         ? outputFile && externalModules.length > 0
@@ -298,6 +320,7 @@ async function resolveScannedFiles(options: ResolvedExternOptions) {
     compilerOptions: options.compilerOptions,
     projectRoot: options.projectRoot,
     specifiers: options.modules,
+    target: options.target,
     tolerateMissing: options.mode === "runtime-aware",
   });
   return typeEntryFiles.length === 0
@@ -306,6 +329,12 @@ async function resolveScannedFiles(options: ResolvedExternOptions) {
         compilerOptions: options.compilerOptions,
         entryFiles: typeEntryFiles,
         includeDependencies: options.includeDependencies,
+        onUnresolved: (specifier) => {
+          options.unresolvedDeclarationDependencies.set(
+            specifier,
+            (options.unresolvedDeclarationDependencies.get(specifier) ?? 0) + 1,
+          );
+        },
       });
 }
 
@@ -315,18 +344,18 @@ async function renderTypedDeclarations(
 ) {
   const modules = await Promise.all(
     options.externalModules.map(async (module) => {
-      const [declarationEntry] = await resolveModuleTypeEntries({
+      const declaration = await resolveModuleTypeEntry({
         compilerOptions: options.compilerOptions,
         projectRoot: options.projectRoot,
-        specifiers: [module.specifier],
-        tolerateMissing: false,
+        specifier: module.specifier,
+        target: options.target,
       });
-      if (!declarationEntry)
+      if (!declaration.declarationEntry)
         throw new Error(
           `Unable to resolve declarations for external module ${module.specifier}.`,
         );
       return {
-        declarationEntry,
+        ...declaration,
         selectedExports:
           module.exports === "used"
             ? collectUsedExports(analysis, module.specifier)
@@ -341,6 +370,24 @@ async function renderTypedDeclarations(
     program: analysis.program,
     projectRoot: options.projectRoot,
   });
+}
+
+function formatUnresolvedDeclarationWarnings(
+  unresolved: ReadonlyMap<string, number>,
+) {
+  if (unresolved.size === 0) return [];
+  const references = [...unresolved.values()].reduce(
+    (total, count) => total + count,
+    0,
+  );
+  return [
+    `Unresolved declaration dependencies: ${references} references across ${unresolved.size} specifiers (${[
+      ...unresolved,
+    ]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([specifier, count]) => `${JSON.stringify(specifier)} ×${count}`)
+      .join(", ")}).`,
+  ];
 }
 
 function collectUsedExports(

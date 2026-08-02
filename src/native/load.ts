@@ -13,6 +13,11 @@ interface NativeFileHashEntry {
   hash: string;
 }
 
+interface NativeExternalBoundaryEntry {
+  importerFilePath: string;
+  specifier: string;
+}
+
 interface NativeDependencyGraphEntry {
   dependencies: string[];
   filePath: string;
@@ -132,6 +137,7 @@ interface NativeLazyImportEntry {
 
 interface NativeResolveGraphOutput {
   entries: NativeEntryExportMetadata[];
+  externalBoundaries: NativeExternalBoundaryEntry[];
   fileHashes: NativeFileHashEntry[];
   graph: NativeDependencyGraphEntry[];
   lazyImports: NativeLazyImportEntry[];
@@ -323,16 +329,20 @@ export function resolveGraph(input: {
   entries: string[];
   packageMode: string;
   srcDir: string;
+  target?: string | undefined;
   workspaceDir: string;
 }) {
   const result = loadBinding().resolveGraph(
     input.entries,
     input.srcDir,
     input.workspaceDir,
-    input.packageMode,
+    input.target && input.target !== "browser"
+      ? `${input.packageMode}:${input.target}`
+      : input.packageMode,
   );
   return {
     entries: result.entries,
+    externalBoundaries: result.externalBoundaries,
     fileHashes: toRecord(
       result.fileHashes.map((entry): readonly [string, string] => [
         entry.filePath,

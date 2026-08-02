@@ -11,6 +11,7 @@ import {
   LANGUAGE_OUTPUTS,
   PACKAGE_MODES,
   PLATFORM_EXTERNS_MODES,
+  TARGET_NAMES,
 } from "../../api/types";
 import type {
   BuildEntryOption,
@@ -144,6 +145,11 @@ export function normalizeBuildOptions(
     ),
     projectRoot,
     srcDir,
+    target: requireChoice(
+      options.target ?? DEFAULT_BUILD_OPTIONS.target,
+      TARGET_NAMES,
+      "target",
+    ),
     typedExterns: [...(options.typedExterns ?? [])].map((filePath) =>
       path.isAbsolute(filePath)
         ? filePath

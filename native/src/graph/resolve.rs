@@ -1,3 +1,4 @@
+use super::package_resolver::is_external_boundary_specifier;
 use super::*;
 use oxc_allocator::Allocator;
 
@@ -10,14 +11,17 @@ pub(super) fn resolve_graph_impl(
     let src_dir = PathBuf::from(src_dir);
     let workspace_dir = PathBuf::from(workspace_dir);
     let entries: Vec<PathBuf> = entries.into_iter().map(PathBuf::from).collect();
+    let (package_mode, target) = PackageMode::parse(&package_mode)?;
     let context = ResolveContext {
-        package_mode: PackageMode::parse(&package_mode)?,
+        package_mode,
+        target,
         src_dir: &src_dir,
         workspace_dir: &workspace_dir,
     };
 
     let mut consulted_package_jsons = BTreeSet::new();
     let mut commonjs_cache = HashMap::<PathBuf, CommonJsAnalysis>::new();
+    let mut external_boundaries = BTreeMap::<String, ExternalBoundaryEntry>::new();
     let mut file_hashes = BTreeMap::new();
     let mut graph = BTreeMap::new();
     let mut lazy_imports = BTreeMap::<String, LazyImportEntry>::new();
@@ -57,6 +61,18 @@ pub(super) fn resolve_graph_impl(
 
         let mut dependencies = BTreeSet::new();
         for specifier in specifiers {
+            if is_external_boundary_specifier(&specifier, &context) {
+                let importer_file_path =
+                    normalize_path(&current_file).to_string_lossy().to_string();
+                external_boundaries.insert(
+                    format!("{importer_file_path}\0{specifier}"),
+                    ExternalBoundaryEntry {
+                        importerFilePath: importer_file_path,
+                        specifier,
+                    },
+                );
+                continue;
+            }
             if let Some(resolved) = resolve_module_specifier(&specifier, &current_file, &context)? {
                 consulted_package_jsons.extend(resolved.package_json_files.iter().cloned());
                 if let Some(package_alias) = resolved.package_alias {
@@ -82,6 +98,18 @@ pub(super) fn resolve_graph_impl(
             }
         }
         for specifier in lazy_specifiers {
+            if is_external_boundary_specifier(&specifier, &context) {
+                let importer_file_path =
+                    normalize_path(&current_file).to_string_lossy().to_string();
+                external_boundaries.insert(
+                    format!("{importer_file_path}\0{specifier}"),
+                    ExternalBoundaryEntry {
+                        importerFilePath: importer_file_path,
+                        specifier,
+                    },
+                );
+                continue;
+            }
             if let Some(resolved) = resolve_module_specifier(&specifier, &current_file, &context)? {
                 consulted_package_jsons.extend(resolved.package_json_files.iter().cloned());
                 if let Some(package_alias) = resolved.package_alias.clone() {
@@ -143,6 +171,7 @@ pub(super) fn resolve_graph_impl(
 
     Ok(ResolveGraphOutput {
         entries: entries_metadata,
+        externalBoundaries: external_boundaries.into_values().collect(),
         fileHashes: file_hashes
             .into_iter()
             .map(|(file_path, hash)| FileHashEntry {
@@ -167,11 +196,13 @@ pub(super) fn resolve_graph_impl(
 }
 
 impl PackageMode {
-    pub(super) fn parse(value: &str) -> std::result::Result<Self, String> {
-        match value {
-            "esm-only" => Ok(Self::EsmOnly),
-            "off" => Ok(Self::Off),
-            _ => Err(format!("Unsupported package mode: {value}")),
-        }
+    pub(super) fn parse(value: &str) -> std::result::Result<(Self, TargetDescriptor), String> {
+        let (mode, target) = value.split_once(':').unwrap_or((value, "browser"));
+        let package_mode = match mode {
+            "esm-only" => Self::EsmOnly,
+            "off" => Self::Off,
+            _ => return Err(format!("Unsupported package mode: {mode}")),
+        };
+        Ok((package_mode, target_descriptor(target)?))
     }
 }

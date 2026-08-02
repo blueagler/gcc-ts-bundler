@@ -2,6 +2,7 @@ import { parseArgs } from "node:util";
 
 import type { GenerateExternsOptions } from "../externs";
 import { EXTERN_MODES } from "../externs";
+import { TARGET_NAMES } from "../targets";
 import { parseChoice } from "../shared/validation";
 
 export function parseExternsCliArgs(args: string[]) {
@@ -19,6 +20,7 @@ export function parseExternsCliArgs(args: string[]) {
       "project-root": { short: "p", type: "string" },
       "runtime-entry": { multiple: true, type: "string" },
       "src-dir": { type: "string" },
+      target: { type: "string" },
       tsconfig: { type: "string" },
     },
     strict: true,
@@ -48,6 +50,7 @@ export function parseExternsCliArgs(args: string[]) {
     projectRoot: values["project-root"],
     runtimeEntryFiles: values["runtime-entry"],
     srcDir: values["src-dir"],
+    target: parseChoice(values.target, TARGET_NAMES, "--target"),
     tsConfigPath: values.tsconfig,
   };
 

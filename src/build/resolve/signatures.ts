@@ -69,6 +69,7 @@ export function getOptionsSignature(
     platformExterns: options.platformExterns,
     projectRoot: options.projectRoot,
     srcDir: options.srcDir,
+    target: options.target,
     typeMetadata: hashJson(options.typeMetadata ?? null),
     typedExterns: [...options.typedExterns].sort(),
   });

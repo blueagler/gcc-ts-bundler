@@ -28,6 +28,19 @@ export interface GeneratedExternModule {
   specifier: string;
 }
 
+export interface ExternDegradationStats {
+  byConstruct: Readonly<Record<string, number>>;
+  degradedOccurrences: number;
+  degradedSymbolCount: number;
+  reachableSymbolCount: number;
+}
+
+export interface GeneratedGlobalSurface {
+  collisionPolicy: "owner-qualified";
+  exports: readonly GeneratedExternExport[];
+  name: string;
+}
+
 export interface GeneratedExternArtifact {
   outputFile?: string | undefined;
   text: string;
@@ -38,6 +51,8 @@ export interface GeneratedRenameBarrierArtifact extends GeneratedExternArtifact 
 }
 
 export interface GeneratedTypedExternArtifact extends GeneratedExternArtifact {
+  degradations: ExternDegradationStats;
+  globalSurfaces: readonly GeneratedGlobalSurface[];
   moduleExports: readonly GeneratedExternModule[];
   /**
    * Property names this artifact pins program-wide. Typed declarations are

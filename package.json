@@ -34,11 +34,13 @@
     }
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "5.20260801.1",
     "@eslint/js": "10.0.1",
     "@types/bun": "^1.3.14",
     "@types/eslint": "9.6.1",
     "@types/google-closure-compiler": "^20231112.0.0",
     "@types/node": "^26.1.2",
+    "bun-types": "1.3.14",
     "esbuild": "^0.28.1",
     "eslint": "10.8.0",
     "eslint-plugin-perfectionist": "^5.10.0",

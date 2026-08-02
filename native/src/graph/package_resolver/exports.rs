@@ -2,29 +2,62 @@ use std::path::Path;
 
 use serde_json::Value;
 
+#[allow(dead_code)]
 pub(crate) fn select_package_export_target(
     exports: &Value,
     subpath: &str,
     package_name: &str,
     prefer_debug_exports: bool,
 ) -> std::result::Result<Option<String>, String> {
+    select_package_export_target_for_target(
+        exports,
+        subpath,
+        package_name,
+        prefer_debug_exports,
+        super::super::target_descriptor("browser")?,
+    )
+}
+
+pub(crate) fn select_package_export_target_for_target(
+    exports: &Value,
+    subpath: &str,
+    package_name: &str,
+    prefer_debug_exports: bool,
+    target: super::super::TargetDescriptor,
+) -> std::result::Result<Option<String>, String> {
+    let production_conditions = target.export_conditions;
+    let default_conditions = production_conditions
+        .iter()
+        .copied()
+        .filter(|condition| *condition != "production")
+        .collect::<Vec<_>>();
+    let development_conditions = production_conditions
+        .iter()
+        .map(|condition| {
+            if *condition == "production" {
+                "development"
+            } else {
+                *condition
+            }
+        })
+        .collect::<Vec<_>>();
     let production_target = resolve_package_exports_with_conditions(
         exports,
         subpath,
         package_name,
-        &["browser", "production", "import", "default"],
+        production_conditions,
     )?;
     let default_target = resolve_package_exports_with_conditions(
         exports,
         subpath,
         package_name,
-        &["browser", "import", "default"],
+        &default_conditions,
     )?;
     let development_target = resolve_package_exports_with_conditions(
         exports,
         subpath,
         package_name,
-        &["browser", "development", "import", "default"],
+        &development_conditions,
     )?;
 
     if prefer_debug_exports {

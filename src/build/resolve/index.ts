@@ -217,8 +217,17 @@ async function resolveFreshGraph(
     ),
     packageMode: options.packages,
     srcDir: env.sourceRoot,
+    target: options.target,
     workspaceDir: env.cacheStore.workspaceDir,
   });
+  if (graphResult.externalBoundaries.length > 0) {
+    const boundaries = graphResult.externalBoundaries
+      .map((item) => JSON.stringify(item.specifier))
+      .join(", ");
+    throw new Error(
+      `Target ${JSON.stringify(options.target)} resolved external builtin boundaries (${boundaries}), but preserved runtime imports are M2 pending.`,
+    );
+  }
   const outputNames = resolveOutputNames(
     zipExact(options.entries, entryRelativePaths, "entries").map(
       ([entry, relativePath]) => ({ name: entry.name, relativePath }),

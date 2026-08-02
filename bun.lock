@@ -9,11 +9,13 @@
         "google-closure-compiler": "20260726.0.0",
       },
       "devDependencies": {
+        "@cloudflare/workers-types": "5.20260801.1",
         "@eslint/js": "10.0.1",
         "@types/bun": "^1.3.14",
         "@types/eslint": "9.6.1",
         "@types/google-closure-compiler": "^20231112.0.0",
         "@types/node": "^26.1.2",
+        "bun-types": "1.3.14",
         "esbuild": "^0.28.1",
         "eslint": "10.8.0",
         "eslint-plugin-perfectionist": "^5.10.0",
@@ -41,6 +43,8 @@
     },
   },
   "packages": {
+    "@cloudflare/workers-types": ["@cloudflare/workers-types@5.20260801.1", "", {}, "sha512-XCv5xWi47WQOK0LpLa6997Mrpz8Ct+nZmp/M5Xp8Z4BFsarf7nYjkznGOcOoYK5m1GfbMFEEuQ2OIZnbIWoe9A=="],
+
     "@emnapi/core": ["@emnapi/core@2.0.0-alpha.3", "", { "dependencies": { "@emnapi/wasi-threads": "2.0.1", "tslib": "^2.4.0" } }, "sha512-AZypUeJ/yByuxyS7BlSNRDOMLMlROYtjYdIAuBmJssVz1UJDSeYxLrdizhXCFYhedC5bqd/ASy8EuNXbVVXp9g=="],
 
     "@emnapi/runtime": ["@emnapi/runtime@2.0.0-alpha.3", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-hFPAhMUjJD9BSyCANEISPOogeXC9Zo9ZQl7L6vKnaVsMkCtzznaW/naYypeyl0Gv5rYfWYsZbpixTMpjDJzQeA=="],

@@ -5,6 +5,11 @@ import ts from "@typescript/typescript6";
 import { loadCompilerOptions } from "../build/transpile/compiler-options";
 import { hasErrorCode } from "../shared/validation";
 import {
+  getTargetDescriptor,
+  targetCompilerOptions,
+  type TargetName,
+} from "../targets";
+import {
   DECLARATION_EXTENSIONS,
   findPackageDir,
   isRecoverableExternConfigError,
@@ -15,9 +20,11 @@ import {
 
 export async function loadExternCompilerOptions({
   projectRoot,
+  target = "browser",
   tsConfigPath,
 }: {
   projectRoot: string;
+  target?: TargetName | undefined;
   tsConfigPath: string | undefined;
 }) {
   const fallbackOptions = {
@@ -32,10 +39,13 @@ export async function loadExternCompilerOptions({
   try {
     await fs.promises.access(resolvedConfigPath, fs.constants.R_OK);
     try {
-      return await loadCompilerOptions(resolvedConfigPath, {
-        allowJs: true,
-        rootDir: projectRoot,
-      });
+      return targetCompilerOptions(
+        await loadCompilerOptions(resolvedConfigPath, {
+          allowJs: true,
+          rootDir: projectRoot,
+        }),
+        target,
+      );
     } catch (error) {
       if (!isRecoverableExternConfigError(error)) {
         throw error;
@@ -47,18 +57,20 @@ export async function loadExternCompilerOptions({
     }
   }
 
-  return fallbackOptions;
+  return targetCompilerOptions(fallbackOptions, target);
 }
 
 export async function resolveModuleTypeEntries({
   compilerOptions,
   projectRoot,
   specifiers,
+  target = "browser",
   tolerateMissing,
 }: {
   compilerOptions: ts.CompilerOptions;
   projectRoot: string;
   specifiers: string[];
+  target?: TargetName | undefined;
   tolerateMissing: boolean;
 }) {
   const resolvedEntries: string[] = [];
@@ -69,7 +81,8 @@ export async function resolveModuleTypeEntries({
           compilerOptions,
           projectRoot,
           specifier,
-        }),
+          target,
+        }).then((entry) => entry.declarationEntry),
       );
     } catch (error) {
       if (!tolerateMissing) {
@@ -105,10 +118,12 @@ export async function collectReachableTypeFiles({
   compilerOptions,
   entryFiles,
   includeDependencies,
+  onUnresolved,
 }: {
   compilerOptions: ts.CompilerOptions;
   entryFiles: string[];
   includeDependencies: boolean;
+  onUnresolved?: ((specifier: string, fromFile: string) => void) | undefined;
 }) {
   const rootPackageDirs = new Set(
     entryFiles
@@ -148,6 +163,7 @@ export async function collectReachableTypeFiles({
         ts.sys,
       ).resolvedModule;
       if (!resolvedModule) {
+        onUnresolved?.(specifier, resolvedFile);
         continue;
       }
 
@@ -202,15 +218,30 @@ export async function collectReachableTypeFiles({
   return [...seen].sort((left, right) => left.localeCompare(right));
 }
 
-async function resolveModuleTypeEntry({
+export type ResolvedModuleTypeEntry = {
+  ambientModuleName?: string | undefined;
+  declarationEntry: string;
+  globalSurface?: string | undefined;
+};
+
+export async function resolveModuleTypeEntry({
   compilerOptions,
   projectRoot,
   specifier,
+  target = "browser",
 }: {
   compilerOptions: ts.CompilerOptions;
   projectRoot: string;
   specifier: string;
-}) {
+  target?: TargetName | undefined;
+}): Promise<ResolvedModuleTypeEntry> {
+  const targetEntry = resolveTargetDeclarationEntry({
+    compilerOptions,
+    projectRoot,
+    specifier,
+    target,
+  });
+  if (targetEntry) return targetEntry;
   const containingFile = path.join(projectRoot, "__gcc_externs_entry__.ts");
   const resolution = ts.resolveModuleName(
     specifier,
@@ -221,7 +252,7 @@ async function resolveModuleTypeEntry({
   const resolvedFromTypescript =
     resolution && normalizeResolvedTypeFile(resolution.resolvedFileName);
   if (resolvedFromTypescript) {
-    return resolvedFromTypescript;
+    return { declarationEntry: resolvedFromTypescript };
   }
 
   const require = ts.createModuleResolutionCache(
@@ -240,11 +271,69 @@ async function resolveModuleTypeEntry({
     fallbackResolution &&
     normalizeResolvedTypeFile(fallbackResolution.resolvedFileName);
   if (resolvedFromFallback) {
-    return resolvedFromFallback;
+    return { declarationEntry: resolvedFromFallback };
   }
 
   throw new Error(
     `Unable to resolve TypeScript declarations for module ${JSON.stringify(specifier)} from ${projectRoot}.`,
+  );
+}
+
+function resolveTargetDeclarationEntry({
+  compilerOptions,
+  projectRoot,
+  specifier,
+  target,
+}: {
+  compilerOptions: ts.CompilerOptions;
+  projectRoot: string;
+  specifier: string;
+  target: TargetName;
+}): ResolvedModuleTypeEntry | null {
+  const descriptor = getTargetDescriptor(target);
+  const containingFile = path.join(projectRoot, "__gcc_externs_entry__.ts");
+  const resolveRoot = (root: string) => {
+    if (root === "lib.webworker") {
+      const candidate = path.join(
+        path.dirname(ts.getDefaultLibFilePath(compilerOptions)),
+        "lib.webworker.d.ts",
+      );
+      return ts.sys.fileExists(candidate) ? candidate : undefined;
+    }
+    return ts.resolveTypeReferenceDirective(
+      root.replace(/^@types\//u, ""),
+      containingFile,
+      compilerOptions,
+      ts.sys,
+    ).resolvedTypeReferenceDirective?.resolvedFileName;
+  };
+  const root = descriptor.ambientDeclarationRoots.find((candidate) => {
+    if (candidate === "@types/node") {
+      return specifier.startsWith("node:") || isNodeBuiltin(specifier);
+    }
+    if (candidate === "bun-types") {
+      return specifier === "bun" || specifier.startsWith("bun:");
+    }
+    return specifier === target;
+  });
+  if (!root) return null;
+  const declarationEntry = resolveRoot(root);
+  if (!declarationEntry) return null;
+  if (root === "@types/node" || (root === "bun-types" && specifier !== "bun")) {
+    return {
+      ambientModuleName: specifier,
+      declarationEntry: path.resolve(declarationEntry),
+    };
+  }
+  return {
+    declarationEntry: path.resolve(declarationEntry),
+    globalSurface: target,
+  };
+}
+
+function isNodeBuiltin(specifier: string) {
+  return /^(?:assert|buffer|child_process|cluster|console|constants|crypto|dgram|diagnostics_channel|dns|domain|events|fs|http|http2|https|inspector|module|net|os|path|perf_hooks|process|punycode|querystring|readline|repl|stream|string_decoder|sys|timers|tls|trace_events|tty|url|util|v8|vm|worker_threads|zlib)(?:\/|$)/u.test(
+    specifier,
   );
 }
 

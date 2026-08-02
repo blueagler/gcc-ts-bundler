@@ -9,6 +9,7 @@ import {
   LANGUAGE_OUTPUTS,
   PACKAGE_MODES,
   PLATFORM_EXTERNS_MODES,
+  TARGET_NAMES,
 } from "../api/types";
 export interface CliParseResult {
   options: BuildOptions;
@@ -40,6 +41,7 @@ export function parseCliArgs(args: string[]): CliParseResult {
       preflight: { type: "string" },
       "project-root": { type: "string" },
       "src-dir": { type: "string" },
+      target: { type: "string" },
       verbose: { type: "boolean" },
     },
     strict: true,
@@ -90,6 +92,7 @@ export function parseCliArgs(args: string[]): CliParseResult {
     ),
     projectRoot: values["project-root"],
     srcDir: values["src-dir"],
+    target: parseChoice(values.target, TARGET_NAMES, "--target"),
     typedExterns: values["typed-extern"],
   };
 

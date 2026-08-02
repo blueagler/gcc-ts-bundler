@@ -4,16 +4,25 @@ mod paths;
 
 use super::*;
 
+#[cfg(test)]
 pub(crate) use self::exports::select_package_export_target;
-use self::exports::{package_resolution_prefers_debug, resolve_browser_subpath};
+use self::exports::{
+    package_resolution_prefers_debug, resolve_browser_subpath,
+    select_package_export_target_for_target,
+};
 use self::parse::{
-    find_package_dir, format_package_specifier, is_bare_package_specifier, is_node_builtin,
-    parse_package_import, read_package_json,
+    find_package_dir, format_package_specifier, is_bare_package_specifier, is_bun_builtin,
+    is_node_builtin, parse_package_import, read_package_json,
 };
 pub(super) use self::paths::validate_commonjs_usage;
 use self::paths::{
     is_package_source_file, resolve_module_base, resolve_package_local_path, resolve_package_target,
 };
+
+pub(super) fn is_external_boundary_specifier(specifier: &str, context: &ResolveContext) -> bool {
+    context.target.builtin_policy == BuiltinPolicy::ExternalBoundary
+        && (is_node_builtin(specifier) || is_bun_builtin(specifier))
+}
 
 pub(super) fn resolve_module_specifier(
     specifier: &str,
@@ -153,11 +162,12 @@ fn resolve_package_path(
     if let Some(package_json) = package_json {
         let prefer_debug_exports = package_resolution_prefers_debug();
         if let Some(exports) = package_json.get("exports") {
-            if let Some(target) = select_package_export_target(
+            if let Some(target) = select_package_export_target_for_target(
                 exports,
                 &package_import.subpath,
                 &package_import.package_name,
                 prefer_debug_exports,
+                context.target,
             )? {
                 if let Some(path) = resolve_package_target(
                     &target,

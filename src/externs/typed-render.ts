@@ -8,7 +8,12 @@ import {
   stableExternNamespace,
   stableSymbolName,
 } from "./module-identity";
-import type { ExternTypeDiagnostic, GeneratedExternModule } from "./types";
+import type {
+  ExternDegradationStats,
+  ExternTypeDiagnostic,
+  GeneratedExternModule,
+  GeneratedGlobalSurface,
+} from "./types";
 
 const BUILTINS = new Map([
   ["Array", "Array"],
@@ -32,12 +37,18 @@ const MAX_PROPERTIES = 48;
 const MAX_UNION = 16;
 
 type ModuleSeed = {
+  ambientModuleName?: string | undefined;
   declarationEntry: string;
+  globalSurface?: string | undefined;
   selectedExports?: ReadonlySet<string> | undefined;
   specifier: string;
 };
 type RenderState = {
   checker: ts.TypeChecker;
+  currentSymbol?: ts.Symbol | undefined;
+  degradationCounts: Map<string, number>;
+  degradedOccurrences: number;
+  degradedSymbols: Set<ts.Symbol>;
   projectRoot?: string | undefined;
   diagnostics: ExternTypeDiagnostic[];
   emitted: Set<ts.Symbol>;
@@ -59,12 +70,18 @@ export function renderTypedExternalDeclarations({
   program: ts.Program;
   projectRoot?: string | undefined;
 }): {
+  degradations: ExternDegradationStats;
   diagnostics: ExternTypeDiagnostic[];
+  globalSurfaces: GeneratedGlobalSurface[];
   moduleExports: GeneratedExternModule[];
   text: string;
+  warnings: string[];
 } {
   const state: RenderState = {
     checker,
+    degradationCounts: new Map(),
+    degradedOccurrences: 0,
+    degradedSymbols: new Set(),
     projectRoot,
     diagnostics: [],
     emitted: new Set(),
@@ -74,6 +91,7 @@ export function renderTypedExternalDeclarations({
     namespaces: new Set(),
     pending: [],
   };
+  const globalSurfaces: GeneratedGlobalSurface[] = [];
   const moduleExports: GeneratedExternModule[] = [];
 
   for (const module of [...modules].sort((a, b) =>
@@ -82,8 +100,10 @@ export function renderTypedExternalDeclarations({
     const sourceFile = program.getSourceFile(
       path.resolve(module.declarationEntry),
     );
-    const moduleSymbol = sourceFile && checker.getSymbolAtLocation(sourceFile);
-    if (!sourceFile || !moduleSymbol) {
+    const moduleSymbol = sourceFile
+      ? findModuleSymbol(module, sourceFile, checker)
+      : undefined;
+    if (!sourceFile || (!module.globalSurface && !moduleSymbol)) {
       diagnostic(
         state,
         module,
@@ -99,16 +119,24 @@ export function renderTypedExternalDeclarations({
       state.projectRoot,
     );
     state.namespaces.add(namespace);
-    const exports = collectModuleExports(
-      moduleSymbol,
-      checker,
-      module.selectedExports,
-    )
+    const exportedSymbols = module.globalSurface
+      ? collectGlobalSurfaceExports(sourceFile, checker, module.selectedExports)
+      : moduleSymbol
+        ? collectModuleExports(moduleSymbol, checker, module.selectedExports)
+        : [];
+    const exports = exportedSymbols
       .map(({ exportName, symbol }) => ({
         exportName,
         qualifiedName: reserveSymbol(symbol, module, state),
       }))
       .sort((a, b) => a.exportName.localeCompare(b.exportName));
+    if (module.globalSurface) {
+      globalSurfaces.push({
+        collisionPolicy: "owner-qualified",
+        exports,
+        name: module.globalSurface,
+      });
+    }
     moduleExports.push({
       declarationEntry: module.declarationEntry,
       exports,
@@ -122,9 +150,30 @@ export function renderTypedExternalDeclarations({
     const symbol = state.pending.shift();
     if (!symbol || state.emitted.has(symbol)) continue;
     state.emitted.add(symbol);
+    state.currentSymbol = symbol;
     emitSymbol(symbol, state);
+    state.currentSymbol = undefined;
   }
 
+  const degradations = {
+    byConstruct: Object.fromEntries(
+      [...state.degradationCounts].sort(([left], [right]) =>
+        left.localeCompare(right),
+      ),
+    ),
+    degradedOccurrences: state.degradedOccurrences,
+    degradedSymbolCount: state.degradedSymbols.size,
+    reachableSymbolCount: state.emitted.size,
+  };
+  const warnings = [];
+  if (
+    degradations.reachableSymbolCount > 0 &&
+    degradations.degradedSymbolCount / degradations.reachableSymbolCount > 0.05
+  ) {
+    warnings.push(
+      `Typed extern degradation exceeds 5%: ${degradations.degradedSymbolCount}/${degradations.reachableSymbolCount} reachable symbols rendered as ?.`,
+    );
+  }
   const header = [
     "/** @externs */",
     "// Owner-qualified declarations for runtimes outside this Closure job.",
@@ -136,10 +185,56 @@ export function renderTypedExternalDeclarations({
     "",
   ];
   return {
+    degradations,
     diagnostics: dedupeDiagnostics(state.diagnostics),
+    globalSurfaces,
     moduleExports,
     text: [...header, ...state.lines, ""].join("\n"),
+    warnings,
   };
+}
+
+function findModuleSymbol(
+  module: ModuleSeed,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+) {
+  if (module.ambientModuleName) {
+    const quotedName = JSON.stringify(module.ambientModuleName);
+    return checker
+      .getAmbientModules()
+      .find((symbol) => symbol.getName() === quotedName);
+  }
+  if (module.globalSurface) return undefined;
+  return checker.getSymbolAtLocation(sourceFile);
+}
+
+function collectGlobalSurfaceExports(
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  selectedExports?: ReadonlySet<string>,
+) {
+  const sourcePath = path.resolve(sourceFile.fileName);
+  const byName = new Map<string, ts.Symbol>();
+  for (const symbol of checker.getSymbolsInScope(
+    sourceFile,
+    ts.SymbolFlags.Value | ts.SymbolFlags.Type | ts.SymbolFlags.Namespace,
+  )) {
+    if (
+      symbol.declarations?.some(
+        (declaration) =>
+          path.resolve(declaration.getSourceFile().fileName) === sourcePath,
+      )
+    ) {
+      byName.set(symbol.getName(), symbol);
+    }
+  }
+  if (selectedExports && !selectedExports.has("*")) {
+    for (const name of byName.keys()) {
+      if (!selectedExports.has(name)) byName.delete(name);
+    }
+  }
+  return [...byName].map(([exportName, symbol]) => ({ exportName, symbol }));
 }
 
 function collectModuleExports(
@@ -650,6 +745,12 @@ function fallback(
   type: ts.Type,
   code: string,
 ) {
+  state.degradedOccurrences += 1;
+  if (state.currentSymbol) state.degradedSymbols.add(state.currentSymbol);
+  state.degradationCounts.set(
+    code,
+    (state.degradationCounts.get(code) ?? 0) + 1,
+  );
   diagnostic(
     state,
     module,

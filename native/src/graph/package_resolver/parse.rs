@@ -77,6 +77,10 @@ pub(super) fn is_bare_package_specifier(specifier: &str) -> bool {
     !specifier.starts_with('/') && !specifier.contains(':')
 }
 
+pub(super) fn is_bun_builtin(specifier: &str) -> bool {
+    specifier == "bun" || specifier.starts_with("bun:")
+}
+
 pub(super) fn is_node_builtin(specifier: &str) -> bool {
     if specifier.starts_with("node:") {
         return true;
