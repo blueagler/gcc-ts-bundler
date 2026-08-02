@@ -9,7 +9,7 @@ import { createDefineApplier } from "./defines";
 import {
   getCapturedModuleAnalysis,
   isAuthoredModuleId,
-  isNonMaterializedRetainedModuleId,
+  isNonMaterializedAssetModuleId,
   isSupportedExternalSpecifier,
   resolveCapturedSpecifier,
   stripQuery,
@@ -264,6 +264,18 @@ async function rewriteModuleImports(
 
     const targetFile = input.filePathByModuleId.get(resolved.id);
     if (!targetFile) {
+      const assetReplacement = getNonMaterializedAssetReplacement(node);
+      if (
+        isNonMaterializedAssetModuleId(resolved.id) &&
+        assetReplacement !== undefined
+      ) {
+        edits.push({
+          end: node.getEnd(),
+          start: node.getStart(sourceFile),
+          text: assetReplacement,
+        });
+        return;
+      }
       if (shouldOmitPrunedImport(node, resolved.id)) {
         edits.push({
           end: node.getEnd(),
@@ -321,6 +333,25 @@ async function rewriteModuleImports(
   };
 }
 
+function getNonMaterializedAssetReplacement(
+  node: ts.ImportDeclaration | ts.ExportDeclaration | ts.CallExpression,
+) {
+  if (ts.isCallExpression(node)) {
+    return "Promise.resolve({})";
+  }
+  if (!ts.isImportDeclaration(node)) {
+    return undefined;
+  }
+  if (!node.importClause) {
+    return "";
+  }
+  const bindings = node.importClause.namedBindings;
+  if (bindings && ts.isNamespaceImport(bindings)) {
+    return `const ${bindings.name.text} = {};`;
+  }
+  return undefined;
+}
+
 function shouldOmitPrunedImport(
   node: ts.ImportDeclaration | ts.ExportDeclaration | ts.CallExpression,
   resolvedId: string,
@@ -331,8 +362,5 @@ function shouldOmitPrunedImport(
       return true;
     }
   }
-  if (!ts.isImportDeclaration(node) || node.importClause) {
-    return false;
-  }
-  return isNonMaterializedRetainedModuleId(resolvedId);
+  return false;
 }

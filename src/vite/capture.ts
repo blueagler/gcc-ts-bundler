@@ -426,9 +426,12 @@ export function isAuthoredModuleId(moduleId: string, projectRoot: string) {
   return cleanId.startsWith(path.resolve(projectRoot) + path.sep);
 }
 
-export function isNonMaterializedRetainedModuleId(moduleId: string) {
-  const cleanId = stripQuery(moduleId);
-  return /\.(?:css|less|sass|scss|styl|stylus|pcss|postcss)$/u.test(cleanId);
+export function isNonMaterializedAssetModuleId(moduleId: string) {
+  // Vite can retain stylesheet and other asset edges in transformed JS while
+  // omitting the asset itself from the final JS chunk graph. The capture
+  // predicate is the shared structural boundary: a module not capturable with
+  // empty source is an asset, rather than a JS graph node awaiting materialization.
+  return !shouldCaptureModule(moduleId, "");
 }
 
 export function classifyModuleId(moduleId: string, fallback = "app") {

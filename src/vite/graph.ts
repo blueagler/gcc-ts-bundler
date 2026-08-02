@@ -2,7 +2,7 @@ import { readAssetText } from "./output";
 import {
   classifyModuleId,
   getCapturedModuleAnalysis,
-  isNonMaterializedRetainedModuleId,
+  isNonMaterializedAssetModuleId,
   resolveCapturedSpecifier,
   type CapturedModuleResolutionCache,
 } from "./capture";
@@ -110,7 +110,7 @@ export async function resolveRetainedCapturedModuleIds(
       continue;
     }
 
-    if (isNonMaterializedRetainedModuleId(moduleId)) {
+    if (isNonMaterializedAssetModuleId(moduleId)) {
       continue;
     }
 
@@ -254,7 +254,7 @@ async function collectBridgeModuleIds(
         resolved.external ||
         input.retainedModuleIds.has(resolved.id) ||
         !input.capturedModules.has(resolved.id) ||
-        isNonMaterializedRetainedModuleId(resolved.id)
+        isNonMaterializedAssetModuleId(resolved.id)
       ) {
         return;
       }
