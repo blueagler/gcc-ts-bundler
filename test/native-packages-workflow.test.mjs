@@ -13,6 +13,9 @@ const rootPublishJob = workflow.match(
 )?.[0];
 const publishCondition =
   "${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == true) }}";
+const bunVersion = rootPublishJob?.match(
+  /bun-version:\s*(?<version>\d+\.\d+\.\d+)/u,
+)?.groups?.version;
 
 function readZigArchitectureMapping(runnerArchitecture) {
   const mapping = zigInstaller?.match(
@@ -94,6 +97,12 @@ test("root publishing restores native artifacts before installing dependencies",
   expect(rootPublishJob).toMatch(
     /actions\/download-artifact@v8\n        with:\n          pattern: gcc-ts-bundler-\*\n          path: npm[\s\S]*?cp npm\/gcc-ts-bundler-linux-x64-gnu\/index\.node native\/index\.node[\s\S]*?bun install --frozen-lockfile/u,
   );
+});
+
+test("root publishing uses a Bun version compatible with bun.lock", () => {
+  expect(bunVersion).toBeDefined();
+  const [major, minor] = bunVersion.split(".").map(Number);
+  expect(major > 1 || (major === 1 && minor >= 4)).toBe(true);
 });
 
 test("native package publishing is release-only except opt-in dry runs", () => {
