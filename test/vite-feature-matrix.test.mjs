@@ -34,11 +34,9 @@ async function buildViteFixture(fixture, options = {}) {
   const pluginUrl = pathToFileURL(
     path.join(process.cwd(), "dist", "vite", "index.mjs"),
   ).href;
-  const plugins = options.withPlugin === false
+  const pluginEntries = options.pluginEntries ?? (options.withPlugin === false
     ? []
-    : [
-        "  plugins: [gccTsBundler({ compiler: { cache: { mode: \"off\" } } })],",
-      ];
+    : ["gccTsBundler({ compiler: { cache: { mode: \"off\" } } })"]);
   await fixture.write(
     "vite.config.mjs",
     [
@@ -50,7 +48,13 @@ async function buildViteFixture(fixture, options = {}) {
           ]),
       "export default {",
       ...(options.configLines ?? []),
-      ...plugins,
+      ...(pluginEntries.length === 0
+        ? []
+        : [
+            "  plugins: [",
+            ...pluginEntries.map((entry) => `    ${entry},`),
+            "  ],",
+          ]),
       "  build: {",
       '    outDir: "dist",',
       '    target: "es2018",',
@@ -277,6 +281,209 @@ test.serial(
       expect(result.ok).toBe(false);
       expect(buildErrorText(result)).toContain(WORKER_ENTRY_GRAPH_ERROR);
     }
+  },
+);
+
+test.serial(
+  "Vite plugin virtual modules, transforms, CSS, and output hooks retain their boundaries",
+  { timeout: 30000 },
+  async () => {
+    const virtualPlugin = [
+      "{",
+      '  name: "inline-virtual-module",',
+      '  resolveId(id) { return id === "virtual:hello" ? "\\0virtual:hello" : null; },',
+      '  load(id) { return id === "\\0virtual:hello" ? "console.log(\\\"virtual-ok\\\");" : null; }',
+      "}",
+    ].join("\n");
+    const preTransformPlugin = [
+      "{",
+      '  name: "inline-pre-transform",',
+      '  enforce: "pre",',
+      '  transform(code, id) { return id.endsWith("/src/main.js") ? code + "\\nconsole.log(\\\"pre-seen\\\");" : null; }',
+      "}",
+    ].join("\n");
+    const postTransformPlugin = [
+      "{",
+      '  name: "inline-post-transform",',
+      '  enforce: "post",',
+      '  transform(code, id) { return id.endsWith("/src/main.js") ? code + "\\nconsole.log(\\\"post-seen\\\");" : null; }',
+      "}",
+    ].join("\n");
+    const virtualCssPlugin = [
+      "{",
+      '  name: "inline-virtual-css",',
+      '  resolveId(id) { return id === "virtual:plugin.css" ? "\\0virtual:plugin.css" : null; },',
+      '  load(id) { return id === "\\0virtual:plugin.css" ? ".virtual-css-marker { color: rebeccapurple; }" : null; }',
+      "}",
+    ].join("\n");
+    const gccPlugin = 'gccTsBundler({ compiler: { cache: { mode: "off" } } })';
+
+    const virtualFixture = await createFixture();
+    await writeHtmlFixture(virtualFixture);
+    await virtualFixture.write("src/main.js", 'import "virtual:hello";\n');
+    expect(
+      (await buildViteFixture(virtualFixture, {
+        pluginEntries: [virtualPlugin, gccPlugin],
+      })).ok,
+    ).toBe(true);
+    expect((await readJavaScript(virtualFixture)).join("\\n")).toContain("virtual-ok");
+
+    const preFixture = await createFixture();
+    await writeHtmlFixture(preFixture);
+    await preFixture.write("src/main.js", 'console.log("app");\n');
+    expect(
+      (await buildViteFixture(preFixture, {
+        pluginEntries: [preTransformPlugin, gccPlugin],
+      })).ok,
+    ).toBe(true);
+    expect((await readJavaScript(preFixture)).join("\\n")).toContain("pre-seen");
+
+    const postFixture = await createFixture();
+    await writeHtmlFixture(postFixture);
+    await postFixture.write("src/main.js", 'console.log("app");\n');
+    expect(
+      (await buildViteFixture(postFixture, {
+        withPlugin: false,
+        pluginEntries: [postTransformPlugin],
+      })).ok,
+    ).toBe(true);
+    expect((await readJavaScript(postFixture)).join("\\n")).toContain("post-seen");
+    expect(
+      (await buildViteFixture(postFixture, {
+        pluginEntries: [gccPlugin, postTransformPlugin],
+      })).ok,
+    ).toBe(true);
+    // gcc replaces chunks in generateBundle, structurally after transform hooks run.
+    expect((await readJavaScript(postFixture)).join("\\n")).not.toContain("post-seen");
+
+    const cssFixture = await createFixture();
+    await writeHtmlFixture(cssFixture);
+    await cssFixture.write(
+      "src/main.js",
+      'import "virtual:plugin.css"; console.log("css-ok");\n',
+    );
+    expect(
+      (await buildViteFixture(cssFixture, {
+        pluginEntries: [virtualCssPlugin, gccPlugin],
+      })).ok,
+    ).toBe(true);
+    const cssFiles = await listFiles(cssFixture.outDir);
+    expect(cssFiles.some((filePath) => filePath.endsWith(".css"))).toBe(true);
+    expect(
+      (await Promise.all(
+        cssFiles
+          .filter((filePath) => filePath.endsWith(".css"))
+          .map((filePath) => cssFixture.read(path.join("dist", filePath))),
+      )).join("\\n"),
+    ).toContain("virtual-css-marker");
+
+    const compressionPlugin = [
+      "{",
+      '  name: "inline-gzip-postprocessor",',
+      '  enforce: "post",',
+      '  generateBundle: { order: "post", handler() {} },',
+      '  async writeBundle(outputOptions) {',
+      '    const { readFile, readdir, writeFile } = await import("node:fs/promises");',
+      '    const { join } = await import("node:path");',
+      '    const { gzipSync } = await import("node:zlib");',
+      '    for (const fileName of await readdir(outputOptions.dir, { recursive: true })) {',
+      '      if (fileName.endsWith(".js")) {',
+      '        const filePath = join(outputOptions.dir, fileName);',
+      '        await writeFile(filePath + ".gz", gzipSync(await readFile(filePath)));',
+      "      }",
+      "    }",
+      "  },",
+      "}",
+    ].join("\n");
+    const compressionFixture = await createFixture();
+    await writeHtmlFixture(compressionFixture);
+    await compressionFixture.write("src/main.js", 'console.log("gzip-final");\n');
+    expect(
+      (await buildViteFixture(compressionFixture, {
+        pluginEntries: [gccPlugin, compressionPlugin],
+      })).ok,
+    ).toBe(true);
+    const compressionFiles = await listFiles(compressionFixture.outDir);
+    const jsFile = compressionFiles.find((filePath) => filePath.endsWith(".js"));
+    expect(jsFile).toBeDefined();
+    const gzipFile = compressionFiles.find((filePath) => filePath.endsWith(".gz"));
+    expect(gzipFile).toBeDefined();
+    const { gunzipSync } = await import("node:zlib");
+    const finalJavaScript = await fs.readFile(path.join(compressionFixture.outDir, jsFile));
+    const compressedJavaScript = await fs.readFile(
+      path.join(compressionFixture.outDir, gzipFile),
+    );
+    expect(gunzipSync(compressedJavaScript).equals(finalJavaScript)).toBe(true);
+
+    const renderChunkPlugin = [
+      "{",
+      '  name: "inline-render-chunk-mutator",',
+      '  renderChunk(code) { return { code: "/* renderchunk-marker */" + code, map: null }; },',
+      '  generateBundle(_, bundle) {',
+      '    const chunk = Object.values(bundle).find((output) => output.type === "chunk");',
+      '    this.emitFile({ type: "asset", fileName: "renderchunk-state.json", source: JSON.stringify({ markerObserved: chunk.code.includes("renderchunk-marker") }) });',
+      "  }",
+      "}",
+    ].join("\n");
+    const renderFixture = await createFixture();
+    await writeHtmlFixture(renderFixture);
+    await renderFixture.write("src/main.js", 'console.log("render-chunk");\n');
+    expect(
+      (await buildViteFixture(renderFixture, {
+        withPlugin: false,
+        pluginEntries: [renderChunkPlugin],
+      })).ok,
+    ).toBe(true);
+    const baselineRenderState = JSON.parse(
+      await renderFixture.read("dist/renderchunk-state.json"),
+    );
+    expect(
+      (await buildViteFixture(renderFixture, {
+        pluginEntries: [gccPlugin, renderChunkPlugin],
+      })).ok,
+    ).toBe(true);
+    const gccRenderState = JSON.parse(
+      await renderFixture.read("dist/renderchunk-state.json"),
+    );
+    // Vite/Rolldown invokes the hook but bypasses its replacement in both builds.
+    expect(baselineRenderState.markerObserved).toBe(false);
+    expect(gccRenderState).toEqual(baselineRenderState);
+  },
+);
+
+test.serial(
+  "Vite vite-plugin-wasm-style top-level await remains an expected Closure failure",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await writeHtmlFixture(fixture);
+    await fixture.write(
+      "src/main.js",
+      'import wasmModule from "virtual:vite-plugin-wasm"; globalThis.__wasmModule = wasmModule;\n',
+    );
+    const wasmPlugin = [
+      "{",
+      '  name: "vite-plugin-wasm-tla-fixture",',
+      '  resolveId(id) { return id === "virtual:vite-plugin-wasm" ? "\\0virtual:vite-plugin-wasm" : null; },',
+      '  load(id) { return id === "\\0virtual:vite-plugin-wasm" ? "const __vite__wasmModule = await Promise.resolve({}); export default __vite__wasmModule;" : null; }',
+      "}",
+    ].join("\n");
+    expect(
+      (await buildViteFixture(fixture, {
+        withPlugin: false,
+        pluginEntries: [wasmPlugin],
+        buildLines: ['    target: "esnext",'],
+      })).ok,
+    ).toBe(true);
+    const gcc = await buildViteFixture(fixture, {
+      pluginEntries: [
+        wasmPlugin,
+        'gccTsBundler({ compiler: { cache: { mode: "off" } } })',
+      ],
+      buildLines: ['    target: "esnext",'],
+    });
+    expect(gcc.ok).toBe(false);
+    expect(buildErrorText(gcc)).toContain("await must be inside asynchronous function");
   },
 );
 

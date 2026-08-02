@@ -223,6 +223,6 @@ Vite transforms modules
   -> replace Rollup JS and rewrite HTML entry scripts
 ```
 
-Vite remains responsible for framework compilation, asset handling, CSS generation, and deciding which modules survive tree shaking. The core compiler receives the transformed, retained JavaScript graph with package resolution disabled because dependencies have already been materialized.
+Vite remains responsible for framework compilation, asset handling, CSS generation, and deciding which modules survive tree shaking. The core compiler receives the transformed, retained JavaScript graph with package resolution disabled because dependencies have already been materialized. Probe-backed matrix coverage shows that transform-stage, virtual-module, and CSS plugins compose with this boundary, while post-transform and `renderChunk` postprocessors cannot observe Closure-replaced output by design.
 
 See [Vite integration](vite.md) for supported configuration and limitations.
