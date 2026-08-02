@@ -98,9 +98,10 @@ jobs:
           targets: ${{ matrix.target }}
 
       - if: ${{ matrix.cargo_command == 'zigbuild' }}
-        uses: mlugg/setup-zig@v1
+        # mlugg/setup-zig v1.2.2
+        uses: mlugg/setup-zig@53fc45b17fe98b52f92ee5ea08ff48a85a3e7eb7
         with:
-          version: latest
+          version: 0.15.2
 
       - if: ${{ matrix.cargo_command == 'zigbuild' }}
         shell: bash

@@ -8,7 +8,7 @@ import {
 } from "fs";
 import { spawnSync } from "child_process";
 import path from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, "..");
@@ -72,25 +72,35 @@ const TARGETS = {
   },
 };
 
-const args = parseArgs(process.argv.slice(2));
+const MUSL_ZIGBUILD_RUSTFLAG = "-C target-feature=-crt-static";
+const MUSL_ZIGBUILD_RUSTFLAG_PATTERN =
+  /(?:^|\s)(?:-C\s+target-feature=-crt-static|-Ctarget-feature=-crt-static|--codegen\s+target-feature=-crt-static|--codegen=target-feature=-crt-static)(?=\s|$)/gu;
 const hostTarget = resolveSingleBuildTarget({});
-const targets = resolveBuildTargets(args);
-const sharedSkipRootCopy =
-  args["skip-root-copy"] === true || targets.length > 1;
 
-ensureCargoSubcommands(targets);
-
-for (const target of targets) {
-  buildNativeTarget({
-    skipRootCopy: sharedSkipRootCopy || !isHostTarget(target),
-    target,
-  });
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  main();
 }
 
-function buildNativeTarget({
-  skipRootCopy,
-  target,
-}) {
+function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const targets = resolveBuildTargets(args);
+  const sharedSkipRootCopy =
+    args["skip-root-copy"] === true || targets.length > 1;
+
+  ensureCargoSubcommands(targets);
+
+  for (const target of targets) {
+    buildNativeTarget({
+      skipRootCopy: sharedSkipRootCopy || !isHostTarget(target),
+      target,
+    });
+  }
+}
+
+function buildNativeTarget({ skipRootCopy, target }) {
   ensureRustTargetInstalled(target);
 
   const cargoCommand = target.cargoCommand ?? inferCargoCommand(target);
@@ -101,6 +111,10 @@ function buildNativeTarget({
 
   const cargoResult = spawnSync("cargo", cargoArgs, {
     cwd: packageRoot,
+    env: buildCargoEnvironment({
+      cargoCommand,
+      libc: target.libc,
+    }),
     stdio: "inherit",
   });
   if ((cargoResult.status ?? 1) !== 0) {
@@ -127,10 +141,7 @@ function buildNativeTarget({
   writeNativePackage(target, builtLibraryPath);
 }
 
-function writeNativePackage(
-  target,
-  builtLibraryPath,
-) {
+function writeNativePackage(target, builtLibraryPath) {
   const packageDir = path.join(packageRoot, "npm", target.packageName);
   rmSync(packageDir, { force: true, recursive: true });
   mkdirSync(packageDir, { recursive: true });
@@ -172,17 +183,32 @@ function ensureRustTargetInstalled(target) {
     return;
   }
 
-  const result = spawnSync(
-    "rustup",
-    ["target", "add", target.targetTriple],
-    {
-      cwd: packageRoot,
-      stdio: "inherit",
-    },
-  );
+  const result = spawnSync("rustup", ["target", "add", target.targetTriple], {
+    cwd: packageRoot,
+    stdio: "inherit",
+  });
   if ((result.status ?? 1) !== 0) {
     process.exit(result.status ?? 1);
   }
+}
+
+export function buildCargoEnvironment({
+  cargoCommand,
+  environment = process.env,
+  libc,
+}) {
+  if (cargoCommand !== "zigbuild" || libc !== "musl") {
+    return environment;
+  }
+
+  const rustFlags = environment.RUSTFLAGS?.replace(
+    MUSL_ZIGBUILD_RUSTFLAG_PATTERN,
+    "",
+  ).trim();
+  return {
+    ...environment,
+    RUSTFLAGS: [rustFlags, MUSL_ZIGBUILD_RUSTFLAG].filter(Boolean).join(" "),
+  };
 }
 
 function buildCargoArgs({ cargoCommand, targetTriple }) {
@@ -348,7 +374,9 @@ function resolveSingleBuildTarget(options) {
           : metadata.packageName,
       platform: metadata.platform,
       targetTriple:
-        typeof options.target === "string" ? options.target : metadata.targetTriple,
+        typeof options.target === "string"
+          ? options.target
+          : metadata.targetTriple,
     };
   }
 
@@ -385,7 +413,9 @@ function resolveSingleBuildTarget(options) {
         : metadata.packageName,
     platform,
     targetTriple:
-      typeof options.target === "string" ? options.target : metadata.targetTriple,
+      typeof options.target === "string"
+        ? options.target
+        : metadata.targetTriple,
   };
 }
 
