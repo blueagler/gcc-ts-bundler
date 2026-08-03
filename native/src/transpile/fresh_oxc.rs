@@ -69,8 +69,12 @@ impl FreshNameAllocator {
         }
     }
 
+    pub(crate) fn try_reserve(&mut self, candidate: &str) -> bool {
+        self.used.insert(candidate.to_string())
+    }
+
     pub(crate) fn fresh(&mut self, preferred: &str) -> String {
-        if self.used.insert(preferred.to_string()) {
+        if self.try_reserve(preferred) {
             return preferred.to_string();
         }
         let mut suffix = 1usize;

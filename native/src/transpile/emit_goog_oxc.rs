@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use oxc_allocator::{Allocator, FromIn, TakeIn, Vec as ArenaVec};
@@ -100,9 +100,9 @@ pub(crate) fn emit_goog_module_program<'a>(
                     import.source.value.as_str(),
                 )) {
                     let plan = convert_external_import_decl(
-                        &module_id,
                         &import,
                         specifier,
+                        boundary_identity_token(context, &module_id, specifier),
                         None,
                         context.opaque_external_specifiers.contains(specifier),
                         &mut import_counter,
@@ -120,9 +120,13 @@ pub(crate) fn emit_goog_module_program<'a>(
                     if let Some(preserved) = context.preserved_modules.get(&target_module_id) {
                         validate_preserved_import(&import, preserved)?;
                         let mut plan = convert_external_import_decl(
-                            &module_id,
                             &import,
                             import.source.value.as_str(),
+                            boundary_identity_token(
+                                context,
+                                &module_id,
+                                import.source.value.as_str(),
+                            ),
                             Some((identity, &namespace_usage)),
                             false,
                             &mut import_counter,
@@ -355,6 +359,78 @@ struct ExternalImportPlan {
     extern_lines: Vec<String>,
     lines: Vec<String>,
     preserved_import: PreservedImportPlan,
+}
+
+pub(super) fn boundary_identity(module_id: &str, external_specifier: &str) -> String {
+    format!("{module_id}\0{external_specifier}")
+}
+
+pub(super) fn allocate_boundary_identity_tokens(
+    identities: impl IntoIterator<Item = String>,
+) -> HashMap<String, String> {
+    allocate_boundary_identity_tokens_with(identities, crate::utils::hash48_base36)
+}
+
+fn allocate_boundary_identity_tokens_with(
+    identities: impl IntoIterator<Item = String>,
+    token_for: impl Fn(&str) -> String,
+) -> HashMap<String, String> {
+    let mut groups = BTreeMap::<String, Vec<String>>::new();
+    for identity in identities.into_iter().collect::<BTreeSet<_>>() {
+        groups
+            .entry(token_for(&identity))
+            .or_default()
+            .push(identity);
+    }
+    let mut tokens = HashMap::new();
+    for (base, identities) in groups {
+        if identities.len() == 1 {
+            tokens.insert(identities[0].clone(), base);
+            continue;
+        }
+        for (ordinal, identity) in identities.into_iter().enumerate() {
+            tokens.insert(
+                identity,
+                format!("{base}z{}", crate::utils::base36(ordinal as u64)),
+            );
+        }
+    }
+    tokens
+}
+
+fn boundary_identity_token(
+    context: &TranspileContext,
+    module_id: &str,
+    external_specifier: &str,
+) -> String {
+    let identity = boundary_identity(module_id, external_specifier);
+    context
+        .boundary_identity_tokens
+        .get(&identity)
+        .cloned()
+        .unwrap_or_else(|| crate::utils::hash48_base36(&identity))
+}
+
+fn fresh_boundary_name(
+    fresh_names: &mut FreshNameAllocator,
+    boundary_token: &str,
+    import_index: usize,
+    specifier_index: usize,
+) -> String {
+    let import_index = crate::utils::base36(import_index as u64);
+    let specifier_index = crate::utils::base36(specifier_index as u64);
+    let mut collision_ordinal = None;
+    loop {
+        let token = collision_ordinal.map_or_else(
+            || boundary_token.to_string(),
+            |ordinal| format!("{boundary_token}z{}", crate::utils::base36(ordinal)),
+        );
+        let candidate = format!("e{token}_{import_index}_{specifier_index}");
+        if fresh_names.try_reserve(&candidate) {
+            return candidate;
+        }
+        collision_ordinal = Some(collision_ordinal.map_or(0, |ordinal| ordinal + 1));
+    }
 }
 
 fn quote_external_boundary_accesses<'a>(
@@ -655,9 +731,9 @@ fn quoted_property_key<'a>(
 }
 
 fn convert_external_import_decl(
-    module_id: &str,
     import: &ImportDeclaration<'_>,
     external_specifier: &str,
+    boundary_token: String,
     namespace_externs: Option<(&ModuleIdentity, &NamespaceUsage)>,
     opaque_external: bool,
     import_counter: &mut usize,
@@ -690,13 +766,8 @@ fn convert_external_import_decl(
         {
             continue;
         }
-        let preferred = format!(
-            "__gcc_external_{}_{}_{}",
-            &crate::utils::hash_content(&format!("{module_id}\0{external_specifier}"))[..12],
-            import_index,
-            specifier_index
-        );
-        let boundary = fresh_names.fresh(&preferred);
+        let boundary =
+            fresh_boundary_name(fresh_names, &boundary_token, import_index, specifier_index);
         boundary_names.push(boundary.clone());
         match specifier {
             ImportDeclarationSpecifier::ImportDefaultSpecifier(default) => {
@@ -756,7 +827,7 @@ fn convert_external_import_decl(
         }
         (_, Some(_), false) => {
             return Err(format!(
-                "External import in {module_id} has an unsupported namespace/named combination"
+                "External import from {external_specifier:?} has an unsupported namespace/named combination"
             ));
         }
     };
@@ -1205,6 +1276,7 @@ mod tests {
             pure_callees: HashSet::new(),
             commonjs_specifiers: HashSet::new(),
             opaque_commonjs: Default::default(),
+            boundary_identity_tokens: HashMap::new(),
             external_specifiers: HashMap::new(),
             opaque_external_specifiers: HashSet::new(),
             file_metadata: HashMap::new(),
@@ -1317,6 +1389,21 @@ mod tests {
     }
 
     #[test]
+    fn boundary_identity_tokens_are_order_independent_and_extend_collisions() {
+        let first = allocate_boundary_identity_tokens_with(
+            ["zeta".to_string(), "alpha".to_string()],
+            |_| "0000000000".to_string(),
+        );
+        let second = allocate_boundary_identity_tokens_with(
+            ["alpha".to_string(), "zeta".to_string()],
+            |_| "0000000000".to_string(),
+        );
+        assert_eq!(first, second);
+        assert_eq!(first["alpha"], "0000000000z0");
+        assert_eq!(first["zeta"], "0000000000z1");
+    }
+
+    #[test]
     fn external_boundary_names_are_workspace_relative() {
         let base = std::env::temp_dir().join(format!(
             "gcc-emit-goog-path-independent-{}",
@@ -1354,6 +1441,8 @@ mod tests {
             );
         }
         assert_eq!(outputs[0], outputs[1]);
+        assert!(outputs[0].contains("e"));
+        assert!(!outputs[0].contains("__gcc_external_"));
         std::fs::remove_dir_all(base).unwrap();
     }
 

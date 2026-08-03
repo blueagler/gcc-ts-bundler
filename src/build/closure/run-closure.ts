@@ -11,7 +11,7 @@ import type {
   PreservedModule,
   ResolvedBuildOptions,
 } from "../types";
-import { prepareClosureJobs, stripTypescriptModule } from "../../native/load";
+import { emitPreservedModule, prepareClosureJobs } from "../../native/load";
 import type { NativeEmittedTypeMetadata } from "../../native/load";
 import {
   configureClosureCompilerOptions,
@@ -253,16 +253,12 @@ async function emitPreservedModules(input: {
         );
       }
       await ensureParentDirectory(outputPath);
-      if (isTypeScriptModule(module.filePath)) {
-        const source = await fs.readFile(module.filePath, "utf8");
-        await fs.writeFile(
-          outputPath,
-          stripTypescriptModule(module.filePath, source),
-          "utf8",
-        );
-      } else {
-        await fs.copyFile(module.filePath, outputPath);
-      }
+      const source = await fs.readFile(module.filePath, "utf8");
+      await fs.writeFile(
+        outputPath,
+        emitPreservedModule(module.filePath, source),
+        "utf8",
+      );
       return outputPath;
     }),
   );
@@ -379,10 +375,6 @@ async function prependEntryShebangs(input: {
       await fs.writeFile(outputPath, `${entry.shebang}\n${source}`, "utf8");
     }
   }
-}
-
-function isTypeScriptModule(filePath: string) {
-  return /\.(?:cts|mts|ts)$/u.test(filePath) && !filePath.endsWith(".d.ts");
 }
 
 function normalizeFilePath(filePath: string) {

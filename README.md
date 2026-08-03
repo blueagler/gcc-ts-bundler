@@ -83,7 +83,7 @@ Programmatic options:
 - `entries`
 - `outDir`
 - `externals` (runtime-owned ESM specifiers)
-- `preserveModules` (project-relative authored modules shipped verbatim)
+- `preserveModules` (project-relative authored modules shipped without optimization or identifier renaming)
 - `packages`
 - `languageOut`
 - `compilationLevel`
@@ -111,7 +111,7 @@ Defaults:
 
 The runtime path uses a native Rust addon for graph resolution, shim emission, and GCC export rewriting. Closure Compiler remains the final aggressive optimizer.
 
-`packages = "esm-only"` supports browser-safe ESM dependencies from `node_modules`, plus statically analyzable CommonJS package entrypoints and internal package modules. Browser builds reject Node builtins; Node/Bun ESM builds preserve builtins and configured `externals` as runtime imports. Dynamic `require()` remains rejected in compiled modules and is permitted only inside configured `preserveModules`; preserved paths are canonicalized, escaping symlink targets fail closed, and even in-tree symlink aliases are rejected explicitly rather than published under an ambiguous path. JSON modules and native addons are still rejected.
+`packages = "esm-only"` supports browser-safe ESM dependencies from `node_modules`, plus statically analyzable CommonJS package entrypoints and internal package modules. Browser builds reject Node builtins; Node/Bun ESM builds preserve builtins and configured `externals` as runtime imports. Dynamic `require()` remains rejected in compiled modules and is permitted only inside configured `preserveModules`; preserved paths are canonicalized, escaping symlink targets fail closed, and even in-tree symlink aliases are rejected explicitly rather than published under an ambiguous path. Preserved output keeps runtime semantics and the stable module API without Closure optimization or identifier renaming, but Oxc removes comments and unnecessary whitespace (and still erases TypeScript types), so authored bytes are not retained. JSON modules and native addons are still rejected.
 
 `chunks.mode = "split"` compiles one Closure chunk graph for the strongest cross-module optimization. `chunks.mode = "bundler-runtime"` compiles app-oriented chunks as separate cacheable jobs. Both modes treat entries as bootstrap scripts rather than exported library bundles.
 

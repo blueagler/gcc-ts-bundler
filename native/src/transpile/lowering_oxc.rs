@@ -144,18 +144,22 @@ pub(crate) fn transform_program<'a>(
     transform_program_with_enum_values(allocator, path, program, scoping, run_jsx, HashMap::new())
 }
 
-pub(crate) fn strip_typescript_module(path: &Path, source: &str) -> Result<String, String> {
+pub(crate) fn emit_preserved_module(path: &Path, source: &str) -> Result<String, String> {
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path)
         .map_err(|error| error.to_string())?
         .with_module(true);
-    if !source_type.is_typescript() || source_type.is_jsx() {
+    if source_type.is_typescript() && source_type.is_jsx() {
         return Err(format!(
             "Preserved type stripping requires a non-JSX TypeScript module: {}",
             path.display()
         ));
     }
-    let source = rewrite_preserved_module_specifiers(path, source, source_type)?;
+    let source = if source_type.is_typescript() {
+        rewrite_preserved_module_specifiers(path, source, source_type)?
+    } else {
+        source.to_string()
+    };
     let parsed = oxc_parser::Parser::new(&allocator, &source, source_type).parse();
     if !parsed.diagnostics.is_empty() {
         return Err(parsed
@@ -166,30 +170,35 @@ pub(crate) fn strip_typescript_module(path: &Path, source: &str) -> Result<Strin
             .join("\n"));
     }
     let mut program = parsed.program;
-    let semantic = SemanticBuilder::new()
-        .with_build_nodes(true)
-        .with_enum_eval(true)
-        .build(&program);
-    if !semantic.diagnostics.is_empty() {
-        return Err(semantic
-            .diagnostics
-            .iter()
-            .map(|diagnostic| format!("{}: {diagnostic}", path.display()))
-            .collect::<Vec<_>>()
-            .join("\n"));
+    if source_type.is_typescript() {
+        let semantic = SemanticBuilder::new()
+            .with_build_nodes(true)
+            .with_enum_eval(true)
+            .build(&program);
+        if !semantic.diagnostics.is_empty() {
+            return Err(semantic
+                .diagnostics
+                .iter()
+                .map(|diagnostic| format!("{}: {diagnostic}", path.display()))
+                .collect::<Vec<_>>()
+                .join("\n"));
+        }
+        let options = TransformOptions::default();
+        let result = Transformer::new(&allocator, path, &options)
+            .build_with_scoping(semantic.semantic.into_scoping(), &mut program);
+        if !result.diagnostics.is_empty() {
+            return Err(result
+                .diagnostics
+                .iter()
+                .map(|diagnostic| format!("{}: {diagnostic}", path.display()))
+                .collect::<Vec<_>>()
+                .join("\n"));
+        }
     }
-    let options = TransformOptions::default();
-    let result = Transformer::new(&allocator, path, &options)
-        .build_with_scoping(semantic.semantic.into_scoping(), &mut program);
-    if !result.diagnostics.is_empty() {
-        return Err(result
-            .diagnostics
-            .iter()
-            .map(|diagnostic| format!("{}: {diagnostic}", path.display()))
-            .collect::<Vec<_>>()
-            .join("\n"));
-    }
-    Ok(Codegen::new().build(&program).code)
+    Ok(Codegen::new()
+        .with_options(oxc_codegen::CodegenOptions::minify())
+        .build(&program)
+        .code)
 }
 
 fn rewrite_preserved_module_specifiers(

@@ -85,9 +85,9 @@ pub fn write_entry_shims(entries: Vec<shims::ShimEntry>) -> Result<Vec<String>> 
     into_napi(shims::write_entry_shims(entries))
 }
 
-#[napi(js_name = "stripTypescriptModule")]
-pub fn strip_typescript_module(file_path: String, source: String) -> Result<String> {
-    into_napi(transpile::strip_typescript_module(file_path, source))
+#[napi(js_name = "emitPreservedModule")]
+pub fn emit_preserved_module(file_path: String, source: String) -> Result<String> {
+    into_napi(transpile::emit_preserved_module(file_path, source))
 }
 
 #[napi(js_name = "transpileSources")]

@@ -29,6 +29,12 @@ Runtime data crossing filesystem, native-addon, compiler-package, or generated-m
 | `closure-externs`     | Extra browser, CommonJS, worker, Closure, and tslib externs                               |
 | `closure-lib`         | Closure support library shipped with the package                                          |
 
+### Shipped package compilation
+
+The self-hosted package compiles the five public ESM exports and the CLI in one multi-entry off-mode Closure job. Their common implementation is emitted once as `dist/shared.js`; `bin/gcc-ts-bundler.mjs` remains the declared shebang entry but is a thin module that imports that shared chunk, and all preserved runtime modules live in the single canonical `dist/__gcc_preserved` tree.
+
+The CLI was previously compiled as a separate closed-world job to maximize entry-specific dead-code elimination. A direct probe found that the standalone CLI retained only about 6.4 KB less code than the shared implementation, while separate CLI and Vite jobs duplicated roughly 65-97% of the core pipeline. The package build therefore accepts the small import hop and couples the CLI to the published `dist` layout in exchange for removing the much larger shipped duplication; package verification keeps the exports map, bin path, shebang, declarations, and runtime asset layout contractual.
+
 ## Core build flow
 
 A call to `build()` follows this path:
@@ -145,6 +151,8 @@ rule should have fired and it did not, so a rule cannot silently become a no-op.
 ### 5. Compile and postprocess
 
 Rust prepares explicit Closure jobs and aggregates delivered metadata counts over each job's real native inputs. The JavaScript layer enables silent `checkTypes` inference and the typed platform extern slice only for ADVANCED jobs whose aggregate is non-empty, unless `GCC_DISABLE_TYPE_INFERENCE=1`, then invokes the installed `google-closure-compiler` package.
+
+Configured preserved modules retain their runtime semantics and stable ESM API, not their authored bytes. Oxc parses and reprints them with comments and unnecessary whitespace removed; identifiers are not renamed, code is not optimized or dead-code eliminated, and the existing TypeScript-only path still performs type erasure plus relative extension rewriting.
 
 Off mode runs Closure serially, split mode compiles one Closure chunk graph, and bundler-runtime mode may compile independent jobs concurrently while caching each job separately. Postprocessing then:
 

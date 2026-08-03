@@ -27,7 +27,7 @@ Build flags:
   --packages            off | esm-only
   --target              browser | node | bun | workerd | webworker
   --external            Runtime-owned ESM module specifier. Repeatable
-  --preserve-module     Project-relative authored module published verbatim. Repeatable
+  --preserve-module     Authored module kept unoptimized and unrenamed. Repeatable
   --platform-externs    minimal | full (default minimal: typed per-job platform slice)
   --extern              Explicit extern file consumed by Closure and native preservation. Repeatable
   --typed-extern        Closure-only typed extern declaration file. Repeatable

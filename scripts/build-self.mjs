@@ -7,8 +7,10 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   symlink,
+  writeFile,
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -54,8 +56,13 @@ const cliOutputRelative = Object.values(packageManifest.bin)[0];
 if (typeof cliOutputRelative !== "string" || !cliOutputRelative.startsWith("bin/")) {
   throw new Error("Unsupported package bin output");
 }
-const cliEntries = [
-  { file: "cli/main.ts", name: path.basename(cliOutputRelative) },
+const stagedCliOutputName = path.posix.join(
+  "__bin__",
+  path.basename(cliOutputRelative),
+);
+const packageEntries = [
+  ...libraryEntries,
+  { file: "cli/main.ts", name: stagedCliOutputName },
 ];
 const generatedPackageRoots = new Set(
   [
@@ -115,15 +122,11 @@ async function buildStage(compilerPath, stageRoot, label) {
   assertCompletePublicExterns(externResult);
 
   await runCompilerBuild(compiler.build, {
-    entries: libraryEntries,
+    entries: packageEntries,
     outDir: path.join(stageRoot, "dist"),
     typedExternPath,
   });
-  await runCompilerBuild(compiler.build, {
-    entries: cliEntries,
-    outDir: path.join(stageRoot, "bin"),
-    typedExternPath,
-  });
+  await relocateCliEntry(stageRoot);
   await emitDeclarations(path.join(stageRoot, "dist"));
   await assertDeclaredPackageEntrypoints(stageRoot);
   await assertCliShebang(path.join(stageRoot, cliOutputRelative));
@@ -153,6 +156,32 @@ async function runCompilerBuild(build, { entries, outDir, typedExternPath }) {
         .join("\n")}`,
     );
   }
+}
+
+async function relocateCliEntry(stageRoot) {
+  const stagedPath = path.join(stageRoot, "dist", stagedCliOutputName);
+  const finalPath = path.join(stageRoot, cliOutputRelative);
+  const distRoot = path.join(stageRoot, "dist");
+  const source = await readFile(stagedPath, "utf8");
+  const relocatedSource = source.replace(
+    /(\b(?:from|import)\s*)(["'])([^"']+)\2/gu,
+    (full, prefix, quote, specifier) => {
+      if (!specifier.startsWith(".")) return full;
+      const target = path.resolve(path.dirname(stagedPath), specifier);
+      if (!target.startsWith(`${distRoot}${path.sep}`)) return full;
+      const relative = path
+        .relative(path.dirname(finalPath), target)
+        .replace(/\\/gu, "/");
+      const relocatedSpecifier = relative.startsWith(".")
+        ? relative
+        : `./${relative}`;
+      return `${prefix}${quote}${relocatedSpecifier}${quote}`;
+    },
+  );
+  await mkdir(path.dirname(finalPath), { recursive: true });
+  await writeFile(stagedPath, relocatedSource, "utf8");
+  await rename(stagedPath, finalPath);
+  await rm(path.dirname(stagedPath), { force: true, recursive: true });
 }
 
 async function assertDeclaredPackageEntrypoints(stageRoot) {

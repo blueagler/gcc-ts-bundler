@@ -170,7 +170,7 @@ export interface BuildOptions {
   outDir?: string | undefined;
   packages?: PackageMode | undefined;
   platformExterns?: PlatformExternsMode | undefined;
-  /** Project-relative authored modules published verbatim. */
+  /** Project-relative authored modules published without optimization or identifier renaming. */
   preserveModules?: readonly string[] | undefined;
   projectRoot?: string | undefined;
   srcDir?: string | undefined;

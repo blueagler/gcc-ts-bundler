@@ -50,7 +50,7 @@ if (!result.ok) {
 | `compilationLevel` | `ADVANCED`        | Closure level: `WHITESPACE_ONLY`, `SIMPLE`, or `ADVANCED`.                                                                   |
 | `languageOut`      | `ECMASCRIPT_NEXT` | Closure output syntax: `ECMASCRIPT3`, `ECMASCRIPT5`, `ECMASCRIPT6`, or `ECMASCRIPT_NEXT`.                                    |
 | `externals`        | `[]`              | Exact runtime-owned ESM specifiers preserved as real imports. Requires standalone ESM output.                               |
-| `preserveModules`  | `[]`              | Project-relative authored modules published verbatim; real paths must remain inside `projectRoot` and `srcDir`.              |
+| `preserveModules`  | `[]`              | Authored modules published with stable runtime/API semantics and no optimization or renaming; Oxc minifies comments/whitespace and erases TypeScript types. |
 | `externs`          | `[]`              | Explicit externs consumed by Closure and scanned by native as rename-barrier opt-in.                                         |
 | `typedExterns`     | `[]`              | Closure-only owner-qualified typed declarations; native preservation never scans these.                                      |
 | `js`               | `[]`              | Additional JavaScript inputs passed to Closure jobs.                                                                         |

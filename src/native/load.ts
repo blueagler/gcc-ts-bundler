@@ -296,7 +296,7 @@ interface NativeBinding {
     preservedFilePaths: string[],
   ): NativeResolveGraphOutput;
   rewriteGccExports(code: string): NativeGccExportsRewrite;
-  stripTypescriptModule(filePath: string, source: string): string;
+  emitPreservedModule(filePath: string, source: string): string;
   transpileSources(
     fileNames: string[],
     explicitExternPaths: string[],
@@ -337,7 +337,7 @@ const NATIVE_BINDING_METHOD_FLAGS: Record<keyof NativeBinding, true> = {
   publishedOutputsMatch: true,
   resolveGraph: true,
   rewriteGccExports: true,
-  stripTypescriptModule: true,
+  emitPreservedModule: true,
   transpileSources: true,
   writeEntryShims: true,
 };
@@ -438,8 +438,8 @@ export function rewriteGccExports(code: string) {
   return loadBinding().rewriteGccExports(code);
 }
 
-export function stripTypescriptModule(filePath: string, source: string) {
-  return loadBinding().stripTypescriptModule(filePath, source);
+export function emitPreservedModule(filePath: string, source: string) {
+  return loadBinding().emitPreservedModule(filePath, source);
 }
 
 export function transpileSources(input: {

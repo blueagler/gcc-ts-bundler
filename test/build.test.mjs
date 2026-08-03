@@ -315,9 +315,9 @@ test.serial("emits and executes all external ESM import forms", async () => {
   expect(result.ok).toBe(true);
   const output = await fixture.read("dist/index.js");
   expect(output).toContain('import "runtime-ext";');
-  expect(output).toMatch(/import __gcc_external_[^ ]+ from "runtime-ext";/u);
-  expect(output).toMatch(/import \{ named as __gcc_external_/u);
-  expect(output).toMatch(/import \* as __gcc_external_/u);
+  expect(output).toMatch(/import e[a-z0-9]+_[a-z0-9]+_[a-z0-9]+ from "runtime-ext";/u);
+  expect(output).toMatch(/import \{ named as e[a-z0-9]+_/u);
+  expect(output).toMatch(/import \* as e[a-z0-9]+_/u);
   await execFileAsync(
     process.execPath,
     [path.join(fixture.outDir, "index.js")],
@@ -403,8 +403,8 @@ test.serial(
     const externText = await fs.readFile(externFiles[0], "utf8");
     expect(externText).toContain("Typed external runtime declarations");
     expect(externText).toContain("@type {number}");
-    expect(externText).toMatch(/@type \{\?\} \*\/ var __gcc_external_/u);
-    expect(externText).not.toMatch(/__gcc_external_[^.\s]+\.extra;/u);
+    expect(externText).toMatch(/@type \{\?\} \*\/ var e[a-z0-9]+_[a-z0-9]+_[a-z0-9]+/u);
+    expect(externText).not.toMatch(/e[a-z0-9_]+\.extra;/u);
     expect(warnings.join("\n")).toContain("using opaque externs");
   },
 );
@@ -496,19 +496,24 @@ test.serial("rejects export-from external modules", async () => {
 });
 
 test.serial(
-  "publishes configured modules verbatim and permits their dynamic require",
+  "publishes parser-minified modules and permits their dynamic require",
   async () => {
     const fixture = await createFixture();
     const loaderSource = [
+      "// preserved output is semantic, not byte-verbatim",
       "export function load(name) {",
       "  return require(name);",
       "}",
+      "export const asi = (() => {",
+      "  return",
+      "  { broken: true };",
+      "})();",
       "",
     ].join("\n");
     await fixture.write("src/loader.js", loaderSource);
     await fixture.write(
       "src/index.js",
-      'import { load } from "./loader.js";\nglobalThis.savedLoad = load;\n',
+      'import { asi, load } from "./loader.js";\nexport { asi, load };\n',
     );
     const preserved = await build({
       cache: { mode: "off" },
@@ -520,9 +525,15 @@ test.serial(
       srcDir: fixture.srcDir,
     });
     expect(preserved.ok).toBe(true);
-    expect(await fixture.read("dist/__gcc_preserved/loader.js")).toBe(
-      loaderSource,
+    const emittedLoader = await fixture.read("dist/__gcc_preserved/loader.js");
+    expect(emittedLoader).not.toBe(loaderSource);
+    expect(emittedLoader).not.toContain("semantic, not byte-verbatim");
+    expect(emittedLoader.length).toBeLessThan(loaderSource.length);
+    const builtPreserved = await import(
+      `${pathToFileURL(path.join(fixture.outDir, "index.js")).href}?preserved-minified=${Date.now()}`,
     );
+    expect(typeof builtPreserved.load).toBe("function");
+    expect(builtPreserved.asi).toBeUndefined();
 
     await fixture.write(
       "src/compiled.js",
@@ -587,7 +598,7 @@ test.serial(
     const inner = await fixture.read("dist/__gcc_preserved/inner.js");
     expect(loader).not.toContain("interface LoadOptions");
     expect(loader).not.toContain("options: LoadOptions");
-    expect(loader).toContain('from "./inner.js"');
+    expect(loader).toContain('from"./inner.js"');
     expect(inner).not.toContain(": string");
 
     const built = await import(

@@ -175,8 +175,8 @@ pub struct ClassMapCallInput {
     pub keySource: Option<String>,
 }
 
-pub fn strip_typescript_module(file_path: String, source: String) -> Result<String, String> {
-    lowering_oxc::strip_typescript_module(Path::new(&file_path), &source)
+pub fn emit_preserved_module(file_path: String, source: String) -> Result<String, String> {
+    lowering_oxc::emit_preserved_module(Path::new(&file_path), &source)
 }
 
 // napi positional contract: the TS side calls these by argument
@@ -212,6 +212,34 @@ pub fn transpile_sources(
     let workspace_dir = PathBuf::from(workspace_dir);
     let out_dir = PathBuf::from(out_dir);
     let chunk_mode = parse_chunk_mode(&chunk_mode)?;
+    let preserved_module_ids = preserved_modules
+        .iter()
+        .map(|module| module.moduleId.clone())
+        .collect::<HashSet<_>>();
+    let boundary_identity_tokens = emit_goog_oxc::allocate_boundary_identity_tokens(
+        external_boundaries
+            .iter()
+            .map(|boundary| {
+                emit_goog_oxc::boundary_identity(
+                    &to_goog_module_id(Path::new(&boundary.importerFilePath), &workspace_dir),
+                    &boundary.specifier,
+                )
+            })
+            .chain(
+                resolved_imports
+                    .iter()
+                    .filter(|resolved| preserved_module_ids.contains(&resolved.moduleId))
+                    .map(|resolved| {
+                        emit_goog_oxc::boundary_identity(
+                            &to_goog_module_id(
+                                Path::new(&resolved.importerFilePath),
+                                &workspace_dir,
+                            ),
+                            &resolved.specifier,
+                        )
+                    }),
+            ),
+    );
     let preserved_modules = preserved_modules
         .into_iter()
         .map(|module| (module.moduleId.clone(), module))
@@ -340,6 +368,7 @@ pub fn transpile_sources(
             &commonjs_specifiers,
             &package_aliases,
         )?),
+        boundary_identity_tokens,
         external_specifiers,
         opaque_external_specifiers: opaque_external_specifiers.into_iter().collect(),
         file_metadata,
