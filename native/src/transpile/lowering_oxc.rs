@@ -5,20 +5,20 @@
 //! below rather than assumed, and each divergence becomes a pass we own.
 
 use oxc_allocator::Allocator;
+use oxc_allocator::FromIn;
 use oxc_allocator::Vec as ArenaVec;
 use oxc_ast::ast::{
-    BinaryOperator, BindingIdentifier, Declaration, Expression, PrivateIdentifier, Program,
-    Statement, TSEnumMemberName, TSModuleDeclarationBody, TSModuleDeclarationName, UnaryOperator,
-    VariableDeclaration, VariableDeclarationKind,
+    BinaryOperator, BindingIdentifier, Declaration, Expression, IdentifierReference, NewExpression,
+    PrivateIdentifier, Program, Statement, TSEnumMemberName, TSModuleDeclarationBody,
+    TSModuleDeclarationName, UnaryOperator, VariableDeclaration, VariableDeclarationKind,
 };
 #[cfg(test)]
 use oxc_ast::ast::{ObjectProperty, PropertyKey};
-#[cfg(test)]
-use oxc_ast_visit::walk;
-use oxc_ast_visit::{Visit, VisitMut};
+use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_codegen::Codegen;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType, Span};
+use oxc_str::Ident;
 use oxc_transformer::{
     ClassPropertiesOptions, Helper, HelperLoaderMode, JsxOptions, JsxRuntime, TransformOptions,
     Transformer,
@@ -29,165 +29,108 @@ use std::path::Path;
 use super::identity_oxc::ModuleIdentity;
 
 const PRIVATE_CLASS_HELPERS: &str = r#"
-const babelHelpers = (function () {
-  function babelTypeof(value) {
-    return babelTypeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol"
-      ? function (value) { return typeof value; }
-      : function (value) {
-          return value && typeof Symbol === "function" && value.constructor === Symbol && value !== Symbol.prototype
-            ? "symbol"
-            : typeof value;
-        }, babelTypeof(value);
+class gccPrivateSlot {
+  constructor() {
+    this.key = Symbol();
   }
-  function toPrimitive(value, hint) {
-    if (babelTypeof(value) !== "object" || !value) return value;
-    const exotic = value[Symbol.toPrimitive];
-    if (exotic !== undefined) {
-      const result = exotic.call(value, hint || "default");
-      if (babelTypeof(result) !== "object") return result;
-      throw new TypeError("@@toPrimitive must return a primitive value.");
-    }
-    return (hint === "string" ? String : Number)(value);
+  has(receiver) {
+    return this.key in receiver;
   }
-  function toPropertyKey(value) {
-    const key = toPrimitive(value, "string");
-    return babelTypeof(key) === "symbol" ? key : key + "";
+  get(receiver) {
+    return receiver[this.key];
   }
-  function defineProperty(object, key, value) {
-    key = toPropertyKey(key);
-    if (key in object) {
-      Object.defineProperty(object, key, {
-        value,
-        enumerable: true,
-        configurable: true,
-        writable: true,
-      });
+  set(receiver, value) {
+    if (this.key in receiver) {
+      receiver[this.key] = value;
     } else {
-      object[key] = value;
+      Object.defineProperty(receiver, this.key, { writable: true, value });
     }
-    return object;
+    return this;
   }
-  function checkPrivateRedeclaration(receiver, collection) {
-    if (collection.has(receiver)) {
-      throw new TypeError("Cannot initialize the same private elements twice on an object");
-    }
+  add(receiver) {
+    Object.defineProperty(receiver, this.key, { value: true });
+    return this;
   }
-  function classPrivateFieldInitSpec(receiver, state, value) {
-    checkPrivateRedeclaration(receiver, state);
-    state.set(receiver, value);
-  }
-  function classPrivateMethodInitSpec(receiver, brand) {
-    checkPrivateRedeclaration(receiver, brand);
-    brand.add(receiver);
-  }
-  function assertClassBrand(brand, receiver, value) {
+}
+const babelHelpers = {
+  assertClassBrand(brand, receiver, value) {
     if (typeof brand === "function" ? brand === receiver : brand.has(receiver)) {
       return arguments.length < 3 ? receiver : value;
     }
     throw new TypeError("Private element is not present on this object");
-  }
-  function classPrivateFieldGet2(state, receiver) {
-    return state.get(assertClassBrand(state, receiver));
-  }
-  function classPrivateFieldSet2(state, receiver, value) {
-    state.set(assertClassBrand(state, receiver), value);
-    return value;
-  }
-  function toSetter(callback, args, receiver) {
-    args || (args = []);
-    const index = args.length++;
-    return Object.defineProperty({}, "_", {
-      set(value) {
-        args[index] = value;
-        callback.apply(receiver, args);
-      },
-    });
-  }
-  function readOnlyError(name) {
-    throw new TypeError('"' + name + '" is read-only');
-  }
-  function writeOnlyError(name) {
-    throw new TypeError('"' + name + '" is write-only');
-  }
-  function checkInRHS(value) {
+  },
+  checkInRHS(value) {
     if (Object(value) !== value) {
-      throw new TypeError("right-hand side of 'in' should be an object, got " + (value !== null ? babelTypeof(value) : "null"));
+      throw new TypeError("right-hand side of 'in' should be an object, got " + (value !== null ? typeof value : "null"));
     }
     return value;
-  }
-  function getPrototypeOf(value) {
-    return getPrototypeOf = Object.setPrototypeOf
-      ? Object.getPrototypeOf.bind()
-      : function (value) { return value.__proto__ || Object.getPrototypeOf(value); }, getPrototypeOf(value);
-  }
-  function superPropBase(target, property) {
-    while (!Object.prototype.hasOwnProperty.call(target, property) && (target = getPrototypeOf(target)) !== null) {}
-    return target;
-  }
-  function get(target, property, receiver) {
-    return get = typeof Reflect !== "undefined" && Reflect.get
-      ? Reflect.get.bind()
-      : function (target, property, receiver) {
-          const base = superPropBase(target, property);
-          if (base) {
-            const descriptor = Object.getOwnPropertyDescriptor(base, property);
-            return descriptor.get ? descriptor.get.call(arguments.length < 3 ? target : receiver) : descriptor.value;
-          }
-        }, get(target, property, receiver);
-  }
-  function setProperty(target, property, value, receiver) {
-    return setProperty = typeof Reflect !== "undefined" && Reflect.set
-      ? Reflect.set
-      : function (target, property, value, receiver) {
-          let descriptor;
-          const base = superPropBase(target, property);
-          if (base) {
-            descriptor = Object.getOwnPropertyDescriptor(base, property);
-            if (descriptor.set) return descriptor.set.call(receiver, value), true;
-            if (!descriptor.writable) return false;
-          }
-          descriptor = Object.getOwnPropertyDescriptor(receiver, property);
-          if (descriptor) {
-            if (!descriptor.writable) return false;
-            descriptor.value = value;
-            Object.defineProperty(receiver, property, descriptor);
-          } else {
-            defineProperty(receiver, property, value);
-          }
-          return true;
-        }, setProperty(target, property, value, receiver);
-  }
-  function set(target, property, value, receiver, strict) {
-    if (!setProperty(target, property, value, receiver || target) && strict) {
+  },
+  classPrivateFieldGet2(state, receiver) {
+    return state.get(babelHelpers.assertClassBrand(state, receiver));
+  },
+  classPrivateFieldInitSpec(receiver, state, value) {
+    if (state.has(receiver)) {
+      throw new TypeError("Cannot initialize the same private elements twice on an object");
+    }
+    state.set(receiver, value);
+  },
+  classPrivateFieldSet2(state, receiver, value) {
+    state.set(babelHelpers.assertClassBrand(state, receiver), value);
+    return value;
+  },
+  classPrivateMethodInitSpec(receiver, brand) {
+    if (brand.has(receiver)) {
+      throw new TypeError("Cannot initialize the same private elements twice on an object");
+    }
+    brand.add(receiver);
+  },
+  defineProperty(object, key, value) {
+    key = babelHelpers.toPropertyKey(key);
+    if (key in object) {
+      Object.defineProperty(object, key, { value, enumerable: true, configurable: true, writable: true });
+    } else {
+      object[key] = value;
+    }
+    return object;
+  },
+  readOnlyError(name) {
+    throw new TypeError('"' + name + '" is read-only');
+  },
+  writeOnlyError(name) {
+    throw new TypeError('"' + name + '" is write-only');
+  },
+  toPropertyKey(value) {
+    if ((typeof value === "object" && value !== null) || typeof value === "function") {
+      const exotic = value[Symbol.toPrimitive];
+      if (exotic !== undefined) {
+        value = exotic.call(value, "string");
+        if ((typeof value === "object" && value !== null) || typeof value === "function") {
+          throw new TypeError("@@toPrimitive must return a primitive value.");
+        }
+      } else {
+        value = String(value);
+      }
+    }
+    return typeof value === "symbol" ? value : value + "";
+  },
+  toSetter(callback, args, receiver) {
+    args ||= [];
+    const index = args.length++;
+    return { set _(value) { args[index] = value; callback.apply(receiver, args); } };
+  },
+  superPropGet(target, property, receiver, flags) {
+    target = Object.getPrototypeOf(flags & 1 ? target.prototype : target);
+    const value = Reflect.get(target, property, receiver);
+    return flags & 2 && typeof value === "function" ? (args) => value.apply(receiver, args) : value;
+  },
+  superPropSet(target, property, value, receiver, strict, isProto) {
+    target = Object.getPrototypeOf(isProto ? target.prototype : target);
+    if (!Reflect.set(target, property, value, receiver) && strict) {
       throw new TypeError("failed to set property");
     }
     return value;
-  }
-  function superPropGet(target, property, receiver, flags) {
-    const value = get(getPrototypeOf(flags & 1 ? target.prototype : target), property, receiver);
-    return flags & 2 && typeof value === "function"
-      ? function (args) { return value.apply(receiver, args); }
-      : value;
-  }
-  function superPropSet(target, property, value, receiver, strict, isProto) {
-    return set(getPrototypeOf(isProto ? target.prototype : target), property, value, receiver, strict);
-  }
-  return {
-    assertClassBrand,
-    checkInRHS,
-    classPrivateFieldGet2,
-    classPrivateFieldInitSpec,
-    classPrivateFieldSet2,
-    classPrivateMethodInitSpec,
-    defineProperty,
-    readOnlyError,
-    superPropGet,
-    superPropSet,
-    toPropertyKey,
-    toSetter,
-    writeOnlyError,
-  };
-})();
+  },
+};
 "#;
 
 #[cfg(test)]
@@ -338,7 +281,8 @@ impl<'a> VisitMut<'a> for SynthesizedSpanOffset {
 #[derive(Default)]
 struct PrivateElementDetector {
     found: bool,
-    has_babel_helpers_binding: bool,
+    has_reserved_binding: bool,
+    authored_weak_collection_news: HashSet<(u32, u32)>,
 }
 
 impl<'a> Visit<'a> for PrivateElementDetector {
@@ -347,8 +291,56 @@ impl<'a> Visit<'a> for PrivateElementDetector {
     }
 
     fn visit_binding_identifier(&mut self, identifier: &BindingIdentifier<'a>) {
-        if identifier.name == "babelHelpers" {
-            self.has_babel_helpers_binding = true;
+        if matches!(identifier.name.as_str(), "babelHelpers" | "gccPrivateSlot") {
+            self.has_reserved_binding = true;
+        }
+    }
+
+    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+        if matches!(identifier.name.as_str(), "babelHelpers" | "gccPrivateSlot") {
+            self.has_reserved_binding = true;
+        }
+    }
+
+    fn visit_new_expression(&mut self, expression: &NewExpression<'a>) {
+        if matches!(
+            &expression.callee,
+            Expression::Identifier(identifier)
+                if matches!(identifier.name.as_str(), "WeakMap" | "WeakSet")
+        ) {
+            self.authored_weak_collection_news
+                .insert((expression.span.start, expression.span.end));
+        }
+        walk::walk_new_expression(self, expression);
+    }
+}
+
+struct PrivateClassLowering {
+    authored_weak_collection_news: HashSet<(u32, u32)>,
+}
+
+struct PrivateSlotConstructorRewriter<'a, 'plan> {
+    allocator: &'a Allocator,
+    authored_weak_collection_news: &'plan HashSet<(u32, u32)>,
+}
+
+impl<'a> VisitMut<'a> for PrivateSlotConstructorRewriter<'a, '_> {
+    fn visit_expression(&mut self, expression: &mut Expression<'a>) {
+        walk_mut::walk_expression(self, expression);
+        let Expression::NewExpression(new_expression) = expression else {
+            return;
+        };
+        if self
+            .authored_weak_collection_news
+            .contains(&(new_expression.span.start, new_expression.span.end))
+        {
+            return;
+        }
+        let Expression::Identifier(callee) = &mut new_expression.callee else {
+            return;
+        };
+        if matches!(callee.name.as_str(), "WeakMap" | "WeakSet") {
+            callee.name = Ident::from_in("gccPrivateSlot", self.allocator);
         }
     }
 }
@@ -358,15 +350,15 @@ fn prepare_private_class_lowering<'a>(
     path: &Path,
     program: &mut Program<'a>,
     scoping: oxc_semantic::Scoping,
-) -> Result<(bool, oxc_semantic::Scoping), String> {
+) -> Result<(Option<PrivateClassLowering>, oxc_semantic::Scoping), String> {
     let mut detector = PrivateElementDetector::default();
     detector.visit_program(program);
     if !detector.found {
-        return Ok((false, scoping));
+        return Ok((None, scoping));
     }
-    if detector.has_babel_helpers_binding {
+    if detector.has_reserved_binding {
         return Err(format!(
-            "Private class element lowering cannot safely inject its Oxc helper binding because {} already declares babelHelpers",
+            "Private class element lowering cannot safely inject its reserved bindings because {} already references babelHelpers or gccPrivateSlot",
             path.display()
         ));
     }
@@ -408,7 +400,12 @@ fn prepare_private_class_lowering<'a>(
             .collect::<Vec<_>>()
             .join("\n"));
     }
-    Ok((true, semantic.semantic.into_scoping()))
+    Ok((
+        Some(PrivateClassLowering {
+            authored_weak_collection_news: detector.authored_weak_collection_news,
+        }),
+        semantic.semantic.into_scoping(),
+    ))
 }
 
 fn supports_private_class_helper(helper: Helper) -> bool {
@@ -444,8 +441,9 @@ pub(crate) fn transform_program_with_enum_values<'a>(
     for (name, members) in &const_enum_values {
         enum_values.insert(name.clone(), members.clone());
     }
-    let (lower_private_classes, scoping) =
+    let (private_lowering, scoping) =
         prepare_private_class_lowering(allocator, path, program, scoping)?;
+    let lower_private_classes = private_lowering.is_some();
     let mut options = TransformOptions::default();
     if lower_private_classes {
         options.env.es2022.class_properties = Some(ClassPropertiesOptions::default());
@@ -484,6 +482,12 @@ pub(crate) fn transform_program_with_enum_values<'a>(
                 unsupported_helpers.join(", ")
             ));
         }
+        let private_lowering = private_lowering.as_ref().expect("private lowering plan");
+        PrivateSlotConstructorRewriter {
+            allocator,
+            authored_weak_collection_news: &private_lowering.authored_weak_collection_news,
+        }
+        .visit_program(program);
     }
     force_var_for_lowered_declarations(program, &lowered_names);
     if !enum_values.is_empty() {
@@ -495,7 +499,23 @@ pub(crate) fn transform_program_with_enum_values<'a>(
         oxc_ast_visit::VisitMut::visit_program(&mut inliner, program);
         erase_const_enum_objects(program, &const_enum_values);
     }
-    Ok(ModuleIdentity::new(result.scoping))
+    if lower_private_classes {
+        let semantic = SemanticBuilder::new()
+            .with_build_nodes(true)
+            .with_enum_eval(true)
+            .build(program);
+        if !semantic.diagnostics.is_empty() {
+            return Err(semantic
+                .diagnostics
+                .iter()
+                .map(|diagnostic| format!("{}: {diagnostic}", path.display()))
+                .collect::<Vec<_>>()
+                .join("\n"));
+        }
+        Ok(ModuleIdentity::new(semantic.semantic.into_scoping()))
+    } else {
+        Ok(ModuleIdentity::new(result.scoping))
+    }
 }
 #[cfg(test)]
 /// parse -> semantic -> oxc TS/JSX lowering -> print. The baseline the owned
@@ -858,7 +878,7 @@ mod what_oxc_gets_wrong {
         let (enabled, _) =
             prepare_private_class_lowering(&allocator, Path::new("box.ts"), &mut program, scoping)
                 .unwrap();
-        assert!(enabled);
+        assert!(enabled.is_some());
         let mut spans = HelperObjectKeySpans(Vec::new());
         spans.visit_program(&program);
         assert!(!spans.0.is_empty());
@@ -870,20 +890,40 @@ mod what_oxc_gets_wrong {
     }
 
     #[test]
-    fn private_class_elements_use_spec_helpers_only_when_present() {
+    fn private_class_elements_use_symbol_slots_only_when_present() {
         let code = lower(
             "m.ts",
             "class Box { #value = 1; static #scale = 2; #read() { return this.#value; } static has(value: object) { return #value in value; } value() { return this.#read() + Box.#scale; } } export const box = new Box();\n",
         );
         assert!(!code.contains("#value"), "{code}");
         assert!(!code.contains("#read"), "{code}");
-        assert!(code.contains("new WeakMap"), "{code}");
-        assert!(code.contains("new WeakSet"), "{code}");
+        assert!(code.contains("new gccPrivateSlot"), "{code}");
+        assert!(!code.contains("new WeakMap"), "{code}");
+        assert!(!code.contains("new WeakSet"), "{code}");
+        assert!(code.contains("Symbol()"), "{code}");
         assert!(code.contains("babelHelpers"), "{code}");
 
         let ordinary = lower("plain.ts", "export class Box { value = 1; }\n");
         assert!(!ordinary.contains("babelHelpers"), "{ordinary}");
         assert!(ordinary.contains("value = 1"), "{ordinary}");
+
+        let lit_styles = lower(
+            "styles.ts",
+            "const css = String.raw; export const styles = css`:host { --text: #fff; } #center { color: #08060d; }`;\n",
+        );
+        assert!(!lit_styles.contains("babelHelpers"), "{lit_styles}");
+        assert!(!lit_styles.contains("gccPrivateSlot"), "{lit_styles}");
+        assert!(lit_styles.contains("#center"), "{lit_styles}");
+    }
+
+    #[test]
+    fn authored_weak_collections_are_not_rewritten() {
+        let code = lower(
+            "m.ts",
+            "const authored = new WeakMap<object, number>(); class Box { #value = 1; read() { return this.#value; } } export { authored, Box };\n",
+        );
+        assert!(code.contains("new WeakMap"), "{code}");
+        assert!(code.contains("new gccPrivateSlot"), "{code}");
     }
 
     /// Namespace lowering shape, for the OX-A end-to-end namespace test.
@@ -970,6 +1010,44 @@ mod executing {
             "export function early(): string { return typeof Outer; }\nexport const probe = early();\nexport namespace Outer { export const v = 3; }\n",
         );
         assert_eq!(probe, "\"undefined\"");
+    }
+
+    #[test]
+    fn private_accessor_getters_and_setters_execute_for_instances_statics_and_inheritance() {
+        let probe = run_emitted(
+            "private-accessors",
+            r#"
+class InstanceBase {
+  #value = 1;
+  get #pair() { return this.#value * 2; }
+  set #pair(value: number) { this.#value = value; }
+  read() { return this.#pair; }
+  change(value: number) { this.#pair = value; return this.#pair; }
+}
+class InstanceChild extends InstanceBase {}
+class StaticBase {
+  static #value = 7;
+  static get #pair() { return this.#value * 2; }
+  static set #pair(value: number) { this.#value = value; }
+  static read() { return this.#pair; }
+  static change(value: number) { this.#pair = value; return this.#pair; }
+}
+class StaticChild extends StaticBase {}
+function fails(callback: () => unknown) {
+  try { callback(); return false; } catch (error) { return error instanceof TypeError; }
+}
+const instance = new InstanceChild();
+export const probe = [
+  instance.read(),
+  instance.change(4),
+  StaticBase.read(),
+  StaticBase.change(9),
+  fails(() => StaticChild.read()),
+  fails(() => StaticChild.change(10)),
+];
+"#,
+        );
+        assert_eq!(probe, "[2,8,14,18,true,true]");
     }
 }
 
