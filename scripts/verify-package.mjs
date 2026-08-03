@@ -2,9 +2,11 @@ import { execFile } from "node:child_process";
 import { constants, existsSync } from "node:fs";
 import {
   access,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   symlink,
   writeFile,
@@ -48,6 +50,7 @@ try {
 
   const packageJson = await readJson(path.join(packageRoot, "package.json"));
   const rootTargets = await verifyPackageTargets(packageRoot, packageJson);
+  await assertOnlyDeclaredDeclarations(packageRoot, packageJson);
   const archivePath = await packPackage(temporaryRoot);
   const installedPackageDir = path.join(
     temporaryRoot,
@@ -69,6 +72,7 @@ try {
     installedPackageDir,
     packedPackageJson,
   );
+  await assertOnlyDeclaredDeclarations(installedPackageDir, packedPackageJson);
   if (packedPackageJson.license !== "Apache-2.0") {
     throw new Error("Packed package is missing Apache-2.0 license metadata");
   }
@@ -165,6 +169,59 @@ async function verifyPackageTargets(directory, packageJson) {
     await assertFile(targetPath, `${label} target ${target}`);
   }
   return targets;
+}
+
+async function assertOnlyDeclaredDeclarations(directory, packageJson) {
+  const expected = [
+    ...new Set(
+      [
+        packageJson.types,
+        ...Object.values(packageJson.exports ?? {}).map((conditions) =>
+          conditions && typeof conditions === "object"
+            ? conditions.types
+            : undefined,
+        ),
+      ]
+        .filter((target) => typeof target === "string")
+        .map((target) => target.replace(/^\.\//u, "")),
+    ),
+  ].sort();
+  const packageFiles = Array.isArray(packageJson.files) ? packageJson.files : [];
+  const actual = (
+    await Promise.all(
+      packageFiles.map((filePath) => listFiles(path.join(directory, filePath))),
+    )
+  )
+    .flat()
+    .map((filePath) => path.relative(directory, filePath).replace(/\\/gu, "/"))
+    .filter((filePath) => filePath.endsWith(".d.ts"))
+    .sort();
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error(
+      `Packed declarations must match package export types:\n${JSON.stringify({ actual, expected }, null, 2)}`,
+    );
+  }
+}
+
+async function listFiles(directory) {
+  const stats = await lstat(directory).catch((error) => {
+    if (error && typeof error === "object" && error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (!stats) return [];
+  if (stats.isFile()) return [directory];
+  if (!stats.isDirectory()) return [];
+  const entries = await readdir(directory, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory() && entry.name !== "node_modules") {
+      files.push(...(await listFiles(entryPath)));
+    } else if (entry.isFile()) {
+      files.push(entryPath);
+    }
+  }
+  return files;
 }
 
 function collectExportTargets(exports, label = "exports") {

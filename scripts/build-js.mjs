@@ -1,11 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { readdir, readFile, rm, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { rm } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
-
-// TEMPORARY M0/M1 parser bridge; remove with the legacy compiler-API migration.
-import ts from "@typescript/typescript6";
 
 const BUN = process.platform === "win32" ? "bun.exe" : "bun";
 const SHOW_TIMINGS = process.env.GCC_BUILD_TIMINGS === "1";
@@ -62,115 +57,9 @@ await runCommandsInParallel([
   },
 ]);
 
-await runCommand(
-  process.execPath,
-  ["./scripts/run-typescript.mjs", "-p", "./tsconfig.types.json"],
-  { label: "build-js:types" },
-);
-await rewriteDeclarationSpecifiers("./dist");
-
-async function rewriteDeclarationSpecifiers(directory) {
-  const declarationFiles = await collectDeclarationFiles(directory);
-  await Promise.all(declarationFiles.map(rewriteDeclarationFile));
-}
-
-async function collectDeclarationFiles(directory) {
-  const files = [];
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    const entryPath = path.join(directory, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...(await collectDeclarationFiles(entryPath)));
-    } else if (entry.isFile() && entry.name.endsWith(".d.ts")) {
-      files.push(entryPath);
-    }
-  }
-  return files;
-}
-
-async function rewriteDeclarationFile(filePath) {
-  const source = await readFile(filePath, "utf8");
-  const sourceFile = ts.createSourceFile(
-    filePath,
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
-  const edits = [];
-
-  const visit = (node) => {
-    const moduleSpecifier = getModuleSpecifier(node);
-    if (moduleSpecifier) {
-      const nextSpecifier = resolveDeclarationSpecifier(
-        filePath,
-        moduleSpecifier.text,
-      );
-      if (nextSpecifier !== moduleSpecifier.text) {
-        edits.push({
-          end: moduleSpecifier.getEnd() - 1,
-          start: moduleSpecifier.getStart(sourceFile) + 1,
-          text: nextSpecifier,
-        });
-      }
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
-
-  let output = source;
-  for (const edit of edits.sort((left, right) => right.start - left.start)) {
-    output = `${output.slice(0, edit.start)}${edit.text}${output.slice(edit.end)}`;
-  }
-  if (output !== source) {
-    await writeFile(filePath, output, "utf8");
-  }
-}
-
-function getModuleSpecifier(node) {
-  if (
-    (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
-    node.moduleSpecifier &&
-    ts.isStringLiteralLike(node.moduleSpecifier)
-  ) {
-    return node.moduleSpecifier;
-  }
-  if (
-    ts.isImportTypeNode(node) &&
-    ts.isLiteralTypeNode(node.argument) &&
-    ts.isStringLiteralLike(node.argument.literal)
-  ) {
-    return node.argument.literal;
-  }
-  if (
-    ts.isImportEqualsDeclaration(node) &&
-    ts.isExternalModuleReference(node.moduleReference) &&
-    node.moduleReference.expression &&
-    ts.isStringLiteralLike(node.moduleReference.expression)
-  ) {
-    return node.moduleReference.expression;
-  }
-  return null;
-}
-
-function resolveDeclarationSpecifier(filePath, specifier) {
-  if (
-    (!specifier.startsWith("./") && !specifier.startsWith("../")) ||
-    path.posix.extname(specifier)
-  ) {
-    return specifier;
-  }
-
-  const target = path.resolve(path.dirname(filePath), specifier);
-  if (existsSync(`${target}.d.ts`)) {
-    return `${specifier}.js`;
-  }
-  if (existsSync(path.join(target, "index.d.ts"))) {
-    return `${specifier.replace(/\/$/u, "")}/index.js`;
-  }
-  throw new Error(
-    `Cannot resolve declaration import ${specifier} from ${filePath}`,
-  );
-}
+await runCommand(process.execPath, ["./scripts/bundle-declarations.mjs"], {
+  label: "build-js:types",
+});
 
 async function runCommandsInParallel(commands) {
   const running = commands.map(({ args, label }) =>
