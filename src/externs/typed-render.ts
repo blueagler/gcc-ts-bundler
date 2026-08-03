@@ -40,6 +40,7 @@ type ModuleSeed = {
   ambientModuleName?: string | undefined;
   declarationEntry: string;
   globalSurface?: string | undefined;
+  globalDeclarationFiles?: ReadonlySet<string> | undefined;
   selectedExports?: ReadonlySet<string> | undefined;
   specifier: string;
 };
@@ -120,7 +121,12 @@ export function renderTypedExternalDeclarations({
     );
     state.namespaces.add(namespace);
     const exportedSymbols = module.globalSurface
-      ? collectGlobalSurfaceExports(sourceFile, checker, module.selectedExports)
+      ? collectGlobalSurfaceExports(
+          sourceFile,
+          checker,
+          module.selectedExports,
+          module.globalDeclarationFiles,
+        )
       : moduleSymbol
         ? collectModuleExports(moduleSymbol, checker, module.selectedExports)
         : [];
@@ -194,6 +200,33 @@ export function renderTypedExternalDeclarations({
   };
 }
 
+export function renderTypedBoundaryDeclaration(
+  externText: string,
+  qualifiedName: string,
+  boundaryName: string,
+  declareVariable = true,
+) {
+  const referenceIndex = externText.indexOf(qualifiedName);
+  if (referenceIndex < 0) return [];
+  const commentIndex = externText.lastIndexOf("/**", referenceIndex);
+  const statementEnd = externText.indexOf(";", referenceIndex);
+  if (commentIndex < 0 || statementEnd < 0) return [];
+  const declaration = externText.slice(commentIndex, statementEnd + 1);
+  const replaced = declaration.replaceAll(qualifiedName, boundaryName);
+  if (!declareVariable) return [replaced];
+  const bareReference = `${boundaryName};`;
+  if (replaced.endsWith(bareReference)) {
+    return [`${replaced.slice(0, -bareReference.length)}var ${bareReference}`];
+  }
+  const commentEnd = replaced.lastIndexOf("*/");
+  const statementStart = commentEnd < 0 ? 0 : commentEnd + 2;
+  const statement = replaced.slice(statementStart).trimStart();
+  if (statement.startsWith(`${boundaryName} =`)) {
+    return [`${replaced.slice(0, statementStart)}\nvar ${statement}`];
+  }
+  return [replaced];
+}
+
 function findModuleSymbol(
   module: ModuleSeed,
   sourceFile: ts.SourceFile,
@@ -213,17 +246,18 @@ function collectGlobalSurfaceExports(
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
   selectedExports?: ReadonlySet<string>,
+  declarationFiles?: ReadonlySet<string>,
 ) {
-  const sourcePath = path.resolve(sourceFile.fileName);
+  const sourcePaths =
+    declarationFiles ?? new Set([path.resolve(sourceFile.fileName)]);
   const byName = new Map<string, ts.Symbol>();
   for (const symbol of checker.getSymbolsInScope(
     sourceFile,
     ts.SymbolFlags.Value | ts.SymbolFlags.Type | ts.SymbolFlags.Namespace,
   )) {
     if (
-      symbol.declarations?.some(
-        (declaration) =>
-          path.resolve(declaration.getSourceFile().fileName) === sourcePath,
+      symbol.declarations?.some((declaration) =>
+        sourcePaths.has(path.resolve(declaration.getSourceFile().fileName)),
       )
     ) {
       byName.set(symbol.getName(), symbol);
@@ -353,11 +387,9 @@ function emitClass(
       );
     }
   }
-  appendSignatureTags(lines, constructors, state, module, true);
-  lines.push(
-    " */",
-    `${name} = function(${renderFunctionParameterList(constructors)}) {};`,
-  );
+  const parameterNames = renderFunctionParameterNames(constructors);
+  appendSignatureTags(lines, constructors, parameterNames, state, module, true);
+  lines.push(" */", `${name} = function(${parameterNames.join(", ")}) {};`);
   state.lines.push(...lines);
 
   for (const declaration of declarations) {
@@ -466,11 +498,16 @@ function emitFunction(
       ...("typeParameters" in item ? (item.typeParameters ?? []) : []),
     ]),
   );
-  appendSignatureTags(lines, declarations, state, module, false);
-  lines.push(
-    " */",
-    `${name} = function(${renderFunctionParameterList(declarations)}) {};`,
+  const parameterNames = renderFunctionParameterNames(declarations);
+  appendSignatureTags(
+    lines,
+    declarations,
+    parameterNames,
+    state,
+    module,
+    false,
   );
+  lines.push(" */", `${name} = function(${parameterNames.join(", ")}) {};`);
   state.lines.push(...lines);
 }
 
@@ -527,10 +564,18 @@ function emitMember(
         ...("typeParameters" in item ? (item.typeParameters ?? []) : []),
       ]),
     );
-    appendSignatureTags(lines, declarations, state, module, false);
+    const parameterNames = renderFunctionParameterNames(declarations);
+    appendSignatureTags(
+      lines,
+      declarations,
+      parameterNames,
+      state,
+      module,
+      false,
+    );
     lines.push(
       " */",
-      `${propertyAccess(owner, name)} = function(${renderFunctionParameterList(declarations)}) {};`,
+      `${propertyAccess(owner, name)} = function(${parameterNames.join(", ")}) {};`,
     );
     state.lines.push(...lines);
     return;
@@ -562,23 +607,22 @@ function emitMember(
   );
 }
 
-function renderFunctionParameterList(
+function renderFunctionParameterNames(
   declarations: readonly ts.SignatureDeclaration[],
 ) {
   const maxParams = Math.max(
     0,
     ...declarations.map((item) => item.parameters.length),
   );
-  return Array.from({ length: maxParams }, (_, index) => {
-    const parameter = declarations.find((item) => item.parameters[index])
-      ?.parameters[index];
-    return parameter ? parameterName(parameter, index) : `param${index}`;
-  }).join(", ");
+  // Synthetic positional names cannot collide across overloads and cannot be
+  // JavaScript reserved words (including strict-mode `arguments` and `eval`).
+  return Array.from({ length: maxParams }, (_, index) => `param${index}`);
 }
 
 function appendSignatureTags(
   lines: string[],
   declarations: readonly ts.SignatureDeclaration[],
+  parameterNames: readonly string[],
   state: RenderState,
   module: ModuleSeed,
   constructor: boolean,
@@ -620,7 +664,7 @@ function appendSignatureTags(
         : "?";
     });
     lines.push(
-      ` * @param {${rest ? "..." : ""}${union(types)}${optional && !rest ? "=" : ""}} ${parameterName(first, index)}`,
+      ` * @param {${rest ? "..." : ""}${union(types)}${optional && !rest ? "=" : ""}} ${parameterNames[index] ?? `param${index}`}`,
     );
   }
   if (!constructor && signatures.length > 0) {
@@ -808,12 +852,6 @@ function appendTemplates(
     ...new Set(parameters.map((item) => sanitizeClosureName(item.name.text))),
   ].sort();
   if (names.length) lines.push(` * @template ${names.join(", ")}`);
-}
-
-function parameterName(parameter: ts.ParameterDeclaration, index: number) {
-  return ts.isIdentifier(parameter.name)
-    ? parameter.name.text
-    : `param${index}`;
 }
 
 function propertyName(name: ts.PropertyName | ts.BindingName | undefined) {

@@ -131,24 +131,27 @@ export function mergeRuntimeHazards(
 ): RuntimeRenameHazards {
   const merged = createEmptyRuntimeHazards();
   for (const hazards of hazardsList) {
-    for (const key of RUNTIME_HAZARD_KEYS) {
-      const target = merged[key];
-      for (const member of hazards[key]) target.add(member);
-    }
+    mergeHazardSet(
+      merged.constructedKeyFragments,
+      hazards.constructedKeyFragments,
+    );
+    mergeHazardSet(
+      merged.constructedKeyPrefixes,
+      hazards.constructedKeyPrefixes,
+    );
+    mergeHazardSet(merged.dotAccessed, hazards.dotAccessed);
+    mergeHazardSet(merged.dotDefined, hazards.dotDefined);
+    mergeHazardSet(merged.protocolMembers, hazards.protocolMembers);
+    mergeHazardSet(merged.selfReferentialKeys, hazards.selfReferentialKeys);
+    mergeHazardSet(merged.stringDefined, hazards.stringDefined);
+    mergeHazardSet(merged.stringLiteralRead, hazards.stringLiteralRead);
   }
   return merged;
 }
 
-export const RUNTIME_HAZARD_KEYS = [
-  "constructedKeyFragments",
-  "constructedKeyPrefixes",
-  "dotAccessed",
-  "dotDefined",
-  "protocolMembers",
-  "selfReferentialKeys",
-  "stringDefined",
-  "stringLiteralRead",
-] as const satisfies ReadonlyArray<keyof RuntimeRenameHazards>;
+function mergeHazardSet(target: Set<string>, source: ReadonlySet<string>) {
+  for (const member of source) target.add(member);
+}
 
 export async function analyzeRuntimeUsage(
   runtimeEntryFiles: string[],

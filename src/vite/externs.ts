@@ -12,10 +12,7 @@ import {
   analyzeRuntimeUsage,
   mergeRuntimeHazards,
 } from "../externs/runtime-analysis";
-import type {
-  RuntimeRenameHazards,
-  RUNTIME_HAZARD_KEYS,
-} from "../externs/runtime-analysis";
+import type { RuntimeRenameHazards } from "../externs/runtime-analysis";
 import {
   getStringLiteralMemberName,
   isRuntimeExternPropertyName,
@@ -38,10 +35,9 @@ export interface CompilerExternArtifacts {
   typedDeclarations: string[];
 }
 
-type CachedRuntimeHazards = Record<
-  (typeof RUNTIME_HAZARD_KEYS)[number],
-  string[]
->;
+type CachedRuntimeHazards = {
+  [Key in keyof RuntimeRenameHazards]: string[];
+};
 
 // v3: hazard payload split into evidence classes (see externs/render.ts).
 // v5: runtime hazards gained `constructedKeyFragments`.

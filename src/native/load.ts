@@ -1,6 +1,8 @@
+import type { PreservedImport } from "../build/types";
+import type { ClosureTypeMetadataFile } from "../build/transpile/closure-ir/types";
 import { toRecord } from "../shared/records";
 import { isRecord } from "../shared/validation";
-import nativeBinding from "./index";
+import { loadNativeBinding } from "./index";
 
 interface NativeEntryExportMetadata {
   exportNames: string[];
@@ -41,6 +43,7 @@ interface NativeChunkPlanChunkOutput {
   kind?: "base" | "entry" | "lazy" | "shared" | "vendor";
   lazyModuleIds?: string[];
   name: string;
+  outputName?: string;
 }
 
 interface NativeClosureCompileJob {
@@ -72,6 +75,10 @@ interface NativeGeneratedAsset {
 
 interface NativeGccExportsRewrite {
   code: string;
+  /** Structural `globalThis.GCC` member references, excluding string literals. */
+  gccReferenceCount: number;
+  matchedBootstrapCount: number;
+  matchedExportAssignmentCount: number;
   /** Fail-closed telemetry: export slots this rewrite actually converted. */
   rewrittenExportCount: number;
 }
@@ -206,14 +213,7 @@ export interface NativeEmittedTypeMetadata {
   hasTypeMetadata: boolean;
 }
 
-interface NativePreservedImportOutput {
-  boundaryExports: string[];
-  boundaryNames: string[];
-  externalSpecifier?: string | undefined;
-  importClause: string;
-  importerFilePath: string;
-  targetModuleId: string;
-}
+type NativePreservedImportOutput = PreservedImport;
 
 interface NativeTranspileOutput {
   emittedFiles: string[];
@@ -296,6 +296,7 @@ interface NativeBinding {
     preservedFilePaths: string[],
   ): NativeResolveGraphOutput;
   rewriteGccExports(code: string): NativeGccExportsRewrite;
+  stripTypescriptModule(filePath: string, source: string): string;
   transpileSources(
     fileNames: string[],
     explicitExternPaths: string[],
@@ -336,6 +337,7 @@ const NATIVE_BINDING_METHOD_FLAGS: Record<keyof NativeBinding, true> = {
   publishedOutputsMatch: true,
   resolveGraph: true,
   rewriteGccExports: true,
+  stripTypescriptModule: true,
   transpileSources: true,
   writeEntryShims: true,
 };
@@ -346,6 +348,7 @@ function loadBinding(): NativeBinding {
   if (cachedBinding) {
     return cachedBinding;
   }
+  const nativeBinding = loadNativeBinding();
   if (!isNativeBinding(nativeBinding)) {
     throw new TypeError("Loaded native addon has an invalid API surface.");
   }
@@ -435,6 +438,10 @@ export function rewriteGccExports(code: string) {
   return loadBinding().rewriteGccExports(code);
 }
 
+export function stripTypescriptModule(filePath: string, source: string) {
+  return loadBinding().stripTypescriptModule(filePath, source);
+}
+
 export function transpileSources(input: {
   chunkGraph: NativeTranspileChunkInput[];
   chunkMode: string;
@@ -444,6 +451,8 @@ export function transpileSources(input: {
   explicitExternPaths: string[];
   externsPath: string;
   fileNames: string[];
+  /** Type-only declaration of the JSON sidecar schema consumed by native serde. */
+  metadataFiles?: readonly ClosureTypeMetadataFile[] | undefined;
   metadataPath: string;
   outDir: string;
   target: string;

@@ -1,8 +1,7 @@
 import { spawn } from "node:child_process";
 
 await runCommandsInParallel([
-  [process.execPath, ["./scripts/build-native.mjs"]],
-  [process.execPath, ["./scripts/build-js.mjs"]],
+  [process.execPath, ["./scripts/build-self.mjs"]],
 ]);
 
 async function runCommandsInParallel(commands) {

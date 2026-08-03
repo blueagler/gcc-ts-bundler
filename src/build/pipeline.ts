@@ -21,6 +21,7 @@ import {
   fileContentSnapshotMatches,
   type FileContentSnapshot,
   filesExist,
+  type PublishedOutputSnapshot,
   publishedOutputsMatchSnapshot,
 } from "../shared/file-state";
 import { logInternalDetail, withInternalTiming } from "../shared/timing";
@@ -40,6 +41,7 @@ import {
 } from "../shared/validation";
 import { ensureParentDirectory } from "../shared/files";
 import { generateExterns } from "../externs";
+import { renderTypedBoundaryDeclaration } from "../externs/typed-render";
 import { writeEntryShims } from "../native/load";
 import { runClosureStage } from "./closure/run-closure";
 import { emitNativeStage } from "./transpile/emit";
@@ -70,7 +72,7 @@ interface FinalFastSnapshot {
   finalKey: string;
   optionsSignature: string;
   packageSignature: string;
-  publishedOutputs: Array<{ digest: string; name: string; size: number }>;
+  publishedOutputs: PublishedOutputSnapshot[];
   typeMetadataDependencies: FileContentSnapshot;
 }
 
@@ -189,6 +191,7 @@ export async function build(
       chunkPlan: resolved.chunkPlan,
       closureCompilerEnvironment: context.closureCompilerEnvironment,
       emittedOutDir: nativeEmitResult.outDir,
+      entryFiles: resolved.entryFiles,
       entryShebangs:
         context.options.target === "node"
           ? await collectEntryShebangs(resolved.entryFiles)
@@ -247,6 +250,10 @@ export async function build(
     );
     return successfulBuild(publishedResult.outputFiles, false);
   } catch (error) {
+    logInternalDetail(
+      "build:error",
+      error instanceof Error ? (error.stack ?? error.message) : String(error),
+    );
     return failedBuild([createBuildDiagnostic(error)]);
   } finally {
     if (staging) {
@@ -689,27 +696,6 @@ async function appendExternalTypedExterns(input: {
       "utf8",
     );
   }
-}
-
-function renderTypedBoundaryDeclaration(
-  externText: string,
-  qualifiedName: string,
-  boundaryName: string,
-  declareVariable = true,
-) {
-  const referenceIndex = externText.indexOf(qualifiedName);
-  if (referenceIndex < 0) return [];
-  const commentIndex = externText.lastIndexOf("/**", referenceIndex);
-  const statementEnd = externText.indexOf(";", referenceIndex);
-  if (commentIndex < 0 || statementEnd < 0) return [];
-  const declaration = externText.slice(commentIndex, statementEnd + 1);
-  const replaced = declaration.replaceAll(qualifiedName, boundaryName);
-  const bareReference = `${boundaryName};`;
-  return [
-    declareVariable && replaced.endsWith(bareReference)
-      ? `${replaced.slice(0, -bareReference.length)}var ${bareReference}`
-      : replaced,
-  ];
 }
 
 async function collectEntryShebangs(entries: ResolvedBuild["entryFiles"]) {

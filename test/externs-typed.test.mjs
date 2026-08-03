@@ -101,6 +101,62 @@ test.serial(
 );
 
 test.serial(
+  "typed extern signatures use parse-safe positional parameter names",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "node_modules/overloaded-runtime/package.json",
+      JSON.stringify({
+        exports: { ".": { types: "./index.d.ts", default: "./index.js" } },
+        name: "overloaded-runtime",
+        types: "./index.d.ts",
+      }),
+    );
+    await fixture.write("node_modules/overloaded-runtime/index.js", "export {};\n");
+    await fixture.write(
+      "node_modules/overloaded-runtime/index.d.ts",
+      [
+        "export declare function collide(value: string, callback: () => void): void;",
+        "export declare function collide(value: string, address: string, callback: () => void): void;",
+        "export declare function reserved(arguments: string, eval?: number): void;",
+        "",
+      ].join("\n"),
+    );
+    const result = await generateExterns({
+      mode: "boundary-aware",
+      modules: [{ runtime: "external", specifier: "overloaded-runtime" }],
+      projectRoot: fixture.projectRoot,
+    });
+    const typedFile = path.join(fixture.projectRoot, "typed.externs.js");
+    const inputFile = path.join(fixture.projectRoot, "closure-input.js");
+    const outputFile = path.join(fixture.projectRoot, "closure-output.js");
+    await fs.writeFile(typedFile, result.typedDeclarations.text);
+    await fs.writeFile(inputFile, "var value = 1;\n");
+
+    expect(result.typedDeclarations.text).toContain(
+      "function(param0, param1, param2)",
+    );
+    expect(result.typedDeclarations.text).toContain("function(param0, param1)");
+    expect(result.typedDeclarations.text).not.toMatch(
+      /function\([^)]*\b(?:arguments|eval)\b/u,
+    );
+    expect(
+      await runClosureCompiler({
+        compilationLevel: "SIMPLE",
+        env: "CUSTOM",
+        externs: [typedFile],
+        js: [inputFile],
+        jsOutputFile: outputFile,
+        jscompError: ["duplicate"],
+        languageIn: "UNSTABLE",
+        languageOut: "ECMASCRIPT_2020",
+        warningLevel: "VERBOSE",
+      }),
+    ).toBe(0);
+  },
+);
+
+test.serial(
   "external declaration translation produces split owner-qualified artifacts",
   async () => {
     const fixture = await createTypedExternFixture();

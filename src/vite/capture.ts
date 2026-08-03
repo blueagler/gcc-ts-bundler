@@ -2,7 +2,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 
 import ts from "@typescript/typescript6";
-import type { ResolvedConfig, transformWithEsbuild } from "vite";
+import { transformWithEsbuild, type ResolvedConfig } from "vite";
 
 import { hashJson } from "../shared/hash";
 import { applyTextEdits } from "../shared/text-edits";
@@ -15,10 +15,6 @@ import type {
 } from "./internal-types";
 
 const GCC_CAPTURE_DIR = ".gcc-ts-bundler-vite";
-
-type ViteEsbuildTransform = typeof transformWithEsbuild;
-
-let cachedViteEsbuildTransform: Promise<ViteEsbuildTransform> | null = null;
 
 export type CapturedModuleResolution = Awaited<
   ReturnType<PluginContext["resolve"]>
@@ -732,10 +728,5 @@ function isClassStaticBlockNode(node: ts.Node) {
 }
 
 async function loadViteEsbuildTransform() {
-  if (!cachedViteEsbuildTransform) {
-    cachedViteEsbuildTransform = import("vite").then(
-      (module) => module.transformWithEsbuild,
-    );
-  }
-  return cachedViteEsbuildTransform;
+  return transformWithEsbuild;
 }

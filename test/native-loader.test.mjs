@@ -65,14 +65,15 @@ async function createLinkedInstall(
     "node_modules",
     nativePackageName,
   );
-  await fs.mkdir(path.join(targetDir, "dist"), { recursive: true });
+  const sourceManifest = JSON.parse(
+    await fs.readFile(path.join(process.cwd(), "package.json"), "utf8"),
+  );
+  await fs.cp(path.join(process.cwd(), "dist"), path.join(targetDir, "dist"), {
+    recursive: true,
+  });
   if (installOptionalPackage) {
     await fs.mkdir(optionalPackageDir, { recursive: true });
   }
-  await fs.copyFile(
-    path.join(process.cwd(), "dist", "index.mjs"),
-    path.join(targetDir, "dist", "index.mjs"),
-  );
   if (installOptionalPackage) {
     await fs.copyFile(
       path.join(process.cwd(), "native", "index.node"),
@@ -103,9 +104,9 @@ async function createLinkedInstall(
   await fs.writeFile(
     path.join(targetDir, "package.json"),
     JSON.stringify({
-      exports: { ".": "./dist/index.mjs" },
-      name: "gcc-ts-bundler",
-      type: "module",
+      exports: { ".": sourceManifest.exports["."] },
+      name: sourceManifest.name,
+      type: sourceManifest.type,
     }),
   );
   if (installOptionalPackage) {

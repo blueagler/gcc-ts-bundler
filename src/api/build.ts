@@ -3,15 +3,11 @@ import { auditExternFiles, generateExterns } from "../externs";
 import { usage } from "../cli/usage";
 import { parseCliArgs } from "../cli/parse-options";
 import { parseExternsCliArgs } from "../cli/parse-externs-options";
-
-async function loadBuildPipeline() {
-  return import("../build/pipeline");
-}
+import * as pipeline from "../build/pipeline";
 
 export async function cleanCache(
   options: CleanCacheOptions = {},
 ): Promise<void> {
-  const pipeline = await loadBuildPipeline();
   return pipeline.cleanCache(options);
 }
 
@@ -24,7 +20,6 @@ export const build = async (options: BuildOptions): Promise<BuildResult> => {
   )) {
     console.warn(`gcc-ts-bundler: ${warning.message}`);
   }
-  const pipeline = await loadBuildPipeline();
   return pipeline.build(options);
 };
 export { generateExterns };

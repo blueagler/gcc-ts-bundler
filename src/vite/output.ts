@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import ts from "@typescript/typescript6";
-import type { ResolvedConfig } from "vite";
+import type { ChunkMetadata, ResolvedConfig } from "vite";
 
 import { applyTextEdits } from "../shared/text-edits";
 
@@ -142,18 +142,20 @@ export async function resolveViteAssetUrls(input: {
   };
 
   for (const file of filesWithPlaceholders) {
+    const viteMetadata: ChunkMetadata = {
+      __modules: {},
+      importedAssets: new Set<string>(),
+      importedCss: new Set<string>(),
+    };
+    const chunk: OutputChunk = {
+      ...templateChunk,
+      fileName: file.fileName,
+      viteMetadata,
+    };
     const rendered = await renderChunk.call(
       input.pluginContext,
       file.source,
-      {
-        ...templateChunk,
-        fileName: file.fileName,
-        viteMetadata: {
-          __modules: {},
-          importedAssets: new Set<string>(),
-          importedCss: new Set<string>(),
-        },
-      },
+      chunk,
       outputOptions,
       { chunks: {} },
     );

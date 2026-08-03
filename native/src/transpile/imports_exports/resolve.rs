@@ -43,7 +43,12 @@ pub(crate) fn resolve_module_id_for_specifier(
                 .iter()
                 .find(|alias| alias.packageName == package_name && alias.subpath == ".")
         })
-        .ok_or_else(|| format!("Failed to resolve package specifier {specifier:?}"))?;
+        .ok_or_else(|| {
+            format!(
+                "Failed to resolve package specifier {specifier:?} from {}",
+                file_path.display()
+            )
+        })?;
     Ok(to_goog_module_id(
         Path::new(&alias.targetPath),
         &context.workspace_dir,

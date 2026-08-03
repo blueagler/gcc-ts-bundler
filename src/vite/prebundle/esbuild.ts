@@ -1,6 +1,5 @@
 import { createRequire } from "node:module";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 
 import type {
   build as esbuildBuild,
@@ -25,14 +24,12 @@ async function loadEsbuildModule() {
   }
 
   cachedEsbuildModule = (async () => {
-    const require = createRequire(import.meta.url);
-    const vitePackagePath = require.resolve("vite/package.json");
-    const esbuildPath = require.resolve("esbuild", {
+    const requireFromVite = createRequire(import.meta.url);
+    const vitePackagePath = requireFromVite.resolve("vite/package.json");
+    const esbuildPath = requireFromVite.resolve("esbuild", {
       paths: [path.dirname(vitePackagePath)],
     });
-    const esbuildModule: unknown = await import(
-      pathToFileURL(esbuildPath).href
-    );
+    const esbuildModule: unknown = requireFromVite(esbuildPath);
     if (!isEsbuildModule(esbuildModule)) {
       throw new TypeError(`Invalid esbuild module loaded from ${esbuildPath}.`);
     }

@@ -90,11 +90,15 @@ export function scanNativeTypeAnalysisContext({
 }
 
 export function collectNativeTypeMetadataFromContext({
+  boundaryModuleFileNames,
   context,
+  externalSpecifiers,
   scan,
   targets,
 }: {
+  boundaryModuleFileNames?: string[] | undefined;
   context: NativeTypeAnalysisContext;
+  externalSpecifiers?: string[] | undefined;
   scan: NativeTypeAnalysisScanResult | undefined;
   targets?: TypeMetadataTarget[] | undefined;
 }) {
@@ -105,7 +109,9 @@ export function collectNativeTypeMetadataFromContext({
     `${closureIrScan.analyzedFileCount}/${closureIrScan.scannedFileCount}`,
   );
   const result = collectTypeMetadataFiles({
+    boundaryModuleFileNames,
     compilerOptions,
+    externalSpecifiers,
     fileNames,
     program,
     scan: closureIrScan,

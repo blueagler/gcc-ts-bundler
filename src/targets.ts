@@ -28,60 +28,92 @@ export interface TargetDescriptor {
   name: TargetName;
 }
 
-export const TARGET_DESCRIPTORS: Record<TargetName, TargetDescriptor> = {
-  browser: {
-    ambientDeclarationRoots: [],
-    builtinPolicy: "reject",
-    exportConditions: ["browser", "production", "import", "default"],
-    envelope: "browser",
-    name: "browser",
-  },
-  node: {
-    ambientDeclarationRoots: ["@types/node"],
-    builtinPolicy: "external-boundary",
-    exportConditions: ["node", "production", "import", "require", "default"],
-    envelope: "server",
-    name: "node",
-  },
-  bun: {
-    ambientDeclarationRoots: ["bun-types"],
-    builtinPolicy: "external-boundary",
-    exportConditions: [
-      "bun",
-      "node",
-      "production",
-      "import",
-      "require",
-      "default",
-    ],
-    envelope: "server",
-    name: "bun",
-  },
-  workerd: {
-    ambientDeclarationRoots: ["@cloudflare/workers-types"],
-    builtinPolicy: "reject",
-    exportConditions: [
-      "workerd",
-      "worker",
+export const TARGET_DESCRIPTORS: ReadonlyMap<TargetName, TargetDescriptor> =
+  new Map([
+    [
       "browser",
-      "production",
-      "import",
-      "default",
+      {
+        ambientDeclarationRoots: [],
+        builtinPolicy: "reject",
+        exportConditions: ["browser", "production", "import", "default"],
+        envelope: "browser",
+        name: "browser",
+      },
     ],
-    envelope: "worker",
-    name: "workerd",
-  },
-  webworker: {
-    ambientDeclarationRoots: ["lib.webworker"],
-    builtinPolicy: "reject",
-    exportConditions: ["worker", "browser", "production", "import", "default"],
-    envelope: "worker",
-    name: "webworker",
-  },
-};
+    [
+      "node",
+      {
+        ambientDeclarationRoots: ["@types/node"],
+        builtinPolicy: "external-boundary",
+        exportConditions: [
+          "node",
+          "production",
+          "import",
+          "require",
+          "default",
+        ],
+        envelope: "server",
+        name: "node",
+      },
+    ],
+    [
+      "bun",
+      {
+        ambientDeclarationRoots: ["bun-types"],
+        builtinPolicy: "external-boundary",
+        exportConditions: [
+          "bun",
+          "node",
+          "production",
+          "import",
+          "require",
+          "default",
+        ],
+        envelope: "server",
+        name: "bun",
+      },
+    ],
+    [
+      "workerd",
+      {
+        ambientDeclarationRoots: ["@cloudflare/workers-types"],
+        builtinPolicy: "reject",
+        exportConditions: [
+          "workerd",
+          "worker",
+          "browser",
+          "production",
+          "import",
+          "default",
+        ],
+        envelope: "worker",
+        name: "workerd",
+      },
+    ],
+    [
+      "webworker",
+      {
+        ambientDeclarationRoots: ["lib.webworker"],
+        builtinPolicy: "reject",
+        exportConditions: [
+          "worker",
+          "browser",
+          "production",
+          "import",
+          "default",
+        ],
+        envelope: "worker",
+        name: "webworker",
+      },
+    ],
+  ]);
 
 export function getTargetDescriptor(target: TargetName = "browser") {
-  return TARGET_DESCRIPTORS[target];
+  const descriptor = TARGET_DESCRIPTORS.get(target);
+  if (!descriptor) {
+    throw new TypeError(`Unknown build target ${JSON.stringify(target)}.`);
+  }
+  return descriptor;
 }
 
 export function targetCompilerOptions(

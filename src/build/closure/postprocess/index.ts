@@ -43,9 +43,13 @@ class PostprocessRuleReport {
     if (matched > 0) {
       return;
     }
-    this.#failures.push(
+    this.fail(
       `${rule} found its trigger in ${path.basename(outputPath)} but rewrote nothing`,
     );
+  }
+
+  fail(message: string) {
+    this.#failures.push(message);
   }
 }
 
@@ -71,6 +75,21 @@ function resolveBaseSpecifierRewrite({
     return null;
   }
   return { from: `"./${internalName}"`, to: `"./${publishedName}"` };
+}
+
+function resolveOffModeSpecifierRewrites(
+  current: ReturnType<typeof prepareClosureJobs>["postprocessActions"][number],
+  actions: ReturnType<typeof prepareClosureJobs>["postprocessActions"],
+) {
+  return actions.flatMap((target) => {
+    if (target.inputPath === current.inputPath) return [];
+    const from = `./${path.basename(target.inputPath)}`;
+    let to = path
+      .relative(path.dirname(current.outputPath), target.outputPath)
+      .replaceAll(path.sep, "/");
+    if (!to.startsWith(".")) to = `./${to}`;
+    return from === to ? [] : [{ from, to }];
+  });
 }
 
 function countOccurrences(haystack: string, needle: string) {
@@ -106,7 +125,7 @@ export async function runClosurePostprocess({
   const report = new PostprocessRuleReport();
   const inputContents = new Map<string, Promise<string>>();
 
-  await Promise.all(
+  const exportRewriteReports = await Promise.all(
     prepared.postprocessActions.map(async (action) => {
       await ensureParentDirectory(action.outputPath);
       // ES_MODULES output has no $gcc namespace and cannot be wrapped:
@@ -121,23 +140,49 @@ export async function runClosurePostprocess({
         !baseSpecifierRewrite
       ) {
         await fs.copyFile(action.inputPath, action.outputPath);
-        return;
+        return null;
       }
 
       let contents = await readCachedText(action.inputPath, inputContents);
+      let exportRewriteReport: {
+        gccReferenceCount: number;
+        matchedBootstrapCount: number;
+        matchedExportAssignmentCount: number;
+        outputPath: string;
+        rewrittenExportCount: number;
+      } | null = null;
       if (rewritesExports) {
-        const hasExportBag =
-          contents.includes("globalThis.GCC") ||
-          contents.includes('globalThis["GCC"]');
         const rewritten = rewriteGccExports(contents);
-        if (hasExportBag) {
-          report.expectMatch(
-            "gcc-exports",
-            action.outputPath,
-            rewritten.rewrittenExportCount,
+        exportRewriteReport = { ...rewritten, outputPath: action.outputPath };
+        const accountedReferences =
+          rewritten.matchedBootstrapCount +
+          rewritten.matchedExportAssignmentCount;
+        if (rewritten.gccReferenceCount !== accountedReferences) {
+          report.fail(
+            `gcc-exports found ${rewritten.gccReferenceCount - accountedReferences} unsupported structural GCC reference(s) in ${path.basename(action.outputPath)}`,
           );
         }
         contents = rewritten.code;
+      }
+      if (chunkMode === "off") {
+        for (const rewrite of resolveOffModeSpecifierRewrites(
+          action,
+          prepared.postprocessActions,
+        )) {
+          for (const quote of ['"', "'"]) {
+            const from = `${quote}${rewrite.from}${quote}`;
+            const to = `${quote}${rewrite.to}${quote}`;
+            const expected = countOccurrences(contents, from);
+            contents = contents.replaceAll(from, to);
+            if (expected > 0) {
+              report.expectMatch(
+                "off-mode-chunk-specifier",
+                action.outputPath,
+                countOccurrences(contents, to),
+              );
+            }
+          }
+        }
       }
       if (wrapBundlerRuntimeOutput) {
         contents = wrapBundlerRuntimeOutputFile(contents);
@@ -160,8 +205,24 @@ export async function runClosurePostprocess({
         }
       }
       await fs.writeFile(action.outputPath, contents);
+      return exportRewriteReport;
     }),
   );
 
+  const structurallyTriggered = exportRewriteReports.filter(
+    (item) => item && item.gccReferenceCount > 0,
+  );
+  const rewrittenExportCount = exportRewriteReports.reduce(
+    (count, item) => count + (item?.rewrittenExportCount ?? 0),
+    0,
+  );
+  const firstTriggered = structurallyTriggered[0];
+  if (firstTriggered) {
+    report.expectMatch(
+      "gcc-exports",
+      firstTriggered.outputPath,
+      rewrittenExportCount,
+    );
+  }
   report.assertAllRulesFired();
 }

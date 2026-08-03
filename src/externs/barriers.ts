@@ -132,7 +132,7 @@ export interface BarrierSource {
 }
 
 export interface BarrierAccounting {
-  byKind: Record<BarrierKind, number>;
+  byKind: ReadonlyMap<BarrierKind, number>;
   label: string;
   propertyNames: string[];
   /** `package -> declaration files scanned`, biggest first. */
@@ -142,12 +142,14 @@ export interface BarrierAccounting {
 
 export function accountBarriers(source: BarrierSource): BarrierAccounting {
   const barriers = collectBarrierNames(source.text);
-  const byKind: Record<BarrierKind, number> = {
-    flat: 0,
-    owner: 0,
-    record: 0,
-  };
-  for (const barrier of barriers) byKind[barrier.kind] += 1;
+  const byKind = new Map<BarrierKind, number>([
+    ["flat", 0],
+    ["owner", 0],
+    ["record", 0],
+  ]);
+  for (const barrier of barriers) {
+    byKind.set(barrier.kind, (byKind.get(barrier.kind) ?? 0) + 1);
+  }
   return {
     byKind,
     label: source.label,
@@ -170,8 +172,8 @@ export function formatBarrierWarning(
 ): string | null {
   if (accounting.total <= threshold) return null;
   const shape = (["flat", "owner", "record"] as const)
-    .filter((kind) => accounting.byKind[kind] > 0)
-    .map((kind) => `${kind}=${accounting.byKind[kind]}`)
+    .filter((kind) => (accounting.byKind.get(kind) ?? 0) > 0)
+    .map((kind) => `${kind}=${accounting.byKind.get(kind) ?? 0}`)
     .join(" ");
   const packages = accounting.topPackages
     .slice(0, 5)

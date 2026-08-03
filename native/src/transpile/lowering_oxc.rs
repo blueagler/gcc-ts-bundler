@@ -7,21 +7,188 @@
 use oxc_allocator::Allocator;
 use oxc_allocator::Vec as ArenaVec;
 use oxc_ast::ast::{
-    BinaryOperator, Declaration, Expression, Program, Statement, TSEnumMemberName,
-    TSModuleDeclarationBody, TSModuleDeclarationName, UnaryOperator, VariableDeclaration,
-    VariableDeclarationKind,
+    BinaryOperator, BindingIdentifier, Declaration, Expression, PrivateIdentifier, Program,
+    Statement, TSEnumMemberName, TSModuleDeclarationBody, TSModuleDeclarationName, UnaryOperator,
+    VariableDeclaration, VariableDeclarationKind,
 };
 #[cfg(test)]
+use oxc_ast::ast::{ObjectProperty, PropertyKey};
+#[cfg(test)]
+use oxc_ast_visit::walk;
+use oxc_ast_visit::{Visit, VisitMut};
 use oxc_codegen::Codegen;
-#[cfg(test)]
 use oxc_semantic::SemanticBuilder;
-#[cfg(test)]
-use oxc_span::SourceType;
-use oxc_transformer::{JsxOptions, JsxRuntime, TransformOptions, Transformer};
+use oxc_span::{GetSpan, SourceType, Span};
+use oxc_transformer::{
+    ClassPropertiesOptions, Helper, HelperLoaderMode, JsxOptions, JsxRuntime, TransformOptions,
+    Transformer,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::identity_oxc::ModuleIdentity;
+
+const PRIVATE_CLASS_HELPERS: &str = r#"
+const babelHelpers = (function () {
+  function babelTypeof(value) {
+    return babelTypeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol"
+      ? function (value) { return typeof value; }
+      : function (value) {
+          return value && typeof Symbol === "function" && value.constructor === Symbol && value !== Symbol.prototype
+            ? "symbol"
+            : typeof value;
+        }, babelTypeof(value);
+  }
+  function toPrimitive(value, hint) {
+    if (babelTypeof(value) !== "object" || !value) return value;
+    const exotic = value[Symbol.toPrimitive];
+    if (exotic !== undefined) {
+      const result = exotic.call(value, hint || "default");
+      if (babelTypeof(result) !== "object") return result;
+      throw new TypeError("@@toPrimitive must return a primitive value.");
+    }
+    return (hint === "string" ? String : Number)(value);
+  }
+  function toPropertyKey(value) {
+    const key = toPrimitive(value, "string");
+    return babelTypeof(key) === "symbol" ? key : key + "";
+  }
+  function defineProperty(object, key, value) {
+    key = toPropertyKey(key);
+    if (key in object) {
+      Object.defineProperty(object, key, {
+        value,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    } else {
+      object[key] = value;
+    }
+    return object;
+  }
+  function checkPrivateRedeclaration(receiver, collection) {
+    if (collection.has(receiver)) {
+      throw new TypeError("Cannot initialize the same private elements twice on an object");
+    }
+  }
+  function classPrivateFieldInitSpec(receiver, state, value) {
+    checkPrivateRedeclaration(receiver, state);
+    state.set(receiver, value);
+  }
+  function classPrivateMethodInitSpec(receiver, brand) {
+    checkPrivateRedeclaration(receiver, brand);
+    brand.add(receiver);
+  }
+  function assertClassBrand(brand, receiver, value) {
+    if (typeof brand === "function" ? brand === receiver : brand.has(receiver)) {
+      return arguments.length < 3 ? receiver : value;
+    }
+    throw new TypeError("Private element is not present on this object");
+  }
+  function classPrivateFieldGet2(state, receiver) {
+    return state.get(assertClassBrand(state, receiver));
+  }
+  function classPrivateFieldSet2(state, receiver, value) {
+    state.set(assertClassBrand(state, receiver), value);
+    return value;
+  }
+  function toSetter(callback, args, receiver) {
+    args || (args = []);
+    const index = args.length++;
+    return Object.defineProperty({}, "_", {
+      set(value) {
+        args[index] = value;
+        callback.apply(receiver, args);
+      },
+    });
+  }
+  function readOnlyError(name) {
+    throw new TypeError('"' + name + '" is read-only');
+  }
+  function writeOnlyError(name) {
+    throw new TypeError('"' + name + '" is write-only');
+  }
+  function checkInRHS(value) {
+    if (Object(value) !== value) {
+      throw new TypeError("right-hand side of 'in' should be an object, got " + (value !== null ? babelTypeof(value) : "null"));
+    }
+    return value;
+  }
+  function getPrototypeOf(value) {
+    return getPrototypeOf = Object.setPrototypeOf
+      ? Object.getPrototypeOf.bind()
+      : function (value) { return value.__proto__ || Object.getPrototypeOf(value); }, getPrototypeOf(value);
+  }
+  function superPropBase(target, property) {
+    while (!Object.prototype.hasOwnProperty.call(target, property) && (target = getPrototypeOf(target)) !== null) {}
+    return target;
+  }
+  function get(target, property, receiver) {
+    return get = typeof Reflect !== "undefined" && Reflect.get
+      ? Reflect.get.bind()
+      : function (target, property, receiver) {
+          const base = superPropBase(target, property);
+          if (base) {
+            const descriptor = Object.getOwnPropertyDescriptor(base, property);
+            return descriptor.get ? descriptor.get.call(arguments.length < 3 ? target : receiver) : descriptor.value;
+          }
+        }, get(target, property, receiver);
+  }
+  function setProperty(target, property, value, receiver) {
+    return setProperty = typeof Reflect !== "undefined" && Reflect.set
+      ? Reflect.set
+      : function (target, property, value, receiver) {
+          let descriptor;
+          const base = superPropBase(target, property);
+          if (base) {
+            descriptor = Object.getOwnPropertyDescriptor(base, property);
+            if (descriptor.set) return descriptor.set.call(receiver, value), true;
+            if (!descriptor.writable) return false;
+          }
+          descriptor = Object.getOwnPropertyDescriptor(receiver, property);
+          if (descriptor) {
+            if (!descriptor.writable) return false;
+            descriptor.value = value;
+            Object.defineProperty(receiver, property, descriptor);
+          } else {
+            defineProperty(receiver, property, value);
+          }
+          return true;
+        }, setProperty(target, property, value, receiver);
+  }
+  function set(target, property, value, receiver, strict) {
+    if (!setProperty(target, property, value, receiver || target) && strict) {
+      throw new TypeError("failed to set property");
+    }
+    return value;
+  }
+  function superPropGet(target, property, receiver, flags) {
+    const value = get(getPrototypeOf(flags & 1 ? target.prototype : target), property, receiver);
+    return flags & 2 && typeof value === "function"
+      ? function (args) { return value.apply(receiver, args); }
+      : value;
+  }
+  function superPropSet(target, property, value, receiver, strict, isProto) {
+    return set(getPrototypeOf(isProto ? target.prototype : target), property, value, receiver, strict);
+  }
+  return {
+    assertClassBrand,
+    checkInRHS,
+    classPrivateFieldGet2,
+    classPrivateFieldInitSpec,
+    classPrivateFieldSet2,
+    classPrivateMethodInitSpec,
+    defineProperty,
+    readOnlyError,
+    superPropGet,
+    superPropSet,
+    toPropertyKey,
+    toSetter,
+    writeOnlyError,
+  };
+})();
+"#;
 
 #[cfg(test)]
 pub(crate) fn transform_program<'a>(
@@ -32,6 +199,235 @@ pub(crate) fn transform_program<'a>(
     run_jsx: bool,
 ) -> Result<ModuleIdentity, String> {
     transform_program_with_enum_values(allocator, path, program, scoping, run_jsx, HashMap::new())
+}
+
+pub(crate) fn strip_typescript_module(path: &Path, source: &str) -> Result<String, String> {
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path)
+        .map_err(|error| error.to_string())?
+        .with_module(true);
+    if !source_type.is_typescript() || source_type.is_jsx() {
+        return Err(format!(
+            "Preserved type stripping requires a non-JSX TypeScript module: {}",
+            path.display()
+        ));
+    }
+    let source = rewrite_preserved_module_specifiers(path, source, source_type)?;
+    let parsed = oxc_parser::Parser::new(&allocator, &source, source_type).parse();
+    if !parsed.diagnostics.is_empty() {
+        return Err(parsed
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {diagnostic}", path.display()))
+            .collect::<Vec<_>>()
+            .join("\n"));
+    }
+    let mut program = parsed.program;
+    let semantic = SemanticBuilder::new()
+        .with_build_nodes(true)
+        .with_enum_eval(true)
+        .build(&program);
+    if !semantic.diagnostics.is_empty() {
+        return Err(semantic
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {diagnostic}", path.display()))
+            .collect::<Vec<_>>()
+            .join("\n"));
+    }
+    let options = TransformOptions::default();
+    let result = Transformer::new(&allocator, path, &options)
+        .build_with_scoping(semantic.semantic.into_scoping(), &mut program);
+    if !result.diagnostics.is_empty() {
+        return Err(result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {diagnostic}", path.display()))
+            .collect::<Vec<_>>()
+            .join("\n"));
+    }
+    Ok(Codegen::new().build(&program).code)
+}
+
+fn rewrite_preserved_module_specifiers(
+    path: &Path,
+    source: &str,
+    source_type: SourceType,
+) -> Result<String, String> {
+    let allocator = Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
+    if !parsed.diagnostics.is_empty() {
+        return Err(parsed
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {diagnostic}", path.display()))
+            .collect::<Vec<_>>()
+            .join("\n"));
+    }
+    let mut edits = Vec::<(usize, usize, String)>::new();
+    for statement in &parsed.program.body {
+        let literal = match statement {
+            Statement::ImportDeclaration(import) => Some(&import.source),
+            Statement::ExportAllDeclaration(export) => Some(&export.source),
+            Statement::ExportNamedDeclaration(export) => export.source.as_ref(),
+            _ => None,
+        };
+        let Some(literal) = literal else {
+            continue;
+        };
+        let Some(specifier) = preserved_output_specifier(path, literal.value.as_str()) else {
+            continue;
+        };
+        let span = literal.span();
+        edits.push((
+            span.start as usize,
+            span.end as usize,
+            format!("{specifier:?}"),
+        ));
+    }
+    let mut output = source.to_string();
+    edits.sort_by_key(|(start, _, _)| *start);
+    for (start, end, replacement) in edits.into_iter().rev() {
+        output.replace_range(start..end, &replacement);
+    }
+    Ok(output)
+}
+
+fn preserved_output_specifier(path: &Path, specifier: &str) -> Option<String> {
+    if !specifier.starts_with('.') {
+        return None;
+    }
+    let extension = Path::new(specifier)
+        .extension()
+        .and_then(|value| value.to_str());
+    if matches!(extension, Some("ts" | "tsx" | "mts" | "cts")) {
+        let stem = specifier.rsplit_once('.')?.0;
+        return Some(format!("{stem}.js"));
+    }
+    if extension.is_some() {
+        return None;
+    }
+    let target = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(specifier);
+    for extension in ["ts", "tsx", "mts", "cts", "js", "mjs", "cjs"] {
+        if target.with_extension(extension).is_file() {
+            return Some(format!("{specifier}.js"));
+        }
+    }
+    for extension in ["ts", "tsx", "mts", "cts", "js", "mjs", "cjs"] {
+        if target.join(format!("index.{extension}")).is_file() {
+            return Some(format!("{}/index.js", specifier.trim_end_matches('/')));
+        }
+    }
+    None
+}
+
+struct SynthesizedSpanOffset {
+    offset: u32,
+}
+
+impl<'a> VisitMut<'a> for SynthesizedSpanOffset {
+    fn visit_span(&mut self, span: &mut Span) {
+        span.start = span.start.saturating_add(self.offset);
+        span.end = span.end.saturating_add(self.offset);
+    }
+}
+
+#[derive(Default)]
+struct PrivateElementDetector {
+    found: bool,
+    has_babel_helpers_binding: bool,
+}
+
+impl<'a> Visit<'a> for PrivateElementDetector {
+    fn visit_private_identifier(&mut self, _identifier: &PrivateIdentifier<'a>) {
+        self.found = true;
+    }
+
+    fn visit_binding_identifier(&mut self, identifier: &BindingIdentifier<'a>) {
+        if identifier.name == "babelHelpers" {
+            self.has_babel_helpers_binding = true;
+        }
+    }
+}
+
+fn prepare_private_class_lowering<'a>(
+    allocator: &'a Allocator,
+    path: &Path,
+    program: &mut Program<'a>,
+    scoping: oxc_semantic::Scoping,
+) -> Result<(bool, oxc_semantic::Scoping), String> {
+    let mut detector = PrivateElementDetector::default();
+    detector.visit_program(program);
+    if !detector.found {
+        return Ok((false, scoping));
+    }
+    if detector.has_babel_helpers_binding {
+        return Err(format!(
+            "Private class element lowering cannot safely inject its Oxc helper binding because {} already declares babelHelpers",
+            path.display()
+        ));
+    }
+
+    let source_type = SourceType::from_path(Path::new("gcc-private-class-helpers.js"))
+        .map_err(|error| error.to_string())?
+        .with_module(true);
+    let mut parsed = oxc_parser::Parser::new(allocator, PRIVATE_CLASS_HELPERS, source_type).parse();
+    if !parsed.diagnostics.is_empty() {
+        return Err(parsed
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("private class helper runtime: {diagnostic}"))
+            .collect::<Vec<_>>()
+            .join("\n"));
+    }
+    // Exact-span metadata addresses the authored source. Keep synthesized helper
+    // spans outside that range so an unrelated authored property at the same
+    // byte offset cannot accidentally quote a helper-runtime object key.
+    SynthesizedSpanOffset {
+        offset: program.span.end.saturating_add(1),
+    }
+    .visit_program(&mut parsed.program);
+
+    let original_body = std::mem::replace(&mut program.body, ArenaVec::new_in(&allocator));
+    let mut body = parsed.program.body;
+    body.extend(original_body);
+    program.body = body;
+
+    let semantic = SemanticBuilder::new()
+        .with_build_nodes(true)
+        .with_enum_eval(true)
+        .build(program);
+    if !semantic.diagnostics.is_empty() {
+        return Err(semantic
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {diagnostic}", path.display()))
+            .collect::<Vec<_>>()
+            .join("\n"));
+    }
+    Ok((true, semantic.semantic.into_scoping()))
+}
+
+fn supports_private_class_helper(helper: Helper) -> bool {
+    matches!(
+        helper,
+        Helper::AssertClassBrand
+            | Helper::CheckInRHS
+            | Helper::ClassPrivateFieldGet2
+            | Helper::ClassPrivateFieldInitSpec
+            | Helper::ClassPrivateFieldSet2
+            | Helper::ClassPrivateMethodInitSpec
+            | Helper::DefineProperty
+            | Helper::ReadOnlyError
+            | Helper::SuperPropGet
+            | Helper::SuperPropSet
+            | Helper::ToPropertyKey
+            | Helper::ToSetter
+            | Helper::WriteOnlyError
+    )
 }
 
 pub(crate) fn transform_program_with_enum_values<'a>(
@@ -48,7 +444,14 @@ pub(crate) fn transform_program_with_enum_values<'a>(
     for (name, members) in &const_enum_values {
         enum_values.insert(name.clone(), members.clone());
     }
+    let (lower_private_classes, scoping) =
+        prepare_private_class_lowering(allocator, path, program, scoping)?;
     let mut options = TransformOptions::default();
+    if lower_private_classes {
+        options.env.es2022.class_properties = Some(ClassPropertiesOptions::default());
+        options.env.es2022.class_static_block = true;
+        options.helper_loader.mode = HelperLoaderMode::External;
+    }
     if run_jsx {
         options.jsx = JsxOptions {
             runtime: JsxRuntime::Classic,
@@ -64,6 +467,23 @@ pub(crate) fn transform_program_with_enum_values<'a>(
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n"));
+    }
+    if lower_private_classes {
+        #[allow(deprecated)]
+        let unsupported_helpers = result
+            .helpers_used
+            .keys()
+            .copied()
+            .filter(|helper| !supports_private_class_helper(*helper))
+            .map(|helper| helper.name())
+            .collect::<Vec<_>>();
+        if !unsupported_helpers.is_empty() {
+            return Err(format!(
+                "Private class element lowering requested unsupported Oxc helpers in {}: {}",
+                path.display(),
+                unsupported_helpers.join(", ")
+            ));
+        }
     }
     force_var_for_lowered_declarations(program, &lowered_names);
     if !enum_values.is_empty() {
@@ -404,6 +824,66 @@ mod what_oxc_gets_wrong {
     fn jsx_classic_production_is_what_we_asked_for() {
         let code = lower("m.tsx", "export const view = <div id=\"a\">hi</div>;\n");
         assert!(code.contains("React.createElement"), "{code}");
+    }
+
+    #[test]
+    fn synthesized_private_helper_spans_do_not_overlap_authored_source() {
+        struct HelperObjectKeySpans(Vec<u32>);
+
+        impl<'a> Visit<'a> for HelperObjectKeySpans {
+            fn visit_object_property(&mut self, property: &ObjectProperty<'a>) {
+                if let PropertyKey::StaticIdentifier(identifier) = &property.key {
+                    if identifier.name == "classPrivateFieldInitSpec" {
+                        self.0.push(identifier.span.start);
+                    }
+                }
+                walk::walk_object_property(self, property);
+            }
+        }
+
+        let source = "class Box { #value = 1; }";
+        let allocator = Allocator::default();
+        let source_type = SourceType::from_path(Path::new("box.ts"))
+            .unwrap()
+            .with_module(true);
+        let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let mut program = parsed.program;
+        let scoping = SemanticBuilder::new()
+            .with_build_nodes(true)
+            .with_enum_eval(true)
+            .build(&program)
+            .semantic
+            .into_scoping();
+        let (enabled, _) =
+            prepare_private_class_lowering(&allocator, Path::new("box.ts"), &mut program, scoping)
+                .unwrap();
+        assert!(enabled);
+        let mut spans = HelperObjectKeySpans(Vec::new());
+        spans.visit_program(&program);
+        assert!(!spans.0.is_empty());
+        assert!(
+            spans.0.iter().all(|start| *start > source.len() as u32),
+            "helper spans overlapped authored source: {:?}",
+            spans.0
+        );
+    }
+
+    #[test]
+    fn private_class_elements_use_spec_helpers_only_when_present() {
+        let code = lower(
+            "m.ts",
+            "class Box { #value = 1; static #scale = 2; #read() { return this.#value; } static has(value: object) { return #value in value; } value() { return this.#read() + Box.#scale; } } export const box = new Box();\n",
+        );
+        assert!(!code.contains("#value"), "{code}");
+        assert!(!code.contains("#read"), "{code}");
+        assert!(code.contains("new WeakMap"), "{code}");
+        assert!(code.contains("new WeakSet"), "{code}");
+        assert!(code.contains("babelHelpers"), "{code}");
+
+        let ordinary = lower("plain.ts", "export class Box { value = 1; }\n");
+        assert!(!ordinary.contains("babelHelpers"), "{ordinary}");
+        assert!(ordinary.contains("value = 1"), "{ordinary}");
     }
 
     /// Namespace lowering shape, for the OX-A end-to-end namespace test.

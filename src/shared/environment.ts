@@ -1,5 +1,8 @@
+export type EnvironmentOverrides = NodeJS.ProcessEnv &
+  Readonly<Record<string, string>>;
+
 export async function withEnvironment<Result>(
-  values: Readonly<Record<string, string>>,
+  values: EnvironmentOverrides,
   run: () => Promise<Result>,
 ): Promise<Result> {
   const previous = new Map<string, string | undefined>();

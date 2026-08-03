@@ -11,7 +11,10 @@ import {
 } from "../build/resolve/options";
 import type { BuildOptions, LanguageOut } from "../api/types";
 import type { InternalBuildOptions } from "../build/types";
-import { withEnvironment } from "../shared/environment";
+import {
+  type EnvironmentOverrides,
+  withEnvironment,
+} from "../shared/environment";
 import { collectOutputChunkStats } from "../shared/lifecycle-size";
 import { logInternalDetail, logInternalTiming } from "../shared/timing";
 import {
@@ -542,12 +545,12 @@ async function compileViteGraph(
     ...compilerOptions,
     cssRuntime: ownershipNeedsCssRuntime(prepared.cssOwnership),
   };
-  const result = await withEnvironment(
-    {
-      GCC_VITE_AUTHORED_FILES_FILE: authoredFilesFilePath,
-      GCC_VITE_RUNTIME_SOURCE_MAP_FILE: runtimeModuleSourceMapFilePath,
-    },
-    () => build(buildOptions),
+  const buildEnvironment: EnvironmentOverrides = {
+    GCC_VITE_AUTHORED_FILES_FILE: authoredFilesFilePath,
+    GCC_VITE_RUNTIME_SOURCE_MAP_FILE: runtimeModuleSourceMapFilePath,
+  };
+  const result = await withEnvironment(buildEnvironment, () =>
+    build(buildOptions),
   );
   if (!result.ok) {
     this.error(

@@ -874,6 +874,99 @@ fn resolves_js_specifier_to_ts_source() {
 }
 
 #[test]
+fn colliding_chunk_names_receive_deterministic_entry_identity_suffixes() {
+    let base_names = vec!["index".to_string(), "index".to_string()];
+    let assigned = assign_chunk_names(
+        base_names.clone(),
+        vec!["index.ts".to_string(), "vite/index.ts".to_string()],
+    )
+    .expect("colliding names should be disambiguated");
+    let assigned_with_windows_separator = assign_chunk_names(
+        base_names,
+        vec!["index.ts".to_string(), "vite\\index.ts".to_string()],
+    )
+    .expect("path separators should not affect chunk identity");
+
+    assert_eq!(assigned, assigned_with_windows_separator);
+    assert_ne!(assigned[0], assigned[1]);
+    assert!(assigned.iter().all(|name| name.starts_with("index-")));
+}
+
+#[test]
+fn non_colliding_chunk_names_are_byte_stable() {
+    let assigned = assign_chunk_names(
+        vec!["main".to_string(), "panel".to_string()],
+        vec!["src/main.ts".to_string(), "src/panel.ts".to_string()],
+    )
+    .expect("distinct names should remain valid");
+
+    assert_eq!(assigned, vec!["main".to_string(), "panel".to_string()]);
+}
+
+#[test]
+fn off_mode_chunk_plan_disambiguates_colliding_output_basenames() {
+    let plan = || {
+        plan_chunks(
+            "off".to_string(),
+            "ignored".to_string(),
+            "/workspace".to_string(),
+            vec![
+                ChunkPlanEntryInput {
+                    chunkName: "index-mjs".to_string(),
+                    outputName: "index.mjs".to_string(),
+                    sourcePath: "/workspace/src/index.ts".to_string(),
+                },
+                ChunkPlanEntryInput {
+                    chunkName: "vite-index-mjs".to_string(),
+                    outputName: "vite/index.mjs".to_string(),
+                    sourcePath: "/workspace/src/vite/index.ts".to_string(),
+                },
+            ],
+            vec![
+                DependencyGraphEntry {
+                    filePath: "/workspace/entries/index-mjs.ts".to_string(),
+                    dependencies: vec!["/workspace/src/index.ts".to_string()],
+                },
+                DependencyGraphEntry {
+                    filePath: "/workspace/entries/vite-index-mjs.ts".to_string(),
+                    dependencies: vec!["/workspace/src/vite/index.ts".to_string()],
+                },
+                DependencyGraphEntry {
+                    filePath: "/workspace/src/index.ts".to_string(),
+                    dependencies: vec![],
+                },
+                DependencyGraphEntry {
+                    filePath: "/workspace/src/vite/index.ts".to_string(),
+                    dependencies: vec![],
+                },
+            ],
+            vec![],
+            vec![
+                "/workspace/entries/index-mjs.ts".to_string(),
+                "/workspace/entries/vite-index-mjs.ts".to_string(),
+            ],
+            false,
+        )
+        .expect("colliding output basenames should be planned")
+    };
+    let first = plan();
+    let second = plan();
+    let first_names = first
+        .iter()
+        .map(|chunk| chunk.name.clone())
+        .collect::<Vec<_>>();
+    let second_names = second
+        .iter()
+        .map(|chunk| chunk.name.clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(first_names, second_names);
+    assert_eq!(first_names.len(), 2);
+    assert_ne!(first_names[0], first_names[1]);
+    assert!(first_names.iter().all(|name| name.starts_with("index-")));
+}
+
+#[test]
 fn plans_bundler_runtime_chunks_in_native_graph_layer() {
     let result = plan_chunks(
         "bundler-runtime".to_string(),
@@ -974,7 +1067,9 @@ fn plans_off_mode_chunks_in_native_graph_layer() {
 
     assert_eq!(result.len(), 3);
     assert_eq!(result[0].name, "shared");
+    assert_eq!(result[1].name, "first");
     assert_eq!(result[1].dependencies, vec!["shared"]);
+    assert_eq!(result[2].name, "second");
     assert_eq!(result[2].dependencies, vec!["shared"]);
 }
 

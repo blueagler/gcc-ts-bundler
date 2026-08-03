@@ -55,7 +55,7 @@ function getTargetKey() {
   return `${process.platform}-${process.arch}`;
 }
 
-function loadNativeBinding(): unknown {
+export function loadNativeBinding(): unknown {
   const targetKey = getTargetKey();
   const packageName = SUPPORTED_TARGETS.get(targetKey);
   const loadErrors: string[] = [];
@@ -98,5 +98,3 @@ function loadNativeBinding(): unknown {
     `No native binding available for ${targetKey}. Supported targets: ${supportedTargets}.${details}`,
   );
 }
-
-export default loadNativeBinding();

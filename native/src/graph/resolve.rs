@@ -56,42 +56,34 @@ pub(super) fn resolve_graph_impl(
 
         let normalized_current = normalize_path(&current_file).to_string_lossy().to_string();
         let authored_preserved = context.preserved_file_paths.contains(&normalized_current);
-        let commonjs_analysis = if authored_preserved {
-            CommonJsAnalysis::default()
-        } else {
-            analyze_commonjs_source(&current_file, &contents)?
-        };
-        if commonjs_analysis.has_commonjs {
-            validate_commonjs_usage(&current_file, &commonjs_analysis, &context)?;
-        }
+        let commonjs_analysis = analyze_commonjs_source(&current_file, &contents)?;
         commonjs_cache.insert(current_file.clone(), commonjs_analysis.clone());
 
-        // Explicitly preserved files ship byte-for-byte, so dynamic import and
-        // require are runtime-owned. They are still parsed for static ESM edges.
+        // Preserved classification happens after the complete static graph is
+        // known. Scan ESM edges even when a createRequire() binding looks like
+        // CommonJS so a preserved seed can promote its dependency closure
+        // before CommonJS validation is applied to the remaining modules.
         let scan_allocator = Allocator::default();
-        let (specifiers, lazy_specifiers) = if commonjs_analysis.has_commonjs {
-            (commonjs_analysis.dependencies.clone(), Vec::new())
+        let scanned = parse_scanned_module(&scan_allocator, &current_file, &contents)?;
+        if authored_preserved || has_top_level_await(&scanned) {
+            top_level_await_modules.insert(current_file.to_string_lossy().to_string());
+        }
+        for specifier in collect_export_source_specifiers(&scanned) {
+            if is_external_boundary_specifier(&specifier, &context) {
+                return Err(format!(
+                    "Export-from external module {specifier:?} is unsupported in this phase ({})",
+                    current_file.display()
+                ));
+            }
+        }
+        let mut specifiers = extract_dependencies(&scanned);
+        specifiers.extend(commonjs_analysis.dependencies.clone());
+        specifiers.sort();
+        specifiers.dedup();
+        let lazy_specifiers = if authored_preserved {
+            Vec::new()
         } else {
-            let scanned = parse_scanned_module(&scan_allocator, &current_file, &contents)?;
-            if authored_preserved || has_top_level_await(&scanned) {
-                top_level_await_modules.insert(current_file.to_string_lossy().to_string());
-            }
-            for specifier in collect_export_source_specifiers(&scanned) {
-                if is_external_boundary_specifier(&specifier, &context) {
-                    return Err(format!(
-                        "Export-from external module {specifier:?} is unsupported in this phase ({})",
-                        current_file.display()
-                    ));
-                }
-            }
-            (
-                extract_dependencies(&scanned),
-                if authored_preserved {
-                    Vec::new()
-                } else {
-                    collect_dynamic_import_specifiers(&scanned)?
-                },
-            )
+            collect_dynamic_import_specifiers(&scanned)?
         };
 
         let mut dependencies = BTreeSet::new();
@@ -195,6 +187,16 @@ pub(super) fn resolve_graph_impl(
     }
 
     let preserved_file_paths = classify_preserved_modules(&graph, &top_level_await_modules)?;
+    for (file_path, analysis) in &commonjs_cache {
+        if analysis.has_commonjs
+            && !preserved_file_paths.contains(&file_path.to_string_lossy().to_string())
+        {
+            validate_commonjs_usage(file_path, analysis, &context)?;
+        }
+    }
+    for file_path in &preserved_file_paths {
+        commonjs_cache.insert(PathBuf::from(file_path), CommonJsAnalysis::default());
+    }
     if let Some(lazy_import) = lazy_imports
         .values()
         .find(|lazy_import| preserved_file_paths.contains(&lazy_import.targetPath))

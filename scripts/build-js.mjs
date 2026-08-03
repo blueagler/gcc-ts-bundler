@@ -52,7 +52,7 @@ await runCommandsInParallel([
       "--packages",
       "external",
       "--banner",
-      "#!/usr/bin/env node\nconst __gcc_current_module_url = import.meta.url;",
+      "const __gcc_current_module_url = import.meta.url;",
       "--entry-naming",
       "gcc-ts-bundler.mjs",
       "--target",

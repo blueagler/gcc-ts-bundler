@@ -26,6 +26,10 @@ pub struct ClosureFileMetadata {
     pub diagnostics: Vec<TypeMetadataDiagnostic>,
     #[serde(default)]
     pub enums: Vec<ClosureEnumDeclaration>,
+    /// UTF-8 byte offsets of property names whose receiver type originates from
+    /// a runtime external declaration module.
+    #[serde(default)]
+    pub external_owned_member_accesses: Vec<u32>,
     /// Const enums TypeScript erases. Only the names travel: the declaration is
     /// dropped and nothing is emitted in its place.
     #[allow(dead_code)]

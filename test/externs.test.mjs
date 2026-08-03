@@ -8,6 +8,7 @@ import { build, generateExterns } from "../dist/index.mjs";
 // is meaningful before dist is rebuilt; the tests above validate the built
 // artifact and need `bun run build:js` to see rule changes.
 import { generateExterns as generateExternsFromSource } from "../src/api/build.ts";
+import { mergeRuntimeHazards } from "../src/externs/runtime-analysis.ts";
 import {
   createFixture,
   createExternFixture,
@@ -16,6 +17,33 @@ import {
   findFilesNamed,
   getProjectCacheDir,
 } from "./helpers.mjs";
+
+test("mergeRuntimeHazards merges every hazard set without runtime string indexing", () => {
+  const first = {
+    constructedKeyFragments: new Set(["fragment-a"]),
+    constructedKeyPrefixes: new Set(["prefix-a"]),
+    dotAccessed: new Set(["accessed-a"]),
+    dotDefined: new Set(["defined-a"]),
+    protocolMembers: new Set(["protocol-a"]),
+    selfReferentialKeys: new Set(["self-a"]),
+    stringDefined: new Set(["string-defined-a"]),
+    stringLiteralRead: new Set(["string-read-a"]),
+  };
+  const second = Object.fromEntries(
+    Object.entries(first).map(([key, values]) => [
+      key,
+      new Set([...values].map((value) => value.replace("-a", "-b"))),
+    ]),
+  );
+
+  const merged = mergeRuntimeHazards(first, second);
+  for (const [key, values] of Object.entries(merged)) {
+    expect([...values]).toEqual([
+      ...first[key],
+      ...second[key],
+    ]);
+  }
+});
 
 test.serial(
   "generateExterns follows declaration dependencies and emits stable property externs",
@@ -563,9 +591,9 @@ test("barrier accounting counts every extern property shape", async () => {
   ]);
 
   const accounting = accountBarriers({ label: "probe", text });
-  expect(accounting.byKind.flat).toBe(2);
-  expect(accounting.byKind.owner).toBe(2);
-  expect(accounting.byKind.record).toBe(2);
+  expect(accounting.byKind.get("flat")).toBe(2);
+  expect(accounting.byKind.get("owner")).toBe(2);
+  expect(accounting.byKind.get("record")).toBe(2);
   expect(formatBarrierWarning(accounting)).toBeNull();
   expect(formatBarrierWarning(accounting, 1)).toContain("pins 6 property names");
 });

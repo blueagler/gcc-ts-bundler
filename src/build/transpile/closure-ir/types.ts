@@ -10,6 +10,8 @@ export interface ClosureTypeMetadataFile {
   decoratedOutputText: string | undefined;
   diagnostics: TypeMetadataDiagnostic[];
   enums: ClosureEnumDeclaration[];
+  /** UTF-8 byte offsets of property names whose receiver type comes from a runtime external. */
+  externalOwnedMemberAccesses?: number[] | undefined;
   /** Const enums TypeScript erases; the declaration is dropped, nothing emitted. */
   erasedConstEnums?: string[] | undefined;
   filePath: string;

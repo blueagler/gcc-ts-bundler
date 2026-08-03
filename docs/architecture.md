@@ -115,6 +115,8 @@ The JavaScript layer uses one TypeScript checker/extractor for standalone and Vi
 
 Rust resolves that metadata against the final Oxc/import/hoist plan, transforms files in parallel, and returns exact delivered counts and diagnostics per emitted JavaScript file. The same stage strips TypeScript, lowers JSX where needed, normalizes supported CommonJS, rewrites imports/exports, emits support files, and generates proven property rename barriers.
 
+Closure Compiler 20260726 rejects private class elements even with `language_in=UNSTABLE` and `language_out=ECMASCRIPT_NEXT`. As an upstream capability workaround, the Oxc stage structurally detects modules containing private identifiers and enables its spec-mode class-properties transform only for those modules, before Closure sees them. Instance fields use `WeakMap`, private methods/accessors use brand sets, static elements retain exact class-brand checks, and `#x in value` keeps the required right-hand-side and brand semantics; the Oxc helper surface is local Closure input and fails closed if the transform requests an unowned helper. Modules without private elements take the unchanged transform path, independent of target. Retire this workaround when the pinned Closure release accepts private elements directly and the regression corpus passes without it.
+
 Three things that used to be patched into Closure's *output* are decided here
 instead, because this is the last point at which the provenance they need still
 exists:

@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use napi_derive::napi;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::commonjs::{analyze_commonjs_source, CommonJsAnalysis};
 use crate::pathing::to_goog_module_id;
@@ -99,6 +100,7 @@ pub struct ChunkPlanChunkOutput {
     pub kind: Option<String>,
     pub lazyModuleIds: Option<Vec<String>>,
     pub name: String,
+    pub outputName: Option<String>,
 }
 
 #[allow(non_snake_case)]
@@ -271,6 +273,47 @@ pub fn resolve_graph_with_options(
     )
 }
 
+pub fn assign_chunk_names(
+    base_names: Vec<String>,
+    entry_identities: Vec<String>,
+) -> std::result::Result<Vec<String>, String> {
+    if base_names.len() != entry_identities.len() {
+        return Err(format!(
+            "Chunk-name inputs differ in length: {} base names, {} entry identities",
+            base_names.len(),
+            entry_identities.len()
+        ));
+    }
+    let counts = base_names.iter().fold(BTreeMap::new(), |mut counts, name| {
+        *counts.entry(name.clone()).or_insert(0_usize) += 1;
+        counts
+    });
+    let mut assigned = BTreeSet::new();
+    base_names
+        .into_iter()
+        .zip(entry_identities)
+        .map(|(base_name, identity)| {
+            let name = if counts.get(base_name.as_str()).copied().unwrap_or(0) > 1 {
+                let normalized_identity = identity.replace('\\', "/");
+                let suffix = Sha256::digest(normalized_identity.as_bytes())
+                    .iter()
+                    .take(5)
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                format!("{base_name}-{suffix}")
+            } else {
+                base_name
+            };
+            if !assigned.insert(name.clone()) {
+                return Err(format!(
+                    "Entry identities did not produce unique Closure chunk names: {name}"
+                ));
+            }
+            Ok(name)
+        })
+        .collect()
+}
+
 impl ChunkMode {
     fn parse(value: &str) -> std::result::Result<Self, String> {
         match value {
@@ -312,7 +355,7 @@ pub fn plan_chunks(
             // vendor chunk needs to be ordered against the base.
             vendor_chunk,
         ),
-        ChunkMode::Off => build_off_chunk_plan(&entry_files, &graph, &shim_files, &workspace_dir),
+        ChunkMode::Off => build_off_chunk_plan(&entry_files, &graph, &shim_files, &workspace_dir)?,
     })
 }
 

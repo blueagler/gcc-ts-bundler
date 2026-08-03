@@ -5,12 +5,7 @@ pub(super) fn build_off_chunk_plan(
     graph: &HashMap<String, Vec<String>>,
     shim_files: &[String],
     workspace_dir: &Path,
-) -> Vec<ChunkPlanChunkOutput> {
-    let shim_to_entry = shim_files
-        .iter()
-        .cloned()
-        .zip(entry_files.iter().cloned())
-        .collect::<HashMap<_, _>>();
+) -> Result<Vec<ChunkPlanChunkOutput>, String> {
     let mut reachability = HashMap::<String, BTreeSet<String>>::new();
     let mut counts = HashMap::<String, usize>::new();
 
@@ -30,7 +25,7 @@ pub(super) fn build_off_chunk_plan(
     if entry_files.len() == 1 {
         let only_entry = &entry_files[0];
         let only_shim = &shim_files[0];
-        return vec![ChunkPlanChunkOutput {
+        return Ok(vec![ChunkPlanChunkOutput {
             dependencies: Vec::new(),
             entryFiles: None,
             files: to_relative_files(
@@ -48,9 +43,25 @@ pub(super) fn build_off_chunk_plan(
             kind: None,
             lazyModuleIds: None,
             name: strip_extension(&only_entry.outputName),
-        }];
+            outputName: Some(only_entry.outputName.clone()),
+        }]);
     }
 
+    let entry_chunk_names = assign_chunk_names(
+        entry_files
+            .iter()
+            .map(|entry| strip_extension(&entry.outputName))
+            .collect(),
+        entry_files
+            .iter()
+            .map(|entry| entry.outputName.clone())
+            .collect(),
+    )?;
+    let shim_to_entry = shim_files
+        .iter()
+        .cloned()
+        .zip(entry_files.iter().cloned().zip(entry_chunk_names))
+        .collect::<HashMap<_, _>>();
     let mut chunks = Vec::new();
     if !shared_files.is_empty() {
         chunks.push(ChunkPlanChunkOutput {
@@ -63,11 +74,12 @@ pub(super) fn build_off_chunk_plan(
             kind: None,
             lazyModuleIds: None,
             name: "shared".to_string(),
+            outputName: None,
         });
     }
 
     for shim_file in shim_files {
-        let entry = shim_to_entry
+        let (entry, chunk_name) = shim_to_entry
             .get(shim_file)
             .expect("missing shim to entry mapping");
         let unique_files = reachability
@@ -85,11 +97,12 @@ pub(super) fn build_off_chunk_plan(
             files: to_relative_files(&topological_sort(unique_files, graph), workspace_dir),
             kind: None,
             lazyModuleIds: None,
-            name: strip_extension(&entry.outputName),
+            name: chunk_name.clone(),
+            outputName: Some(entry.outputName.clone()),
         });
     }
 
-    chunks
+    Ok(chunks)
 }
 
 /// Path segments that mark a file as dependency-originated rather than app
@@ -203,6 +216,7 @@ pub(super) fn build_bundler_chunk_plan(
                 kind: Some("vendor".to_string()),
                 lazyModuleIds: None,
                 name: name.clone(),
+                outputName: None,
             })
             .collect::<Vec<_>>()
     };
@@ -222,6 +236,7 @@ pub(super) fn build_bundler_chunk_plan(
             kind: Some("base".to_string()),
             lazyModuleIds: None,
             name: base_chunk_name.to_string(),
+            outputName: None,
         });
         return chunks;
     }
@@ -277,6 +292,7 @@ pub(super) fn build_bundler_chunk_plan(
                 .collect(),
         ),
         name: base_chunk_name.to_string(),
+        outputName: None,
     });
 
     let shared_chunk_name = format!("{base_chunk_name}-shared");
@@ -291,6 +307,7 @@ pub(super) fn build_bundler_chunk_plan(
             kind: Some("shared".to_string()),
             lazyModuleIds: None,
             name: shared_chunk_name.clone(),
+            outputName: None,
         });
     }
 
@@ -325,6 +342,7 @@ pub(super) fn build_bundler_chunk_plan(
                             .replace(['\\', '/'], "-")
                     })
             )),
+            outputName: None,
         });
     }
 

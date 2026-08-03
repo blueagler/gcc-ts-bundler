@@ -32,7 +32,10 @@ export async function collectFileContentSnapshot(
       const stat = await fs.stat(filePath);
       return [
         filePath,
-        { digest: await hashFile(filePath), size: stat.size },
+        {
+          digest: await hashFile(filePath),
+          size: stat.size,
+        } satisfies ContentIdentity,
       ] as const;
     }),
   );
@@ -84,7 +87,7 @@ export async function collectTrackedFiles(
             digest: await hashFile(state.filePath),
             mtimeMs: state.mtimeMs,
             size: state.size,
-          },
+          } satisfies FileStateSnapshot,
         ] as const,
     ),
   );

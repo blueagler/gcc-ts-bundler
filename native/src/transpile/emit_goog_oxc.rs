@@ -12,7 +12,7 @@ use std::path::Path;
 use oxc_allocator::{Allocator, FromIn, TakeIn, Vec as ArenaVec};
 use oxc_ast::ast::*;
 use oxc_ast::builder::AstBuilder;
-use oxc_ast_visit::{walk_mut, VisitMut};
+use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_codegen::{Codegen, Gen};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
@@ -43,7 +43,14 @@ pub(crate) fn emit_goog_module_program<'a>(
     file_metadata: Option<&ClosureFileMetadata>,
     commonjs_export_name: Option<&str>,
 ) -> std::result::Result<EmittedProgram, String> {
-    quote_external_namespace_accesses(allocator, file_path, program, identity, context);
+    quote_external_boundary_accesses(
+        allocator,
+        file_path,
+        program,
+        identity,
+        context,
+        file_metadata,
+    );
     let namespace_usage = scan_namespace_usage(program, identity);
     let live_imported_ids = collect_live_imported_binding_ids(program, identity, file_path);
     if !live_imported_ids.is_empty() {
@@ -93,7 +100,7 @@ pub(crate) fn emit_goog_module_program<'a>(
                     import.source.value.as_str(),
                 )) {
                     let plan = convert_external_import_decl(
-                        file_path,
+                        &module_id,
                         &import,
                         specifier,
                         None,
@@ -113,7 +120,7 @@ pub(crate) fn emit_goog_module_program<'a>(
                     if let Some(preserved) = context.preserved_modules.get(&target_module_id) {
                         validate_preserved_import(&import, preserved)?;
                         let mut plan = convert_external_import_decl(
-                            file_path,
+                            &module_id,
                             &import,
                             import.source.value.as_str(),
                             Some((identity, &namespace_usage)),
@@ -350,80 +357,250 @@ struct ExternalImportPlan {
     preserved_import: PreservedImportPlan,
 }
 
-fn quote_external_namespace_accesses<'a>(
+fn quote_external_boundary_accesses<'a>(
     allocator: &'a Allocator,
     file_path: &Path,
     program: &mut Program<'a>,
     identity: &ModuleIdentity,
     context: &TranspileContext,
+    file_metadata: Option<&ClosureFileMetadata>,
 ) {
+    let external_member_starts = file_metadata
+        .map(|metadata| {
+            metadata
+                .external_owned_member_accesses
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
     let mut candidates = BindingKeySet::default();
     for statement in &program.body {
         let Statement::ImportDeclaration(import) = statement else {
             continue;
         };
-        let Some(external_specifier) = context.external_specifiers.get(&resolved_import_key(
-            file_path,
-            import.source.value.as_str(),
-        )) else {
-            continue;
-        };
         if !context
-            .opaque_external_specifiers
-            .contains(external_specifier)
+            .external_specifiers
+            .contains_key(&resolved_import_key(
+                file_path,
+                import.source.value.as_str(),
+            ))
         {
             continue;
         }
+        if import.import_kind == ImportOrExportKind::Type {
+            continue;
+        }
         for specifier in import.specifiers.iter().flatten() {
-            if let ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) = specifier {
-                candidates.insert(identity.key_of_binding(&namespace.local));
+            match specifier {
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(default) => {
+                    candidates.insert(identity.key_of_binding(&default.local));
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) => {
+                    candidates.insert(identity.key_of_binding(&namespace.local));
+                }
+                ImportDeclarationSpecifier::ImportSpecifier(named)
+                    if named.import_kind != ImportOrExportKind::Type =>
+                {
+                    candidates.insert(identity.key_of_binding(&named.local));
+                }
+                ImportDeclarationSpecifier::ImportSpecifier(_) => {}
             }
         }
     }
-    if candidates.is_empty() {
+    if candidates.is_empty() && external_member_starts.is_empty() {
         return;
     }
-    ExternalNamespaceAccessQuoter {
+    loop {
+        let mut collector = ExternalDerivedBindingCollector {
+            candidates: &mut candidates,
+            changed: false,
+            identity,
+        };
+        collector.visit_program(program);
+        if !collector.changed {
+            break;
+        }
+    }
+    ExternalBoundaryAccessQuoter {
         allocator,
         builder: AstBuilder::new(allocator),
         candidates,
+        external_member_starts,
         identity,
     }
     .visit_program(program);
 }
 
-struct ExternalNamespaceAccessQuoter<'a, 'b> {
+struct ExternalBoundaryAccessQuoter<'a, 'b> {
     allocator: &'a Allocator,
     builder: AstBuilder<'a>,
     candidates: BindingKeySet,
+    external_member_starts: HashSet<u32>,
     identity: &'b ModuleIdentity,
 }
 
-impl ExternalNamespaceAccessQuoter<'_, '_> {
-    fn is_external_namespace_access(&self, expression: &Expression<'_>) -> bool {
-        match expression {
-            Expression::Identifier(identifier) => self
-                .identity
-                .key_of_reference(identifier)
-                .is_some_and(|binding| self.candidates.contains(&binding)),
-            Expression::StaticMemberExpression(member) => {
-                self.is_external_namespace_access(&member.object)
-            }
-            Expression::ComputedMemberExpression(member) => {
-                self.is_external_namespace_access(&member.object)
-            }
-            _ => false,
-        }
+impl ExternalBoundaryAccessQuoter<'_, '_> {
+    fn is_external_boundary_value(&self, expression: &Expression<'_>) -> bool {
+        is_external_boundary_value(expression, &self.candidates, self.identity)
     }
 }
 
-impl<'a> VisitMut<'a> for ExternalNamespaceAccessQuoter<'a, '_> {
+struct ExternalDerivedBindingCollector<'b> {
+    candidates: &'b mut BindingKeySet,
+    changed: bool,
+    identity: &'b ModuleIdentity,
+}
+
+impl<'a> Visit<'a> for ExternalDerivedBindingCollector<'_> {
+    fn visit_variable_declarator(&mut self, declarator: &VariableDeclarator<'a>) {
+        if declarator.init.as_ref().is_some_and(|initializer| {
+            is_external_boundary_value(initializer, self.candidates, self.identity)
+        }) {
+            if let Some(binding) = declarator.id.get_binding_identifier() {
+                self.changed |= self
+                    .candidates
+                    .insert(self.identity.key_of_binding(binding));
+            }
+        }
+        walk::walk_variable_declarator(self, declarator);
+    }
+}
+
+fn is_external_boundary_value(
+    expression: &Expression<'_>,
+    candidates: &BindingKeySet,
+    identity: &ModuleIdentity,
+) -> bool {
+    match expression {
+        Expression::Identifier(identifier) => identity
+            .key_of_reference(identifier)
+            .is_some_and(|binding| candidates.contains(&binding)),
+        Expression::StaticMemberExpression(member) => {
+            is_external_boundary_value(&member.object, candidates, identity)
+        }
+        Expression::ComputedMemberExpression(member) => {
+            is_external_boundary_value(&member.object, candidates, identity)
+        }
+        Expression::AssignmentExpression(assignment) => {
+            is_external_boundary_value(&assignment.right, candidates, identity)
+        }
+        Expression::AwaitExpression(awaited) => {
+            is_external_boundary_value(&awaited.argument, candidates, identity)
+        }
+        Expression::CallExpression(call) => {
+            is_external_boundary_value(&call.callee, candidates, identity)
+        }
+        Expression::ConditionalExpression(conditional) => {
+            is_external_boundary_value(&conditional.consequent, candidates, identity)
+                || is_external_boundary_value(&conditional.alternate, candidates, identity)
+        }
+        Expression::LogicalExpression(logical) => {
+            is_external_boundary_value(&logical.left, candidates, identity)
+                || is_external_boundary_value(&logical.right, candidates, identity)
+        }
+        Expression::NewExpression(constructor) => {
+            is_external_boundary_value(&constructor.callee, candidates, identity)
+        }
+        Expression::ParenthesizedExpression(parenthesized) => {
+            is_external_boundary_value(&parenthesized.expression, candidates, identity)
+        }
+        Expression::SequenceExpression(sequence) => sequence
+            .expressions
+            .last()
+            .is_some_and(|last| is_external_boundary_value(last, candidates, identity)),
+        Expression::TaggedTemplateExpression(tagged) => {
+            is_external_boundary_value(&tagged.tag, candidates, identity)
+        }
+        Expression::TSAsExpression(expression) => {
+            is_external_boundary_value(&expression.expression, candidates, identity)
+        }
+        Expression::TSSatisfiesExpression(expression) => {
+            is_external_boundary_value(&expression.expression, candidates, identity)
+        }
+        Expression::TSTypeAssertion(expression) => {
+            is_external_boundary_value(&expression.expression, candidates, identity)
+        }
+        Expression::TSNonNullExpression(expression) => {
+            is_external_boundary_value(&expression.expression, candidates, identity)
+        }
+        Expression::TSInstantiationExpression(expression) => {
+            is_external_boundary_value(&expression.expression, candidates, identity)
+        }
+        Expression::ChainExpression(chain) => match &chain.expression {
+            ChainElement::StaticMemberExpression(member) => {
+                is_external_boundary_value(&member.object, candidates, identity)
+            }
+            ChainElement::ComputedMemberExpression(member) => {
+                is_external_boundary_value(&member.object, candidates, identity)
+            }
+            ChainElement::CallExpression(call) => {
+                is_external_boundary_value(&call.callee, candidates, identity)
+            }
+            ChainElement::TSNonNullExpression(expression) => {
+                is_external_boundary_value(&expression.expression, candidates, identity)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+impl<'a> VisitMut<'a> for ExternalBoundaryAccessQuoter<'a, '_> {
+    fn visit_simple_assignment_target(&mut self, target: &mut SimpleAssignmentTarget<'a>) {
+        walk_mut::walk_simple_assignment_target(self, target);
+        let SimpleAssignmentTarget::StaticMemberExpression(member) = target else {
+            return;
+        };
+        if !self.is_external_boundary_value(&member.object)
+            && !self
+                .external_member_starts
+                .contains(&member.property.span.start)
+        {
+            return;
+        }
+        let property: Ident<'a> = Ident::from_in(member.property.name.as_str(), self.allocator);
+        *target = SimpleAssignmentTarget::new_computed_member_expression(
+            member.span,
+            member.object.take_in(&self.builder),
+            Expression::new_string_literal(member.property.span, property, None, &self.builder),
+            member.optional,
+            &self.builder,
+        );
+    }
+
+    fn visit_chain_element(&mut self, element: &mut ChainElement<'a>) {
+        walk_mut::walk_chain_element(self, element);
+        let ChainElement::StaticMemberExpression(member) = element else {
+            return;
+        };
+        if !self.is_external_boundary_value(&member.object)
+            && !self
+                .external_member_starts
+                .contains(&member.property.span.start)
+        {
+            return;
+        }
+        let property: Ident<'a> = Ident::from_in(member.property.name.as_str(), self.allocator);
+        *element = ChainElement::new_computed_member_expression(
+            member.span,
+            member.object.take_in(&self.builder),
+            Expression::new_string_literal(member.property.span, property, None, &self.builder),
+            member.optional,
+            &self.builder,
+        );
+    }
+
     fn visit_expression(&mut self, expression: &mut Expression<'a>) {
         walk_mut::walk_expression(self, expression);
         let Expression::StaticMemberExpression(member) = expression else {
             return;
         };
-        if !self.is_external_namespace_access(&member.object) {
+        if !self.is_external_boundary_value(&member.object)
+            && !self
+                .external_member_starts
+                .contains(&member.property.span.start)
+        {
             return;
         }
         let property: Ident<'a> = Ident::from_in(member.property.name.as_str(), self.allocator);
@@ -435,10 +612,50 @@ impl<'a> VisitMut<'a> for ExternalNamespaceAccessQuoter<'a, '_> {
             &self.builder,
         );
     }
+
+    fn visit_binding_property(&mut self, property: &mut BindingProperty<'a>) {
+        walk_mut::walk_binding_property(self, property);
+        if let Some((span, name)) =
+            quoted_property_key(&property.key, &self.external_member_starts, self.allocator)
+        {
+            property.key = PropertyKey::new_string_literal(span, name, None, &self.builder);
+            property.shorthand = false;
+            property.computed = false;
+        }
+    }
+
+    fn visit_object_property(&mut self, property: &mut ObjectProperty<'a>) {
+        walk_mut::walk_object_property(self, property);
+        if let Some((span, name)) =
+            quoted_property_key(&property.key, &self.external_member_starts, self.allocator)
+        {
+            property.key = PropertyKey::new_string_literal(span, name, None, &self.builder);
+            property.shorthand = false;
+            property.computed = false;
+        }
+    }
+}
+
+fn quoted_property_key<'a>(
+    key: &PropertyKey<'a>,
+    external_member_starts: &HashSet<u32>,
+    allocator: &'a Allocator,
+) -> Option<(oxc_span::Span, Ident<'a>)> {
+    let PropertyKey::StaticIdentifier(identifier) = key else {
+        return None;
+    };
+    external_member_starts
+        .contains(&identifier.span.start)
+        .then(|| {
+            (
+                identifier.span,
+                Ident::from_in(identifier.name.as_str(), allocator),
+            )
+        })
 }
 
 fn convert_external_import_decl(
-    file_path: &Path,
+    module_id: &str,
     import: &ImportDeclaration<'_>,
     external_specifier: &str,
     namespace_externs: Option<(&ModuleIdentity, &NamespaceUsage)>,
@@ -475,8 +692,7 @@ fn convert_external_import_decl(
         }
         let preferred = format!(
             "__gcc_external_{}_{}_{}",
-            &crate::utils::hash_content(&format!("{}\0{external_specifier}", file_path.display()))
-                [..12],
+            &crate::utils::hash_content(&format!("{module_id}\0{external_specifier}"))[..12],
             import_index,
             specifier_index
         );
@@ -540,8 +756,7 @@ fn convert_external_import_decl(
         }
         (_, Some(_), false) => {
             return Err(format!(
-                "External import in {} has an unsupported namespace/named combination",
-                file_path.display()
+                "External import in {module_id} has an unsupported namespace/named combination"
             ));
         }
     };
@@ -959,7 +1174,15 @@ mod tests {
     use super::super::ChunkMode;
 
     fn parse<'a>(allocator: &'a Allocator, source: &'a str) -> (Program<'a>, ModuleIdentity) {
-        let parsed = Parser::new(allocator, source, SourceType::mjs()).parse();
+        parse_with_source_type(allocator, source, SourceType::mjs())
+    }
+
+    fn parse_with_source_type<'a>(
+        allocator: &'a Allocator,
+        source: &'a str,
+        source_type: SourceType,
+    ) -> (Program<'a>, ModuleIdentity) {
+        let parsed = Parser::new(allocator, source, source_type).parse();
         assert!(
             !parsed.panicked && parsed.diagnostics.is_empty(),
             "{:?}",
@@ -1045,6 +1268,207 @@ mod tests {
         assert!(oxc.contains("exports.helper = helper;"));
         assert!(oxc.contains("exports.Box = Box;"));
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn external_owned_optional_chain_member_is_quoted() {
+        let root = std::env::temp_dir().join(format!(
+            "gcc-emit-goog-optional-external-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let entry = root.join("entry.js");
+        let source = "const value = input?.resolvedFileName;";
+        std::fs::write(&entry, source).unwrap();
+        let allocator = Allocator::default();
+        let (mut program, identity) = parse(&allocator, source);
+        let metadata = ClosureFileMetadata {
+            ambient_globals: Vec::new(),
+            annotations: Vec::new(),
+            declarations: Vec::new(),
+            decorated_output_text: None,
+            diagnostics: Vec::new(),
+            enums: Vec::new(),
+            erased_const_enums: Vec::new(),
+            external_owned_member_accesses: vec![source
+                .find("resolvedFileName")
+                .unwrap()
+                .try_into()
+                .unwrap()],
+            file_path: entry.to_string_lossy().into_owned(),
+            runtime_module_id: None,
+            source_file_path: entry.to_string_lossy().into_owned(),
+            symbols: Vec::new(),
+        };
+        let oxc = emit_goog_module_program(
+            &allocator,
+            &entry,
+            &mut program,
+            &identity,
+            &context(&root),
+            Some(&metadata),
+            None,
+        )
+        .unwrap()
+        .code;
+        assert!(oxc.contains("input?.[\"resolvedFileName\"]"), "{oxc}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn external_boundary_names_are_workspace_relative() {
+        let base = std::env::temp_dir().join(format!(
+            "gcc-emit-goog-path-independent-{}",
+            std::process::id()
+        ));
+        let source = r#"import external from "external-package"; export default external;"#;
+        let mut outputs = Vec::new();
+        for stage in ["stage-1", "stage-2"] {
+            let workspace = base.join(stage);
+            let entry = workspace.join("src/entry.ts");
+            std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+            std::fs::write(&entry, source).unwrap();
+            let allocator = Allocator::default();
+            let source_type = SourceType::from_path(Path::new("entry.ts"))
+                .unwrap()
+                .with_module(true);
+            let (mut program, identity) = parse_with_source_type(&allocator, source, source_type);
+            let mut transpile_context = context(&workspace);
+            transpile_context.external_specifiers.insert(
+                resolved_import_key(&entry, "external-package"),
+                "external-package".to_string(),
+            );
+            outputs.push(
+                emit_goog_module_program(
+                    &allocator,
+                    &entry,
+                    &mut program,
+                    &identity,
+                    &transpile_context,
+                    None,
+                    None,
+                )
+                .unwrap()
+                .code,
+            );
+        }
+        assert_eq!(outputs[0], outputs[1]);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn external_owned_spread_clone_assignment_is_quoted() {
+        let root = std::env::temp_dir().join(format!(
+            "gcc-emit-goog-spread-clone-assignment-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let entry = root.join("entry.ts");
+        let source = r#"
+            import external from "external-package";
+            const clone = { ...external };
+            clone.value = 1;
+        "#;
+        std::fs::write(&entry, source).unwrap();
+        let allocator = Allocator::default();
+        let source_type = SourceType::from_path(Path::new("entry.ts"))
+            .unwrap()
+            .with_module(true);
+        let (mut program, identity) = parse_with_source_type(&allocator, source, source_type);
+        let metadata = ClosureFileMetadata {
+            ambient_globals: Vec::new(),
+            annotations: Vec::new(),
+            declarations: Vec::new(),
+            decorated_output_text: None,
+            diagnostics: Vec::new(),
+            enums: Vec::new(),
+            erased_const_enums: Vec::new(),
+            external_owned_member_accesses: vec![source
+                .rfind("value")
+                .unwrap()
+                .try_into()
+                .unwrap()],
+            file_path: entry.to_string_lossy().into_owned(),
+            runtime_module_id: None,
+            source_file_path: entry.to_string_lossy().into_owned(),
+            symbols: Vec::new(),
+        };
+        let mut transpile_context = context(&root);
+        transpile_context.external_specifiers.insert(
+            resolved_import_key(&entry, "external-package"),
+            "external-package".to_string(),
+        );
+        let oxc = emit_goog_module_program(
+            &allocator,
+            &entry,
+            &mut program,
+            &identity,
+            &transpile_context,
+            Some(&metadata),
+            None,
+        )
+        .unwrap()
+        .code;
+        assert!(oxc.contains("clone[\"value\"] = 1"), "{oxc}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn external_boundary_value_forms_quote_following_members() {
+        let root = std::env::temp_dir().join(format!(
+            "gcc-emit-goog-external-forms-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let entry = root.join("entry.ts");
+        let source = r#"
+            import * as external from "external-package";
+            let assigned;
+            const direct = external.value;
+            external.value = 1;
+            external.value++;
+            const element = external["value"];
+            const called = external.make().value;
+            const chainedCall = external.make?.().value;
+            const parenthesized = (external).value;
+            const sequenced = (0, external).value;
+            const conditional = (true ? external : external).value;
+            const logical = (false || external).value;
+            const tagged = external.tag`x`.value;
+            const assignment = (assigned = external).value;
+            const awaited = (await external.make()).value;
+            const constructed = (new external.Factory()).value;
+            const asExpression = (external as unknown).value;
+            const satisfiesExpression = (external satisfies unknown).value;
+            const asserted = (<unknown>external).value;
+            const nonNull = external!.value;
+            const instantiated = external.make<string>().value;
+        "#;
+        std::fs::write(&entry, source).unwrap();
+        let allocator = Allocator::default();
+        let source_type = SourceType::from_path(Path::new("entry.ts"))
+            .unwrap()
+            .with_module(true);
+        let (mut program, identity) = parse_with_source_type(&allocator, source, source_type);
+        let mut transpile_context = context(&root);
+        transpile_context.external_specifiers.insert(
+            resolved_import_key(&entry, "external-package"),
+            "external-package".to_string(),
+        );
+        let oxc = emit_goog_module_program(
+            &allocator,
+            &entry,
+            &mut program,
+            &identity,
+            &transpile_context,
+            None,
+            None,
+        )
+        .unwrap()
+        .code;
+        assert!(!oxc.contains(".value"), "{oxc}");
+        assert!(oxc.matches("[\"value\"]").count() >= 19, "{oxc}");
         std::fs::remove_dir_all(root).unwrap();
     }
 

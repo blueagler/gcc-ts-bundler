@@ -128,6 +128,7 @@ const isChunkPlanChunk = isObjectOf<ChunkPlanChunk>({
   kind: optional(oneOf(CHUNK_KINDS)),
   lazyModuleIds: optional(isStringArray),
   name: isString,
+  outputName: optional(isString),
 });
 
 const isFileStateSnapshot = isObjectOf<ResolveSnapshot["trackedFiles"][string]>(

@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import fs from "fs";
+import { builtinModules } from "module";
 import path from "path";
 import ts from "@typescript/typescript6";
 
@@ -212,6 +213,19 @@ export async function emitNativeStage({
   const analysis = options.typeMetadata
     ? analysisFromSidecar(options.typeMetadata, options.srcDir, workspaceDir)
     : await collectNativeAnalysis({
+        boundaryModuleFileNames: preservedModules.map(
+          (module) => module.filePath,
+        ),
+        externalSpecifiers: uniqueSortedStrings([
+          ...options.externals,
+          ...externalBoundaries.map((boundary) => boundary.specifier),
+          ...(options.target === "node" || options.target === "bun"
+            ? builtinModules.flatMap((specifier) => [
+                specifier,
+                `node:${specifier}`,
+              ])
+            : []),
+        ]),
         fileNames: combinedFileNames,
         options,
         tsConfigPath,
@@ -245,11 +259,7 @@ export async function emitNativeStage({
     analysis.typeMetadataDiagnostics.length,
   );
 
-  await fs.promises.writeFile(
-    paths.metadataPathForNative,
-    JSON.stringify(analysis.files, null, 2),
-    "utf-8",
-  );
+  await writeJson(paths.metadataPathForNative, analysis.files);
   const result = await withInternalTiming("native-emit:transpile", () =>
     Promise.resolve(
       runNativeTranspile({
@@ -327,11 +337,15 @@ export async function emitNativeStage({
 }
 
 async function collectNativeAnalysis({
+  boundaryModuleFileNames,
+  externalSpecifiers,
   fileNames,
   options,
   tsConfigPath,
   workspaceDir,
 }: {
+  boundaryModuleFileNames: string[];
+  externalSpecifiers: string[];
   fileNames: string[];
   options: ResolvedBuildOptions;
   tsConfigPath: string;
@@ -368,7 +382,9 @@ async function collectNativeAnalysis({
     const analysis = await withInternalTiming("native-emit:closure-ir", () =>
       Promise.resolve(
         collectNativeTypeMetadataFromContext({
+          boundaryModuleFileNames,
           context: analysisContext,
+          externalSpecifiers,
           scan: analysisScan,
         }),
       ),
@@ -396,6 +412,8 @@ async function collectNativeAnalysis({
     .filter(
       ({ features, fileName }) =>
         features.shouldAnalyze ||
+        boundaryModuleFileNames.length > 0 ||
+        externalSpecifiers.length > 0 ||
         (features.needsSemanticPreflight &&
           (authoredFiles ? authoredFiles.has(fileName) : true)),
     )
@@ -461,7 +479,9 @@ async function collectNativeAnalysis({
       ? await withInternalTiming("native-emit:closure-ir", () =>
           Promise.resolve(
             collectNativeTypeMetadataFromContext({
+              boundaryModuleFileNames,
               context: analysisContext,
+              externalSpecifiers,
               scan: analysisScan,
             }),
           ),

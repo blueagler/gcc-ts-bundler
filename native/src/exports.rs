@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use napi_derive::napi;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
+use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
 
@@ -15,6 +16,12 @@ use oxc_span::{GetSpan, SourceType, Span};
 #[napi(object)]
 pub struct GccExportsRewrite {
     pub code: String,
+    #[napi(js_name = "gccReferenceCount")]
+    pub gcc_reference_count: u32,
+    #[napi(js_name = "matchedBootstrapCount")]
+    pub matched_bootstrap_count: u32,
+    #[napi(js_name = "matchedExportAssignmentCount")]
+    pub matched_export_assignment_count: u32,
     #[napi(js_name = "rewrittenExportCount")]
     pub rewritten_export_count: u32,
 }
@@ -42,6 +49,9 @@ pub fn rewrite_gcc_exports(code: String) -> std::result::Result<GccExportsRewrit
     if !code.contains("globalThis.GCC") && !code.contains("globalThis[\"GCC\"]") {
         return Ok(GccExportsRewrite {
             code,
+            gcc_reference_count: 0,
+            matched_bootstrap_count: 0,
+            matched_export_assignment_count: 0,
             rewritten_export_count: 0,
         });
     }
@@ -51,6 +61,8 @@ pub fn rewrite_gcc_exports(code: String) -> std::result::Result<GccExportsRewrit
     // per-file base offset to subtract.
     let allocator = Allocator::default();
     let program = parse_program(&allocator, &code)?;
+    let mut reference_counter = GccReferenceCounter::default();
+    reference_counter.visit_program(&program);
     let slice = |span: Span| -> std::result::Result<&str, String> {
         let (start, end) = span_range(span, code.len())?;
         Ok(&code[start..end])
@@ -80,11 +92,14 @@ pub fn rewrite_gcc_exports(code: String) -> std::result::Result<GccExportsRewrit
     }
 
     let mut edits = Vec::<SourceEdit>::new();
+    let mut matched_bootstrap_count = 0u32;
+    let mut matched_export_assignment_count = 0u32;
     for item in &program.body {
         let (start, end) = span_range(item.span(), code.len())?;
         let end = absorb_statement_terminator(&code, end);
 
         if is_gcc_bootstrap_statement(item) {
+            matched_bootstrap_count += 1;
             edits.push(SourceEdit {
                 start,
                 end,
@@ -96,6 +111,7 @@ pub fn rewrite_gcc_exports(code: String) -> std::result::Result<GccExportsRewrit
         let Some((export_name, right)) = get_gcc_export_assignment(item) else {
             continue;
         };
+        matched_export_assignment_count += 1;
         if !processed_exports.insert(export_name.clone()) {
             // A later assignment to the same export name is dead; the first one
             // already owns the binding, exactly as before.
@@ -154,8 +170,26 @@ pub fn rewrite_gcc_exports(code: String) -> std::result::Result<GccExportsRewrit
 
     Ok(GccExportsRewrite {
         code: apply_source_edits(&code, edits, &appended)?,
+        gcc_reference_count: reference_counter.count,
+        matched_bootstrap_count,
+        matched_export_assignment_count,
         rewritten_export_count: rewritten_export_count as u32,
     })
+}
+
+#[derive(Default)]
+struct GccReferenceCounter {
+    count: u32,
+}
+
+impl<'a> Visit<'a> for GccReferenceCounter {
+    fn visit_expression(&mut self, expression: &Expression<'a>) {
+        if matches!(member_parts(expression), Some((object, property)) if is_global_gcc_member(object, &property))
+        {
+            self.count += 1;
+        }
+        walk::walk_expression(self, expression);
+    }
 }
 
 /// Parses the Closure output as an ES module. Spans in the returned program are
@@ -562,6 +596,35 @@ mod tests {
         let output = rewrite_gcc_exports(input.clone()).unwrap();
 
         assert_eq!(output.code, input);
+        assert_eq!(output.gcc_reference_count, 0);
+        assert_eq!(output.matched_bootstrap_count, 0);
+        assert_eq!(output.matched_export_assignment_count, 0);
+        assert_eq!(output.rewritten_export_count, 0);
+    }
+
+    #[test]
+    fn reports_structural_gcc_references_separately_from_rewrites() {
+        let output = rewrite_gcc_exports(
+            "const a=1,b=2;globalThis.GCC=globalThis.GCC||{};globalThis.GCC.one=a;globalThis.GCC.two=b;"
+                .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(output.gcc_reference_count, 3, "{}", output.code);
+        assert_eq!(output.matched_bootstrap_count, 1, "{}", output.code);
+        assert_eq!(output.matched_export_assignment_count, 2, "{}", output.code);
+        assert_eq!(output.rewritten_export_count, 2, "{}", output.code);
+    }
+
+    #[test]
+    fn reports_unsupported_structural_gcc_references() {
+        let input = "console.log(globalThis.GCC);".to_string();
+        let output = rewrite_gcc_exports(input.clone()).unwrap();
+
+        assert_eq!(output.code, input);
+        assert_eq!(output.gcc_reference_count, 1);
+        assert_eq!(output.matched_bootstrap_count, 0);
+        assert_eq!(output.matched_export_assignment_count, 0);
         assert_eq!(output.rewritten_export_count, 0);
     }
 

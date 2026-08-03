@@ -76,7 +76,7 @@ export function buildEnumDeclarationMetadata(
   checker: ts.TypeChecker,
   unsafeEnumSymbols: Set<ts.Symbol>,
   compilerOptions: ts.CompilerOptions,
-) {
+): ClosureEnumDeclaration | null {
   if (isErasableConstEnum(statement, compilerOptions)) {
     return null;
   }

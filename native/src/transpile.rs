@@ -175,6 +175,10 @@ pub struct ClassMapCallInput {
     pub keySource: Option<String>,
 }
 
+pub fn strip_typescript_module(file_path: String, source: String) -> Result<String, String> {
+    lowering_oxc::strip_typescript_module(Path::new(&file_path), &source)
+}
+
 // napi positional contract: the TS side calls these by argument
 // position, so the parameter list is the published signature.
 #[allow(clippy::too_many_arguments)]

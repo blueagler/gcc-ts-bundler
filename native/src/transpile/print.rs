@@ -36,8 +36,17 @@ pub(super) fn transform_source_with_oxc(
     let source_type = SourceType::from_path(file_path)
         .map_err(|error| error.to_string())?
         .with_module(true);
-    let (prepared_source, opaque_commonjs_bindings) =
+    let (prepared_source, opaque_commonjs_bindings, source_edits) =
         rewrite_commonjs_import_source(&allocator, source, source_type, context);
+    let remapped_file_metadata = file_metadata.cloned().map(|mut metadata| {
+        metadata.external_owned_member_accesses = metadata
+            .external_owned_member_accesses
+            .into_iter()
+            .filter_map(|offset| remap_source_offset(offset, &source_edits))
+            .collect();
+        metadata
+    });
+    let file_metadata = remapped_file_metadata.as_ref();
     let source = prepared_source.as_str();
     let parsed = Parser::new(&allocator, source, source_type).parse();
     if !parsed.diagnostics.is_empty() {
@@ -420,10 +429,10 @@ fn rewrite_commonjs_import_source(
     source: &str,
     source_type: SourceType,
     context: &TranspileContext,
-) -> (String, HashSet<String>) {
+) -> (String, HashSet<String>, Vec<SourceEdit>) {
     let parsed = Parser::new(allocator, source, source_type).parse();
     if !parsed.diagnostics.is_empty() {
-        return (source.to_string(), HashSet::new());
+        return (source.to_string(), HashSet::new(), Vec::new());
     }
     let mut used = super::fresh_oxc::collect_lexical_binding_names(&parsed.program);
     let mut component_edits = ComponentParamEditCollector {
@@ -511,10 +520,40 @@ fn rewrite_commonjs_import_source(
     }
     let mut output = source.to_string();
     edits.sort_by_key(|(start, _, _)| *start);
+    let source_edits = edits
+        .iter()
+        .map(|(start, end, replacement)| SourceEdit {
+            end: *end,
+            replacement_len: replacement.len(),
+            start: *start,
+        })
+        .collect::<Vec<_>>();
     for (start, end, replacement) in edits.into_iter().rev() {
         output.replace_range(start..end, &replacement);
     }
-    (output, opaque_bindings)
+    (output, opaque_bindings, source_edits)
+}
+
+#[derive(Clone, Copy)]
+struct SourceEdit {
+    end: usize,
+    replacement_len: usize,
+    start: usize,
+}
+
+fn remap_source_offset(offset: u32, edits: &[SourceEdit]) -> Option<u32> {
+    let offset = offset as usize;
+    let mut delta = 0isize;
+    for edit in edits {
+        if offset < edit.start {
+            break;
+        }
+        if offset < edit.end {
+            return None;
+        }
+        delta += edit.replacement_len as isize - (edit.end - edit.start) as isize;
+    }
+    u32::try_from(offset.checked_add_signed(delta)?).ok()
 }
 
 struct ThrowEditCollector<'a> {

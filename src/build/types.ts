@@ -96,6 +96,7 @@ export interface ChunkPlanChunk {
   kind?: ChunkKind;
   lazyModuleIds?: string[];
   name: string;
+  outputName?: string;
 }
 
 export interface LazyImport {

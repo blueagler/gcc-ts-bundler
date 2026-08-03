@@ -61,7 +61,8 @@
     "build:native": "node ./scripts/build-native.mjs",
     "build:native:cross": "node ./scripts/build-native.mjs --targets linux-x64-gnu,win32-x64-msvc",
     "build:native:all": "node ./scripts/build-native.mjs --all",
-    "build:js": "node ./scripts/build-js.mjs",
+    "build:js": "node ./scripts/build-self.mjs",
+    "build:js:bootstrap": "node ./scripts/build-js.mjs",
     "build": "node ./scripts/build.mjs",
     "typecheck": "node ./scripts/run-typescript.mjs --noEmit && node ./scripts/run-typescript.mjs -p tsconfig.types.json --noEmit",
     "ledger": "bun --bun ./scripts/property-ledger.ts",
@@ -78,6 +79,7 @@
     "preview:jquery": "node ./scripts/preview-example.mjs jquery",
     "verify:package": "node ./scripts/check-install-sanity.mjs && node ./scripts/verify-package.mjs",
     "verify:examples": "node ./scripts/verify-example-dists.mjs",
+    "verify:selfbuild": "node ./scripts/build-self.mjs",
     "prepublishOnly": "bun run verify:package",
     "publish:npm": "node ./scripts/publish-npm.mjs"
   },

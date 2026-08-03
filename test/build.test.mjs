@@ -16,6 +16,195 @@ import { generatePlatformExternsText } from "../src/build/closure/platform-exter
 import { createFixture, execFileAsync, findFilesNamed } from "./helpers.mjs";
 
 test.serial(
+  "lowers private class elements faithfully for modern Node output",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/index.ts",
+      [
+        "class Vault {",
+        "  #value = 4;",
+        "  static #offset = 3;",
+        "  #double() { return this.#value * 2; }",
+        "  get #adjusted() { return this.#double() + Vault.#offset; }",
+        "  static hasValue(value: object) { return #value in value; }",
+        "  read() { return this.#adjusted; }",
+        "  static offset() { return Vault.#offset; }",
+        "}",
+        "class Child extends Vault {",
+        "  inheritedRead() { return this.read(); }",
+        "}",
+        "class StaticBase {",
+        "  static #value = 7;",
+        "  static read() { return this.#value; }",
+        "}",
+        "class StaticChild extends StaticBase {}",
+        "const child = new Child();",
+        "let staticBrandRejected = false;",
+        "try { StaticChild.read(); } catch (error) { staticBrandRejected = error instanceof TypeError; }",
+        "export const result = [",
+        "  Vault.hasValue({}),",
+        "  Vault.hasValue(child),",
+        "  child.inheritedRead(),",
+        "  Vault.offset(),",
+        "  staticBrandRejected,",
+        "];",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await build({
+      cache: { mode: "off" },
+      chunks: { mode: "off", outputType: "esm" },
+      entries: ["./index.ts"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+      target: "node",
+    });
+    expect(result.ok).toBe(true);
+    const output = await fixture.read("dist/index.js");
+    expect(output).not.toContain("#value");
+    expect(output).not.toContain("#double");
+    const built = await import(
+      `${pathToFileURL(path.join(fixture.outDir, "index.js")).href}?private-class=${Date.now()}`,
+    );
+    expect(built.result).toEqual([false, true, 11, 3, true]);
+  },
+);
+
+test.serial(
+  "derives referenced Node globals from ambient declarations",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "node_modules/@types/node/package.json",
+      '{"name":"@types/node","version":"1.0.0","types":"index.d.ts"}\n',
+    );
+    await fixture.write(
+      "node_modules/@types/node/index.d.ts",
+      [
+        "interface ProcessEnv { [key: string]: string | undefined; }",
+        "interface Process { env: ProcessEnv; argv: string[]; }",
+        "declare var process: Process;",
+        "interface Buffer { toString(encoding?: string): string; }",
+        "interface BufferConstructor { from(input: string): Buffer; }",
+        "declare var Buffer: BufferConstructor;",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/index.ts",
+      [
+        "export const result = [",
+        '  typeof process.env === "object",',
+        "  Array.isArray(process.argv),",
+        '  Buffer.from("ambient").toString("utf8"),',
+        "];",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await build({
+      cache: { mode: "off" },
+      chunks: { mode: "off", outputType: "esm" },
+      entries: ["./index.ts"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+      target: "node",
+    });
+    expect(result.ok).toBe(true);
+    const built = await import(
+      `${pathToFileURL(path.join(fixture.outDir, "index.js")).href}?node-globals=${Date.now()}`,
+    );
+    expect(built.result).toEqual([true, true, "ambient"]);
+  },
+);
+
+test.serial(
+  "typed child-process environments preserve authored keys under ADVANCED",
+  { timeout: 30_000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "tsconfig.json",
+      JSON.stringify(
+        {
+          compilerOptions: {
+            module: "ESNext",
+            moduleResolution: "Bundler",
+            target: "ESNext",
+            types: ["node"],
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    await fixture.write(
+      "node_modules/@types/node/package.json",
+      '{"name":"@types/node","version":"1.0.0","types":"index.d.ts"}\n',
+    );
+    await fixture.write(
+      "node_modules/@types/node/index.d.ts",
+      [
+        "declare namespace NodeJS {",
+        "  interface ProcessEnv { [key: string]: string | undefined; }",
+        "}",
+        "interface Process { env: NodeJS.ProcessEnv; execPath: string; }",
+        "declare var process: Process;",
+        'declare module "node:child_process" {',
+        "  export function spawnSync(",
+        "    command: string,",
+        "    args: string[],",
+        '    options: { encoding: "utf8"; env: NodeJS.ProcessEnv },',
+        "  ): { stdout: string };",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/index.ts",
+      [
+        'import { spawnSync } from "node:child_process";',
+        "const childEnvironment: NodeJS.ProcessEnv = {",
+        "  ...process.env,",
+        '  GCC_ADVANCED_SPAWN_ENV: "survives",',
+        "};",
+        "const child = spawnSync(",
+        "  process.execPath,",
+        '  ["-e", "process.stdout.write(process.env.GCC_ADVANCED_SPAWN_ENV ?? \\\"missing\\\")"],',
+        '  { encoding: "utf8", env: childEnvironment },',
+        ");",
+        "export const result = child.stdout.trim();",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await build({
+      cache: { mode: "off" },
+      chunks: { mode: "off", outputType: "esm" },
+      entries: ["./index.ts"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+      target: "node",
+    });
+    expect(
+      result.ok,
+      (result.diagnostics ?? []).map(({ message }) => message).join("\n"),
+    ).toBe(true);
+    const output = await fixture.read("dist/index.js");
+    expect(output).toContain("GCC_ADVANCED_SPAWN_ENV");
+    const built = await import(
+      `${pathToFileURL(path.join(fixture.outDir, "index.js")).href}?spawn-env=${Date.now()}`,
+    );
+    expect(built.result).toBe("survives");
+  },
+);
+
+test.serial(
   "builds an ESM package from node_modules in ADVANCED mode",
   async () => {
     const fixture = await createFixture();
@@ -199,7 +388,7 @@ test.serial(
 );
 
 test.serial(
-  "keeps typed Node namespace accesses unquoted and protects them with externs",
+  "quotes typed Node namespace accesses and also protects them with externs",
   async () => {
     const fixture = await createFixture();
     const cacheDir = path.join(fixture.projectRoot, "cache");
@@ -244,8 +433,8 @@ test.serial(
     const nativeInput = nativeInputTexts.find(
       (text) => text.includes("goog.module(") && text.includes("existsSync"),
     );
-    expect(nativeInput).toMatch(/\.existsSync\(/u);
-    expect(nativeInput).not.toContain('["existsSync"]');
+    expect(nativeInput).toContain('["existsSync"](');
+    expect(nativeInput).not.toMatch(/\.existsSync\(/u);
 
     const [externFile] = await findFilesNamed(
       cacheDir,
@@ -254,9 +443,9 @@ test.serial(
     expect(externFile).toBeTruthy();
     const externText = await fs.readFile(externFile, "utf8");
     expect(externText).toMatch(
-      /__gcc_external_[^.\s]+\.existsSync = function\(path\) \{\};/u,
+      /__gccExtern\$[0-9a-f]+\.existsSync\$[0-9a-f]+ = function\(param0\) \{\};/u,
     );
-    expect(externText).toContain("@param {string} path");
+    expect(externText).toContain("@param {string} param0");
 
     await execFileAsync(
       process.execPath,
@@ -325,6 +514,156 @@ test.serial(
       srcDir: fixture.srcDir,
     });
     expect(compiled.ok).toBe(false);
+  },
+);
+
+test.serial(
+  "type-strips authored preserved TypeScript and ships its dependency closure",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/inner.ts",
+      [
+        'import { createRequire } from "node:module";',
+        "const require = createRequire(import.meta.url);",
+        'export const separator: string = require("node:path").sep;',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/loader.ts",
+      [
+        'import { separator } from "./inner";',
+        "interface LoadOptions { value: string }",
+        "export function load(options: LoadOptions) {",
+        "  return `${options.value}${separator}`;",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/index.ts",
+      [
+        'import { load } from "./loader";',
+        'export const result = load({ value: "preserved" });',
+        "",
+      ].join("\n"),
+    );
+
+    const result = await build({
+      cache: { mode: "off" },
+      chunks: { mode: "off", outputType: "esm" },
+      entries: ["./index.ts"],
+      outDir: fixture.outDir,
+      preserveModules: ["src/loader.ts"],
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+      target: "node",
+    });
+    expect(result.ok).toBe(true);
+    const loader = await fixture.read("dist/__gcc_preserved/loader.js");
+    const inner = await fixture.read("dist/__gcc_preserved/inner.js");
+    expect(loader).not.toContain("interface LoadOptions");
+    expect(loader).not.toContain("options: LoadOptions");
+    expect(loader).toContain('from "./inner.js"');
+    expect(inner).not.toContain(": string");
+
+    const built = await import(
+      `${pathToFileURL(path.join(fixture.outDir, "index.js")).href}?preserved-ts=${Date.now()}`,
+    );
+    expect(built.result).toBe(`preserved${path.sep}`);
+  },
+);
+
+test.serial(
+  "preserves deep DTOs in both directions across a preserved module export",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/native-boundary.ts",
+      [
+        "interface NativeJob {",
+        "  dependencies: string[];",
+        "  inputPath: string;",
+        "  output: { metadata: { typeMetadata: boolean }; path: string };",
+        "}",
+        "interface NativeRequest {",
+        "  graph: { entries: Array<{ dependencies: string[]; filePath: string }> };",
+        "  onJob: (job: NativeJob) => string;",
+        "  output: { flags: { typeMetadata: boolean }; outDir: string };",
+        "}",
+        "interface NativeResult {",
+        "  callbackValue: string;",
+        "  jobs: NativeJob[];",
+        "  summary: { accepted: boolean; counts: { emitted: number } };",
+        "}",
+        "export async function execute(request: NativeRequest): Promise<NativeResult> {",
+        "  const entry = request.graph.entries[0];",
+        "  const job = {",
+        "    dependencies: entry.dependencies,",
+        "    inputPath: entry.filePath,",
+        "    output: {",
+        "      metadata: { typeMetadata: request.output.flags.typeMetadata },",
+        "      path: `${request.output.outDir}/${entry.filePath}` ,",
+        "    },",
+        "  };",
+        "  return {",
+        "    callbackValue: request.onJob(job),",
+        "    jobs: [job],",
+        "    summary: { accepted: true, counts: { emitted: 1 } },",
+        "  };",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/index.ts",
+      [
+        'import { execute } from "./native-boundary";',
+        "const internal = { renameThisInternalKey: 1 };",
+        "async function consume() {",
+        "  const holder = {",
+        "    nativeResult: await execute({",
+        '      graph: { entries: [{ dependencies: ["shared"], filePath: "entry.ts" }] },',
+        "      onJob: ({ inputPath, output: { path } }) => `${inputPath}->${path}` ,",
+        '      output: { flags: { typeMetadata: true }, outDir: "dist" },',
+        "    }),",
+        "  };",
+        "  const { callbackValue, jobs, summary: { accepted, counts: { emitted } } } = holder.nativeResult;",
+        "  return [",
+        "    ...jobs.map(({ dependencies, inputPath, output: { metadata: { typeMetadata }, path } }) =>",
+        "      `${inputPath}|${dependencies.join(',')}|${path}|${typeMetadata}`),",
+        "    callbackValue,",
+        "    accepted,",
+        "    emitted,",
+        "  ].join('|');",
+        "}",
+        "export const resultPromise = consume();",
+        "const internalRoundTrip = JSON.parse(JSON.stringify(internal));",
+        "export const internalValue = internalRoundTrip.renameThisInternalKey;",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await build({
+      cache: { mode: "off" },
+      chunks: { mode: "off", outputType: "esm" },
+      entries: ["./index.ts"],
+      outDir: fixture.outDir,
+      preserveModules: ["src/native-boundary.ts"],
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+      target: "node",
+    });
+    expect(result.ok).toBe(true);
+
+    const built = await import(
+      `${pathToFileURL(path.join(fixture.outDir, "index.js")).href}?preserved-dto=${Date.now()}`,
+    );
+    expect(await built.resultPromise).toBe(
+      "entry.ts|shared|dist/entry.ts|true|entry.ts->dist/entry.ts|true|1",
+    );
+    expect(built.internalValue).toBe(1);
   },
 );
 
@@ -546,6 +885,40 @@ test.serial("object entries carry an explicit output name", async () => {
 });
 
 test.serial(
+  "publishes an explicitly named Node CLI mjs entry with its shebang",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/cli.ts",
+      [
+        "#!/usr/bin/env node",
+        'if (!import.meta.url.startsWith("file:")) throw new Error("import.meta lost");',
+        "",
+      ].join("\n"),
+    );
+    const binDir = path.join(fixture.projectRoot, "bin");
+    const result = await build({
+      cache: { mode: "off" },
+      chunks: { mode: "off", outputType: "esm" },
+      compilationLevel: "ADVANCED",
+      entries: [{ file: "./cli.ts", name: "gcc-ts-bundler.mjs" }],
+      outDir: binDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+      target: "node",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.outputFiles).toEqual([
+      path.join(binDir, "gcc-ts-bundler.mjs"),
+    ]);
+    const output = await fs.readFile(result.outputFiles[0], "utf8");
+    expect(output.startsWith("#!/usr/bin/env node\n")).toBe(true);
+    await execFileAsync(process.execPath, [result.outputFiles[0]]);
+  },
+);
+
+test.serial(
   "emits a shared chunk when multiple entries use the same package",
   async () => {
     const fixture = await createFixture();
@@ -580,6 +953,195 @@ test.serial(
         .map((filePath) => path.basename(filePath))
         .sort((left, right) => left.localeCompare(right)),
     ).toEqual(["a.js", "b.js", "shared.js"]);
+  },
+);
+
+test.serial(
+  "multi-entry shared chunks ignore incidental GCC marker strings",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/shared.ts",
+      [
+        "let calls = 0;",
+        "export function marker() {",
+        "  calls += 1;",
+        '  return `${calls}:${calls === 1 ? "globalThis.GCC" : \'globalThis["GCC"]\'}`;',
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/a.ts",
+      'import { marker } from "./shared";\nexport function alpha() { return marker(); }\n',
+    );
+    await fixture.write(
+      "src/b.ts",
+      'import { marker } from "./shared";\nexport function beta() { return marker(); }\n',
+    );
+
+    const result = await build({
+      cache: { mode: "off" },
+      chunks: { mode: "off", outputType: "esm" },
+      compilationLevel: "ADVANCED",
+      entries: [
+        { file: "./a.ts", name: "index.mjs" },
+        { file: "./b.ts", name: "nested/index.mjs" },
+      ],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+      target: "node",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(
+      result.outputFiles
+        .map((filePath) => path.relative(fixture.outDir, filePath))
+        .sort(),
+    ).toEqual(["index.mjs", "nested/index.mjs", "shared.js"]);
+    const shared = await fixture.read("dist/shared.js");
+    expect(shared).toContain("globalThis.GCC");
+    expect(shared).toContain('globalThis["GCC"]');
+    expect(await fixture.read("dist/nested/index.mjs")).toContain(
+      'from"../shared.js"',
+    );
+    const alpha = await import(
+      `${pathToFileURL(path.join(fixture.outDir, "index.mjs")).href}?shared-exports=${Date.now()}`,
+    );
+    const beta = await import(
+      `${pathToFileURL(path.join(fixture.outDir, "nested/index.mjs")).href}?shared-exports=${Date.now()}`,
+    );
+    expect(alpha.alpha()).toBe("1:globalThis.GCC");
+    expect(beta.beta()).toBe('2:globalThis["GCC"]');
+  },
+);
+
+test.serial(
+  "shared chunks preserve external boundary properties used at module init",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          allowSyntheticDefaultImports: true,
+          esModuleInterop: true,
+          module: "ESNext",
+          moduleResolution: "Bundler",
+          target: "ESNext",
+          typeRoots: [path.resolve(import.meta.dirname, "../node_modules/@types")],
+          types: ["node"],
+        },
+      }),
+    );
+    await fixture.write(
+      "node_modules/external-return/package.json",
+      JSON.stringify({
+        exports: { types: "./index.d.cts", default: "./index.js" },
+        name: "external-return",
+      }),
+    );
+    await fixture.write(
+      "node_modules/external-return/index.d.cts",
+      [
+        "declare function make(): make.ExternalResult;",
+        "declare namespace make {",
+        "  interface ExternalResult { payload: { value: number } }",
+        "  interface Options { direct?: number; merged?: number; nested: { deep: number } }",
+        "  interface State { written: number }",
+        "  function inspect(options: Options): number;",
+        "  function createState(): State;",
+        "}",
+        "export = make;",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "node_modules/external-return/index.js",
+      [
+        "function make() { return { payload: { value: 42 } }; }",
+        "make.inspect = (options) => (options.direct ?? 0) + (options.merged ?? 0) + options.nested.deep;",
+        "make.createState = () => ({ written: 0 });",
+        "module.exports = make;",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/shared.ts",
+      [
+        'import make from "external-return";',
+        'import fs from "fs";',
+        'import zlib from "node:zlib";',
+        'import { promisify } from "node:util";',
+        "const gzip = promisify(zlib.gzip);",
+        "type ExternalResult = ReturnType<typeof make>;",
+        "function secondHop(holder: { value: ExternalResult }) {",
+        "  const { value } = holder;",
+        "  const { payload } = value;",
+        "  return payload.value;",
+        "}",
+        "function firstHop(value: ExternalResult) {",
+        "  return secondHop({ value });",
+        "}",
+        "const externalResult = make();",
+        "const inlineOptions = make.inspect({ direct: 3, nested: { deep: 4 } });",
+        "const optionBase = { merged: 5 };",
+        "const intermediateOptions = { ...optionBase, nested: { deep: 7 } };",
+        "const intermediateValue = make.inspect(intermediateOptions);",
+        "const externalState = make.createState();",
+        "externalState.written = 11;",
+        "export async function combined(value: string) {",
+        '  await fs.promises.mkdir(".", { recursive: true });',
+        "  return [",
+        "    (await gzip(value)).byteLength,",
+        "    firstHop(externalResult) + inlineOptions + intermediateValue + externalState.written,",
+        "  ];",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/a.ts",
+      'import { combined } from "./shared";\nexport const alpha = () => combined("alpha");\n',
+    );
+    await fixture.write(
+      "src/b.ts",
+      'import { combined } from "./shared";\nexport const beta = () => combined("beta");\n',
+    );
+
+    const result = await build({
+      cache: { mode: "off" },
+      chunks: { mode: "off", outputType: "esm" },
+      compilationLevel: "ADVANCED",
+      entries: ["./a.ts", "./b.ts"],
+      externals: ["external-return"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+      target: "node",
+    });
+
+    expect(
+      result.ok,
+      result.ok
+        ? ""
+        : result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"),
+    ).toBe(true);
+    const shared = await fixture.read("dist/shared.js");
+    expect(shared).toMatch(/(?:\.gzip|\["gzip"\]|\['gzip'\])/u);
+    const alpha = await import(
+      `${pathToFileURL(path.join(fixture.outDir, "a.js")).href}?external-shared=${Date.now()}`,
+    );
+    const beta = await import(
+      `${pathToFileURL(path.join(fixture.outDir, "b.js")).href}?external-shared=${Date.now()}`,
+    );
+    const alphaResult = await alpha.alpha();
+    const betaResult = await beta.beta();
+    expect(alphaResult[0]).toBeGreaterThan(0);
+    expect(betaResult[0]).toBeGreaterThan(0);
+    expect(alphaResult[1]).toBe(72);
+    expect(betaResult[1]).toBe(72);
   },
 );
 

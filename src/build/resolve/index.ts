@@ -384,13 +384,15 @@ function createResolveMetadata(
     optionsSignature: context.optionsSignature,
     chunkPlan,
     externalBoundaries: fresh.externalBoundaries,
-    entryFiles: entryFiles.map((entry) => ({
-      chunkName: entry.chunkName,
-      exportNames: entry.exportNames,
-      hasDefaultExport: entry.hasDefaultExport,
-      outputName: entry.outputName,
-      sourceRelativePath: entry.sourceRelativePath,
-    })),
+    entryFiles: entryFiles.map(
+      (entry): ResolveMetadata["entryFiles"][number] => ({
+        chunkName: entry.chunkName,
+        exportNames: entry.exportNames,
+        hasDefaultExport: entry.hasDefaultExport,
+        outputName: entry.outputName,
+        sourceRelativePath: entry.sourceRelativePath,
+      }),
+    ),
     lazyImports: fresh.graphResult.lazyImports,
     packageAliases: fresh.packageAliases,
     packageJsonFiles: fresh.packageJsonFiles,

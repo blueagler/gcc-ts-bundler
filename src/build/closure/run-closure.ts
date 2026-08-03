@@ -1,15 +1,17 @@
 import fs from "fs/promises";
 import path from "path";
 
+import { renderNodeAmbientGlobals } from "../../externs/ambient-globals";
 import { ensureDirectory, ensureParentDirectory } from "../../shared/files";
 import { logInternalDetail, withInternalTiming } from "../../shared/timing";
 import type {
+  BuildEntry,
   ChunkPlanChunk,
   PreservedImport,
   PreservedModule,
   ResolvedBuildOptions,
 } from "../types";
-import { prepareClosureJobs } from "../../native/load";
+import { prepareClosureJobs, stripTypescriptModule } from "../../native/load";
 import type { NativeEmittedTypeMetadata } from "../../native/load";
 import {
   configureClosureCompilerOptions,
@@ -46,6 +48,7 @@ export async function runClosureStage({
   closureCompilerEnvironment,
   chunkPlan,
   emittedOutDir,
+  entryFiles,
   entryShebangs,
   explicitExternPaths,
   finalCacheDir,
@@ -63,6 +66,7 @@ export async function runClosureStage({
   closureCompilerEnvironment: ClosureCompilerEnvironment;
   chunkPlan: ChunkPlanChunk[];
   emittedOutDir: string;
+  entryFiles: BuildEntry[];
   entryShebangs: Array<{ shebang: string; sourcePath: string }>;
   explicitExternPaths: string[];
   finalCacheDir: string;
@@ -112,6 +116,10 @@ export async function runClosureStage({
     typeMetadata,
   });
 
+  if (options.chunks.mode === "off") {
+    remapOffModeEntryOutputs({ chunkPlan, entryFiles, outDir, prepared });
+  }
+
   await writeGeneratedAssets(prepared.generatedAssets);
 
   const exitCodes = await withInternalTiming("closure:compile", () =>
@@ -121,6 +129,7 @@ export async function runClosureStage({
       platformExterns: options.platformExterns,
       target: options.target,
       packageRoot,
+      projectRoot: options.projectRoot,
       prepared,
       projectCacheDir,
       usesPersistentCache: options.cache.mode !== "off",
@@ -184,6 +193,35 @@ export async function runClosureStage({
   };
 }
 
+function remapOffModeEntryOutputs(input: {
+  chunkPlan: ChunkPlanChunk[];
+  entryFiles: BuildEntry[];
+  outDir: string;
+  prepared: ReturnType<typeof prepareClosureJobs>;
+}) {
+  if (input.chunkPlan.length !== input.prepared.postprocessActions.length) {
+    throw new Error(
+      "Off-mode output mapping could not align Closure chunks with output actions.",
+    );
+  }
+  const declaredOutputs = new Set(
+    input.entryFiles.map((entry) => entry.outputName),
+  );
+  for (const [index, chunk] of input.chunkPlan.entries()) {
+    if (!chunk.outputName) continue;
+    const action = input.prepared.postprocessActions[index];
+    if (!declaredOutputs.has(chunk.outputName) || !action) {
+      throw new Error(
+        `Off-mode output mapping could not resolve entry owner for chunk ${chunk.name}.`,
+      );
+    }
+    action.outputPath = path.join(input.outDir, chunk.outputName);
+  }
+  input.prepared.publishedOutputs = input.prepared.postprocessActions.map(
+    (action) => action.outputPath,
+  );
+}
+
 async function emitPreservedModules(input: {
   chunkPlan: ChunkPlanChunk[];
   imports: PreservedImport[];
@@ -215,7 +253,16 @@ async function emitPreservedModules(input: {
         );
       }
       await ensureParentDirectory(outputPath);
-      await fs.copyFile(module.filePath, outputPath);
+      if (isTypeScriptModule(module.filePath)) {
+        const source = await fs.readFile(module.filePath, "utf8");
+        await fs.writeFile(
+          outputPath,
+          stripTypescriptModule(module.filePath, source),
+          "utf8",
+        );
+      } else {
+        await fs.copyFile(module.filePath, outputPath);
+      }
       return outputPath;
     }),
   );
@@ -334,6 +381,10 @@ async function prependEntryShebangs(input: {
   }
 }
 
+function isTypeScriptModule(filePath: string) {
+  return /\.(?:cts|mts|ts)$/u.test(filePath) && !filePath.endsWith(".d.ts");
+}
+
 function normalizeFilePath(filePath: string) {
   return filePath.replace(/\\/g, "/").replace(/^\.\//u, "");
 }
@@ -386,6 +437,7 @@ async function compilePreparedClosureJobs({
   platformExterns,
   target,
   packageRoot,
+  projectRoot,
   prepared,
   projectCacheDir,
   usesPersistentCache,
@@ -395,6 +447,7 @@ async function compilePreparedClosureJobs({
   platformExterns: string;
   target: ResolvedBuildOptions["target"];
   packageRoot: string;
+  projectRoot: string;
   prepared: ReturnType<typeof prepareClosureJobs>;
   projectCacheDir: string;
   usesPersistentCache: boolean;
@@ -423,6 +476,7 @@ async function compilePreparedClosureJobs({
             platformExterns,
             target,
             packageRoot,
+            projectRoot,
             closureCompilerEnvironment.typeInferenceDisabled,
             projectCacheDir,
             warnPlatformExternFallback,
@@ -506,7 +560,7 @@ async function applyStableRenamingMaps(
   if (!cacheDir || !job.propertyRenamingReportPath) {
     return job;
   }
-  const stableJob = { ...job };
+  const stableJob: PreparedCompileJob = { ...job };
   stableJob.variableRenamingReportPath = path.join(
     path.dirname(job.propertyRenamingReportPath),
     "variable-renaming-report.txt",
@@ -598,18 +652,45 @@ async function applyMinimalPlatformExterns(
   platformExterns: string,
   target: ResolvedBuildOptions["target"],
   packageRoot: string,
+  projectRoot: string,
   typeInferenceDisabled: boolean,
   projectCacheDir: string,
   warnPlatformExternFallback: () => void,
 ): Promise<PreparedCompileJob> {
   if (target !== "browser") {
+    const externs = job.externs.filter(
+      (filePath) =>
+        !["browser-extra.js", "worker.js"].includes(path.basename(filePath)),
+    );
+    if (target !== "node") {
+      return { ...job, env: "CUSTOM", externs };
+    }
+    const rendered = await renderNodeAmbientGlobals({
+      jsFiles: job.js,
+      packageRoot,
+      projectRoot,
+    });
+    if (!rendered || rendered.text.length === 0) {
+      return { ...job, env: "CUSTOM", externs };
+    }
+    const firstOutput = getCompileJobOutputFiles(job)[0];
+    if (!firstOutput) {
+      throw new Error("Node ambient globals require a Closure output path");
+    }
+    const externsPath = path.join(
+      path.dirname(firstOutput),
+      `node-global-externs.${path.basename(firstOutput, ".js")}.js`,
+    );
+    await ensureParentDirectory(externsPath);
+    await fs.writeFile(externsPath, rendered.text, "utf8");
+    logInternalDetail(
+      "closure:node-global-externs",
+      `globals=${rendered.globalNames.join(",")} bytes=${rendered.text.length}`,
+    );
     return {
       ...job,
       env: "CUSTOM",
-      externs: job.externs.filter(
-        (filePath) =>
-          !["browser-extra.js", "worker.js"].includes(path.basename(filePath)),
-      ),
+      externs: [...externs, externsPath],
     };
   }
   if (

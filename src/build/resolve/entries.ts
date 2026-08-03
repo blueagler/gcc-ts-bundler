@@ -2,6 +2,7 @@ import path from "path";
 
 import { zipExact } from "../../shared/arrays";
 import type { BuildEntry } from "../types";
+import type { ResolveMetadata } from "./cache";
 
 export function resolveOutputNames(
   entries: Array<{ name: string | null; relativePath: string }>,
@@ -34,13 +35,7 @@ export function sanitizeChunkName(outputName: string) {
 }
 
 export function toBuildEntry(
-  entry: {
-    chunkName: string;
-    exportNames: string[];
-    hasDefaultExport: boolean;
-    outputName: string;
-    sourceRelativePath: string;
-  },
+  entry: ResolveMetadata["entryFiles"][number],
   sourceRoot: string,
 ): BuildEntry {
   return {

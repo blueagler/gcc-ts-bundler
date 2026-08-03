@@ -182,6 +182,7 @@ pub(super) fn empty_metadata() -> ClosureFileMetadata {
         decorated_output_text: None,
         diagnostics: Vec::new(),
         enums: Vec::new(),
+        external_owned_member_accesses: Vec::new(),
         file_path: String::new(),
         runtime_module_id: None,
         source_file_path: String::new(),

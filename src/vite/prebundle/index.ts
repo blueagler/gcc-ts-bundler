@@ -4,6 +4,7 @@ import path from "node:path";
 
 import type { Plugin } from "esbuild";
 
+import { writeJson } from "../../shared/cache-store";
 import { syncDirectoryEntries } from "../../shared/files";
 import type {
   CapturedRuntimeModule,
@@ -57,6 +58,12 @@ interface PrebundleContext {
   moduleBySourceId: Map<string, CapturedRuntimeModule>;
   parseModule: (filePath: string) => Promise<ParsedMaterializedModule>;
   runtimeSrcDir: string;
+}
+
+interface MaterializedDependencyBundleMarker {
+  files: Array<{ path: string; sha256: string }>;
+  kind: "gcc-ts-bundler-materialized-dependency-bundles";
+  version: 1;
 }
 
 interface DependencyBundleSet {
@@ -184,18 +191,13 @@ async function writeMaterializedDependencyBundleMarker(input: {
         sha256: hashText(await fs.readFile(filePath, "utf8")),
       })),
   );
-  await fs.writeFile(
+  await writeJson(
     path.join(input.bundleDir, MATERIALIZED_DEPENDENCY_BUNDLE_MARKER),
-    `${JSON.stringify(
-      {
-        files,
-        kind: "gcc-ts-bundler-materialized-dependency-bundles",
-        version: 1,
-      },
-      null,
-      2,
-    )}\n`,
-    "utf8",
+    {
+      files,
+      kind: "gcc-ts-bundler-materialized-dependency-bundles",
+      version: 1,
+    } satisfies MaterializedDependencyBundleMarker,
   );
 }
 

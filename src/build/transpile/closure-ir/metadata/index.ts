@@ -1,6 +1,10 @@
 import ts from "@typescript/typescript6";
 
 import { collectClosureIrFileMetadata } from "./collect";
+import {
+  collectExternalDeclarationOrigins,
+  collectExternalOwnedMemberAccesses,
+} from "./external-ownership";
 import { collectUnsafeEnumSymbols } from "./enums";
 import { scanClosureIrSourceFiles, type ClosureIrScanResult } from "./scan";
 import { countTypeMetadata } from "../types";
@@ -23,13 +27,17 @@ export function scanTypeMetadataFiles({
 }
 
 export function collectTypeMetadataFiles({
+  boundaryModuleFileNames = [],
   compilerOptions,
+  externalSpecifiers = [],
   fileNames,
   program,
   scan,
   targets,
 }: {
+  boundaryModuleFileNames?: string[] | undefined;
   compilerOptions: ts.CompilerOptions;
+  externalSpecifiers?: string[] | undefined;
   fileNames: string[];
   program: ts.Program;
   scan?: ClosureIrScanResult;
@@ -51,24 +59,31 @@ export function collectTypeMetadataFiles({
     features,
     sourceFile,
   }));
-  const needsChecker = files.some(
-    ({ features }) =>
-      features.hasEnumDeclarations ||
-      features.hasTopLevelDocs ||
-      features.hasTypeDeclarations,
-  );
+  const needsChecker =
+    boundaryModuleFileNames.length > 0 ||
+    externalSpecifiers.length > 0 ||
+    files.some(
+      ({ features }) =>
+        features.hasEnumDeclarations ||
+        features.hasTopLevelDocs ||
+        features.hasTypeDeclarations,
+    );
   const hasDecorators = files.some(({ features }) => features.hasDecorators);
+  const ambientGlobals = collectAmbientGlobalNames(program);
   if (!needsChecker && !hasDecorators) {
-    const ambient = collectAmbientGlobalNames(program);
     const collectedFiles = effectiveTargets.map((target) => ({
       ...createEmptyMetadataFile(target),
-      ambientGlobals: ambient,
+      ambientGlobals,
     }));
     return buildCollectionResult([], collectedFiles, effectiveScan);
   }
 
-  const ambientGlobals = collectAmbientGlobalNames(program);
   const checker = program.getTypeChecker();
+  const externalOrigins = collectExternalDeclarationOrigins({
+    boundaryModuleFileNames,
+    externalSpecifiers: new Set(externalSpecifiers),
+    program,
+  });
   const unsafeEnumSymbols = effectiveScan.hasEnumDeclarations
     ? collectUnsafeEnumSymbols(
         effectiveScan.files
@@ -81,14 +96,19 @@ export function collectTypeMetadataFiles({
   const collectedBySourcePath = new Map<string, ClosureTypeMetadataFile>();
 
   for (const { features, sourceFile } of files) {
+    const externalOwnedMemberAccesses = collectExternalOwnedMemberAccesses({
+      checker,
+      origins: externalOrigins,
+      sourceFile,
+    });
     if (!features.shouldAnalyze) {
-      collectedBySourcePath.set(
-        sourceFile.fileName,
-        createEmptyMetadataFile({
+      collectedBySourcePath.set(sourceFile.fileName, {
+        ...createEmptyMetadataFile({
           emitFilePath: sourceFile.fileName,
           sourceFilePath: sourceFile.fileName,
         }),
-      );
+        externalOwnedMemberAccesses,
+      });
       continue;
     }
 
@@ -100,7 +120,10 @@ export function collectTypeMetadataFiles({
       unsafeEnumSymbols,
     });
     diagnostics.push(...result.diagnostics);
-    collectedBySourcePath.set(sourceFile.fileName, result.file);
+    collectedBySourcePath.set(sourceFile.fileName, {
+      ...result.file,
+      externalOwnedMemberAccesses,
+    });
   }
 
   const collectedFiles = effectiveTargets.map((target) => {
@@ -128,6 +151,7 @@ function createEmptyMetadataFile(
     decoratedOutputText: undefined,
     diagnostics: [],
     enums: [],
+    externalOwnedMemberAccesses: [],
     filePath: target.emitFilePath,
     runtimeModuleId: target.runtimeModuleId,
     sourceFilePath: target.sourceFilePath,

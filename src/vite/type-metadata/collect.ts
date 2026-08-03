@@ -518,7 +518,7 @@ function createRuntimeGraphResolver(graph: MaterializedGraph) {
 async function filterDirectMetadata(
   file: ClosureTypeMetadataFile,
   diagnostics: ViteTypeMetadataDiagnostic[],
-) {
+): Promise<ClosureTypeMetadataFile | null> {
   let runtimeText: string;
   try {
     runtimeText = await fs.readFile(file.filePath, "utf8");
