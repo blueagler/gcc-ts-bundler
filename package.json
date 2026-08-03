@@ -106,6 +106,7 @@
     "bin",
     "dist",
     "docs",
+    "!docs/research",
     "closure-externs",
     "closure-lib",
     "README.md",

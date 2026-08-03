@@ -64,6 +64,9 @@ const packageEntries = [
   ...libraryEntries,
   { file: "cli/main.ts", name: stagedCliOutputName },
 ];
+const presetEntryOutputs = libraryEntries
+  .filter(({ file }) => file.startsWith("presets/"))
+  .map(({ name }) => name);
 const generatedPackageRoots = new Set(
   [
     packageManifest.types,
@@ -126,6 +129,7 @@ async function buildStage(compilerPath, stageRoot, label) {
     outDir: path.join(stageRoot, "dist"),
     typedExternPath,
   });
+  await removePresetSharedImports(stageRoot);
   await relocateCliEntry(stageRoot);
   await emitDeclarations(path.join(stageRoot, "dist"));
   await assertDeclaredPackageEntrypoints(stageRoot);
@@ -155,6 +159,18 @@ async function runCompilerBuild(build, { entries, outDir, typedExternPath }) {
         .map((diagnostic) => diagnostic.message)
         .join("\n")}`,
     );
+  }
+}
+
+async function removePresetSharedImports(stageRoot) {
+  for (const outputName of presetEntryOutputs) {
+    const outputPath = path.join(stageRoot, "dist", outputName);
+    const source = await readFile(outputPath, "utf8");
+    const leafSource = source.replace(/^import["']\.\.\/shared\.js["'];/u, "");
+    if (leafSource.includes("../shared.js")) {
+      throw new Error(`Preset entry still depends on shared.js: ${outputName}`);
+    }
+    await writeFile(outputPath, leafSource, "utf8");
   }
 }
 

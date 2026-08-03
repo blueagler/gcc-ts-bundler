@@ -173,7 +173,7 @@ Omitting `outputType` and setting it explicitly to `"auto"` are equivalent in th
 ES module output is roughly 7% smaller raw and 3% smaller gzipped on the
 reference app, and drops the renamed-namespace prefix, the per-chunk function
 wrapper, and the `document.currentScript` base-URL probe. The full measurement
-and risk analysis is in [`research/es-modules-output.md`](./research/es-modules-output.md).
+and risk analysis is in [`research/es-modules-output.md`](https://github.com/blueagler/gcc-ts-bundler/blob/main/docs/research/es-modules-output.md).
 
 Request counts and waterfall depth are unchanged: lazy chunks are still fetched
 through the runtime manifest, which issues a chunk and all of its dependencies

@@ -31,3 +31,11 @@ oxc_syntax = "=0.142.0"
 
 [build-dependencies]
 napi-build = "2.4.0"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = 3
+strip = "symbols"
+# Keep unwinding enabled: napi-rs cannot convert an aborting panic to a JS
+# exception, and this addon has no proof that all dependency panics are unreachable.
