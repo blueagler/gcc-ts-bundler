@@ -50,6 +50,7 @@ export function createModuleParser(targets: ParseTargets) {
       ts.ScriptKind.JS,
     );
     const staticAuthoredImports = new Set<string>();
+    const dependencyFilePaths = new Set<string>();
     const dependencyImports: ParsedDependencyImport[] = [];
     const exportedNames = new Set<string>();
     let hasDefaultExport = false;
@@ -71,6 +72,7 @@ export function createModuleParser(targets: ParseTargets) {
         continue;
       }
       if (parsed.kind === "dependency") {
+        dependencyFilePaths.add(parsed.dependencyImport.targetFilePath);
         dependencyImports.push(parsed.dependencyImport);
         continue;
       }
@@ -82,9 +84,35 @@ export function createModuleParser(targets: ParseTargets) {
         exportedNames.add("default");
       }
       if (parsed.dependencyImport) {
+        dependencyFilePaths.add(parsed.dependencyImport.targetFilePath);
         dependencyImports.push(parsed.dependencyImport);
       }
     }
+
+    const visitDynamicImports = (node: ts.Node) => {
+      const firstArgument = ts.isCallExpression(node)
+        ? node.arguments[0]
+        : undefined;
+      if (
+        ts.isCallExpression(node) &&
+        node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+        firstArgument !== undefined &&
+        ts.isStringLiteralLike(firstArgument) &&
+        firstArgument.text.startsWith(".")
+      ) {
+        const targetFilePath = normalizePath(
+          path.resolve(path.dirname(normalizedFilePath), firstArgument.text),
+        );
+        if (
+          targets.moduleFilePaths.has(targetFilePath) &&
+          !targets.authoredFiles.has(targetFilePath)
+        ) {
+          dependencyFilePaths.add(targetFilePath);
+        }
+      }
+      ts.forEachChild(node, visitDynamicImports);
+    };
+    visitDynamicImports(sourceFile);
 
     if (!hasDefaultExport && exportedNames.size === 0) {
       // A CommonJS-only dependency (jquery's UMD wrapper, any `module.exports`
@@ -96,6 +124,9 @@ export function createModuleParser(targets: ParseTargets) {
     }
 
     const parsed = {
+      dependencyFilePaths: [...dependencyFilePaths].sort((left, right) =>
+        left.localeCompare(right),
+      ),
       dependencyImports,
       exportedNames: [...exportedNames].sort((left, right) =>
         left.localeCompare(right),

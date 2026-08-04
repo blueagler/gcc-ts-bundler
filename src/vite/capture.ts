@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
 
@@ -6,15 +7,21 @@ import { transformWithEsbuild, type ResolvedConfig } from "vite";
 
 import { hashJson } from "../shared/hash";
 import { applyTextEdits } from "../shared/text-edits";
+import { hasErrorCode } from "../shared/validation";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type {
   CapturedModule,
   CapturedModuleAnalysis,
+  CapturedModuleFormat,
   PluginContext,
   ViteBuildMetrics,
 } from "./internal-types";
 
 const GCC_CAPTURE_DIR = ".gcc-ts-bundler-vite";
+const packageFormatByDirectory = new Map<
+  string,
+  Promise<CapturedModuleFormat>
+>();
 
 export type CapturedModuleResolution = Awaited<
   ReturnType<PluginContext["resolve"]>
@@ -124,7 +131,100 @@ export function getCapturedModuleAnalysis(
 }
 
 function isDependencyModuleId(id: string) {
-  return stripQuery(id).includes("/node_modules/");
+  return stripQuery(id).replace(/\\/g, "/").includes("/node_modules/");
+}
+
+export async function restoreEmptyDependencyModuleSource(
+  id: string,
+  transformedCode: string,
+) {
+  if (!isDependencyModuleId(id)) {
+    return transformedCode;
+  }
+  const transformedRecord: CapturedModule = { code: transformedCode, id };
+  if (!getCapturedModuleAnalysis(transformedRecord).isEffectivelyEmpty) {
+    return transformedCode;
+  }
+
+  try {
+    const sourceCode = await fs.readFile(stripQuery(id), "utf8");
+    const sourceRecord: CapturedModule = { code: sourceCode, id };
+    const sourceAnalysis = getCapturedModuleAnalysis(sourceRecord);
+    return sourceAnalysis.moduleFormat === "esm" &&
+      !sourceAnalysis.isEffectivelyEmpty
+      ? sourceCode
+      : transformedCode;
+  } catch {
+    return transformedCode;
+  }
+}
+
+export async function resolveCapturedModuleFormat(record: CapturedModule) {
+  const syntaxFormat = getCapturedModuleAnalysis(record).moduleFormat;
+  if (syntaxFormat !== "unknown") {
+    return syntaxFormat;
+  }
+
+  const cleanId = stripQuery(record.id);
+  const extension = path.extname(cleanId).toLowerCase();
+  if (extension === ".mjs" || extension === ".mts") {
+    return "esm";
+  }
+  if (extension === ".cjs" || extension === ".cts") {
+    return "cjs";
+  }
+  if (!isDependencyModuleId(cleanId) || !path.isAbsolute(cleanId)) {
+    return "unknown";
+  }
+  return await resolvePackageModuleFormat(path.dirname(cleanId));
+}
+
+async function resolvePackageModuleFormat(
+  directory: string,
+): Promise<CapturedModuleFormat> {
+  const normalizedDirectory = path.normalize(directory);
+  const cached = packageFormatByDirectory.get(normalizedDirectory);
+  if (cached) {
+    return await cached;
+  }
+
+  const pending = (async (): Promise<CapturedModuleFormat> => {
+    try {
+      const packageText = await fs.readFile(
+        path.join(normalizedDirectory, "package.json"),
+        "utf8",
+      );
+      const packageJson: unknown = JSON.parse(packageText);
+      if (
+        packageJson &&
+        typeof packageJson === "object" &&
+        "type" in packageJson &&
+        packageJson.type === "module"
+      ) {
+        return "esm";
+      }
+      return "cjs";
+    } catch (error) {
+      if (!isMissingFileError(error)) {
+        return "unknown";
+      }
+    }
+
+    const parent = path.dirname(normalizedDirectory);
+    if (
+      parent === normalizedDirectory ||
+      path.basename(normalizedDirectory) === "node_modules"
+    ) {
+      return "unknown";
+    }
+    return await resolvePackageModuleFormat(parent);
+  })();
+  packageFormatByDirectory.set(normalizedDirectory, pending);
+  return await pending;
+}
+
+function isMissingFileError(error: unknown) {
+  return hasErrorCode(error, "ENOENT");
 }
 
 async function normalizeCapturedCode(
@@ -135,10 +235,9 @@ async function normalizeCapturedCode(
   let nextCode = code;
   const moduleAnalysis = analysis ?? analyzeModuleCode(id, code);
 
-  // Dependency modules flow through the region prebundle, which lowers
-  // Closure-unsupported syntax once per bundle with esbuild code splitting.
-  // Lowering them here instead would duplicate esbuild's private-field
-  // helpers into every module that uses them.
+  // Dependency compatibility syntax is owned downstream: ESM-clean graphs use
+  // native Oxc lowering, while ambiguous/CJS graphs use the esbuild prebundle.
+  // Lowering it here would either duplicate helpers or erase the routing evidence.
   if (
     moduleAnalysis.needsClosureCompatibilityDownlevel &&
     !isDependencyModuleId(id)
@@ -333,7 +432,16 @@ async function getNormalizedCapturedModule(
   if (record.normalizedCode !== undefined) {
     return {
       code: record.normalizedCode,
+      ...(record.format === undefined ? {} : { format: record.format }),
       id: record.id,
+      ...(record.requiresDependencyPrebundle === undefined
+        ? {}
+        : {
+            requiresDependencyPrebundle: record.requiresDependencyPrebundle,
+          }),
+      ...(record.renderedLength === undefined
+        ? {}
+        : { renderedLength: record.renderedLength }),
       normalizedAnalysis:
         record.normalizedAnalysis ??
         getCapturedModuleAnalysis(record, metrics, "normalized"),
@@ -355,7 +463,16 @@ async function getNormalizedCapturedModule(
   }
   return {
     code: normalizedCode,
+    ...(record.format === undefined ? {} : { format: record.format }),
     id: record.id,
+    ...(record.requiresDependencyPrebundle === undefined
+      ? {}
+      : {
+          requiresDependencyPrebundle: record.requiresDependencyPrebundle,
+        }),
+    ...(record.renderedLength === undefined
+      ? {}
+      : { renderedLength: record.renderedLength }),
     normalizedAnalysis:
       record.normalizedAnalysis ??
       getCapturedModuleAnalysis(record, metrics, "normalized"),
@@ -611,6 +728,9 @@ function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
   const dynamicImportSpecifiers = new Set<string>();
   const bridgeSpecifiers = new Set<string>();
   let isForwardingOnly = true;
+  let hasCommonJsSyntax = false;
+  let hasDependencyDefineReferences = false;
+  let hasEsmSyntax = false;
   let hasExtendingClass = false;
   let needsClosureCompatibility = false;
   let needsTypeScriptCompatibility = false;
@@ -625,6 +745,7 @@ function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
       statement.moduleSpecifier &&
       ts.isStringLiteralLike(statement.moduleSpecifier)
     ) {
+      hasEsmSyntax = true;
       const specifier = statement.moduleSpecifier.text;
       importSpecifiers.add(specifier);
       if (statement.importClause) {
@@ -633,13 +754,30 @@ function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
       continue;
     }
 
-    if (
-      ts.isExportDeclaration(statement) &&
-      statement.moduleSpecifier &&
-      ts.isStringLiteralLike(statement.moduleSpecifier)
-    ) {
-      importSpecifiers.add(statement.moduleSpecifier.text);
+    if (ts.isExportDeclaration(statement)) {
+      hasEsmSyntax = true;
+      if (
+        statement.moduleSpecifier &&
+        ts.isStringLiteralLike(statement.moduleSpecifier)
+      ) {
+        importSpecifiers.add(statement.moduleSpecifier.text);
+      }
       continue;
+    }
+
+    if (ts.isExportAssignment(statement)) {
+      if (statement.isExportEquals) {
+        hasCommonJsSyntax = true;
+      } else {
+        hasEsmSyntax = true;
+      }
+    } else if (
+      ts.canHaveModifiers(statement) &&
+      ts
+        .getModifiers(statement)
+        ?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)
+    ) {
+      hasEsmSyntax = true;
     }
 
     if (isEmptyExportStatement(statement)) {
@@ -653,6 +791,46 @@ function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
     const firstArgument = ts.isCallExpression(node)
       ? node.arguments[0]
       : undefined;
+    if (
+      (ts.isIdentifier(node) && /^__[A-Z\d_]+__$/u.test(node.text)) ||
+      isProcessNodeEnvAccess(node)
+    ) {
+      hasDependencyDefineReferences = true;
+    }
+
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "require"
+    ) {
+      hasCommonJsSyntax = true;
+    } else if (
+      ts.isBinaryExpression(node) &&
+      isCommonJsExportTarget(node.left)
+    ) {
+      hasCommonJsSyntax = true;
+    } else if (isModuleExportsAccess(node)) {
+      hasCommonJsSyntax = true;
+    } else if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) &&
+      node.expression.expression.text === "Object" &&
+      node.expression.name.text === "defineProperty" &&
+      node.arguments[0] !== undefined &&
+      (isExportsIdentifier(node.arguments[0]) ||
+        isModuleExportsAccess(node.arguments[0]))
+    ) {
+      hasCommonJsSyntax = true;
+    }
+
+    if (
+      ts.isMetaProperty(node) &&
+      node.keywordToken === ts.SyntaxKind.ImportKeyword
+    ) {
+      hasEsmSyntax = true;
+    }
+
     if (
       ts.isCallExpression(node) &&
       node.expression.kind === ts.SyntaxKind.ImportKeyword &&
@@ -710,6 +888,7 @@ function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
     dynamicImportSpecifiers: [...dynamicImportSpecifiers].sort((left, right) =>
       left.localeCompare(right),
     ),
+    hasDependencyDefineReferences,
     importSpecifiers: [...importSpecifiers].sort((left, right) =>
       left.localeCompare(right),
     ),
@@ -718,9 +897,52 @@ function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
     ),
     hasExtendingClass,
     isForwardingOnly,
+    isFusedDistributionModule:
+      (code.match(/(?:^|\n)\s*\/\/\s*#region\b/gu)?.length ?? 0) > 1,
+    moduleFormat: hasEsmSyntax
+      ? hasCommonJsSyntax
+        ? "mixed"
+        : "esm"
+      : hasCommonJsSyntax
+        ? "cjs"
+        : "unknown",
     needsClosureCompatibilityDownlevel: needsClosureCompatibility,
     needsTypeScriptCompatibilityDownlevel: needsTypeScriptCompatibility,
   };
+}
+
+function isProcessNodeEnvAccess(node: ts.Node) {
+  return (
+    ts.isPropertyAccessExpression(node) &&
+    node.name.text === "NODE_ENV" &&
+    ts.isPropertyAccessExpression(node.expression) &&
+    node.expression.name.text === "env" &&
+    ts.isIdentifier(node.expression.expression) &&
+    node.expression.expression.text === "process"
+  );
+}
+
+function isCommonJsExportTarget(node: ts.Expression): boolean {
+  if (
+    !ts.isPropertyAccessExpression(node) &&
+    !ts.isElementAccessExpression(node)
+  ) {
+    return false;
+  }
+  return isExportsIdentifier(node.expression) || isModuleExportsAccess(node);
+}
+
+function isExportsIdentifier(node: ts.Node) {
+  return ts.isIdentifier(node) && node.text === "exports";
+}
+
+function isModuleExportsAccess(node: ts.Node): boolean {
+  return (
+    ts.isPropertyAccessExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === "module" &&
+    node.name.text === "exports"
+  );
 }
 
 function isClassStaticBlockNode(node: ts.Node) {

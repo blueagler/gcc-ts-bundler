@@ -241,8 +241,18 @@ async function collectBridgeModuleIds(
     input.metrics,
     input.analysisMode,
   );
+  const bridgeSpecifiers = new Set(analysis.bridgeSpecifiers);
+  if (
+    record.renderedLength === undefined &&
+    analysis.isForwardingOnly &&
+    classifyModuleId(record.id) !== "app"
+  ) {
+    for (const specifier of analysis.importSpecifiers) {
+      bridgeSpecifiers.add(specifier);
+    }
+  }
   await Promise.all(
-    analysis.bridgeSpecifiers.map(async (specifier) => {
+    [...bridgeSpecifiers].map(async (specifier) => {
       const resolved = await resolveCapturedSpecifier.call(this, {
         importerId: input.importerId,
         metrics: input.metrics,

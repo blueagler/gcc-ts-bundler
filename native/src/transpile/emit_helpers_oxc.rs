@@ -70,24 +70,60 @@ fn pooled_declaration_name(
     statement: &Statement<'_>,
     canonical_names: &HashSet<String>,
 ) -> Option<String> {
-    let Statement::VariableDeclaration(declaration) = statement else {
-        return None;
-    };
-    let [declarator] = declaration.declarations.as_slice() else {
-        return None;
-    };
-    let BindingPattern::BindingIdentifier(binding) = &declarator.id else {
-        return None;
+    let binding_name = match statement {
+        Statement::VariableDeclaration(declaration) => {
+            let [declarator] = declaration.declarations.as_slice() else {
+                return None;
+            };
+            let BindingPattern::BindingIdentifier(binding) = &declarator.id else {
+                return None;
+            };
+            binding.name.as_str()
+        }
+        Statement::ClassDeclaration(class) => class.id.as_ref()?.name.as_str(),
+        _ => return None,
     };
     canonical_names
-        .contains(binding.name.as_str())
-        .then(|| binding.name.to_string())
+        .contains(binding_name)
+        .then(|| binding_name.to_string())
 }
 
 fn print_statement(statement: &Statement<'_>) -> String {
     let mut codegen = Codegen::new();
     statement.print(&mut codegen, oxc_codegen::Context::default());
     codegen.into_source_text()
+}
+
+pub(super) fn collect_lowered_define_property_names(program: &Program<'_>) -> BTreeSet<String> {
+    let mut collector = LoweredDefinePropertyNames {
+        names: BTreeSet::new(),
+    };
+    collector.visit_program(program);
+    collector.names
+}
+
+struct LoweredDefinePropertyNames {
+    names: BTreeSet<String>,
+}
+
+impl<'a> Visit<'a> for LoweredDefinePropertyNames {
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        walk::walk_call_expression(self, call);
+        let Expression::StaticMemberExpression(callee) = &call.callee else {
+            return;
+        };
+        let Expression::Identifier(object) = &callee.object else {
+            return;
+        };
+        if object.name != "babelHelpers" || callee.property.name != "defineProperty" {
+            return;
+        }
+        if let Some(Expression::StringLiteral(key)) =
+            call.arguments.get(1).and_then(Argument::as_expression)
+        {
+            self.names.insert(key.value.to_string());
+        }
+    }
 }
 
 pub(super) fn collect_decorator_metadata_property_names(program: &Program<'_>) -> BTreeSet<String> {
@@ -193,17 +229,36 @@ var ordinary = function(a) { return a; };
         );
 
         let allocator = Allocator::default();
-        let source = format!("var {canonical} = function(a) {{ return a; }};\nvar keep = 1;");
+        let shared_class = "gccPrivateSlot$$shared";
+        let source = format!(
+            "var {canonical} = function(a) {{ return a; }};\nclass {shared_class} {{}}\nvar keep = 1;"
+        );
         let mut program = parse(&allocator, &source);
         let taken = take_shared_helper_declarations(
             &allocator,
             &mut program,
-            &HashSet::from([canonical.clone()]),
+            &HashSet::from([canonical.clone(), shared_class.to_string()]),
         );
-        assert_eq!(taken.len(), 1);
+        assert_eq!(taken.len(), 2);
         assert_eq!(taken[0].canonical_name, canonical);
         assert!(taken[0].text.contains("function"), "{:?}", taken[0]);
+        assert_eq!(taken[1].canonical_name, shared_class);
+        assert!(taken[1].text.contains("class"), "{:?}", taken[1]);
         assert_eq!(program.body.len(), 1);
+    }
+
+    #[test]
+    fn lowered_define_property_names_are_collected() {
+        let allocator = Allocator::default();
+        let program = parse(
+            &allocator,
+            r#"babelHelpers.defineProperty(this, "current", new Map());
+other.defineProperty(this, "ignored", 1);"#,
+        );
+        assert_eq!(
+            collect_lowered_define_property_names(&program),
+            BTreeSet::from(["current".to_string()])
+        );
     }
 
     #[test]

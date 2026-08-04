@@ -13,21 +13,29 @@ export type OutputChunk = Rollup.OutputChunk;
 export type PluginContext = Rollup.PluginContext;
 export type PreRenderedChunk = Rollup.PreRenderedChunk;
 
+export type CapturedModuleFormat = "cjs" | "esm" | "mixed" | "unknown";
+
 export interface CapturedModuleAnalysis {
   bridgeSpecifiers: string[];
+  hasDependencyDefineReferences: boolean;
   /** True when the module declares a class with an `extends` clause. */
   hasExtendingClass: boolean;
   dynamicImportSpecifiers: string[];
   importSpecifiers: string[];
   isEffectivelyEmpty: boolean;
   isForwardingOnly: boolean;
+  isFusedDistributionModule: boolean;
+  moduleFormat: CapturedModuleFormat;
   needsClosureCompatibilityDownlevel: boolean;
   needsTypeScriptCompatibilityDownlevel: boolean;
 }
 
 export interface CapturedModule {
   code: string;
+  format?: CapturedModuleFormat;
   id: string;
+  requiresDependencyPrebundle?: boolean;
+  renderedLength?: number;
   normalizedCode?: string;
   normalizedAnalysis?: CapturedModuleAnalysis;
   rawAnalysis?: CapturedModuleAnalysis;
@@ -35,7 +43,10 @@ export interface CapturedModule {
 
 export interface CapturedRuntimeModule {
   filePath: string;
+  format?: CapturedModuleFormat;
   id: string;
+  requiresDependencyPrebundle?: boolean;
+  renderedLength?: number;
   relativePath: string;
   sourceModuleIds: string[];
   typeMetadata?: RuntimeModuleTypeProvenance;

@@ -7,10 +7,9 @@ import { normalizePath } from "./shared";
 
 /**
  * Pure barrel modules (files whose statements are exclusively re-exports)
- * defeat esbuild's code splitting: every region entry that goes through the
- * barrel drags the barrel's whole dependency closure into one shared chunk.
- * Flattening resolves each requested name to the deep module that defines it
- * so esbuild can place per-region components into per-region bundles.
+ * hide the defining module from both routing paths. Flattening resolves each
+ * requested name to its unique deep definition so esbuild can split CJS/mixed
+ * regions and native direct-ESM input can avoid broad namespace barrels.
  */
 
 interface BarrelReexport {
@@ -19,6 +18,7 @@ interface BarrelReexport {
 }
 
 interface BarrelModuleInfo {
+  localExports: Set<string>;
   /** Only pure barrels are safe to skip executing. */
   pure: boolean;
   reexports: Map<string, BarrelReexport>;
@@ -55,42 +55,69 @@ export function createBarrelFlattener(input: { moduleFilePaths: Set<string> }) {
       targetFilePath: string,
       exportName: string,
     ): Promise<ResolvedDeepExport | null> {
-      let currentFilePath = normalizePath(targetFilePath);
-      let currentName = exportName;
-      for (let depth = 0; depth < MAX_BARREL_DEPTH; depth += 1) {
-        const info = await loadBarrelInfo(currentFilePath);
-        if (!info.pure) {
-          return depth === 0
-            ? null
-            : { imported: currentName, targetFilePath: currentFilePath };
-        }
-        const reexport = resolveBarrelName(info, currentName);
-        if (!reexport) {
-          return null;
-        }
-        currentFilePath = reexport.targetFilePath;
-        currentName = reexport.imported;
+      const normalizedTarget = normalizePath(targetFilePath);
+      if (!(await loadBarrelInfo(normalizedTarget)).pure) {
+        return null;
       }
-      return null;
+      return await resolveBarrelExport(
+        normalizedTarget,
+        exportName,
+        0,
+        new Set<string>(),
+      );
     },
   };
-}
 
-function resolveBarrelName(
-  info: BarrelModuleInfo,
-  exportName: string,
-): BarrelReexport | null {
-  const named = info.reexports.get(exportName);
-  if (named) {
-    return named;
-  }
-  if (exportName !== "default" && info.starTargets.length === 1) {
-    const starTarget = info.starTargets[0];
-    if (starTarget !== undefined) {
-      return { imported: exportName, targetFilePath: starTarget };
+  async function resolveBarrelExport(
+    filePath: string,
+    exportName: string,
+    depth: number,
+    seen: Set<string>,
+  ): Promise<ResolvedDeepExport | null> {
+    if (depth >= MAX_BARREL_DEPTH) {
+      return null;
     }
+    const key = `${filePath}\u0000${exportName}`;
+    if (seen.has(key)) {
+      return null;
+    }
+    const nextSeen = new Set(seen).add(key);
+    const info = await loadBarrelInfo(filePath);
+    const named = info.reexports.get(exportName);
+    if (named) {
+      return await resolveBarrelExport(
+        named.targetFilePath,
+        named.imported,
+        depth + 1,
+        nextSeen,
+      );
+    }
+    if (info.localExports.has(exportName)) {
+      return { imported: exportName, targetFilePath: filePath };
+    }
+    if (exportName === "default") {
+      return null;
+    }
+
+    const candidates = (
+      await Promise.all(
+        info.starTargets.map((targetFilePath) =>
+          resolveBarrelExport(targetFilePath, exportName, depth + 1, nextSeen),
+        ),
+      )
+    ).filter(
+      (candidate): candidate is ResolvedDeepExport => candidate !== null,
+    );
+    const uniqueCandidates = new Map(
+      candidates.map((candidate) => [
+        `${candidate.targetFilePath}\u0000${candidate.imported}`,
+        candidate,
+      ]),
+    );
+    return uniqueCandidates.size === 1
+      ? (uniqueCandidates.values().next().value ?? null)
+      : null;
   }
-  return null;
 }
 
 async function parseBarrelModule(
@@ -98,6 +125,7 @@ async function parseBarrelModule(
   moduleFilePaths: Set<string>,
 ): Promise<BarrelModuleInfo> {
   const impure: BarrelModuleInfo = {
+    localExports: new Set(),
     pure: false,
     reexports: new Map(),
     starTargets: [],
@@ -116,40 +144,100 @@ async function parseBarrelModule(
     true,
     ts.ScriptKind.JS,
   );
+  const localExports = new Set<string>();
   const reexports = new Map<string, BarrelReexport>();
   const starTargets: string[] = [];
+  let pure = true;
 
   for (const statement of sourceFile.statements) {
-    if (
-      !ts.isExportDeclaration(statement) ||
-      statement.isTypeOnly ||
-      !statement.moduleSpecifier ||
-      !ts.isStringLiteralLike(statement.moduleSpecifier)
-    ) {
-      return impure;
-    }
-    const targetFilePath = normalizePath(
-      path.resolve(path.dirname(filePath), statement.moduleSpecifier.text),
-    );
-    if (!moduleFilePaths.has(targetFilePath)) {
-      return impure;
-    }
-    if (!statement.exportClause) {
-      starTargets.push(targetFilePath);
+    if (ts.isEmptyStatement(statement)) {
       continue;
     }
-    if (!ts.isNamedExports(statement.exportClause)) {
-      return impure;
+    if (ts.isExportDeclaration(statement)) {
+      if (statement.isTypeOnly) {
+        continue;
+      }
+      if (
+        statement.moduleSpecifier &&
+        ts.isStringLiteralLike(statement.moduleSpecifier)
+      ) {
+        const targetFilePath = normalizePath(
+          path.resolve(path.dirname(filePath), statement.moduleSpecifier.text),
+        );
+        if (!moduleFilePaths.has(targetFilePath)) {
+          return impure;
+        }
+        if (!statement.exportClause) {
+          starTargets.push(targetFilePath);
+          continue;
+        }
+        if (!ts.isNamedExports(statement.exportClause)) {
+          return impure;
+        }
+        for (const specifier of statement.exportClause.elements) {
+          const exportedName = specifier.name.text;
+          const importedName = specifier.propertyName?.text ?? exportedName;
+          reexports.set(exportedName, {
+            imported: importedName,
+            targetFilePath,
+          });
+        }
+        continue;
+      }
+      pure = false;
+      if (statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+        for (const specifier of statement.exportClause.elements) {
+          localExports.add(specifier.name.text);
+        }
+      }
+      continue;
     }
-    for (const specifier of statement.exportClause.elements) {
-      const exportedName = specifier.name.text;
-      const importedName = specifier.propertyName?.text ?? exportedName;
-      reexports.set(exportedName, {
-        imported: importedName,
-        targetFilePath,
-      });
+    if (ts.isExportAssignment(statement)) {
+      pure = false;
+      if (!statement.isExportEquals) {
+        localExports.add("default");
+      }
+      continue;
     }
+    if (
+      ts.canHaveModifiers(statement) &&
+      ts
+        .getModifiers(statement)
+        ?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)
+    ) {
+      pure = false;
+      collectExportedDeclarationNames(statement, localExports);
+      continue;
+    }
+    pure = false;
   }
 
-  return { pure: true, reexports, starTargets };
+  return { localExports, pure, reexports, starTargets };
+}
+
+function collectExportedDeclarationNames(
+  statement: ts.Statement,
+  names: Set<string>,
+) {
+  if (
+    (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) &&
+    statement.name
+  ) {
+    names.add(statement.name.text);
+    if (
+      statement.modifiers?.some(
+        (modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword,
+      )
+    ) {
+      names.add("default");
+    }
+    return;
+  }
+  if (ts.isVariableStatement(statement)) {
+    for (const declaration of statement.declarationList.declarations) {
+      if (ts.isIdentifier(declaration.name)) {
+        names.add(declaration.name.text);
+      }
+    }
+  }
 }

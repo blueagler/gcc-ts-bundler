@@ -44,8 +44,10 @@ pub(super) fn emit_module_program_oxc<'a>(
     commonjs_export_name: Option<&str>,
 ) -> std::result::Result<EmittedProgram, String> {
     strip_runtime_directives_oxc(program);
-    let reflective_property_names =
+    let mut reflective_property_names =
         super::emit_reflective_oxc::collect_reflective_property_names(program, identity);
+    reflective_property_names
+        .extend(super::emit_helpers_oxc::collect_lowered_define_property_names(program));
     let mut emitted = match context.chunk_mode {
         ChunkMode::BundlerRuntime => {
             if let Some(plan) = context.hoist_plan.clone() {

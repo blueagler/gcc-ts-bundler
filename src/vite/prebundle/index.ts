@@ -19,6 +19,7 @@ import {
 } from "../type-metadata";
 import type { PrebundleExportFacade } from "../type-metadata";
 import { createBarrelFlattener } from "./barrels";
+import { rewriteDirectEsmImports } from "./direct-esm";
 import {
   canonicalizeDuplicateLazyEntryOutputs,
   collectCollapsibleBundleEntryOutputs,
@@ -84,7 +85,7 @@ export async function prebundleMaterializedDependencies(input: {
   materialized: MaterializedGraph;
   outputSrcDir?: string;
 }): Promise<MaterializedGraph> {
-  const context = createPrebundleContext(input);
+  let context = createPrebundleContext(input);
   // ponytail: preserve the whole graph until symbol-level fusion can keep typed
   // dependency-source bindings exact; narrow this to typed regions when needed.
   if (
@@ -96,11 +97,21 @@ export async function prebundleMaterializedDependencies(input: {
   ) {
     return mirrorGraphWithoutBundles(context);
   }
+  const dependencyRouting = await classifyDependencyRouting(context);
+  await rewriteDirectEsmImports({
+    directDependencyFilePaths: dependencyRouting.directFilePaths,
+    materialized: context.materialized,
+  });
+  context = createPrebundleContext(input);
   const {
     bundleRequests,
     dynamicRootRequestKeyByTargetFilePath,
     regionLabelsByAuthoredFile,
-  } = await collectBundleRequests(context, input.dynamicRootModuleIds);
+  } = await collectBundleRequests(
+    context,
+    input.dynamicRootModuleIds,
+    dependencyRouting.prebundleFilePaths,
+  );
   if (bundleRequests.size === 0) {
     return mirrorGraphWithoutBundles(context);
   }
@@ -123,7 +134,12 @@ export async function prebundleMaterializedDependencies(input: {
     requestGroupKeyByTarget: bundles.requestGroupKeyByTarget,
     runtimeSrcDir: context.runtimeSrcDir,
   });
-  return await assembleGraph(context, bundles, authoredEntries);
+  return await assembleGraph(
+    context,
+    bundles,
+    authoredEntries,
+    dependencyRouting.directFilePaths,
+  );
 }
 
 function createMaterializedDependencyResolverPlugin(
@@ -246,6 +262,7 @@ function createPrebundleContext(input: {
 async function collectBundleRequests(
   context: PrebundleContext,
   dynamicRootModuleIds: string[],
+  prebundleFilePaths: Set<string>,
 ) {
   const entryFilePaths = context.materialized.entries.map((entry) =>
     normalizePath(path.resolve(context.materialized.srcDir, entry)),
@@ -281,7 +298,10 @@ async function collectBundleRequests(
       const targetModule = context.moduleByFilePath.get(
         normalizePath(dependencyImport.targetFilePath),
       );
-      if (!targetModule) {
+      if (
+        !targetModule ||
+        !prebundleFilePaths.has(normalizePath(targetModule.filePath))
+      ) {
         continue;
       }
 
@@ -317,7 +337,10 @@ async function collectBundleRequests(
   for (const [targetFilePath, targetModule] of [
     ...dynamicRootModulesByFilePath.entries(),
   ].sort(([left], [right]) => left.localeCompare(right))) {
-    if (context.authoredFiles.has(targetFilePath)) {
+    if (
+      context.authoredFiles.has(targetFilePath) ||
+      !prebundleFilePaths.has(targetFilePath)
+    ) {
       continue;
     }
     const regionKey = `dynamic:${targetFilePath}`;
@@ -343,6 +366,75 @@ async function collectBundleRequests(
     dynamicRootRequestKeyByTargetFilePath,
     regionLabelsByAuthoredFile,
   };
+}
+
+async function classifyDependencyRouting(context: PrebundleContext) {
+  const dependencyFilePaths = new Set(
+    context.materialized.modules
+      .map((module) => normalizePath(module.filePath))
+      .filter((filePath) => !context.authoredFiles.has(filePath)),
+  );
+  const adjacentFilePaths = new Map<string, Set<string>>(
+    [...dependencyFilePaths].map((filePath) => [filePath, new Set<string>()]),
+  );
+  const unsafeFilePaths = new Set<string>();
+
+  for (const filePath of dependencyFilePaths) {
+    const module = context.moduleByFilePath.get(filePath);
+    if (
+      !module ||
+      module.format !== "esm" ||
+      module.requiresDependencyPrebundle !== false
+    ) {
+      unsafeFilePaths.add(filePath);
+    }
+    const parsed = await context.parseModule(filePath);
+    if (parsed.staticAuthoredImports.length > 0) {
+      unsafeFilePaths.add(filePath);
+    }
+    for (const targetFilePath of parsed.dependencyFilePaths) {
+      const normalizedTarget = normalizePath(targetFilePath);
+      if (!dependencyFilePaths.has(normalizedTarget)) {
+        unsafeFilePaths.add(filePath);
+        continue;
+      }
+      adjacentFilePaths.get(filePath)?.add(normalizedTarget);
+      adjacentFilePaths.get(normalizedTarget)?.add(filePath);
+    }
+  }
+
+  const directFilePaths = new Set<string>();
+  const prebundleFilePaths = new Set<string>();
+  const visited = new Set<string>();
+  for (const rootFilePath of [...dependencyFilePaths].sort((left, right) =>
+    left.localeCompare(right),
+  )) {
+    if (visited.has(rootFilePath)) {
+      continue;
+    }
+    const component = new Set<string>();
+    const pending = [rootFilePath];
+    let isEsmClean = true;
+    while (pending.length > 0) {
+      const filePath = pending.pop();
+      if (!filePath || visited.has(filePath)) {
+        continue;
+      }
+      visited.add(filePath);
+      component.add(filePath);
+      isEsmClean &&= !unsafeFilePaths.has(filePath);
+      pending.push(...(adjacentFilePaths.get(filePath) ?? []));
+    }
+    // A one-file package gives no graph evidence that it is source-granular;
+    // treat it as a potentially fused distribution artifact and fail closed.
+    const destination =
+      isEsmClean && component.size > 1 ? directFilePaths : prebundleFilePaths;
+    for (const filePath of component) {
+      destination.add(filePath);
+    }
+  }
+
+  return { directFilePaths, prebundleFilePaths };
 }
 
 /** No dependency bundles: mirror the graph into the runtime dir unchanged. */
@@ -555,6 +647,7 @@ async function assembleGraph(
   context: PrebundleContext,
   bundles: DependencyBundleSet,
   authoredEntries: Array<{ content: string; relativePath: string }>,
+  directDependencyFilePaths: Set<string>,
 ): Promise<MaterializedGraph> {
   const { authoredFiles, materialized, runtimeSrcDir } = context;
   const originalSourceIdsByFilePath = new Map(
@@ -569,6 +662,26 @@ async function assembleGraph(
       request.sourceModuleIds,
     ]),
   );
+  const directDependencyEntries = await Promise.all(
+    materialized.modules
+      .filter((module) =>
+        directDependencyFilePaths.has(normalizePath(module.filePath)),
+      )
+      .map(async (module) => ({
+        content: await fs.readFile(module.filePath, "utf8"),
+        relativePath: module.relativePath,
+      })),
+  );
+  await syncDirectoryEntries(
+    runtimeSrcDir,
+    [...authoredEntries, ...directDependencyEntries],
+    {
+      preserve(relativePath) {
+        return relativePath.startsWith(`${DEP_BUNDLE_OUTPUT_DIR}/`);
+      },
+    },
+  );
+
   const bundledModules = await collectBundledModules({
     extraModules: bundles.canonicalizedEntryOutputs.canonicalModules,
     bundleSrcDir: materialized.srcDir,
@@ -595,7 +708,11 @@ async function assembleGraph(
       .sort((left, right) => left.localeCompare(right)),
     modules: [
       ...materialized.modules
-        .filter((module) => authoredFiles.has(normalizePath(module.filePath)))
+        .filter(
+          (module) =>
+            authoredFiles.has(normalizePath(module.filePath)) ||
+            directDependencyFilePaths.has(normalizePath(module.filePath)),
+        )
         .map((module) =>
           withOneToOneTypeProvenance(
             remapRuntimeModuleToSrcDir(
@@ -614,6 +731,7 @@ async function assembleGraph(
         [
           ...materialized.entries,
           ...authoredEntries.map((entry) => `./${entry.relativePath}`),
+          ...directDependencyEntries.map((entry) => `./${entry.relativePath}`),
           ...bundledModules.map((module) => `./${module.relativePath}`),
         ].sort((left, right) => left.localeCompare(right)),
       ),
@@ -684,6 +802,7 @@ async function collectBundledModules(input: {
     }));
     modules.push({
       filePath,
+      format: "esm",
       id: filePath,
       relativePath: path
         .relative(input.outputSrcDir, filePath)

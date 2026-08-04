@@ -19,7 +19,10 @@ import {
 import { collectOutputChunkStats } from "../shared/lifecycle-size";
 import { logInternalDetail, logInternalTiming } from "../shared/timing";
 import {
+  getCapturedModuleAnalysis,
   normalizeRetainedCapturedModules,
+  resolveCapturedModuleFormat,
+  restoreEmptyDependencyModuleSource,
   shouldCaptureModule,
 } from "./capture";
 import type { CapturedModuleResolutionCache } from "./capture";
@@ -170,7 +173,14 @@ export function gccTsBundler(options: GccTsBundlerVitePluginOptions = {}): {
         return null;
       }
       workerImportDetected ||= id.includes("?worker") || id.includes("&worker");
-      capturedModules.set(id, { code, id });
+      const capturedCode = await restoreEmptyDependencyModuleSource(id, code);
+      const record: CapturedModule = { code: capturedCode, id };
+      record.rawAnalysis = getCapturedModuleAnalysis(record);
+      record.format = await resolveCapturedModuleFormat(record);
+      record.requiresDependencyPrebundle =
+        record.rawAnalysis.hasDependencyDefineReferences ||
+        record.rawAnalysis.isFusedDistributionModule;
+      capturedModules.set(id, record);
       timingTotals.transformCaptureMs += performance.now() - startedAt;
       return null;
     },
@@ -246,6 +256,7 @@ async function prepareViteGraph(
       : resolveEntryModuleIds(input.bundle, jsChunks);
   const dynamicRootModuleIds = resolveDynamicRootModuleIds(jsChunks);
   const retainedModuleIds = resolveRetainedModuleIds(jsChunks, entryModuleIds);
+  applyRenderedModuleEvidence(input.capturedModules, jsChunks);
   const retainedCaptured = await measureAsync(
     input.timingTotals,
     "retainedResolutionMs",
@@ -761,6 +772,20 @@ async function logOutputStats(input: {
     "vite:output-js-chunks",
     `entry=${outputChunkStats.entryRawBytes}/${outputChunkStats.entryGzipBytes} lazy=${outputChunkStats.lazyRawBytes}/${outputChunkStats.lazyGzipBytes} factories=${outputChunkStats.entryFactoryCount}+${outputChunkStats.lazyFactoryCount}`,
   );
+}
+
+function applyRenderedModuleEvidence(
+  capturedModules: Map<string, CapturedModule>,
+  chunks: OutputChunk[],
+) {
+  for (const chunk of chunks) {
+    for (const [moduleId, rendered] of Object.entries(chunk.modules)) {
+      const record = capturedModules.get(moduleId);
+      if (record) {
+        record.renderedLength = rendered.renderedLength;
+      }
+    }
+  }
 }
 
 function createBuildMetrics(): ViteBuildMetrics {

@@ -36,6 +36,7 @@ export interface ParsedDependencyImport {
 }
 
 export interface ParsedMaterializedModule {
+  dependencyFilePaths: string[];
   dependencyImports: ParsedDependencyImport[];
   exportedNames: string[];
   hasDefaultExport: boolean;

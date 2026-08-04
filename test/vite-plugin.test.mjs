@@ -267,7 +267,28 @@ test("captured module analysis ignores comment-only hash text for compat downlev
   const analysis = getCapturedModuleAnalysis(record);
   expect(analysis.needsClosureCompatibilityDownlevel).toBe(false);
   expect(analysis.needsTypeScriptCompatibilityDownlevel).toBe(false);
+  expect(analysis.hasDependencyDefineReferences).toBe(false);
+  expect(analysis.isFusedDistributionModule).toBe(false);
   expect(analysis.importSpecifiers).toEqual(["./dep.js"]);
+});
+
+test("captured module analysis fails dependency routing closed on define and fused-distribution evidence", () => {
+  const analysis = getCapturedModuleAnalysis({
+    code: [
+      "//#region package/a",
+      "export const dev = process.env.NODE_ENV !== 'production' || __DEV__;",
+      "//#endregion",
+      "//#region package/b",
+      "export const value = 1;",
+      "//#endregion",
+      "",
+    ].join("\n"),
+    id: "/node_modules/pkg/dist/runtime.js",
+  });
+
+  expect(analysis.moduleFormat).toBe("esm");
+  expect(analysis.hasDependencyDefineReferences).toBe(true);
+  expect(analysis.isFusedDistributionModule).toBe(true);
 });
 
 test.serial(
@@ -475,6 +496,93 @@ test.serial(
     expect(entryBundle).not.toContain("shared - helper");
     expect(lazyBundle).not.toContain("shared + helper");
     expect(bundleSources.length).toBeGreaterThan(0);
+  },
+);
+
+test.serial(
+  "prebundleMaterializedDependencies keeps proven multi-module ESM direct and flattens namespace barrels",
+  async () => {
+    const fixture = await createFixture();
+    const srcDir = path.join(fixture.projectRoot, "captured-src");
+    const runtimeDir = path.join(fixture.projectRoot, "runtime-src");
+    const authoredEntry = path.join(srcDir, "src", "entry.js");
+    const depIndex = path.join(srcDir, "node_modules", "pkg", "index.js");
+    const depFoo = path.join(srcDir, "node_modules", "pkg", "foo.js");
+    const depBar = path.join(srcDir, "node_modules", "pkg", "bar.js");
+
+    await fixture.write(
+      path.relative(fixture.projectRoot, authoredEntry),
+      'import * as dep from "../node_modules/pkg/index.js";\nexport const value = dep.foo + dep.bar;\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, depIndex),
+      'export * from "./foo.js";\nexport * from "./bar.js";\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, depFoo),
+      "export const foo = 3;\n",
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, depBar),
+      "export const bar = 4;\n",
+    );
+
+    const dependencyModule = (filePath, relativePath, renderedLength = 1) => ({
+      filePath,
+      format: "esm",
+      id: filePath,
+      relativePath,
+      renderedLength,
+      requiresDependencyPrebundle: false,
+      sourceModuleIds: [filePath],
+    });
+    const prebundled = await prebundleMaterializedDependencies({
+      dynamicRootModuleIds: [],
+      materialized: {
+        authoredFiles: [authoredEntry],
+        entries: ["./src/entry.js"],
+        modules: [
+          {
+            filePath: authoredEntry,
+            id: authoredEntry,
+            relativePath: "src/entry.js",
+            sourceModuleIds: [authoredEntry],
+          },
+          dependencyModule(
+            depIndex,
+            "node_modules/pkg/index.js",
+            0,
+          ),
+          dependencyModule(depFoo, "node_modules/pkg/foo.js"),
+          dependencyModule(depBar, "node_modules/pkg/bar.js"),
+        ],
+        prunedEmptyModuleIds: [],
+        retainedEmptyModuleIds: [],
+        runtimeEntries: [
+          "./src/entry.js",
+          "./node_modules/pkg/index.js",
+          "./node_modules/pkg/foo.js",
+          "./node_modules/pkg/bar.js",
+        ],
+        srcDir,
+      },
+      outputSrcDir: runtimeDir,
+    });
+
+    expect(
+      prebundled.modules.some((module) =>
+        module.relativePath.startsWith("__dep-bundles/"),
+      ),
+    ).toBe(false);
+    expect(prebundled.modules).toHaveLength(4);
+    const rewrittenEntry = await fs.readFile(
+      path.join(runtimeDir, "src", "entry.js"),
+      "utf8",
+    );
+    expect(rewrittenEntry).not.toContain("import * as dep");
+    expect(rewrittenEntry).not.toContain("pkg/index.js");
+    expect(rewrittenEntry).toContain("pkg/foo.js");
+    expect(rewrittenEntry).toContain("pkg/bar.js");
   },
 );
 

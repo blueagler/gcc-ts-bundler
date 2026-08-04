@@ -943,6 +943,9 @@ impl<'a> VisitMut<'a> for ImportBindingRewriteVisitor<'a, '_> {
     }
 }
 
+const SHARED_PRIVATE_SLOT_NAME: &str = "gccPrivateSlot$$shared";
+const SHARED_PRIVATE_HELPERS_NAME: &str = "babelHelpers$$shared";
+
 struct TopLevelRenames {
     renames: BindingKeyMap<String>,
     shared_helper_names: HashSet<String>,
@@ -956,16 +959,36 @@ fn collect_top_level_renames(
     let mut renames = HashMap::new();
     let mut shared_helper_names = HashSet::new();
     for statement in &program.body {
-        let Statement::VariableDeclaration(declaration) = statement else {
+        if let Statement::ClassDeclaration(class) = statement {
+            if let Some(binding) = &class.id {
+                if binding.name == "gccPrivateSlot" {
+                    renames.insert(
+                        identity.key_of_binding(binding),
+                        SHARED_PRIVATE_SLOT_NAME.to_string(),
+                    );
+                    shared_helper_names.insert(SHARED_PRIVATE_SLOT_NAME.to_string());
+                }
+            }
             continue;
-        };
-        let Some(initializer_source) = helper_initializer_source(declaration) else {
+        }
+        let Statement::VariableDeclaration(declaration) = statement else {
             continue;
         };
         let [declarator] = declaration.declarations.as_slice() else {
             continue;
         };
         let BindingPattern::BindingIdentifier(binding) = &declarator.id else {
+            continue;
+        };
+        if binding.name == "babelHelpers" {
+            renames.insert(
+                identity.key_of_binding(binding),
+                SHARED_PRIVATE_HELPERS_NAME.to_string(),
+            );
+            shared_helper_names.insert(SHARED_PRIVATE_HELPERS_NAME.to_string());
+            continue;
+        }
+        let Some(initializer_source) = helper_initializer_source(declaration) else {
             continue;
         };
         let canonical_name =
@@ -995,10 +1018,12 @@ fn collect_top_level_renames(
             }
             Declaration::ClassDeclaration(class) => {
                 if let Some(binding) = &class.id {
-                    renames.insert(
-                        identity.key_of_binding(binding),
-                        suffixed_name(binding.name.as_str(), ordinal),
-                    );
+                    if binding.name != "gccPrivateSlot" {
+                        renames.insert(
+                            identity.key_of_binding(binding),
+                            suffixed_name(binding.name.as_str(), ordinal),
+                        );
+                    }
                 }
             }
             _ => {}

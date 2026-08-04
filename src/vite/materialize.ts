@@ -91,10 +91,20 @@ export async function materializeCapturedGraph(
     );
     const filePath = path.join(input.srcDir, relativePath);
     filePathByModuleId.set(moduleId, filePath);
+    const record = input.capturedModules.get(moduleId);
     modules.push({
       filePath,
+      format: record?.format ?? record?.rawAnalysis?.moduleFormat ?? "unknown",
       id: moduleId,
       relativePath,
+      ...(record?.requiresDependencyPrebundle === undefined
+        ? {}
+        : {
+            requiresDependencyPrebundle: record.requiresDependencyPrebundle,
+          }),
+      ...(record?.renderedLength === undefined
+        ? {}
+        : { renderedLength: record.renderedLength }),
       sourceModuleIds: [moduleId],
     });
     if (isAuthoredModuleId(moduleId, input.config.root)) {
