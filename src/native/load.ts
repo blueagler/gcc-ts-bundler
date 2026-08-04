@@ -88,9 +88,10 @@ interface NativePostprocessAction {
   /**
    * What postprocess has to do to the chunk beyond publishing it. `"copy"`
    * still goes through the runtime wrapper and base-specifier rewrites; those
-   * are decided from the chunk mode, not from the kind.
+   * are decided from the chunk mode, not from the kind. The strip action is
+   * capability-derived for one-chunk eager ESM output only.
    */
-  kind: "copy" | "rewrite-gcc-exports";
+  kind: "copy" | "rewrite-gcc-exports" | "strip-bundler-runtime";
   outputPath: string;
 }
 
@@ -109,6 +110,8 @@ interface NativePrepareClosureJobsInput {
   generatedExternPaths: string[];
   languageOut: string;
   manifestFile: string;
+  /** Whether the graph crosses a preserved ESM boundary. */
+  hasPreservedModules: boolean;
   nativeExternPath: string;
   /** Whether CSS rows can be attached to the manifest after the compile. */
   needsCssRuntime: boolean;

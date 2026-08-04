@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import http from "node:http";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -100,6 +101,84 @@ async function readJavaScript(fixture) {
   );
 }
 
+async function executeFixtureInChromium(fixture, expectedText) {
+  const chromium = await findChromiumExecutable();
+  const server = http.createServer(async (request, response) => {
+    try {
+      const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      const relativePath =
+        url.pathname === "/" ? "index.html" : decodeURIComponent(url.pathname.slice(1));
+      const filePath = path.resolve(fixture.outDir, relativePath);
+      const outDirPrefix = `${path.resolve(fixture.outDir)}${path.sep}`;
+      if (!filePath.startsWith(outDirPrefix)) {
+        response.writeHead(403).end();
+        return;
+      }
+      const source = await fs.readFile(filePath);
+      response.setHeader(
+        "content-type",
+        filePath.endsWith(".html")
+          ? "text/html"
+          : filePath.endsWith(".js")
+            ? "text/javascript"
+            : "application/octet-stream",
+      );
+      response.end(source);
+    } catch {
+      response.writeHead(404).end();
+    }
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Could not determine Chromium fixture server port.");
+    }
+    const { stdout } = await execFileAsync(
+      chromium,
+      [
+        "--headless=new",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--no-sandbox",
+        "--no-proxy-server",
+        `--user-data-dir=${path.join(fixture.projectRoot, "chromium-profile")}`,
+        "--virtual-time-budget=5000",
+        "--dump-dom",
+        `http://127.0.0.1:${address.port}/`,
+      ],
+      { maxBuffer: 10 * 1024 * 1024, timeout: 15000 },
+    );
+    expect(stdout).toContain(expectedText);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+async function findChromiumExecutable() {
+  const candidates = [
+    process.env.CHROME_BIN,
+    "/usr/bin/chromium",
+    "/usr/bin/google-chrome",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      await fs.access(candidate);
+      return candidate;
+    } catch {
+      // Try the next conventional browser path.
+    }
+  }
+  throw new Error(
+    "Feature-matrix browser execution requires Chromium; set CHROME_BIN to its executable path.",
+  );
+}
+
 test.serial(
   "Vite suffix transforms preserve url, raw, and inline assets",
   { timeout: 30000 },
@@ -174,6 +253,71 @@ test.serial(
 );
 
 test.serial(
+  "Vite runtime elision is capability-derived and lazy chunks restore the loader",
+  { timeout: 30000 },
+  async () => {
+    const eagerFixture = await createFixture();
+    await writeHtmlFixture(eagerFixture);
+    await eagerFixture.write(
+      "src/main.js",
+      'globalThis.__runtimeElisionEager = "ready";\n',
+    );
+    expect((await buildViteFixture(eagerFixture)).ok).toBe(true);
+    const eagerJavaScript = await readJavaScript(eagerFixture);
+    expect(eagerJavaScript).toHaveLength(1);
+    expect(eagerJavaScript[0]).not.toContain("globalThis.__g");
+    expect(eagerJavaScript[0]).not.toContain('globalThis["__g"]');
+
+    const lazyFixture = await createFixture();
+    await writeHtmlFixture(lazyFixture);
+    await lazyFixture.write(
+      "src/main.js",
+      'globalThis["__loadRuntimeElisionLazy"] = () => import("./lazy.js").then((module) => module.value);\n',
+    );
+    await lazyFixture.write("src/lazy.js", 'export const value = "lazy-ready";\n');
+    expect((await buildViteFixture(lazyFixture)).ok).toBe(true);
+    const lazyFiles = (await listFiles(lazyFixture.outDir)).filter((filePath) =>
+      filePath.endsWith(".js"),
+    );
+    expect(lazyFiles.length).toBeGreaterThan(1);
+    const lazySources = await Promise.all(
+      lazyFiles.map((filePath) =>
+        lazyFixture.read(path.join("dist", filePath)),
+      ),
+    );
+    const lazyHtml = await lazyFixture.read("dist/index.html");
+    const entryUrl = lazyHtml.match(/<script[^>]+src="([^"]+\.js)"/u)?.[1];
+    expect(entryUrl).toBeDefined();
+    const entryFile = entryUrl.replace(/^\//u, "");
+    const entryIndex = lazyFiles.indexOf(entryFile);
+    expect(entryIndex).toBeGreaterThanOrEqual(0);
+    expect(lazySources[entryIndex]).toContain("globalThis.__g");
+
+    const previousLocation = globalThis.location;
+    const previousRuntime = globalThis.__g;
+    const previousLoader = globalThis.__loadRuntimeElisionLazy;
+    try {
+      globalThis.location = {
+        href: pathToFileURL(path.join(lazyFixture.outDir, "index.html")).href,
+      };
+      delete globalThis.__g;
+      delete globalThis.__loadRuntimeElisionLazy;
+      await import(
+        `${pathToFileURL(path.join(lazyFixture.outDir, entryFile)).href}?runtime-elision=${Date.now()}`
+      );
+      expect(await globalThis.__loadRuntimeElisionLazy()).toBe("lazy-ready");
+    } finally {
+      if (previousLocation === undefined) delete globalThis.location;
+      else globalThis.location = previousLocation;
+      if (previousRuntime === undefined) delete globalThis.__g;
+      else globalThis.__g = previousRuntime;
+      if (previousLoader === undefined) delete globalThis.__loadRuntimeElisionLazy;
+      else globalThis.__loadRuntimeElisionLazy = previousLoader;
+    }
+  },
+);
+
+test.serial(
   "Vite preserves env, define, JSON named imports, and dynamic import forms",
   { timeout: 30000 },
   async () => {
@@ -220,14 +364,22 @@ test.serial(
 );
 
 test.serial(
-  "Vite URL-form workers and non-root public URLs remain buildable",
+  "Vite URL-form workers execute in-browser and non-root public URLs remain buildable",
   { timeout: 30000 },
   async () => {
     const workerFixture = await createFixture();
     await writeHtmlFixture(workerFixture);
     await workerFixture.write(
       "src/main.js",
-      'globalThis.__worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });\n',
+      [
+        'const status = document.createElement("output");',
+        'status.textContent = "worker-waiting";',
+        "document.body.append(status);",
+        'const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });',
+        'worker.onmessage = (event) => { status.textContent = event.data; };',
+        'worker.onerror = () => { status.textContent = "worker-error"; };',
+        "",
+      ].join("\n"),
     );
     await workerFixture.write(
       "src/worker.ts",
@@ -239,6 +391,10 @@ test.serial(
         filePath.endsWith(".js"),
       ).length,
     ).toBeGreaterThan(1);
+    const workerJavaScript = (await readJavaScript(workerFixture)).join("\n");
+    expect(workerJavaScript).toContain("globalThis.__g");
+    expect(workerJavaScript).not.toContain("__VITE_WORKER_ASSET__");
+    await executeFixtureInChromium(workerFixture, "url-worker-surface");
 
     const publicFixture = await createFixture();
     await writeHtmlFixture(publicFixture);
@@ -459,7 +615,7 @@ test.serial(
     await writeHtmlFixture(fixture);
     await fixture.write(
       "src/main.js",
-      'import wasmAnswer, { answer as namedAnswer } from "virtual:vite-plugin-wasm"; import * as wasmNamespace from "virtual:vite-plugin-wasm"; globalThis["__wasmAnswer"] = [wasmAnswer(), namedAnswer(), wasmNamespace.answer()];\n',
+      'import wasmAnswer, { answer as namedAnswer } from "virtual:vite-plugin-wasm"; import * as wasmNamespace from "virtual:vite-plugin-wasm"; globalThis["__wasmAnswer"] = [wasmAnswer(), namedAnswer(), wasmNamespace.answer()]; document.body.textContent = `wasm-${globalThis["__wasmAnswer"].join("-")}`;\n',
     );
     const wasmPlugin = [
       "{",
@@ -494,9 +650,9 @@ test.serial(
     );
     expect(entryFile).toBeDefined();
     expect(preservedFile).toBeDefined();
-    expect(await fixture.read(path.join("dist", entryFile))).toContain(
-      "__gcc_preserved/",
-    );
+    const entrySource = await fixture.read(path.join("dist", entryFile));
+    expect(entrySource).toContain("__gcc_preserved/");
+    expect(entrySource).toContain("globalThis.__g");
     const cacheFiles = await listFiles(cacheDir);
     const nativeExtern = cacheFiles.find((filePath) =>
       filePath.endsWith("native-generated.externs.js"),
@@ -514,6 +670,7 @@ test.serial(
     );
     expect(preserved.default()).toBe(42);
     expect(preserved.answer()).toBe(42);
+    await executeFixtureInChromium(fixture, "wasm-42-42-42");
   },
 );
 

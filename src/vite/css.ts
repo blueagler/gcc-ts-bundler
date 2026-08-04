@@ -174,11 +174,26 @@ export async function augmentCompiledViteCss(input: {
   }
 
   const baseChunkSource = await fs.readFile(input.baseChunkFilePath, "utf8");
-  const runtimeManifest = applyRuntimeCssRows({
-    baseChunkSource,
-    manifest,
-    runtimeCssByChunkId,
-  });
+  const needsRuntimeCssRows = [...runtimeCssByChunkId.values()].some(
+    (cssFiles) => cssFiles.length > 0,
+  );
+  let runtimeManifest: unknown;
+  try {
+    runtimeManifest = applyRuntimeCssRows({
+      baseChunkSource,
+      manifest,
+      runtimeCssByChunkId,
+    });
+  } catch (error) {
+    // Eager-only ESM graphs deliberately have no browser runtime manifest.
+    // Their CSS is already linked from HTML, so there is no source payload to
+    // patch. A non-empty runtime CSS row without the runtime remains a hard
+    // error rather than silently dropping lazy stylesheet ownership.
+    if (!needsRuntimeCssRows) {
+      return;
+    }
+    throw error;
+  }
   const patchedSource = replaceRuntimeInitManifest(
     baseChunkSource,
     runtimeManifest,

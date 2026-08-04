@@ -5,7 +5,10 @@ import { ensureParentDirectory } from "../../../shared/files";
 import { rewriteGccExports } from "../../../native/load";
 import type { prepareClosureJobs } from "../../../native/load";
 import { readCachedText } from "./io";
-import { wrapBundlerRuntimeOutputFile } from "./runtime";
+import {
+  stripBundlerRuntimeOutputFile,
+  wrapBundlerRuntimeOutputFile,
+} from "./runtime";
 
 /**
  * Post-Closure rewriting is a hazard, not a feature: after ADVANCED the
@@ -134,8 +137,10 @@ export async function runClosurePostprocess({
       const wrapBundlerRuntimeOutput =
         chunkMode !== "off" && chunkOutputType !== "esm";
       const rewritesExports = action.kind.startsWith("rewrite-gcc-exports");
+      const stripsBundlerRuntime = action.kind === "strip-bundler-runtime";
       if (
         !rewritesExports &&
+        !stripsBundlerRuntime &&
         !wrapBundlerRuntimeOutput &&
         !baseSpecifierRewrite
       ) {
@@ -183,6 +188,9 @@ export async function runClosurePostprocess({
             }
           }
         }
+      }
+      if (stripsBundlerRuntime) {
+        contents = stripBundlerRuntimeOutputFile(contents);
       }
       if (wrapBundlerRuntimeOutput) {
         contents = wrapBundlerRuntimeOutputFile(contents);

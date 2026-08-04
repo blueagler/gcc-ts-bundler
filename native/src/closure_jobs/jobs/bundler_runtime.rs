@@ -270,6 +270,25 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         live_exports: calls_runtime_helper(&all_module_contents, "__live"),
         preload: calls_runtime_helper(&all_module_contents, "__preloadDynamicImport"),
     };
+    // A known-safe one-chunk ESM graph whose emitted modules call none of the
+    // runtime ABI has nothing for the browser-side manifest, registry, loader,
+    // or promise state to do. Keep the build-time JSON manifest for naming/CSS
+    // ownership, and mark the final base output for structural runtime stripping.
+    // Preserved ESM boundaries and Vite worker-asset placeholders stay on the
+    // conservative side of the gate: both cross delivery systems that this
+    // capability scan does not classify, so unknown means retain.
+    let elide_runtime = chunk_output_type.is_esm()
+        && resolved_chunks.len() == 1
+        && base_chunk.dependencies.is_empty()
+        && !input.hasPreservedModules
+        && !all_module_contents.contains("__VITE_WORKER_ASSET__")
+        && !capabilities.css
+        && !capabilities.entry_runner
+        && !capabilities.live_exports
+        && !capabilities.preload
+        && !calls_runtime_helper(&all_module_contents, "__register")
+        && !calls_runtime_helper(&all_module_contents, "__require")
+        && !calls_runtime_helper(&all_module_contents, "__dynamicImport");
 
     // The plan puts a vendor chunk first precisely so base's generated
     // `import "./<vendor>.js"` edge executes it at startup. That inverts the
@@ -473,10 +492,16 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         let final_output_path = PathBuf::from(&input.outDir).join(final_chunk_file_name);
         postprocess_actions.push(PostprocessAction {
             inputPath: output_path.to_string_lossy().to_string(),
-            // Bundler-runtime chunks have no Closure wrapper exports to
-            // rewrite. Postprocess may still wrap the chunk or retarget the
-            // base specifier; both are decided from the chunk mode, not here.
-            kind: "copy".to_string(),
+            // Compile the ordinary runtime-shaped input so removing an unused
+            // eager-only envelope cannot perturb Closure's optimization of the
+            // application body. The postprocess action strips only the two
+            // generated leading statements after Closure, with structural
+            // validation and a fail-closed error if their shape drifts.
+            kind: if elide_runtime && chunk.name == base_chunk.name {
+                "strip-bundler-runtime".to_string()
+            } else {
+                "copy".to_string()
+            },
             outputPath: final_output_path.to_string_lossy().to_string(),
         });
         published_outputs.push(final_output_path.to_string_lossy().to_string());

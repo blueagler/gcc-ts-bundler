@@ -128,11 +128,11 @@ export async function resolveViteAssetUrls(input: {
     return false;
   }
 
-  const renderChunk = findViteAssetRenderHook(input.config);
+  const renderChunks = findViteAssetRenderHooks(input.config);
   const templateChunk = input.jsChunks[0];
-  if (!renderChunk || !templateChunk) {
+  if (renderChunks.length === 0 || !templateChunk) {
     throw new Error(
-      "gccTsBundler() found unresolved Vite asset URLs but could not find Vite's asset renderer.",
+      "gccTsBundler() found unresolved Vite asset URLs but could not find Vite's asset renderers.",
     );
   }
   const outputOptions = {
@@ -152,19 +152,22 @@ export async function resolveViteAssetUrls(input: {
       fileName: file.fileName,
       viteMetadata,
     };
-    const rendered = await renderChunk.call(
-      input.pluginContext,
-      file.source,
-      chunk,
-      outputOptions,
-      { chunks: {} },
-    );
-    const source =
-      typeof rendered === "string"
-        ? rendered
-        : rendered && typeof rendered === "object" && "code" in rendered
-          ? rendered.code.toString()
-          : file.source;
+    let source = file.source;
+    for (const renderChunk of renderChunks) {
+      const rendered = await renderChunk.call(
+        input.pluginContext,
+        source,
+        chunk,
+        outputOptions,
+        { chunks: {} },
+      );
+      source =
+        typeof rendered === "string"
+          ? rendered
+          : rendered && typeof rendered === "object" && "code" in rendered
+            ? rendered.code.toString()
+            : source;
+    }
     if (hasViteAssetPlaceholder(source)) {
       throw new Error(
         `gccTsBundler() could not resolve Vite asset URLs in ${file.fileName}.`,
@@ -316,22 +319,26 @@ function endsWithAnyFileName(value: string, fileNames: Set<string>) {
   return false;
 }
 
-function findViteAssetRenderHook(config: ResolvedConfig) {
-  const hook = config.plugins.find(
-    (plugin) => plugin.name === "vite:asset",
-  )?.renderChunk;
-  if (typeof hook === "function") {
-    return hook;
-  }
-  if (hook && typeof hook === "object") {
-    return hook.handler;
-  }
-  return null;
+function findViteAssetRenderHooks(config: ResolvedConfig) {
+  return config.plugins.flatMap((plugin) => {
+    if (plugin.name !== "vite:asset" && plugin.name !== "vite:worker") {
+      return [];
+    }
+    const hook = plugin.renderChunk;
+    if (typeof hook === "function") {
+      return [hook];
+    }
+    if (hook && typeof hook === "object") {
+      return [hook.handler];
+    }
+    return [];
+  });
 }
 
 function hasViteAssetPlaceholder(source: string) {
   return (
     source.includes("__VITE_ASSET__") ||
-    source.includes("__VITE_PUBLIC_ASSET__")
+    source.includes("__VITE_PUBLIC_ASSET__") ||
+    source.includes("__VITE_WORKER_ASSET__")
   );
 }

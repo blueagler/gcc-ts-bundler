@@ -107,6 +107,7 @@ export async function runClosureStage({
     generatedExternPaths,
     languageOut: options.languageOut,
     manifestFile: options.chunks.manifestFile,
+    hasPreservedModules: preservedModules.length > 0,
     nativeExternPath,
     needsCssRuntime: options.cssRuntime,
     outDir,

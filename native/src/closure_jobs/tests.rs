@@ -95,6 +95,7 @@ fn prepares_bundler_runtime_jobs_with_runtime_assets() {
         generatedExternPaths: vec![],
         languageOut: "ECMASCRIPT_NEXT".to_string(),
         manifestFile: "chunk-map.json".to_string(),
+        hasPreservedModules: false,
         needsCssRuntime: false,
         nativeExternPath: native_extern.to_string_lossy().to_string(),
         outDir: out_dir.to_string_lossy().to_string(),
@@ -235,6 +236,7 @@ fn skips_es5_custom_elements_adapter_when_no_native_dom_subclasses_exist() {
         generatedExternPaths: vec![],
         languageOut: "ECMASCRIPT5".to_string(),
         manifestFile: "".to_string(),
+        hasPreservedModules: false,
         needsCssRuntime: false,
         nativeExternPath: native_extern.to_string_lossy().to_string(),
         outDir: out_dir.to_string_lossy().to_string(),
@@ -349,6 +351,7 @@ fn prepares_off_mode_jobs_and_filters_empty_externs() {
         generatedExternPaths: vec![],
         languageOut: "ECMASCRIPT_NEXT".to_string(),
         manifestFile: "".to_string(),
+        hasPreservedModules: false,
         needsCssRuntime: false,
         nativeExternPath: native_extern.to_string_lossy().to_string(),
         outDir: out_dir.to_string_lossy().to_string(),
@@ -442,6 +445,7 @@ fn prepares_esm_bundler_runtime_jobs() {
         generatedExternPaths: vec![],
         languageOut: "ECMASCRIPT_NEXT".to_string(),
         manifestFile: String::new(),
+        hasPreservedModules: false,
         needsCssRuntime: false,
         nativeExternPath: native_extern.to_string_lossy().to_string(),
         outDir: out_dir.to_string_lossy().to_string(),
@@ -502,6 +506,94 @@ fn prepares_esm_bundler_runtime_jobs() {
 }
 
 #[test]
+fn elides_runtime_for_single_eager_esm_chunk() {
+    let root = make_temp_dir("bundler-runtime-flat-esm");
+    let emitted_out_dir = root.join("native-out");
+    let out_dir = root.join("dist");
+    let final_cache_dir = root.join("cache/final");
+    let package_root = root.join("pkg");
+    fs::create_dir_all(emitted_out_dir.join("src")).unwrap();
+    fs::create_dir_all(&out_dir).unwrap();
+    fs::create_dir_all(package_root.join("closure-lib")).unwrap();
+    fs::write(
+        emitted_out_dir.join("src/main.js"),
+        "globalThis.runtimeElisionAnswer = 42;\n",
+    )
+    .unwrap();
+    let native_extern = root.join("native.externs.js");
+    fs::write(&native_extern, "/** @externs */\n").unwrap();
+
+    let input = PrepareClosureJobsInput {
+        chunkMode: "bundler-runtime".to_string(),
+        chunkLoader: "script".to_string(),
+        chunkOutputType: "esm".to_string(),
+        chunkPlan: vec![ClosureJobChunkPlanChunkInput {
+            dependencies: vec![],
+            entryFiles: Some(vec!["src/main.ts".to_string()]),
+            files: vec!["src/main.ts".to_string()],
+            kind: Some("base".to_string()),
+            lazyModuleIds: None,
+            name: "main".to_string(),
+        }],
+        compilationLevel: "ADVANCED".to_string(),
+        diagnosticsVerbose: false,
+        emittedOutDir: emitted_out_dir.to_string_lossy().to_string(),
+        explicitExternPaths: vec![],
+        explicitJsInputs: vec![],
+        finalCacheDir: final_cache_dir.to_string_lossy().to_string(),
+        generatedExternPaths: vec![],
+        languageOut: "ECMASCRIPT_NEXT".to_string(),
+        manifestFile: "chunk-map.json".to_string(),
+        hasPreservedModules: false,
+        needsCssRuntime: false,
+        nativeExternPath: native_extern.to_string_lossy().to_string(),
+        outDir: out_dir.to_string_lossy().to_string(),
+        packageRoot: package_root.to_string_lossy().to_string(),
+        publicPath: "/app/".to_string(),
+        supportFiles: vec![],
+        typeMetadata: vec![],
+    };
+    let output = prepare_closure_jobs(input.clone()).unwrap();
+
+    let base = output
+        .generatedAssets
+        .iter()
+        .find(|asset| asset.path.ends_with("main.linked.js"))
+        .expect("base linked chunk");
+    // Closure still sees the established runtime-shaped input so removing the
+    // dead envelope cannot perturb optimization/name allocation in the app
+    // body. The native capability gate marks the one published base output for
+    // structurally validated post-Closure stripping.
+    assert!(base.text.contains("globalThis[\"__g\"]"), "{base:?}");
+    assert!(base.text.contains("runtimeElisionAnswer"), "{base:?}");
+    assert_eq!(output.postprocessActions.len(), 1);
+    assert_eq!(output.postprocessActions[0].kind, "strip-bundler-runtime");
+    assert!(output
+        .generatedAssets
+        .iter()
+        .any(|asset| asset.path.ends_with("chunk-map.json")));
+    assert_eq!(
+        output.compileJobs[0].chunkOutputType.as_deref(),
+        Some("ES_MODULES")
+    );
+
+    let preserved_output = prepare_closure_jobs(PrepareClosureJobsInput {
+        hasPreservedModules: true,
+        ..input.clone()
+    })
+    .unwrap();
+    assert_eq!(preserved_output.postprocessActions[0].kind, "copy");
+
+    fs::write(
+        emitted_out_dir.join("src/main.js"),
+        "new Worker('__VITE_WORKER_ASSET__12345678__');\n",
+    )
+    .unwrap();
+    let worker_output = prepare_closure_jobs(input).unwrap();
+    assert_eq!(worker_output.postprocessActions[0].kind, "copy");
+}
+
+#[test]
 fn accepts_esm_output_for_unchunked_mode() {
     let root = make_temp_dir("esm-mode-basic");
     let output = prepare_closure_jobs(PrepareClosureJobsInput {
@@ -518,6 +610,7 @@ fn accepts_esm_output_for_unchunked_mode() {
         generatedExternPaths: vec![],
         languageOut: "ECMASCRIPT_NEXT".to_string(),
         manifestFile: String::new(),
+        hasPreservedModules: false,
         needsCssRuntime: false,
         nativeExternPath: root.join("n.js").to_string_lossy().to_string(),
         outDir: root.join("dist").to_string_lossy().to_string(),
@@ -639,6 +732,7 @@ fn prepare_vendor_jobs(label: &str, vendor: bool) -> PrepareClosureJobsOutput {
         generatedExternPaths: vec![],
         languageOut: "ECMASCRIPT_NEXT".to_string(),
         manifestFile: "manifest.json".to_string(),
+        hasPreservedModules: false,
         needsCssRuntime: false,
         nativeExternPath: native_extern.to_string_lossy().to_string(),
         outDir: out_dir.to_string_lossy().to_string(),
@@ -858,6 +952,7 @@ fn split_jobs_aggregate_only_native_emitted_chunk_inputs() {
         generatedExternPaths: vec![],
         languageOut: "ECMASCRIPT_NEXT".to_string(),
         manifestFile: "".to_string(),
+        hasPreservedModules: false,
         needsCssRuntime: false,
         nativeExternPath: native_extern.to_string_lossy().to_string(),
         outDir: out_dir.to_string_lossy().to_string(),

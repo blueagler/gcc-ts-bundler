@@ -55,6 +55,9 @@ pub struct PrepareClosureJobsInput {
     pub generatedExternPaths: Vec<String>,
     pub languageOut: String,
     pub manifestFile: String,
+    /// Preserved ESM boundaries are intentionally conservative: they retain the
+    /// runtime even when their compiled side is otherwise a one-chunk graph.
+    pub hasPreservedModules: bool,
     pub nativeExternPath: String,
     /// Whether the consumer can attach CSS rows to the runtime manifest after
     /// the compile. Standalone builds never do; the Vite plugin does, and
