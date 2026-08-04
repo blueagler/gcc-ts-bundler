@@ -27,6 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::identity_oxc::ModuleIdentity;
+use crate::closure_capabilities::CLOSURE_COMPILER_CAPABILITIES;
 
 const PRIVATE_CLASS_HELPERS: &str = r#"
 class gccPrivateSlot {
@@ -450,8 +451,11 @@ pub(crate) fn transform_program_with_enum_values<'a>(
     for (name, members) in &const_enum_values {
         enum_values.insert(name.clone(), members.clone());
     }
-    let (private_lowering, scoping) =
-        prepare_private_class_lowering(allocator, path, program, scoping)?;
+    let (private_lowering, scoping) = if CLOSURE_COMPILER_CAPABILITIES.private_class_elements {
+        (None, scoping)
+    } else {
+        prepare_private_class_lowering(allocator, path, program, scoping)?
+    };
     let lower_private_classes = private_lowering.is_some();
     let mut options = TransformOptions::default();
     if lower_private_classes {

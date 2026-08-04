@@ -1,5 +1,6 @@
 use super::package_resolver::is_external_boundary_specifier;
 use super::*;
+use crate::closure_capabilities::CLOSURE_COMPILER_CAPABILITIES;
 use oxc_allocator::Allocator;
 
 pub(super) fn resolve_graph_impl(
@@ -65,7 +66,11 @@ pub(super) fn resolve_graph_impl(
         // before CommonJS validation is applied to the remaining modules.
         let scan_allocator = Allocator::default();
         let scanned = parse_scanned_module(&scan_allocator, &current_file, &contents)?;
-        if authored_preserved || has_top_level_await(&scanned) {
+        // Closure's pinned syntax table rejects top-level await, so retain its
+        // ESM edge for Oxc to emit rather than handing the module to Closure.
+        if authored_preserved
+            || (!CLOSURE_COMPILER_CAPABILITIES.top_level_await && has_top_level_await(&scanned))
+        {
             top_level_await_modules.insert(current_file.to_string_lossy().to_string());
         }
         for specifier in collect_export_source_specifiers(&scanned) {

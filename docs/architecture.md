@@ -35,6 +35,12 @@ The self-hosted package compiles the five public ESM exports and the CLI in one 
 
 The CLI was previously compiled as a separate closed-world job to maximize entry-specific dead-code elimination. A direct probe found that the standalone CLI retained only about 6.4 KB less code than the shared implementation, while separate CLI and Vite jobs duplicated roughly 65-97% of the core pipeline. The package build therefore accepts the small import hop and couples the CLI to the published `dist` layout in exchange for removing the much larger shipped duplication; package verification keeps the exports map, bin path, shebang, declarations, and runtime asset layout contractual.
 
+## Closure envelope capabilities
+
+Closure is the middle-end inside an Oxc envelope: Oxc normalizes source syntax into Closure-ready inputs, Closure performs optimization and property renaming, then the Oxc finishing pass modernizes the delivered JavaScript's printing without DCE or mangling. The versioned table in [`native/src/closure_capabilities.rs`](../native/src/closure_capabilities.rs) is the single source of truth for the pinned `google-closure-compiler` parser contract, including the ES2021-equivalent dependency-prebundle target and the fact that final printer modernization belongs to the finishing pass.
+
+[`test/closure-capabilities.test.mjs`](../test/closure-capabilities.test.mjs) invokes the pinned compiler jar directly with `WHITESPACE_ONLY` fixtures for every declared syntax capability. A compiler bump must update the table only when the canary proves it: a newly supported construct makes an obsolete `false` entry fail, prompting removal of its Oxc envelope workaround rather than silently preserving it.
+
 ## Core build flow
 
 A call to `build()` follows this path:

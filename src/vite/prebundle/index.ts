@@ -4,6 +4,7 @@ import path from "node:path";
 
 import type { Plugin } from "esbuild";
 
+import { closureCompilerCapabilities } from "../../native/load";
 import { writeJson } from "../../shared/cache-store";
 import { syncDirectoryEntries } from "../../shared/files";
 import type {
@@ -480,10 +481,10 @@ async function buildDependencyBundles(
     outbase: DEP_BUNDLE_INPUT_DIR,
     platform: "browser",
     splitting: true,
-    // Closure does not support private class elements or static blocks;
-    // lowering here (instead of per captured module) keeps one shared set of
-    // esbuild helpers across all dependency bundles.
-    target: "es2021",
+    // The pinned Closure syntax table owns this target. Lowering here (instead
+    // of per captured module) keeps one shared set of esbuild helpers across
+    // all dependency bundles.
+    target: closureCompilerCapabilities().prebundleTarget,
     treeShaking: true,
     write: false,
   });

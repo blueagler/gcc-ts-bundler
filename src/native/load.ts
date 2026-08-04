@@ -266,7 +266,17 @@ interface NativeClassMapCallInput {
   stringLiteralArgIndex?: number | undefined;
 }
 
+export interface ClosureCompilerCapabilities {
+  classStaticBlocks: boolean;
+  compilerVersion: string;
+  prebundleTarget: string;
+  privateClassElements: boolean;
+  printerModernization: string;
+  topLevelAwait: boolean;
+}
+
 interface NativeBinding {
+  closureCompilerCapabilities(): ClosureCompilerCapabilities;
   collectFileStates(filePaths: string[]): NativeFileStateEntry[];
   collectPublishedOutputStats(
     filePaths: string[],
@@ -332,6 +342,7 @@ let cachedBinding: NativeBinding | null = null;
 // to NativeBinding without listing it here is a compile error, so a stale
 // addon can never validate as complete.
 const NATIVE_BINDING_METHOD_FLAGS: Record<keyof NativeBinding, true> = {
+  closureCompilerCapabilities: true,
   collectFileStates: true,
   collectPublishedOutputStats: true,
   matchFileStates: true,
@@ -369,6 +380,10 @@ function isNativeBinding(value: unknown): value is NativeBinding {
       (methodName) => typeof value[methodName] === "function",
     )
   );
+}
+
+export function closureCompilerCapabilities() {
+  return loadBinding().closureCompilerCapabilities();
 }
 
 export function resolveGraph(input: {

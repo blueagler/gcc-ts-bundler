@@ -1,3 +1,4 @@
+mod closure_capabilities;
 mod closure_jobs;
 mod closure_metadata;
 mod commonjs;
@@ -23,6 +24,11 @@ where
     F: FnOnce() -> std::result::Result<T, String>,
 {
     into_napi(callback())
+}
+
+#[napi(js_name = "closureCompilerCapabilities")]
+pub fn closure_compiler_capabilities() -> closure_capabilities::ClosureCompilerCapabilitiesOutput {
+    closure_capabilities::closure_compiler_capabilities()
 }
 
 #[napi(js_name = "resolveGraph")]
