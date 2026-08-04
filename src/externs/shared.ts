@@ -1,6 +1,8 @@
 import path from "path";
 import ts from "@typescript/typescript6";
 
+import { hasModifier } from "../shared/typescript";
+
 export const DECLARATION_EXTENSIONS = [
   ".d.ts",
   ".d.mts",
@@ -188,20 +190,6 @@ export function hasNonPublicModifier(node: ts.Node) {
   return (
     hasModifier(node, ts.SyntaxKind.PrivateKeyword) ||
     hasModifier(node, ts.SyntaxKind.ProtectedKeyword)
-  );
-}
-
-function hasModifier(
-  node: ts.Node,
-  kind:
-    | ts.SyntaxKind.ExportKeyword
-    | ts.SyntaxKind.PrivateKeyword
-    | ts.SyntaxKind.ProtectedKeyword
-    | ts.SyntaxKind.StaticKeyword,
-) {
-  return Boolean(
-    ts.canHaveModifiers(node) &&
-    ts.getModifiers(node)?.some((modifier) => modifier.kind === kind),
   );
 }
 

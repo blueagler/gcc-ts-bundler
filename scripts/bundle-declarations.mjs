@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { runCommand } from "./command.mjs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -23,7 +23,7 @@ try {
       `/// <reference path="../types/google-closure-compiler-utils.d.ts" />\nexport * from "../${entry.replace(/\.ts$/u, "")}";\n`, 
     );
     await mkdir(path.dirname(path.join(outDir, output)), { recursive: true });
-    await run(
+    await runCommand(
       process.execPath,
       [
         "--require",
@@ -38,28 +38,9 @@ try {
         path.join(outDir, output),
         wrapperPath,
       ],
+      { cwd: root },
     );
   }
 } finally {
   await rm(temporaryRoot, { force: true, recursive: true });
-}
-
-async function run(command, args) {
-  await new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd: root, stdio: "inherit" });
-    child.on("error", reject);
-    child.on("exit", (code, signal) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      reject(
-        new Error(
-          signal
-            ? `${command} ${args.join(" ")} exited via signal ${signal}`
-            : `${command} ${args.join(" ")} exited with code ${code ?? 1}`,
-        ),
-      );
-    });
-  });
 }

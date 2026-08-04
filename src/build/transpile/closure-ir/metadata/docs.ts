@@ -2,13 +2,14 @@ import ts from "@typescript/typescript6";
 
 import { firstOrUndefined } from "../../../../shared/arrays";
 import { uniqueSortedStrings } from "../../../../shared/files";
+import { hasModifier } from "../../../../shared/typescript";
 import {
   mergeClosureTypes,
   renderPrototypeProperty,
   sanitizeClosureName,
   stripUndefinedFromClosureType,
 } from "./closure-type-strings";
-import { getPropertyNameText, hasExportModifier } from "./modifiers";
+import { getPropertyNameText } from "./modifiers";
 import {
   collectSignatureParamInfos,
   getTypedDeclarationClosureType,
@@ -81,7 +82,7 @@ export function buildInterfaceDeclarationSnippet(
   const template = `${lines.join("\n")}\n`;
   return {
     declaredSymbolId,
-    exported: hasExportModifier(statement),
+    exported: hasModifier(statement, ts.SyntaxKind.ExportKeyword),
     id: `${declaredSymbolId}:declaration`,
     references: referencesForTemplate(template, context),
     template,
@@ -131,7 +132,7 @@ export function buildTypeAliasDeclarationSnippet(
   const template = `${lines.join("\n")}\n`;
   return {
     declaredSymbolId,
-    exported: hasExportModifier(statement),
+    exported: hasModifier(statement, ts.SyntaxKind.ExportKeyword),
     id: `${declaredSymbolId}:declaration`,
     references: referencesForTemplate(template, context),
     template,

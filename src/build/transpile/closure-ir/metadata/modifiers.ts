@@ -1,14 +1,5 @@
 import ts from "@typescript/typescript6";
 
-export function hasExportModifier(node: ts.Node) {
-  return Boolean(
-    ts.canHaveModifiers(node) &&
-    ts
-      .getModifiers(node)
-      ?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword),
-  );
-}
-
 export function getPropertyNameText(
   name: ts.PropertyName | ts.BindingName | undefined,
 ) {

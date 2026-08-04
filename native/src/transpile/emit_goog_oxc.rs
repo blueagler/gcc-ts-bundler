@@ -278,20 +278,6 @@ fn print_node(node: &impl Gen) -> String {
     codegen.into_source_text()
 }
 
-fn print_declaration(declaration: &Declaration<'_>) -> String {
-    match declaration {
-        Declaration::VariableDeclaration(declaration) => {
-            format!(
-                "{};",
-                print_node(declaration.as_ref()).trim_end_matches(';')
-            )
-        }
-        Declaration::FunctionDeclaration(function) => print_node(function.as_ref()),
-        Declaration::ClassDeclaration(class) => print_node(class.as_ref()),
-        _ => String::new(),
-    }
-}
-
 fn default_declaration_name<'a>(
     declaration: &'a ExportDefaultDeclarationKind<'_>,
 ) -> Option<&'a str> {

@@ -3,6 +3,7 @@ import path from "node:path";
 import ts from "@typescript/typescript6";
 
 import { canonicalSymbolId } from "../../build/transpile/closure-ir/metadata/type-render";
+import { hasModifier } from "../../shared/typescript";
 import { hashTypeMetadataValue } from "./cache";
 import type {
   DeclarationExportFact,
@@ -157,14 +158,14 @@ export function parseRuntimeExportGraph(
       }
       continue;
     }
-    if (hasExportModifier(statement)) {
+    if (hasModifier(statement, ts.SyntaxKind.ExportKeyword)) {
       if (
         (ts.isClassDeclaration(statement) ||
           ts.isFunctionDeclaration(statement)) &&
         statement.name
       ) {
         facts.push({
-          exportName: hasDefaultModifier(statement)
+          exportName: hasModifier(statement, ts.SyntaxKind.DefaultKeyword)
             ? "default"
             : statement.name.text,
           kind: "local",
@@ -452,24 +453,6 @@ function collectBindingNames(name: ts.BindingName): string[] {
   }
   return name.elements.flatMap((element) =>
     ts.isOmittedExpression(element) ? [] : collectBindingNames(element.name),
-  );
-}
-
-function hasExportModifier(node: ts.Node) {
-  return Boolean(
-    ts.canHaveModifiers(node) &&
-    ts
-      .getModifiers(node)
-      ?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword),
-  );
-}
-
-function hasDefaultModifier(node: ts.Node) {
-  return Boolean(
-    ts.canHaveModifiers(node) &&
-    ts
-      .getModifiers(node)
-      ?.some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword),
   );
 }
 

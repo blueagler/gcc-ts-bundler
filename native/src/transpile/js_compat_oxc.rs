@@ -2,23 +2,16 @@
 
 #![allow(dead_code)]
 
-use std::path::Path;
-
 use oxc_allocator::{Allocator, FromIn, TakeIn};
 use oxc_ast::ast::*;
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
-use oxc_codegen::Codegen;
-use oxc_parser::Parser;
-use oxc_semantic::SemanticBuilder;
-use oxc_span::{SourceType, SPAN};
+use oxc_span::SPAN;
 use oxc_str::Str;
 use oxc_syntax::operator::{BinaryOperator, LogicalOperator, UnaryOperator};
 
-use super::apply_js_compat_text_fixes;
 use super::global_this_oxc::{collect_global_this_compat_property_names, GlobalThisCompatVisitor};
 use super::identity_oxc::ModuleIdentity;
-use super::lowering_oxc::closure_input_codegen_options;
 
 pub(crate) fn apply_program_transforms<'a>(
     allocator: &'a Allocator,
@@ -34,48 +27,6 @@ pub(crate) fn apply_program_transforms<'a>(
     ProcessEnvNodeEnvVisitor::new(allocator, identity).visit_program(program);
     JsCompatAstVisitor::new(allocator, source_declares_ident(source, "T")).visit_program(program);
     DirectoryModuleSpecifierVisitor::new(allocator).visit_program(program);
-}
-
-pub(crate) fn transform_js_pass_through_source(
-    file_path: &Path,
-    source: &str,
-) -> Result<String, String> {
-    let allocator = Allocator::default();
-    let source_type = SourceType::from_path(file_path)
-        .unwrap_or_default()
-        .with_module(true);
-    let parsed = Parser::new(&allocator, source, source_type).parse();
-    if !parsed.diagnostics.is_empty() {
-        return Err(parsed
-            .diagnostics
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n"));
-    }
-    let semantic = SemanticBuilder::new()
-        .with_build_nodes(true)
-        .with_enum_eval(true)
-        .build(&parsed.program);
-    if !semantic.diagnostics.is_empty() {
-        return Err(semantic
-            .diagnostics
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n"));
-    }
-    let identity = ModuleIdentity::new(semantic.semantic.into_scoping());
-    let mut program = parsed.program;
-
-    apply_program_transforms(&allocator, &mut program, &identity, source);
-
-    Ok(apply_js_compat_text_fixes(
-        Codegen::new()
-            .with_options(closure_input_codegen_options())
-            .build(&program)
-            .code,
-    ))
 }
 
 fn strip_helper_global_fallback<'a>(allocator: &'a Allocator, program: &mut Program<'a>) {
@@ -149,7 +100,6 @@ impl<'a> VisitMut<'a> for ProcessEnvNodeEnvVisitor<'a, '_> {
 }
 
 struct JsCompatAstVisitor<'a> {
-    allocator: &'a Allocator,
     builder: AstBuilder<'a>,
     has_t_declaration: bool,
 }
@@ -157,7 +107,6 @@ struct JsCompatAstVisitor<'a> {
 impl<'a> JsCompatAstVisitor<'a> {
     fn new(allocator: &'a Allocator, has_t_declaration: bool) -> Self {
         Self {
-            allocator,
             builder: AstBuilder::new(allocator),
             has_t_declaration,
         }

@@ -1,6 +1,6 @@
 import ts from "@typescript/typescript6";
 
-import { hasExportModifier } from "./modifiers";
+import { hasModifier } from "../../../../shared/typescript";
 
 interface ClosureIrDocEligibility {
   exportedDeclarationNames: Set<string>;
@@ -84,7 +84,7 @@ function collectExportedTopLevelDeclarationNames(sourceFile: ts.SourceFile) {
       (ts.isFunctionDeclaration(statement) ||
         ts.isClassDeclaration(statement)) &&
       statement.name &&
-      hasExportModifier(statement)
+      hasModifier(statement, ts.SyntaxKind.ExportKeyword)
     ) {
       exportedNames.add(statement.name.text);
       continue;

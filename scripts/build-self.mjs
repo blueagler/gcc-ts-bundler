@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { runCommand } from "./command.mjs";
 import { existsSync } from "node:fs";
 import {
   cp,
@@ -86,8 +86,8 @@ const runtimeAssetExtensions = new Set([
 ]);
 
 try {
-  await run(process.execPath, ["./scripts/build-native.mjs"], root);
-  await run(process.execPath, ["./scripts/build-js.mjs"], root);
+  await runCommand(process.execPath, ["./scripts/build-native.mjs"], { cwd: root });
+  await runCommand(process.execPath, ["./scripts/build-js.mjs"], { cwd: root });
   const stage0 = path.join(temporaryRoot, "stage-0");
   await snapshotShippedTree(stage0);
 
@@ -333,7 +333,9 @@ function normalizePackagePath(packagePath) {
 }
 
 async function emitDeclarations(outDir) {
-  await run(process.execPath, ["./scripts/bundle-declarations.mjs", outDir], root);
+  await runCommand(process.execPath, ["./scripts/bundle-declarations.mjs", outDir], {
+    cwd: root,
+  });
 }
 
 async function snapshotShippedTree(destination) {
@@ -451,24 +453,4 @@ async function assertCliShebang(filePath) {
   if (!contents.startsWith("#!/usr/bin/env node\n")) {
     throw new Error("Self-built CLI is missing its first-line Node shebang.");
   }
-}
-
-async function run(command, args, cwd) {
-  await new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, stdio: "inherit" });
-    child.on("error", reject);
-    child.on("exit", (code, signal) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      reject(
-        new Error(
-          signal
-            ? `${command} ${args.join(" ")} exited via signal ${signal}`
-            : `${command} ${args.join(" ")} exited with code ${code ?? 1}`,
-        ),
-      );
-    });
-  });
 }

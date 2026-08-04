@@ -14,7 +14,7 @@ use oxc_str::Ident;
 
 use std::collections::HashSet;
 
-use super::identity_oxc::{BindingKey, BindingKeySet, ModuleIdentity};
+use super::identity_oxc::{BindingKeySet, ModuleIdentity};
 
 pub(crate) fn collect_global_this_compat_property_names(
     program: &Program<'_>,
@@ -151,9 +151,6 @@ fn is_valid_identifier(value: &str) -> bool {
     characters
         .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '$')
 }
-
-#[expect(dead_code, reason = "consumed once the pipeline around it is ported")]
-pub(crate) fn unused_marker(_: BindingKey) {}
 
 #[cfg(test)]
 mod tests {

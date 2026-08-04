@@ -185,13 +185,16 @@ export async function materializeCapturedGraph(
     },
   });
 
-  const entryFiles = input.entryModuleIds.map((moduleId) => {
+  const materializedSpecifier = (moduleId: string, role: string) => {
     const filePath = filePathByModuleId.get(moduleId);
     if (!filePath) {
-      this.error(`Missing captured entry module ${moduleId}.`);
+      this.error(`Missing captured ${role} module ${moduleId}.`);
     }
     return `./${path.relative(input.srcDir, filePath).replace(/\\/g, "/")}`;
-  });
+  };
+  const entryFiles = input.entryModuleIds.map((moduleId) =>
+    materializedSpecifier(moduleId, "entry"),
+  );
 
   return {
     authoredFiles: authoredFiles.sort((left, right) =>
@@ -207,13 +210,7 @@ export async function materializeCapturedGraph(
       left.localeCompare(right),
     ),
     runtimeEntries: materializedModuleIds
-      .map((moduleId) => {
-        const filePath = filePathByModuleId.get(moduleId);
-        if (!filePath) {
-          this.error(`Missing captured runtime module ${moduleId}.`);
-        }
-        return `./${path.relative(input.srcDir, filePath).replace(/\\/g, "/")}`;
-      })
+      .map((moduleId) => materializedSpecifier(moduleId, "runtime"))
       .sort((left, right) => left.localeCompare(right)),
     runtimeResolutions: [...runtimeResolutionByKey.values()].sort(
       (left, right) =>

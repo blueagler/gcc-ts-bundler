@@ -1,7 +1,8 @@
 import ts from "@typescript/typescript6";
 
 import type { ClosureEnumDeclaration } from "../types";
-import { getPropertyNameText, hasExportModifier } from "./modifiers";
+import { hasModifier } from "../../../../shared/typescript";
+import { getPropertyNameText } from "./modifiers";
 import { canonicalSymbolId } from "./type-render";
 
 export function collectUnsafeEnumSymbols(
@@ -137,7 +138,7 @@ export function buildEnumDeclarationMetadata(
 
   return {
     bindingName: statement.name.text,
-    exported: hasExportModifier(statement),
+    exported: hasModifier(statement, ts.SyntaxKind.ExportKeyword),
     members,
     symbolId: resolved
       ? canonicalSymbolId(resolved)

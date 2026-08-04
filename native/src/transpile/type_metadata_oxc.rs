@@ -311,15 +311,6 @@ impl PreparedTypeMetadata {
         self.delivery.counts.enumDeclarationCount += 1;
     }
 
-    pub(crate) fn render_statement(
-        &mut self,
-        identity: &ModuleIdentity,
-        statement: Statement<'_>,
-        tags: &[&str],
-    ) -> std::result::Result<String, String> {
-        self.render_statement_with_nocollapse(identity, statement, tags, None)
-    }
-
     pub(crate) fn render_statement_with_nocollapse(
         &mut self,
         identity: &ModuleIdentity,

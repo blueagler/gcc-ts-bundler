@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn select_package_export_target(
     exports: &Value,
     subpath: &str,
