@@ -73,7 +73,7 @@ test.serial(
     expect(baseOutput).toContain(".__g");
     // Hoisted entry modules execute inline; no `.n([...])` kick remains.
     expect(baseOutput).not.toMatch(/\.n\(\[/);
-    expect(baseOutput).toContain('textContent="base"');
+    expect(baseOutput).toMatch(/textContent=(?:"base"|`base`)/u);
     expect(baseOutput).not.toMatch(/LAZY_FEATURE/);
     expect(lazyOutput).toMatch(/LAZY_FEATURE/);
   },
@@ -133,11 +133,11 @@ test.serial(
     expect(baseOutput).not.toContain("unknown chunk");
     expect(baseOutput).not.toMatch(/m[0-9a-f]{8}/);
     expect(baseOutput.trimStart()).not.toMatch(/^var\s/);
-    expect(baseOutput.trimStart()).toMatch(/^!function\(\)\{/);
+    expect(baseOutput.trimStart()).toMatch(/^!?\(?function\(\)\{/);
     expect(baseOutput).toContain(".__g");
     // Hoisted entry modules execute inline; no `.n([...])` kick remains.
     expect(baseOutput).not.toMatch(/\.n\(\[/);
-    expect(baseOutput).toContain('textContent="base"');
+    expect(baseOutput).toMatch(/textContent=(?:"base"|`base`)/u);
     expect(baseOutput).not.toMatch(/goog\.module/);
     expect(baseOutput).not.toMatch(/ModuleManager/);
     expect(baseOutput).not.toContain('Object.defineProperty(d,"default"');
@@ -147,7 +147,7 @@ test.serial(
     expect(lazyOutput).not.toMatch(/m[0-9a-f]{8}/);
     expect(lazyOutput).not.toContain("renderMessage");
     expect(lazyOutput.trimStart()).not.toMatch(/^var\s/);
-    expect(lazyOutput.trimStart()).toMatch(/^!function\(\)\{/);
+    expect(lazyOutput.trimStart()).toMatch(/^!?\(?function\(\)\{/);
     expect(lazyOutput).not.toMatch(/Object\.defineProperty\([^)]*,\s*[0-9]+,/);
     expect(lazyOutput).not.toMatch(/\bta\(/);
     expect(lazyOutput).not.toMatch(/\bqa\(/);
@@ -408,10 +408,10 @@ test.serial(
     // comparison and the object literal. The old pipeline instead respelled
     // them afterwards from the property-renaming report, which could not tell
     // these keys apart from network JSON keys or UI labels.
-    expect(output).toContain('"class"');
-    expect(output).toContain('"$$slots"');
-    expect(output).toContain('"style"');
-    expect(output).toContain('"label"');
+    expect(output).toMatch(/["'`]class["'`]/u);
+    expect(output).toMatch(/["'`]\$\$slots["'`]/u);
+    expect(output).toMatch(/["'`]style["'`]/u);
+    expect(output).toMatch(/["'`]label["'`]/u);
 
     const previousDocument = globalThis.document;
     const previousLocation = globalThis.location;
@@ -895,7 +895,7 @@ test.serial(
 
     // It is on the shared capability-gated runtime with native import().
     expect(baseSource).toMatch(/import\(/);
-    expect(baseSource).toMatch(/"\.\/c[0-9a-f]{8}\.js"/);
+    expect(baseSource).toMatch(/["'`]\.\/c[0-9a-f]{8}\.js["'`]/u);
 
     // And the lazy module still resolves renamed exports across the boundary.
     const mainOutput = path.join(fixture.outDir, "main.js");
@@ -1099,7 +1099,7 @@ test.serial(
     expect(baseOutput).not.toContain('createElement("script")');
     expect(baseOutput).not.toContain("currentScript");
     expect(baseOutput).toMatch(/import\(/);
-    expect(baseOutput).toMatch(/"\.\/c[0-9a-f]{8}\.js"/);
+    expect(baseOutput).toMatch(/["'`]\.\/c[0-9a-f]{8}\.js["'`]/u);
 
     // The registry survives; the CSS coupling does not. Nothing in a
     // standalone build can ever fill a manifest CSS row, so the <link> loader
@@ -1225,7 +1225,7 @@ test.serial(
 
     expect(result.ok).toBe(true);
     const baseOutput = await fixture.read("dist/main.js");
-    expect(baseOutput).toContain('createElement("script")');
+    expect(baseOutput).toMatch(/createElement\(["'`]script["'`]\)/u);
     expect(baseOutput).toContain("currentScript");
     expect(baseOutput).not.toMatch(/^import\s|\bexport\s*\{/m);
   },

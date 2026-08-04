@@ -28,6 +28,7 @@ oxc_codegen = "=0.142.0"
 oxc_ast_visit = "=0.142.0"
 oxc_str = "=0.142.0"
 oxc_syntax = "=0.142.0"
+oxc_minifier = "=0.142.0"
 
 [build-dependencies]
 napi-build = "2.4.0"

@@ -290,6 +290,7 @@ interface NativeBinding {
     shimFiles: string[],
     vendorChunk: boolean,
   ): NativeChunkPlanChunkOutput[];
+  minifyJavaScript(filePath: string, source: string): string;
   resolveGraph(
     entries: string[],
     srcDir: string,
@@ -334,6 +335,7 @@ const NATIVE_BINDING_METHOD_FLAGS: Record<keyof NativeBinding, true> = {
   collectFileStates: true,
   collectPublishedOutputStats: true,
   matchFileStates: true,
+  minifyJavaScript: true,
   planChunks: true,
   prepareClosureJobs: true,
   publishedOutputSnapshotMatches: true,
@@ -435,6 +437,10 @@ export function planChunks(input: {
     input.shimFiles,
     input.vendorChunk,
   );
+}
+
+export function minifyJavaScript(filePath: string, source: string) {
+  return loadBinding().minifyJavaScript(filePath, source);
 }
 
 export function rewriteGccExports(code: string) {

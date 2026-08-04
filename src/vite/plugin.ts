@@ -5,6 +5,7 @@ import { performance } from "node:perf_hooks";
 import type { Plugin, ResolvedConfig, UserConfig } from "vite";
 
 import { build } from "../api/build";
+import { finalizeJavaScriptOutputs } from "../build/closure/final-minify";
 import {
   normalizeBuildOptions,
   resolveChunkOutputType,
@@ -544,6 +545,9 @@ async function compileViteGraph(
   const buildOptions: InternalBuildOptions = {
     ...compilerOptions,
     cssRuntime: ownershipNeedsCssRuntime(prepared.cssOwnership),
+    // Vite has a second output-finalization phase for hashed names, resolved
+    // asset URLs, and preserved-import specifiers. Minify only after that.
+    finalMinify: false,
   };
   const buildEnvironment: EnvironmentOverrides = {
     GCC_VITE_AUTHORED_FILES_FILE: authoredFilesFilePath,
@@ -674,6 +678,9 @@ async function emitViteGraph(
 
   await rewritePreservedImportSpecifiers({
     outDir: compiled.compiledCoreOutputs.finalOutDir,
+    outputFiles: finalizedBaseOutput.emittedOutputFiles,
+  });
+  await finalizeJavaScriptOutputs({
     outputFiles: finalizedBaseOutput.emittedOutputFiles,
   });
   removeRollupJavaScript(input.bundle);

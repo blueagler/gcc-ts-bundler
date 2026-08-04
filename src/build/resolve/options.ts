@@ -109,6 +109,7 @@ export function normalizeBuildOptions(
       "compilationLevel",
     ),
     cssRuntime: options.cssRuntime ?? false,
+    finalMinify: options.finalMinify ?? true,
     diagnostics: {
       preflight: requireChoice(
         options.diagnostics?.preflight ??

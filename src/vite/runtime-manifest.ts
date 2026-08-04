@@ -1,3 +1,5 @@
+import ts from "@typescript/typescript6";
+
 import {
   isObjectOf,
   isString,
@@ -79,7 +81,7 @@ export function extractRuntimeInitManifest(sourceText: string) {
     "gccTsBundler() could not parse the runtime manifest payload.",
   );
   const manifestText = sourceText.slice(arrayStartIndex, arrayEndIndex + 1);
-  const manifest: unknown = JSON.parse(manifestText);
+  const manifest = parseRuntimeManifestLiteral(manifestText);
   const closeParenIndex = findMatchingDelimiter(
     sourceText,
     openParenIndex,
@@ -118,6 +120,52 @@ const isGccRuntimeManifest = isObjectOf<GccRuntimeManifest>({
   modules: recordOf(isString),
   publicPath: isString,
 });
+
+function parseRuntimeManifestLiteral(text: string): unknown {
+  const sourceFile = ts.createSourceFile(
+    "runtime-manifest.js",
+    `(${text})`,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS,
+  );
+  const statement = sourceFile.statements[0];
+  if (!statement || !ts.isExpressionStatement(statement)) {
+    throw new Error(
+      "gccTsBundler() could not parse the runtime manifest payload.",
+    );
+  }
+  return parseRuntimeManifestExpression(
+    ts.isParenthesizedExpression(statement.expression)
+      ? statement.expression.expression
+      : statement.expression,
+  );
+}
+
+function parseRuntimeManifestExpression(expression: ts.Expression): unknown {
+  if (ts.isArrayLiteralExpression(expression)) {
+    return expression.elements.map((element) => {
+      if (ts.isSpreadElement(element) || ts.isOmittedExpression(element)) {
+        throw new Error(
+          "gccTsBundler() could not parse the runtime manifest payload.",
+        );
+      }
+      return parseRuntimeManifestExpression(element);
+    });
+  }
+  if (
+    ts.isStringLiteral(expression) ||
+    ts.isNoSubstitutionTemplateLiteral(expression)
+  ) {
+    return expression.text;
+  }
+  if (ts.isNumericLiteral(expression)) {
+    return Number(expression.text);
+  }
+  throw new Error(
+    "gccTsBundler() could not parse the runtime manifest payload.",
+  );
+}
 
 function isQuoteCharacter(
   character: string | undefined,

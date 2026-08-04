@@ -37,6 +37,7 @@ import {
 import { determineClosureConcurrency, runWithConcurrency } from "./concurrency";
 import { runClosurePostprocess } from "./postprocess";
 import { pruneEmptyChunks } from "./prune-empty-chunks";
+import { finalizeJavaScriptOutputs } from "./final-minify";
 
 export interface ClosureStageResult {
   cacheOutputFiles: string[];
@@ -177,6 +178,15 @@ export async function runClosureStage({
             : null,
           outputFiles: publishedOutputs,
         }),
+    );
+  }
+
+  if (options.finalMinify) {
+    await withInternalTiming("closure:final-oxc", () =>
+      finalizeJavaScriptOutputs({
+        excludedOutputFiles: preservedOutputFiles,
+        outputFiles: publishedOutputs,
+      }),
     );
   }
 

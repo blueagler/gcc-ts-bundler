@@ -4,6 +4,7 @@ mod commonjs;
 mod exports;
 mod fs_state;
 mod graph;
+mod minify;
 mod pathing;
 mod shims;
 mod support_files;
@@ -138,6 +139,11 @@ pub fn transpile_sources(
         pure_callees,
         type_inference_disabled,
     ))
+}
+
+#[napi(js_name = "minifyJavaScript")]
+pub fn minify_javascript(file_path: String, source: String) -> Result<String> {
+    into_napi(minify::minify_javascript(file_path, source))
 }
 
 #[napi(js_name = "rewriteGccExports")]

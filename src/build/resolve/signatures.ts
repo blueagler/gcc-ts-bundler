@@ -56,6 +56,7 @@ export function getOptionsSignature(
     // Decides whether the runtime preamble carries the CSS loader, so two
     // otherwise identical builds produce different bytes.
     cssRuntime: options.cssRuntime,
+    finalMinify: options.finalMinify,
     diagnostics: options.diagnostics,
     entries: options.entries.map((entry) => ({
       name: entry.name,

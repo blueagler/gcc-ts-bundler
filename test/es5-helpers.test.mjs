@@ -174,8 +174,8 @@ test.serial(
     const output = await fixture.read("dist/main.js");
     // Closure folds `"variant size".split(" ")` into an array literal; both the
     // comparison key and the folded list must keep their authored spelling.
-    expect(output).toContain('"variant"');
-    expect(output).toContain('"size"');
+    expect(output).toMatch(/["'`]variant["'`]/u);
+    expect(output).toMatch(/["'`]size["'`]/u);
 
     const previousInspect = globalThis.__inspect;
     try {

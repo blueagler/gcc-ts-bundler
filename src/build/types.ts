@@ -28,11 +28,14 @@ export type InternalBuildOptions = BuildOptions & {
    * never fills a CSS row, so shipping the loader is 797 dead bytes.
    */
   cssRuntime?: boolean | undefined;
+  /** Vite runs this after its URL and import finalization instead. */
+  finalMinify?: boolean | undefined;
   typeMetadata?: BuildTypeMetadataSidecar | undefined;
 };
 
 export interface ResolvedBuildOptions extends PublicResolvedBuildOptions {
   cssRuntime: boolean;
+  finalMinify: boolean;
   typeMetadata: BuildTypeMetadataSidecar | undefined;
 }
 

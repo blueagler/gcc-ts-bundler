@@ -314,10 +314,12 @@ test.serial("emits and executes all external ESM import forms", async () => {
 
   expect(result.ok).toBe(true);
   const output = await fixture.read("dist/index.js");
-  expect(output).toContain('import "runtime-ext";');
-  expect(output).toMatch(/import e[a-z0-9]+_[a-z0-9]+_[a-z0-9]+ from "runtime-ext";/u);
-  expect(output).toMatch(/import \{ named as e[a-z0-9]+_/u);
-  expect(output).toMatch(/import \* as e[a-z0-9]+_/u);
+  expect(output).toMatch(/import["']runtime-ext["'];/u);
+  expect(output).toMatch(
+    /import\s*e[a-z0-9]+_[a-z0-9]+_[a-z0-9]+\s*from["']runtime-ext["'];/u,
+  );
+  expect(output).toMatch(/import\s*\{\s*named as e[a-z0-9]+_/u);
+  expect(output).toMatch(/import\s*\*\s*as e[a-z0-9]+_/u);
   await execFileAsync(
     process.execPath,
     [path.join(fixture.outDir, "index.js")],
@@ -824,7 +826,7 @@ test.serial(
       { cwd: fixture.projectRoot },
     );
     const output = await fixture.read("dist/cli.js");
-    expect(output.startsWith("#!/usr/bin/env node\nimport ")).toBe(true);
+    expect(output.startsWith("#!/usr/bin/env node\nimport")).toBe(true);
     expect(output).toContain("import.meta.url");
     await execFileAsync(
       process.execPath,
