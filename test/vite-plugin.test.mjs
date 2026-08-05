@@ -11,7 +11,10 @@ import {
   annotateAliasedStaticClassMemberWrites,
   resolveViteCaptureRootPath,
 } from "../src/vite/capture.ts";
-import { resolveNormalizedBridgeModuleIds } from "../src/vite/graph.ts";
+import {
+  resolveNormalizedBridgeModuleIds,
+  resolveRetainedCapturedModuleIds,
+} from "../src/vite/graph.ts";
 import { resolveCompilerExterns } from "../src/vite/externs.ts";
 import { materializeCapturedGraph } from "../src/vite/materialize.ts";
 import {
@@ -270,6 +273,52 @@ test("captured module analysis ignores comment-only hash text for compat downlev
   expect(analysis.hasDependencyDefineReferences).toBe(false);
   expect(analysis.isFusedDistributionModule).toBe(false);
   expect(analysis.importSpecifiers).toEqual(["./dep.js"]);
+});
+
+test("retained graph follows demanded names through impure, named, and star barrels", async () => {
+  const entry = "/src/entry.js";
+  const barrel = "/node_modules/pkg/index.js";
+  const hook = "/node_modules/pkg/hook.js";
+  const star = "/node_modules/pkg/star.js";
+  const starLeaf = "/node_modules/pkg/star-leaf.js";
+  const heavy = "/node_modules/pkg/heavy.js";
+  const capturedModules = new Map(
+    [
+      [entry, 'import { hiddenHook, starName } from "/node_modules/pkg/index.js";'],
+      [
+        barrel,
+        [
+          '"use client";',
+          'export { default as hiddenHook } from "./hook.js";',
+          'export * from "./star.js";',
+          'export { unused } from "./heavy.js";',
+          "export const marker = 1;",
+        ].join("\n"),
+      ],
+      [hook, "export default function hiddenHook() {}"],
+      [star, 'export * from "./star-leaf.js";'],
+      [starLeaf, "export const starName = 1;"],
+      [heavy, "export const unused = 1;"],
+    ].map(([id, code]) => [id, { code, id }]),
+  );
+  const context = createCapturePluginContext();
+  context.resolve = async (specifier, importer) => ({
+    external: false,
+    id: specifier.startsWith("/")
+      ? specifier
+      : path.resolve(path.dirname(importer), specifier),
+  });
+
+  const result = await resolveRetainedCapturedModuleIds.call(context, {
+    capturedModules,
+    metrics: undefined,
+    resolutionCache: new Map(),
+    retainedModuleIds: [entry],
+  });
+  expect(result.materializedModuleIds).toEqual(
+    [barrel, hook, star, starLeaf, entry].sort(),
+  );
+  expect(result.materializedModuleIds).not.toContain(heavy);
 });
 
 test("captured module analysis fails dependency routing closed on define and fused-distribution evidence", () => {

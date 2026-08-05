@@ -55,6 +55,7 @@ export type SignatureParamInfo = {
 };
 
 const MAX_TYPE_DEPTH = 28;
+const MAX_SYMBOL_CHAIN_DEPTH = 64;
 
 const MAX_UNION_MEMBERS = 16;
 
@@ -207,6 +208,26 @@ export function toClosureType(
   seen = new Set<ts.Type>(),
   referenceNode?: ts.Node | undefined,
 ): string {
+  try {
+    return renderClosureType(type, checker, context, seen, referenceNode);
+  } catch (error) {
+    if (!(error instanceof RangeError)) {
+      throw error;
+    }
+    // Guard one recursive type atom, not the metadata pass: siblings and later
+    // files remain typed while only the pathological checker chain degrades.
+    recordSymbolRenderingFailure(context, type.aliasSymbol ?? type.getSymbol());
+    return "?";
+  }
+}
+
+function renderClosureType(
+  type: ts.Type,
+  checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
+  seen: Set<ts.Type>,
+  referenceNode?: ts.Node | undefined,
+): string {
   if (seen.size > MAX_TYPE_DEPTH) {
     recordUnresolvedType(
       context,
@@ -255,7 +276,8 @@ export function toClosureType(
     return "?";
   }
   if (type.flags & ts.TypeFlags.TypeParameter) {
-    return sanitizeClosureName(checker.typeToString(type));
+    const rendered = safeTypeToString(type, checker, context);
+    return rendered ? sanitizeClosureName(rendered) : "?";
   }
 
   if (type.isUnion()) {
@@ -287,7 +309,7 @@ export function toClosureType(
     return `!${referenceBuiltin("Object", context)}`;
   }
 
-  if (checker.isArrayType(type) || isReadonlyArrayType(type, checker)) {
+  if (checker.isArrayType(type) || isReadonlyArrayType(type)) {
     const elementType = firstOrUndefined(getTypeArguments(type, checker));
     const arraySymbol = referenceBuiltin("Array", context);
     const elementNode =
@@ -394,8 +416,11 @@ function renderEnumLiteralType(
   if (!enumSymbol) {
     return null;
   }
-  const name = checker.symbolToString(enumSymbol);
-  if (!name || !isClosureQualifiedName(name)) {
+  const name = safeSymbolToString(enumSymbol, checker, context);
+  if (!name) {
+    return "?";
+  }
+  if (!isClosureQualifiedName(name)) {
     return null;
   }
   const declaredSymbolId = context.symbolIdByDeclaredName.get(name);
@@ -566,24 +591,33 @@ function renderNamedType(
     recordUnresolvedType(context, "unsupported-type-atom", type, checker);
     return "?";
   }
-  const locationSymbol = getReferenceNodeSymbol(referenceNode, checker);
+  const locationSymbol = getReferenceNodeSymbol(
+    referenceNode,
+    checker,
+    context,
+  );
+  if (locationSymbol === null) {
+    return "?";
+  }
   const symbol = locationSymbol ?? type.aliasSymbol ?? type.getSymbol();
   if (!symbol) {
     return null;
   }
   const resolvedSymbol =
     symbol.flags & ts.SymbolFlags.Alias
-      ? checker.getAliasedSymbol(symbol)
+      ? safeGetAliasedSymbol(symbol, checker, context)
       : symbol;
+  if (!resolvedSymbol) {
+    return "?";
+  }
   if (!type.aliasSymbol && !isTypeLikeSymbol(resolvedSymbol)) {
     return null;
   }
-  const symbolName = checker.symbolToString(resolvedSymbol);
-  if (
-    !symbolName ||
-    symbolName === "__type" ||
-    !isClosureQualifiedName(symbolName)
-  ) {
+  const symbolName = safeSymbolToString(resolvedSymbol, checker, context);
+  if (!symbolName) {
+    return "?";
+  }
+  if (symbolName === "__type" || !isClosureQualifiedName(symbolName)) {
     return null;
   }
   if (["Array", "ReadonlyArray"].includes(symbolName)) {
@@ -637,7 +671,7 @@ function renderNamedType(
     // named Closure type here; the caller degrades the atom to `?`.
     return null;
   }
-  if (isGlobalObjectType(type, checker)) {
+  if (isGlobalObjectType(type)) {
     return `!${referenceBuiltin("Object", context)}`;
   }
   if (isUnboundAmbientNominal(resolvedSymbol)) {
@@ -763,9 +797,10 @@ export function signatureToClosureFunctionType(
   // nothing, so a signature that introduces its own type parameters renders
   // them as `?` rather than leaking an unbound name.
   const ownTypeParameters = new Set(
-    (signature.getTypeParameters() ?? []).map((parameter) =>
-      sanitizeClosureName(checker.typeToString(parameter)),
-    ),
+    (signature.getTypeParameters() ?? []).map((parameter) => {
+      const rendered = safeTypeToString(parameter, checker, context);
+      return rendered ? sanitizeClosureName(rendered) : "?";
+    }),
   );
   const paramInfos = collectSignatureParamInfos({
     checker,
@@ -848,7 +883,7 @@ function renderParameterType(
 }
 
 function getArrayElementType(type: ts.Type, checker: ts.TypeChecker) {
-  if (!checker.isArrayType(type) && !isReadonlyArrayType(type, checker)) {
+  if (!checker.isArrayType(type) && !isReadonlyArrayType(type)) {
     return null;
   }
   return firstOrUndefined(getTypeArguments(type, checker)) ?? null;
@@ -991,9 +1026,9 @@ function isMappedObjectType(type: ts.Type) {
   return Boolean(type.objectFlags & ts.ObjectFlags.Mapped);
 }
 
-function isReadonlyArrayType(type: ts.Type, checker: ts.TypeChecker) {
+function isReadonlyArrayType(type: ts.Type) {
   const symbol = type.getSymbol();
-  return symbol ? checker.symbolToString(symbol) === "ReadonlyArray" : false;
+  return symbol?.getName() === "ReadonlyArray";
 }
 
 function getTypeArguments(type: ts.Type, checker: ts.TypeChecker) {
@@ -1027,25 +1062,34 @@ function isFunctionLikeDeclaration(
   );
 }
 
-function isGlobalObjectType(type: ts.Type, checker: ts.TypeChecker) {
+function isGlobalObjectType(type: ts.Type) {
   const symbol = type.getSymbol();
-  if (!symbol) {
-    return false;
-  }
-  return BUILTIN_TYPE_NAMES.has(checker.symbolToString(symbol));
+  return symbol ? BUILTIN_TYPE_NAMES.has(symbol.getName()) : false;
 }
 
 function getReferenceNodeSymbol(
   node: ts.Node | undefined,
   checker: ts.TypeChecker,
-) {
-  if (node && ts.isTypeReferenceNode(node)) {
-    return checker.getSymbolAtLocation(node.typeName);
+  context: ClosureDocRenderContext,
+): ts.Symbol | null | undefined {
+  const location =
+    node && ts.isTypeReferenceNode(node)
+      ? node.typeName
+      : node && ts.isExpressionWithTypeArguments(node)
+        ? node.expression
+        : undefined;
+  if (!location) {
+    return undefined;
   }
-  if (node && ts.isExpressionWithTypeArguments(node)) {
-    return checker.getSymbolAtLocation(node.expression);
+  try {
+    return checker.getSymbolAtLocation(location);
+  } catch (error) {
+    if (!(error instanceof RangeError)) {
+      throw error;
+    }
+    recordSymbolRenderingFailure(context, undefined);
+    return null;
   }
-  return undefined;
 }
 
 function referenceBuiltin(name: string, context: ClosureDocRenderContext) {
@@ -1115,7 +1159,7 @@ function recordUnresolvedType(
   context: ClosureDocRenderContext,
   reason: TypeMetadataDiagnostic["reason"],
   type: ts.Type,
-  checker: ts.TypeChecker,
+  _checker: ts.TypeChecker,
   symbol = type.aliasSymbol ?? type.getSymbol(),
 ) {
   context.unresolvedTypeReferenceCount += 1;
@@ -1126,9 +1170,91 @@ function recordUnresolvedType(
     reason,
     sourceFilePath: context.sourceFilePath,
     symbolId: symbol ? canonicalSymbolId(symbol) : undefined,
-    symbolName: symbol
-      ? checker.symbolToString(symbol)
-      : checker.typeToString(type),
+    // Diagnostics must never recurse back into the checker renderer after the
+    // rendering path already degraded. `getName()` is bounded and sufficient
+    // to identify the offending symbol; anonymous types omit the name.
+    symbolName: symbol?.getName(),
+  });
+}
+
+function safeGetAliasedSymbol(
+  symbol: ts.Symbol,
+  checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
+) {
+  try {
+    return checker.getAliasedSymbol(symbol);
+  } catch (error) {
+    if (!(error instanceof RangeError)) {
+      throw error;
+    }
+    recordSymbolRenderingFailure(context, symbol);
+    return null;
+  }
+}
+
+function safeSymbolToString(
+  symbol: ts.Symbol,
+  checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
+) {
+  if (!hasBoundedSymbolParentChain(symbol)) {
+    recordSymbolRenderingFailure(context, symbol);
+    return null;
+  }
+  try {
+    return checker.symbolToString(symbol);
+  } catch (error) {
+    if (!(error instanceof RangeError)) {
+      throw error;
+    }
+    recordSymbolRenderingFailure(context, symbol);
+    return null;
+  }
+}
+
+function safeTypeToString(
+  type: ts.Type,
+  checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
+) {
+  try {
+    return checker.typeToString(type);
+  } catch (error) {
+    if (!(error instanceof RangeError)) {
+      throw error;
+    }
+    recordSymbolRenderingFailure(context, type.aliasSymbol ?? type.getSymbol());
+    return null;
+  }
+}
+
+function hasBoundedSymbolParentChain(symbol: ts.Symbol) {
+  const seen = new Set<ts.Symbol>();
+  let current: ts.Symbol | undefined = symbol;
+  for (let depth = 0; current; depth += 1) {
+    if (depth >= MAX_SYMBOL_CHAIN_DEPTH || seen.has(current)) {
+      return false;
+    }
+    seen.add(current);
+    current = symbolParent(current);
+  }
+  return true;
+}
+
+function recordSymbolRenderingFailure(
+  context: ClosureDocRenderContext,
+  symbol: ts.Symbol | undefined,
+) {
+  context.unresolvedTypeReferenceCount += 1;
+  const declaration = symbol ? canonicalDeclaration(symbol) : undefined;
+  context.diagnostics.push({
+    declarationFilePath: declaration?.getSourceFile().fileName,
+    phase: "analysis",
+    reason: "symbol-rendering-failed",
+    sourceFilePath: context.sourceFilePath,
+    symbolId: symbol ? canonicalSymbolId(symbol) : undefined,
+    symbolName: symbol?.getName(),
   });
 }
 

@@ -282,6 +282,78 @@ function programFor(source) {
   };
 }
 
+test("checker symbol-rendering recursion degrades one type atom instead of aborting the pass", () => {
+  const { checker: baseChecker, context, sourceFile } = programFor(
+    "class Recursive {} let v: Recursive; let sibling: number;",
+  );
+  let declaration;
+  let siblingDeclaration;
+  const walk = (node) => {
+    if (ts.isVariableDeclaration(node) && node.name.getText() === "v") {
+      declaration = node;
+    } else if (
+      ts.isVariableDeclaration(node) &&
+      node.name.getText() === "sibling"
+    ) {
+      siblingDeclaration = node;
+    }
+    ts.forEachChild(node, walk);
+  };
+  walk(sourceFile);
+  const checker = new Proxy(baseChecker, {
+    get(target, property) {
+      if (property === "getSymbolAtLocation") {
+        return () => {
+          throw new RangeError("synthetic recursive symbol chain");
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+
+  const rendered = toClosureType(
+    baseChecker.getTypeAtLocation(declaration),
+    checker,
+    context,
+    new Set(),
+    declaration.type,
+  );
+  expect(rendered).toBe("?");
+  expect(
+    toClosureType(
+      baseChecker.getTypeAtLocation(siblingDeclaration),
+      checker,
+      context,
+      new Set(),
+      siblingDeclaration.type,
+    ),
+  ).toBe("number");
+  expect(context.unresolvedTypeReferenceCount).toBe(1);
+  expect(context.diagnostics[0]?.reason).toBe("symbol-rendering-failed");
+
+  const nonRangeChecker = new Proxy(baseChecker, {
+    get(target, property) {
+      if (property === "getSymbolAtLocation") {
+        return () => {
+          throw new Error("not recursion");
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  expect(() =>
+    toClosureType(
+      baseChecker.getTypeAtLocation(declaration),
+      nonRangeChecker,
+      context,
+      new Set(),
+      declaration.type,
+    ),
+  ).toThrow("not recursion");
+});
+
 function firstClass(sourceFile, name) {
   let found;
   const walk = (node) => {

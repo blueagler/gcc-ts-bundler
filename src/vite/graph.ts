@@ -1,3 +1,5 @@
+import ts from "@typescript/typescript6";
+
 import { readAssetText } from "./output";
 import {
   classifyModuleId,
@@ -117,27 +119,44 @@ export async function resolveRetainedCapturedModuleIds(
     missingModuleIds.add(moduleId);
   }
 
-  while (pendingModuleIds.length > 0) {
-    const moduleId = pendingModuleIds.pop();
-    if (!moduleId) {
-      continue;
-    }
-
-    const bridgeModuleIds = await collectBridgeModuleIds.call(this, {
-      analysisMode: "raw",
-      analysisModules: input.capturedModules,
-      capturedModules: input.capturedModules,
-      importerId: moduleId,
-      metrics: input.metrics,
-      resolutionCache: input.resolutionCache,
-      retainedModuleIds,
-    });
-    for (const bridgeModuleId of bridgeModuleIds) {
-      if (materializedModuleIds.has(bridgeModuleId)) {
+  for (;;) {
+    while (pendingModuleIds.length > 0) {
+      const moduleId = pendingModuleIds.pop();
+      if (!moduleId) {
         continue;
       }
-      materializedModuleIds.add(bridgeModuleId);
-      pendingModuleIds.push(bridgeModuleId);
+
+      const bridgeModuleIds = await collectBridgeModuleIds.call(this, {
+        analysisMode: "raw",
+        analysisModules: input.capturedModules,
+        capturedModules: input.capturedModules,
+        importerId: moduleId,
+        metrics: input.metrics,
+        resolutionCache: input.resolutionCache,
+        retainedModuleIds,
+      });
+      for (const bridgeModuleId of bridgeModuleIds) {
+        if (materializedModuleIds.has(bridgeModuleId)) {
+          continue;
+        }
+        materializedModuleIds.add(bridgeModuleId);
+        pendingModuleIds.push(bridgeModuleId);
+      }
+    }
+
+    const demandedReexportModuleIds =
+      await collectDemandedReexportModuleIds.call(this, {
+        capturedModules: input.capturedModules,
+        materializedModuleIds,
+        metrics: input.metrics,
+        resolutionCache: input.resolutionCache,
+      });
+    if (demandedReexportModuleIds.size === 0) {
+      break;
+    }
+    for (const moduleId of demandedReexportModuleIds) {
+      materializedModuleIds.add(moduleId);
+      pendingModuleIds.push(moduleId);
     }
   }
 
@@ -199,6 +218,139 @@ export async function resolveNormalizedBridgeModuleIds(
   return [...additionalModuleIds].sort((left, right) =>
     left.localeCompare(right),
   );
+}
+
+async function collectDemandedReexportModuleIds(
+  this: PluginContext,
+  input: {
+    capturedModules: Map<string, CapturedModule>;
+    materializedModuleIds: Set<string>;
+    metrics: ViteBuildMetrics | undefined;
+    resolutionCache: CapturedModuleResolutionCache;
+  },
+) {
+  type Demand = { all: boolean; names: Set<string> };
+  const demands = new Map<string, Demand>();
+  const pending: string[] = [];
+  const addDemand = (
+    moduleId: string,
+    all: boolean,
+    names: Iterable<string>,
+  ) => {
+    const demand = demands.get(moduleId) ?? { all: false, names: new Set() };
+    const previousSize = demand.names.size;
+    const previousAll = demand.all;
+    demand.all ||= all;
+    for (const name of names) demand.names.add(name);
+    demands.set(moduleId, demand);
+    if (demand.all !== previousAll || demand.names.size !== previousSize) {
+      pending.push(moduleId);
+    }
+  };
+  const resolve = async (specifier: string, importerId: string) => {
+    const resolved = await resolveCapturedSpecifier.call(this, {
+      importerId,
+      metrics: input.metrics,
+      resolutionCache: input.resolutionCache,
+      specifier,
+    });
+    return resolved &&
+      !resolved.external &&
+      input.capturedModules.has(resolved.id)
+      ? resolved.id
+      : null;
+  };
+
+  for (const importerId of input.materializedModuleIds) {
+    const record = input.capturedModules.get(importerId);
+    if (!record) continue;
+    const sourceFile = ts.createSourceFile(
+      importerId,
+      record.code,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.JS,
+    );
+    for (const statement of sourceFile.statements) {
+      if (
+        !ts.isImportDeclaration(statement) ||
+        statement.importClause?.isTypeOnly ||
+        !statement.importClause ||
+        !ts.isStringLiteralLike(statement.moduleSpecifier)
+      ) {
+        continue;
+      }
+      const targetId = await resolve(
+        statement.moduleSpecifier.text,
+        importerId,
+      );
+      if (!targetId) continue;
+      const names = new Set<string>();
+      if (statement.importClause.name) names.add("default");
+      const bindings = statement.importClause.namedBindings;
+      const all = !!bindings && ts.isNamespaceImport(bindings);
+      if (bindings && ts.isNamedImports(bindings)) {
+        for (const element of bindings.elements) {
+          if (!element.isTypeOnly) {
+            names.add((element.propertyName ?? element.name).text);
+          }
+        }
+      }
+      addDemand(targetId, all, names);
+    }
+  }
+
+  const additions = new Set<string>();
+  while (pending.length > 0) {
+    const moduleId = pending.pop();
+    if (!moduleId) continue;
+    const demand = demands.get(moduleId);
+    const record = input.capturedModules.get(moduleId);
+    if (!demand || !record) continue;
+    const sourceFile = ts.createSourceFile(
+      moduleId,
+      record.code,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.JS,
+    );
+    for (const statement of sourceFile.statements) {
+      if (
+        !ts.isExportDeclaration(statement) ||
+        statement.isTypeOnly ||
+        !statement.moduleSpecifier ||
+        !ts.isStringLiteralLike(statement.moduleSpecifier)
+      ) {
+        continue;
+      }
+      const targetId = await resolve(statement.moduleSpecifier.text, moduleId);
+      if (!targetId) continue;
+      let targetAll = false;
+      const targetNames = new Set<string>();
+      if (!statement.exportClause) {
+        targetAll = demand.all;
+        for (const name of demand.names) {
+          if (name !== "default") targetNames.add(name);
+        }
+      } else if (ts.isNamespaceExport(statement.exportClause)) {
+        if (demand.all || demand.names.has(statement.exportClause.name.text)) {
+          targetAll = true;
+        }
+      } else {
+        for (const element of statement.exportClause.elements) {
+          if (element.isTypeOnly) continue;
+          const exportedName = element.name.text;
+          if (demand.all || demand.names.has(exportedName)) {
+            targetNames.add((element.propertyName ?? element.name).text);
+          }
+        }
+      }
+      if (!targetAll && targetNames.size === 0) continue;
+      if (!input.materializedModuleIds.has(targetId)) additions.add(targetId);
+      addDemand(targetId, targetAll, targetNames);
+    }
+  }
+  return additions;
 }
 
 export function summarizeModuleIdsByPackage(moduleIds: Iterable<string>) {

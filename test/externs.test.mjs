@@ -650,6 +650,91 @@ test("concatenated element-access keys are rename evidence", async () => {
   expect([...lines]).not.toContain("Object.prototype.things;");
 });
 
+// fast-color detects `{ h, s, v }` by passing literal format names to a local
+// helper that evaluates `str[0] in input`, so the fixed characters are runtime
+// property reads even though they are not literal element-access expressions.
+test("literal arguments indexed into object-key probes are rename evidence", async () => {
+  const { analyzeRuntimeUsage } = await import(
+    "../src/externs/runtime-analysis.ts"
+  );
+  const { collectRuntimeUsageExternLines } = await import(
+    "../src/externs/render.ts"
+  );
+  const fixture = await createFixture();
+  await fixture.write(
+    "runtime.js",
+    [
+      "const input = { r: 1, g: 2, b: 3, h: 4, s: 5, l: 6, v: 7, z: 8 };",
+      "function matchFormat(str) {",
+      "  return str[0] in input && str[1] in input && str[2] in input;",
+      "}",
+      "matchFormat('rgb'); matchFormat('hsl'); matchFormat('hsv');",
+      // Numeric string indexing that is not used as an object key is not proof.
+      "function first(text) { return text[0]; } first('zoo');",
+    ].join("\n"),
+  );
+
+  const hazards = await analyzeRuntimeUsage(
+    [path.join(fixture.projectRoot, "runtime.js")],
+    { keyExclusionListCallees: [], keyReadCallees: [] },
+  );
+  expect([...hazards.stringLiteralRead].sort()).toEqual([
+    "b",
+    "g",
+    "h",
+    "l",
+    "r",
+    "s",
+    "v",
+  ]);
+
+  const lines = collectRuntimeUsageExternLines(hazards, {
+    dotAccessed: new Set(),
+    stringLiteralRead: new Set(),
+  });
+  for (const member of ["b", "g", "h", "l", "r", "s", "v"]) {
+    expect([...lines]).toContain(`Object.prototype.${member};`);
+  }
+  expect([...lines]).not.toContain("Object.prototype.z;");
+});
+
+test("Babel class descriptors are string-defined rename evidence", async () => {
+  const { analyzeRuntimeUsage } = await import(
+    "../src/externs/runtime-analysis.ts"
+  );
+  const { collectRuntimeUsageExternLines } = await import(
+    "../src/externs/render.ts"
+  );
+  const fixture = await createFixture();
+  await fixture.write(
+    "runtime.js",
+    [
+      "function ArrayKeyMap() {}",
+      "_createClass(ArrayKeyMap, [{",
+      "  key: 'getCompositeKey',",
+      "  value: function getCompositeKey(keys) { return keys.join('|'); }",
+      "}]);",
+      "ArrayKeyMap.prototype.run = function (keys) { return this.getCompositeKey(keys); };",
+      // A descriptor-shaped data record without a function body is not a class member.
+      "record(ArrayKeyMap, [{ key: 'message', value: 1 }]);",
+    ].join("\n"),
+  );
+
+  const hazards = await analyzeRuntimeUsage(
+    [path.join(fixture.projectRoot, "runtime.js")],
+    { keyExclusionListCallees: [], keyReadCallees: [] },
+  );
+  expect([...hazards.stringDefined]).toContain("getCompositeKey");
+  expect([...hazards.stringDefined]).not.toContain("message");
+
+  const lines = collectRuntimeUsageExternLines(hazards, {
+    dotAccessed: new Set(),
+    stringLiteralRead: new Set(),
+  });
+  expect([...lines]).toContain("Object.prototype.getCompositeKey;");
+  expect([...lines]).not.toContain("Object.prototype.message;");
+});
+
 // jquery.js:7135-7143 defines `jQuery.easing = { linear, swing, _default: "swing" }`
 // and reads it back as `jQuery.easing[this.easing]` where `this.easing` holds the
 // string from `_default`. The key is dot-defined and the read goes through a

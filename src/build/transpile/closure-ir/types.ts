@@ -75,6 +75,7 @@ export interface TypeMetadataDiagnostic {
   phase: "analysis";
   reason:
     | "ambient-nominal-without-binding"
+    | "symbol-rendering-failed"
     | "type-reference-depth-exceeded"
     | "unsupported-type-atom";
   sourceFilePath: string;

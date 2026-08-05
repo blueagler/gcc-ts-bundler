@@ -381,20 +381,28 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         linked_chunk_paths.push((chunk.name.clone(), source_path));
     }
 
-    let closure_lib_files = select_bundler_runtime_closure_lib_files(
-        &input.packageRoot,
-        &unique_paths(
-            leading_js_inputs
-                .iter()
-                .cloned()
-                .chain(
-                    linked_chunk_paths
-                        .iter()
-                        .map(|(_, source_path)| source_path.to_string_lossy().to_string()),
-                )
-                .collect(),
-        ),
-    )?;
+    let mut closure_lib_files =
+        select_bundler_runtime_closure_lib_files(&input.packageRoot, &leading_js_inputs)?;
+    // Linked chunks are generated in memory and are not written until the job
+    // executes, so file-based selection cannot inspect them here. Include the
+    // reflect runtime when native emission introduced a goog.reflect call.
+    if generated_assets
+        .iter()
+        .any(|asset| asset.text.contains("goog.reflect."))
+    {
+        let closure_lib_dir = Path::new(&input.packageRoot).join("closure-lib");
+        closure_lib_files.extend([
+            closure_lib_dir
+                .join("base.js")
+                .to_string_lossy()
+                .to_string(),
+            closure_lib_dir
+                .join("reflect.js")
+                .to_string_lossy()
+                .to_string(),
+        ]);
+        closure_lib_files = unique_paths(closure_lib_files);
+    }
     let chunk_specs = resolved_chunks
         .iter()
         .enumerate()
