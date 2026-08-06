@@ -4,7 +4,7 @@ import { classifyModuleId, toRelativeImportSpecifier } from "../capture";
 import type { CapturedRuntimeModule } from "../internal-types";
 import type { EsbuildBuild } from "./esbuild";
 import type { ParsedMaterializedModule } from "./shared";
-import { EAGER_REGION_LABEL, normalizePath } from "./shared";
+import { EAGER_REGION_LABEL, hashText, normalizePath } from "./shared";
 
 export interface RegionBundleRequest {
   exportedNames: string[];
@@ -45,17 +45,24 @@ export async function assignRegionLabels(input: {
         continue;
       }
       const normalizedFilePath = normalizePath(filePath);
-      if (
-        seen.has(normalizedFilePath) ||
-        !input.authoredFiles.has(normalizedFilePath)
-      ) {
+      if (seen.has(normalizedFilePath)) {
         continue;
       }
       seen.add(normalizedFilePath);
+      const parsed = await input.parseModule(normalizedFilePath);
+      if (!input.authoredFiles.has(normalizedFilePath)) {
+        // A framework may own the public entry while importing the authored
+        // application several dependency modules below it. Walk only until
+        // those authored boundaries are found; they are eager roots too.
+        queue.push(
+          ...parsed.dependencyFilePaths,
+          ...parsed.staticAuthoredImports,
+        );
+        continue;
+      }
       const labels = labelsByFile.get(normalizedFilePath) ?? new Set<string>();
       labels.add(label);
       labelsByFile.set(normalizedFilePath, labels);
-      const parsed = await input.parseModule(normalizedFilePath);
       queue.push(...parsed.staticAuthoredImports);
     }
   };
@@ -310,7 +317,7 @@ export function sanitizeRegionKey(regionKey: string) {
   if (regionKey === EAGER_REGION_LABEL) {
     return "eager";
   }
-  return regionKey
+  const sanitized = regionKey
     .split("|")
     .map((segment) => {
       if (segment.startsWith("dynamic:")) {
@@ -322,6 +329,9 @@ export function sanitizeRegionKey(regionKey: string) {
     })
     .join("__")
     .replace(/[^\w.-]+/gu, "-");
+  return sanitized.length <= 96
+    ? sanitized
+    : `${sanitized.slice(0, 72)}-${hashText(regionKey).slice(0, 12)}`;
 }
 
 export function isPureLazyRegionKey(regionKey: string | undefined) {

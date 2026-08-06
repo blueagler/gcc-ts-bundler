@@ -390,6 +390,12 @@ impl<'a> VisitMut<'a> for PreservedPropertyVisitor<'a, '_> {
 
     fn visit_method_definition(&mut self, method: &mut MethodDefinition<'a>) {
         walk_mut::walk_method_definition(self, method);
+        if matches!(
+            &method.key,
+            PropertyKey::StaticIdentifier(identifier) if identifier.name == "constructor"
+        ) {
+            return;
+        }
         if self.quote_key(&mut method.key) {
             method.computed = false;
         }
@@ -1077,5 +1083,27 @@ mod tests {
             lowered("export const a = (function () { return 1; })();\nexport const b = 1 || 2;\n");
         assert!(!output.contains("((function"), "{output}");
         assert!(output.contains("1 || 2"), "{output}");
+    }
+
+    #[test]
+    fn preserved_constructor_name_stays_class_syntax() {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(
+            &allocator,
+            "class Child extends Error { constructor() { super('x'); } }",
+            SourceType::mjs(),
+        )
+        .parse();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let mut program = parsed.program;
+        PreservedPropertyVisitor {
+            allocator: &allocator,
+            builder: AstBuilder::new(&allocator),
+            names: &HashSet::from(["constructor".to_string()]),
+        }
+        .visit_program(&mut program);
+        let output = Codegen::new().build(&program).code;
+        assert!(output.contains("constructor()"), "{output}");
+        assert!(!output.contains("\"constructor\"()"), "{output}");
     }
 }

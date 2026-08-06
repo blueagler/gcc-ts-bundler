@@ -86,15 +86,12 @@ export async function prebundleMaterializedDependencies(input: {
   outputSrcDir?: string;
 }): Promise<MaterializedGraph> {
   let context = createPrebundleContext(input);
-  // ponytail: preserve the whole graph until symbol-level fusion can keep typed
-  // dependency-source bindings exact; narrow this to typed regions when needed.
-  if (
-    context.materialized.modules.some(
-      (module) =>
-        !context.authoredFiles.has(normalizePath(module.filePath)) &&
-        shouldBypassTypeMetadataFusion(module),
-    )
-  ) {
+  const hasFusionSensitiveTypes = context.materialized.modules.some(
+    (module) =>
+      !context.authoredFiles.has(normalizePath(module.filePath)) &&
+      shouldBypassTypeMetadataFusion(module),
+  );
+  if (hasFusionSensitiveTypes && context.materialized.modules.length <= 256) {
     return mirrorGraphWithoutBundles(context);
   }
   const dependencyRouting = await classifyDependencyRouting(context);
@@ -106,6 +103,7 @@ export async function prebundleMaterializedDependencies(input: {
   const {
     bundleRequests,
     dynamicRootRequestKeyByTargetFilePath,
+    entryRequestKeyByTargetFilePath,
     regionLabelsByAuthoredFile,
   } = await collectBundleRequests(
     context,
@@ -139,7 +137,74 @@ export async function prebundleMaterializedDependencies(input: {
     bundles,
     authoredEntries,
     dependencyRouting.directFilePaths,
+    entryRequestKeyByTargetFilePath,
   );
+}
+
+const AUTHORED_BOUNDARY_PREFIX = "gcc-authored:";
+
+function createSourceBoundaryPlugin(
+  boundaryFiles: Set<string>,
+  srcDir: string,
+): Plugin | undefined {
+  if (boundaryFiles.size === 0) return undefined;
+  return {
+    name: "gcc-ts-bundler-source-boundary",
+    setup(build) {
+      build.onResolve({ filter: /^(?:\.{1,2}\/|\/)/ }, (args) => {
+        if (!args.importer) return undefined;
+        const candidate = normalizePath(
+          path.isAbsolute(args.path)
+            ? args.path
+            : path.resolve(path.dirname(args.importer), args.path),
+        );
+        if (!boundaryFiles.has(candidate)) return undefined;
+        const relativePath = path
+          .relative(srcDir, candidate)
+          .replace(/\\/g, "/");
+        return {
+          external: true,
+          path: `${AUTHORED_BOUNDARY_PREFIX}${encodeURIComponent(relativePath)}`,
+        };
+      });
+    },
+  };
+}
+
+function rewriteAuthoredBoundarySpecifiers(input: {
+  bundleOutputRoot: string;
+  outputDir: string;
+  outputFilePath: string;
+  runtimeSrcDir: string;
+  text: string;
+}) {
+  const relativeOutputPath = path.relative(
+    input.bundleOutputRoot,
+    input.outputFilePath,
+  );
+  const finalOutputPath = path.join(input.outputDir, relativeOutputPath);
+  const rewritten = input.text.replace(
+    /(["'])gcc-authored:([^"']+)\1/gu,
+    (_match, quote: string, encodedPath: string) => {
+      const targetPath = path.join(
+        input.runtimeSrcDir,
+        decodeURIComponent(encodedPath),
+      );
+      const relativeTarget = path
+        .relative(path.dirname(finalOutputPath), targetPath)
+        .replace(/\\/g, "/");
+      const specifier = relativeTarget.startsWith(".")
+        ? relativeTarget
+        : `./${relativeTarget}`;
+      return `${quote}${specifier}${quote}`;
+    },
+  );
+  return rewritten
+    .replace(
+      /var __copyProps = \(to, from, except, desc\) =>/gu,
+      "var __copyProps = (to, from, except = void 0, desc = void 0) =>",
+    )
+    .replace(/__getOwnPropNames\(from\)/gu, "__getOwnPropNames(from || {})");
 }
 
 function createMaterializedDependencyResolverPlugin(
@@ -333,6 +398,33 @@ async function collectBundleRequests(
     }
   }
 
+  const entryRequestKeyByTargetFilePath = new Map<string, string>();
+  for (const targetFilePath of entryFilePaths) {
+    const targetModule = context.moduleByFilePath.get(targetFilePath);
+    if (
+      !targetModule ||
+      context.authoredFiles.has(targetFilePath) ||
+      !prebundleFilePaths.has(targetFilePath)
+    ) {
+      continue;
+    }
+    const requestKey = `${EAGER_REGION_LABEL}\u0000${targetFilePath}`;
+    const parsedTarget = await context.parseModule(targetFilePath);
+    bundleRequests.set(requestKey, {
+      exportedNames: parsedTarget.exportedNames,
+      hasDefaultExport: parsedTarget.hasDefaultExport,
+      needsDefault: parsedTarget.hasDefaultExport,
+      needsExportAll: true,
+      needsSideEffectOnly: false,
+      regionKey: EAGER_REGION_LABEL,
+      sourceModuleIds: [...targetModule.sourceModuleIds],
+      targetFilePath,
+      targetModule,
+      usedNamedExports: new Set<string>(),
+    });
+    entryRequestKeyByTargetFilePath.set(targetFilePath, requestKey);
+  }
+
   const dynamicRootRequestKeyByTargetFilePath = new Map<string, string>();
   for (const [targetFilePath, targetModule] of [
     ...dynamicRootModulesByFilePath.entries(),
@@ -364,6 +456,7 @@ async function collectBundleRequests(
   return {
     bundleRequests,
     dynamicRootRequestKeyByTargetFilePath,
+    entryRequestKeyByTargetFilePath,
     regionLabelsByAuthoredFile,
   };
 }
@@ -541,6 +634,7 @@ async function buildDependencyBundles(
   const entryPoints = writtenRequests.map((request) =>
     path.relative(materialized.srcDir, request.entryPoint).replace(/\\/g, "/"),
   );
+  const sourceBoundaryFiles = context.authoredFiles;
   const bundleResult = await esbuildBuild({
     absWorkingDir: materialized.srcDir,
     bundle: true,
@@ -565,6 +659,7 @@ async function buildDependencyBundles(
     // removes the branch instead. Identifiers and whitespace are untouched.
     minifySyntax: true,
     plugins: [
+      createSourceBoundaryPlugin(sourceBoundaryFiles, materialized.srcDir),
       createMaterializedDependencyResolverPlugin(
         materialized.dependencySourceFileByMaterializedFile,
       ),
@@ -589,7 +684,13 @@ async function buildDependencyBundles(
     (bundleResult.outputFiles ?? [])
       .filter((outputFile) => outputFile.path.endsWith(".js"))
       .map((outputFile) => ({
-        content: outputFile.contents,
+        content: rewriteAuthoredBoundarySpecifiers({
+          bundleOutputRoot,
+          outputDir,
+          outputFilePath: outputFile.path,
+          runtimeSrcDir,
+          text: new TextDecoder().decode(outputFile.contents),
+        }),
         relativePath: path
           .relative(bundleOutputRoot, outputFile.path)
           .replace(/\\/g, "/"),
@@ -648,6 +749,7 @@ async function assembleGraph(
   bundles: DependencyBundleSet,
   authoredEntries: Array<{ content: string; relativePath: string }>,
   directDependencyFilePaths: Set<string>,
+  entryRequestKeyByTargetFilePath: Map<string, string>,
 ): Promise<MaterializedGraph> {
   const { authoredFiles, materialized, runtimeSrcDir } = context;
   const originalSourceIdsByFilePath = new Map(
@@ -701,8 +803,29 @@ async function assembleGraph(
     files: bundledModules.map((module) => module.filePath),
   });
 
+  const runtimeEntrySpecifiers = materialized.entries.map((entry) => {
+    const targetFilePath = normalizePath(
+      path.resolve(materialized.srcDir, entry),
+    );
+    const requestKey = entryRequestKeyByTargetFilePath.get(targetFilePath);
+    let outputFilePath = requestKey
+      ? bundles.canonicalizedEntryOutputs.outputByRequestKey.get(
+          bundles.requestGroupKeyByTarget.get(requestKey) ?? requestKey,
+        )
+      : undefined;
+    if (outputFilePath) {
+      outputFilePath =
+        bundles.collapsedEntryOutputByPath.get(outputFilePath)
+          ?.directTargetFilePath ?? outputFilePath;
+    }
+    return outputFilePath
+      ? `./${path.relative(runtimeSrcDir, outputFilePath).replace(/\\/g, "/")}`
+      : entry;
+  });
+
   return {
     ...materialized,
+    entries: runtimeEntrySpecifiers,
     authoredFiles: authoredEntries
       .map((entry) => path.join(runtimeSrcDir, entry.relativePath))
       .sort((left, right) => left.localeCompare(right)),
@@ -729,7 +852,7 @@ async function assembleGraph(
     runtimeEntries: [
       ...new Set(
         [
-          ...materialized.entries,
+          ...runtimeEntrySpecifiers,
           ...authoredEntries.map((entry) => `./${entry.relativePath}`),
           ...directDependencyEntries.map((entry) => `./${entry.relativePath}`),
           ...bundledModules.map((module) => `./${module.relativePath}`),

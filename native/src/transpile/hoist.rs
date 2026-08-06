@@ -157,6 +157,9 @@ struct ModuleScan {
     reexport_targets: Vec<String>,
     scan_failed: bool,
     local_export_modes: HashMap<String, BundlerExportSlotMode>,
+    /// Local names of top-level declarations whose bodies assign a `Live`
+    /// (mutable) top-level binding of the same module.
+    live_assigners: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -261,11 +264,20 @@ pub(super) fn build_hoist_plan(
                     .collect::<Vec<_>>()
                     .join("\n"));
             }
+            let write_attributions = collect_top_level_write_attributions(&semantic.semantic);
             let identity =
                 super::identity_oxc::ModuleIdentity::new(semantic.semantic.into_scoping());
             let mut scan = scan_esm_program(&program, &identity, &file_path, &resolution_context);
             scan.local_export_modes =
                 super::emit_runtime_oxc::collect_local_export_modes(&program, &identity);
+            scan.live_assigners = scan
+                .local_export_modes
+                .iter()
+                .filter(|(_, mode)| **mode == BundlerExportSlotMode::Live)
+                .filter_map(|(local, _)| write_attributions.get(local))
+                .flatten()
+                .cloned()
+                .collect();
             scan
         };
         if let Some(metadata) = metadata {
@@ -617,6 +629,55 @@ fn module_export_name(name: &ModuleExportName<'_>) -> String {
     }
 }
 
+/// For every top-level binding that is written after initialization, the
+/// names of the top-level declarations (functions, classes, or variable
+/// declarators) whose bodies contain those writes. Writes executed directly
+/// at module top level are not attributed: they run during module
+/// initialization inside the owner chunk and cannot be moved elsewhere.
+fn collect_top_level_write_attributions(
+    semantic: &oxc_semantic::Semantic,
+) -> HashMap<String, BTreeSet<String>> {
+    use oxc_ast::AstKind;
+    let scoping = semantic.scoping();
+    let nodes = semantic.nodes();
+    let mut attributions = HashMap::<String, BTreeSet<String>>::new();
+    for (name, &symbol_id) in scoping.get_bindings(scoping.root_scope_id()) {
+        for reference in scoping.get_resolved_references(symbol_id) {
+            if !reference.flags().is_write() {
+                continue;
+            }
+            let mut attributed: Option<String> = None;
+            for ancestor in nodes.ancestors(reference.node_id()) {
+                match ancestor.kind() {
+                    AstKind::Function(function) => {
+                        if let Some(id) = &function.id {
+                            attributed = Some(id.name.to_string());
+                        }
+                    }
+                    AstKind::Class(class) => {
+                        if let Some(id) = &class.id {
+                            attributed = Some(id.name.to_string());
+                        }
+                    }
+                    AstKind::VariableDeclarator(declarator) => {
+                        if let Some(id) = declarator.id.get_binding_identifier() {
+                            attributed = Some(id.name.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(owner) = attributed {
+                attributions
+                    .entry(name.to_string())
+                    .or_default()
+                    .insert(owner);
+            }
+        }
+    }
+    attributions
+}
+
 fn resolve_all_export_bindings(
     scans: &HashMap<String, ModuleScan>,
 ) -> HashMap<String, BTreeMap<String, ResolvedExportBinding>> {
@@ -850,6 +911,44 @@ fn compute_facade_slots(
             }
             for star_target in &scan.stars {
                 needs.need_all(star_target);
+            }
+        }
+    }
+
+    // Pin live-assigning exported declarations that are consumed from a
+    // different chunk inside their owner chunk. Registering the slot emits
+    // an in-chunk reference, so cross-chunk code motion can never relocate
+    // a function whose body mutates hoisted module state into its sole
+    // consumer chunk, where the assignment would become an illegal
+    // ES-module import write. Same-chunk-only or unused assigners are left
+    // alone: they either stay put or disappear entirely.
+    for (consumer_id, scan) in scans {
+        let consumer_chunk = plan.chunk_of(consumer_id);
+        if consumer_chunk.is_none() {
+            continue;
+        }
+        for edge in &scan.import_edges {
+            let mut names: Vec<&String> = edge.named.iter().collect();
+            if let Some(members) = edge.namespace_members.as_ref().filter(|_| edge.namespace) {
+                names.extend(members.iter());
+            }
+            for name in names {
+                let Some(binding) = plan.resolve_export(&edge.target_module_id, name) else {
+                    continue;
+                };
+                if plan.chunk_of(&binding.owner_module_id) == consumer_chunk {
+                    continue;
+                }
+                let assigns_live = scans
+                    .get(&binding.owner_module_id)
+                    .is_some_and(|owner| owner.live_assigners.contains(&binding.owner_local_name));
+                if assigns_live {
+                    let (owner, owner_export_name) = (
+                        binding.owner_module_id.clone(),
+                        binding.owner_export_name.clone(),
+                    );
+                    needs.need(&owner, &owner_export_name);
+                }
             }
         }
     }

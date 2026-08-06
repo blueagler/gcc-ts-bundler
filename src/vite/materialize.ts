@@ -118,7 +118,10 @@ export async function materializeCapturedGraph(
     }
   }
 
-  const applyDefines = createDefineApplier(input.config.define);
+  const applyDefines = createDefineApplier(
+    input.config.define,
+    input.config.env,
+  );
   const materializedEntries = await Promise.all(
     materializedModuleIds.map(async (moduleId) => {
       const record = input.capturedModules.get(moduleId);
@@ -153,7 +156,10 @@ export async function materializeCapturedGraph(
       }
       return {
         content: applyDefines
-          ? await applyDefines(rewritten.code)
+          ? await applyDefines(
+              rewritten.code,
+              record.format === "cjs" ? "cjs" : "esm",
+            )
           : rewritten.code,
         relativePath: path
           .relative(input.srcDir, outputPath)

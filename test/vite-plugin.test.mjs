@@ -15,6 +15,7 @@ import {
   resolveNormalizedBridgeModuleIds,
   resolveRetainedCapturedModuleIds,
 } from "../src/vite/graph.ts";
+import { createDefineApplier } from "../src/vite/defines.ts";
 import { resolveCompilerExterns } from "../src/vite/externs.ts";
 import { materializeCapturedGraph } from "../src/vite/materialize.ts";
 import {
@@ -320,6 +321,74 @@ test("retained graph follows demanded names through impure, named, and star barr
   );
   expect(result.materializedModuleIds).not.toContain(heavy);
 });
+
+test("resolved Vite env values are removed before Closure chunk linking", async () => {
+  const apply = createDefineApplier(
+    { "import.meta.env.OVERRIDE": JSON.stringify("user") },
+    { MODE: "production", VITE_CDN: "https://cdn.example" },
+  );
+  expect(apply).not.toBeNull();
+  const output = await apply(
+    "export const values = [import.meta.env.MODE, import.meta.env.VITE_CDN, import.meta.env.OVERRIDE];",
+  );
+  expect(output).not.toContain("import.meta");
+  expect(output).toContain('"production"');
+  expect(output).toContain('"https://cdn.example"');
+  expect(output).toContain('"user"');
+});
+
+test.serial(
+  "lazy ESM chunks keep mutable shared exports linked through the registry",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<div id="app"></div><script type="module" src="/src/main.js"></script>\n',
+    );
+    await fixture.write(
+      "src/shared.js",
+      [
+        'export let characters = import.meta.env.VITE_CHUNK_MARKER || "initial";',
+        "export function takeCharacters() {",
+        '  const value = characters;',
+        '  characters = "";',
+        "  return value;",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/main.js",
+      [
+        'import { characters } from "./shared.js";',
+        'globalThis.__initialCharacters = characters;',
+        'globalThis.__loadCharacters = () => import("./lazy.js").then((module) => module.read());',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/lazy.js",
+      [
+        'import { takeCharacters } from "./shared.js";',
+        "export function read() { return takeCharacters(); }",
+        "",
+      ].join("\n"),
+    );
+
+    await buildViteFixture(fixture, {
+      buildLines: ['    target: "esnext",'],
+      env: { VITE_CHUNK_MARKER: "linked" },
+    });
+    const files = await listFiles(path.join(fixture.projectRoot, "dist"));
+    const scripts = files.filter((file) => file.endsWith(".js"));
+    expect(scripts.length).toBeGreaterThan(1);
+    const sources = await Promise.all(
+      scripts.map((file) => fixture.read(path.join("dist", file))),
+    );
+    expect(sources.join("\n")).not.toContain("import.meta.env");
+  },
+);
 
 test("captured module analysis fails dependency routing closed on define and fused-distribution evidence", () => {
   const analysis = getCapturedModuleAnalysis({

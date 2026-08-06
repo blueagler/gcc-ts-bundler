@@ -12,10 +12,12 @@ import { loadEsbuildTransform } from "./prebundle/esbuild";
  */
 export function createDefineApplier(
   define: Record<string, unknown> | undefined,
+  env: Record<string, unknown> | undefined,
 ) {
-  const entries = Object.entries(define ?? {}).filter(
-    ([key]) => key.length > 0,
-  );
+  const entries = [
+    ...(env ? [["import.meta.env", env] as const] : []),
+    ...Object.entries(define ?? {}),
+  ].filter(([key]) => key.length > 0);
   if (entries.length === 0) {
     return null;
   }
@@ -29,14 +31,17 @@ export function createDefineApplier(
   // as `process.env.NODE_ENV`, so it is the cheapest correct prefilter.
   const probes = entries.map(([key]) => key.split(".")[0] ?? key);
 
-  return async function applyDefines(code: string): Promise<string> {
+  return async function applyDefines(
+    code: string,
+    format: "cjs" | "esm" = "esm",
+  ): Promise<string> {
     if (!probes.some((probe) => code.includes(probe))) {
       return code;
     }
     const transform = await loadEsbuildTransform();
     const result = await transform(code, {
       define: esbuildDefine,
-      format: "esm",
+      format,
       loader: "js",
       logLevel: "silent",
       // Substitution only: no syntax lowering, no minification.

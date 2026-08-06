@@ -485,6 +485,68 @@ test("typed dependency runtime sources bypass fusion conservatively", async () =
   ).toContain("value");
 });
 
+test("large typed dependency graphs fall back to prebundling", async () => {
+  const workspace = await createWorkspace();
+  const srcDir = path.join(workspace.root, "captured");
+  const outputSrcDir = path.join(workspace.root, "runtime");
+  const app = await workspace.write(
+    "captured/app.js",
+    'import { value } from "./typed.js"; console.log(value);\n',
+  );
+  const dependency = await workspace.write(
+    "captured/typed.js",
+    "export const value = 1;\n",
+  );
+  const fillerModules = await Promise.all(
+    Array.from({ length: 255 }, async (_, index) => {
+      const filePath = await workspace.write(
+        `captured/filler-${index}.js`,
+        `export const filler${index} = ${index};\n`,
+      );
+      return {
+        filePath,
+        id: `filler-${index}`,
+        relativePath: `filler-${index}.js`,
+        sourceModuleIds: [`/node_modules/filler-${index}/index.js`],
+      };
+    }),
+  );
+  const result = await prebundleMaterializedDependencies({
+    dynamicRootModuleIds: [],
+    materialized: {
+      authoredFiles: [app],
+      entries: ["./app.js"],
+      modules: [
+        {
+          filePath: app,
+          id: "app",
+          relativePath: "app.js",
+          sourceModuleIds: ["/src/app.ts"],
+        },
+        {
+          filePath: dependency,
+          id: "typed",
+          relativePath: "typed.js",
+          sourceModuleIds: ["/node_modules/typed/index.ts"],
+        },
+        ...fillerModules,
+      ],
+      prunedEmptyModuleIds: [],
+      retainedEmptyModuleIds: [],
+      runtimeEntries: ["./app.js"],
+      srcDir,
+    },
+    outputSrcDir,
+  });
+
+  expect(result.modules.length).toBeGreaterThan(1);
+  expect(
+    result.modules.some((module) =>
+      module.relativePath.includes("__dep-bundles"),
+    ),
+  ).toBe(true);
+});
+
 test("shared extractor targets project, dependency, TSX, and JSDoc sources without guessing transformed ids", async () => {
   const workspace = await createWorkspace();
   await workspace.write(
