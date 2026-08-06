@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use oxc_allocator::{Allocator, FromIn, Vec as ArenaVec};
+use oxc_allocator::{Allocator, CloneIn, FromIn, Vec as ArenaVec};
 use oxc_ast::ast::*;
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk_mut, VisitMut};
@@ -1141,6 +1141,58 @@ impl<'a> VisitMut<'a> for TopLevelRenameVisitor<'a, '_> {
             property.shorthand = false;
         }
         walk_mut::walk_binding_property(self, property);
+    }
+
+    fn visit_assignment_target_property(&mut self, property: &mut AssignmentTargetProperty<'a>) {
+        let AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(shorthand) = property
+        else {
+            walk_mut::walk_assignment_target_property(self, property);
+            return;
+        };
+        if self.reference_name(&shorthand.binding).is_none() {
+            walk_mut::walk_assignment_target_property(self, property);
+            return;
+        }
+
+        let builder = AstBuilder::new(self.allocator);
+        let span = shorthand.span;
+        let binding_span = shorthand.binding.span;
+        let binding_name = shorthand.binding.name.as_str();
+        let reference_id = shorthand
+            .binding
+            .reference_id
+            .get()
+            .expect("authored assignment target must carry a reference id");
+        let name = PropertyKey::new_static_identifier(
+            binding_span,
+            Ident::from_in(binding_name, self.allocator),
+            &builder,
+        );
+        let binding = match &shorthand.init {
+            Some(init) => AssignmentTargetMaybeDefault::new_assignment_target_with_default(
+                span,
+                AssignmentTarget::new_assignment_target_identifier_with_reference_id(
+                    binding_span,
+                    Ident::from_in(binding_name, self.allocator),
+                    reference_id,
+                    &builder,
+                ),
+                init.clone_in(self.allocator),
+                &builder,
+            ),
+            None => {
+                AssignmentTargetMaybeDefault::new_assignment_target_identifier_with_reference_id(
+                    binding_span,
+                    Ident::from_in(binding_name, self.allocator),
+                    reference_id,
+                    &builder,
+                )
+            }
+        };
+        *property = AssignmentTargetProperty::new_assignment_target_property_property(
+            span, name, binding, false, &builder,
+        );
+        walk_mut::walk_assignment_target_property(self, property);
     }
 }
 

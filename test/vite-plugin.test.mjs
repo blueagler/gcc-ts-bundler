@@ -360,6 +360,161 @@ test.serial(
   },
 );
 
+test.serial(
+  "Vite keeps a five-property returned-object protocol linked after dependency graph partitioning",
+  { timeout: 60000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write("package.json", '{"type":"module"}\n');
+    await fixture.write(
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          allowJs: true,
+          checkJs: true,
+          module: "ESNext",
+          moduleResolution: "Bundler",
+          target: "ESNext",
+        },
+        include: ["src"],
+      }),
+    );
+    await fixture.write(
+      "index.html",
+      [
+        '<div id="status">pending</div>',
+        '<script type="module" src="/src/main.js"></script>',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "node_modules/returned-object-protocol/package.json",
+      JSON.stringify({
+        exports: "./consumer.js",
+        name: "returned-object-protocol",
+        type: "module",
+        types: "./consumer.d.ts",
+      }),
+    );
+    await fixture.write(
+      "node_modules/returned-object-protocol/producer.js",
+      [
+        "export function createReactiveSystem() {",
+        '  const link = (value) => `link:${value}`;',
+        '  const unlink = (value) => `unlink:${value}`;',
+        '  const propagate = (value) => `propagate:${value}`;',
+        '  const checkDirty = (value) => `checkDirty:${value}`;',
+        '  const shallowPropagate = (value) => `shallowPropagate:${value}`;',
+        "  return { link, unlink, propagate, checkDirty, shallowPropagate };",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "node_modules/returned-object-protocol/producer.d.ts",
+      [
+        "export interface ReactiveSystem {",
+        "  link(value: number): string;",
+        "  unlink(value: number): string;",
+        "  propagate(value: number): string;",
+        "  checkDirty(value: number): string;",
+        "  shallowPropagate(value: number): string;",
+        "}",
+        "export declare function createReactiveSystem(): ReactiveSystem;",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "node_modules/returned-object-protocol/consumer.js",
+      [
+        'import { createReactiveSystem } from "./producer.js";',
+        "let link;",
+        "let unlink;",
+        "let propagate;",
+        "let checkDirty;",
+        "let shallowPropagate;",
+        "({ link, unlink, propagate, checkDirty, shallowPropagate } = createReactiveSystem());",
+        "export function runProtocol() {",
+        "  return [link(1), unlink(2), propagate(3), checkDirty(4), shallowPropagate(5)].join('|');",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "node_modules/returned-object-protocol/consumer.d.ts",
+      "export declare function runProtocol(): string;\n",
+    );
+
+    await fixture.write(
+      "node_modules/partition-filler/package.json",
+      JSON.stringify({
+        exports: "./index.js",
+        name: "partition-filler",
+        type: "module",
+      }),
+    );
+    const fillerCount = 255;
+    await Promise.all(
+      Array.from({ length: fillerCount }, (_, index) =>
+        fixture.write(
+          `node_modules/partition-filler/filler-${index}.js`,
+          `export const filler${index} = ${index};\n`,
+        ),
+      ),
+    );
+    await fixture.write(
+      "node_modules/partition-filler/index.js",
+      [
+        ...Array.from(
+          { length: fillerCount },
+          (_, index) =>
+            `import { filler${index} } from "./filler-${index}.js";`,
+        ),
+        `export const fillerTotal = ${Array.from(
+          { length: fillerCount },
+          (_, index) => `filler${index}`,
+        ).join(" + ")};`,
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/main.js",
+      [
+        'import { fillerTotal } from "partition-filler";',
+        'import { runProtocol } from "returned-object-protocol";',
+        "document.getElementById('status').textContent = `${runProtocol()}|${fillerTotal}`;",
+        "",
+      ].join("\n"),
+    );
+
+    await buildViteFixture(fixture);
+    const html = await fixture.read("dist/index.html");
+    const entryScript = readRewrittenEntryScript(html);
+    const status = { textContent: "pending" };
+    const previousDocument = globalThis.document;
+    const previousLocation = globalThis.location;
+    const previousRuntime = globalThis.__g;
+    try {
+      globalThis.document = { getElementById: () => status };
+      globalThis.location = { href: "http://vite.test/index.html" };
+      delete globalThis.__g;
+      await import(
+        `${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?returned-object=${Date.now()}`
+      );
+      expect(status.textContent).toBe(
+        "link:1|unlink:2|propagate:3|checkDirty:4|shallowPropagate:5|32385",
+      );
+    } finally {
+      if (previousDocument === undefined) delete globalThis.document;
+      else globalThis.document = previousDocument;
+      if (previousLocation === undefined) delete globalThis.location;
+      else globalThis.location = previousLocation;
+      if (previousRuntime === undefined) delete globalThis.__g;
+      else globalThis.__g = previousRuntime;
+    }
+  },
+);
+
 test("annotates aliased static class writes in place", () => {
   const source = [
     "var _a;",
