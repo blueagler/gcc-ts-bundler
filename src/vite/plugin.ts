@@ -74,12 +74,10 @@ import {
 } from "./naming";
 import {
   collectOutputByteBreakdown,
-  emitCompiledOutputs,
   listJavaScriptChunks,
-  removeRollupJavaScript,
+  preserveCompiledChunkIdentities,
   resolveViteAssetUrls,
   rewritePreservedImportSpecifiers,
-  rewriteHtmlAssets,
 } from "./output";
 import { prebundleMaterializedDependencies } from "./prebundle";
 import { parseGccRuntimeManifest } from "./runtime-manifest";
@@ -140,8 +138,6 @@ function resolveViteChunkOutputType(
   });
 }
 
-const REWRITE_ENTRY_SCRIPTS_DEFAULT = true;
-
 export function gccTsBundler(options: GccTsBundlerVitePluginOptions = {}): {
   name: string;
 } {
@@ -156,6 +152,9 @@ export function gccTsBundler(options: GccTsBundlerVitePluginOptions = {}): {
   const plugin: Plugin = {
     name: "gcc-ts-bundler:vite",
     apply: "build",
+    applyToEnvironment(environment) {
+      return environment.name === "client";
+    },
     enforce: "post",
     config(userConfig: UserConfig) {
       assertNoViteLanguageOut(options);
@@ -694,41 +693,36 @@ async function emitViteGraph(
   await finalizeJavaScriptOutputs({
     outputFiles: finalizedBaseOutput.emittedOutputFiles,
   });
-  removeRollupJavaScript(input.bundle);
   const emittedOutputFiles = filterInternalOutputs(
     finalizedBaseOutput.emittedOutputFiles,
     compiled,
   );
+  const identityOutputs = await measureAsync(
+    input.timingTotals,
+    "emitOutputsMs",
+    async () =>
+      preserveCompiledChunkIdentities({
+        bundle: input.bundle,
+        jsChunks: compiled.jsChunks,
+        manifest: parseGccRuntimeManifest(
+          await fs.readFile(compiled.manifestFilePath, "utf8"),
+          compiled.manifestFilePath,
+        ),
+        manifestFilePath: compiled.manifestFilePath,
+        materialized: compiled.materialized,
+        outDir: compiled.compiledCoreOutputs.finalOutDir,
+        outputFiles: emittedOutputFiles,
+        pluginContext: this,
+        publicPath: compiled.publicPath,
+        runtimeModuleSourceMapFilePath: compiled.runtimeModuleSourceMapFilePath,
+      }),
+  );
   await logOutputStats({
     bundle: input.bundle,
-    emittedOutputFiles,
+    emittedOutputFiles: identityOutputs.finalOutputFiles,
     finalOutDir: compiled.compiledCoreOutputs.finalOutDir,
-    finalScriptFileName: finalizedBaseOutput.baseScriptFileName,
+    finalScriptFileName: identityOutputs.baseScriptFileName,
   });
-  await measureAsync(input.timingTotals, "emitOutputsMs", () =>
-    emitCompiledOutputs(
-      this,
-      emittedOutputFiles,
-      compiled.compiledCoreOutputs.finalOutDir,
-    ),
-  );
-
-  if (
-    input.options.html?.rewriteEntryScripts ??
-    REWRITE_ENTRY_SCRIPTS_DEFAULT
-  ) {
-    measure(input.timingTotals, "htmlRewriteMs", () =>
-      rewriteHtmlAssets({
-        baseScriptFileName: finalizedBaseOutput.baseScriptFileName,
-        bundle: input.bundle,
-        chunkOutputType: compiled.chunkOutputType,
-        publicPath: compiled.publicPath,
-        removedChunkFileNames: new Set(
-          compiled.jsChunks.map((chunk) => chunk.fileName),
-        ),
-      }),
-    );
-  }
 }
 
 function filterInternalOutputs(

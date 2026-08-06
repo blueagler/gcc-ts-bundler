@@ -50,6 +50,7 @@ export function createModuleParser(targets: ParseTargets) {
       ts.ScriptKind.JS,
     );
     const staticAuthoredImports = new Set<string>();
+    const bareImportSpecifiers = new Set<string>();
     const dependencyFilePaths = new Set<string>();
     const dependencyImports: ParsedDependencyImport[] = [];
     const exportedNames = new Set<string>();
@@ -58,6 +59,15 @@ export function createModuleParser(targets: ParseTargets) {
     for (const statement of sourceFile.statements) {
       hasDefaultExport =
         collectLocalExportNames(statement, exportedNames) || hasDefaultExport;
+      if (
+        (ts.isImportDeclaration(statement) ||
+          ts.isExportDeclaration(statement)) &&
+        statement.moduleSpecifier &&
+        ts.isStringLiteralLike(statement.moduleSpecifier) &&
+        isBareSpecifier(statement.moduleSpecifier.text)
+      ) {
+        bareImportSpecifiers.add(statement.moduleSpecifier.text);
+      }
 
       const parsed = parseStatementTarget(
         statement,
@@ -109,6 +119,16 @@ export function createModuleParser(targets: ParseTargets) {
         ) {
           dependencyFilePaths.add(targetFilePath);
         }
+      } else if (
+        ts.isCallExpression(node) &&
+        firstArgument !== undefined &&
+        ts.isStringLiteralLike(firstArgument) &&
+        (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+          (ts.isIdentifier(node.expression) &&
+            node.expression.text === "require")) &&
+        isBareSpecifier(firstArgument.text)
+      ) {
+        bareImportSpecifiers.add(firstArgument.text);
       }
       ts.forEachChild(node, visitDynamicImports);
     };
@@ -124,6 +144,9 @@ export function createModuleParser(targets: ParseTargets) {
     }
 
     const parsed = {
+      bareImportSpecifiers: [...bareImportSpecifiers].sort((left, right) =>
+        left.localeCompare(right),
+      ),
       dependencyFilePaths: [...dependencyFilePaths].sort((left, right) =>
         left.localeCompare(right),
       ),
@@ -139,6 +162,14 @@ export function createModuleParser(targets: ParseTargets) {
     parseCache.set(normalizedFilePath, parsed);
     return parsed;
   };
+}
+
+function isBareSpecifier(specifier: string) {
+  return (
+    !specifier.startsWith(".") &&
+    !specifier.startsWith("/") &&
+    !specifier.includes(":")
+  );
 }
 
 /** Record locally declared export names; returns whether one is a default. */

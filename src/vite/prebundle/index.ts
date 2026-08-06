@@ -91,7 +91,11 @@ export async function prebundleMaterializedDependencies(input: {
       !context.authoredFiles.has(normalizePath(module.filePath)) &&
       shouldBypassTypeMetadataFusion(module),
   );
-  if (hasFusionSensitiveTypes && context.materialized.modules.length <= 256) {
+  if (
+    hasFusionSensitiveTypes &&
+    context.materialized.modules.length <= 256 &&
+    !(await hasBarePackageEdges(context))
+  ) {
     return mirrorGraphWithoutBundles(context);
   }
   const dependencyRouting = await classifyDependencyRouting(context);
@@ -482,6 +486,9 @@ async function classifyDependencyRouting(context: PrebundleContext) {
       unsafeFilePaths.add(filePath);
     }
     const parsed = await context.parseModule(filePath);
+    if (parsed.bareImportSpecifiers.length > 0) {
+      unsafeFilePaths.add(filePath);
+    }
     if (parsed.staticAuthoredImports.length > 0) {
       unsafeFilePaths.add(filePath);
     }
@@ -528,6 +535,14 @@ async function classifyDependencyRouting(context: PrebundleContext) {
   }
 
   return { directFilePaths, prebundleFilePaths };
+}
+
+async function hasBarePackageEdges(context: PrebundleContext) {
+  for (const module of context.materialized.modules) {
+    const parsed = await context.parseModule(module.filePath);
+    if (parsed.bareImportSpecifiers.length > 0) return true;
+  }
+  return false;
 }
 
 /** No dependency bundles: mirror the graph into the runtime dir unchanged. */

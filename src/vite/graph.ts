@@ -394,6 +394,11 @@ async function collectBridgeModuleIds(
     input.analysisMode,
   );
   const bridgeSpecifiers = new Set(analysis.bridgeSpecifiers);
+  for (const specifier of analysis.importSpecifiers) {
+    if (isBarePackageSpecifier(specifier)) {
+      bridgeSpecifiers.add(specifier);
+    }
+  }
   if (
     record.renderedLength === undefined &&
     analysis.isForwardingOnly &&
@@ -411,19 +416,41 @@ async function collectBridgeModuleIds(
         resolutionCache: input.resolutionCache,
         specifier,
       });
+      if (!resolved || resolved.external) {
+        if (isBarePackageSpecifier(specifier)) {
+          throw new Error(
+            `gccTsBundler() could not route package edge ${JSON.stringify(specifier)} from ${input.importerId}: Vite did not resolve it to a captured module.`,
+          );
+        }
+        return;
+      }
+      if (input.retainedModuleIds.has(resolved.id)) {
+        return;
+      }
       if (
-        !resolved ||
-        resolved.external ||
-        input.retainedModuleIds.has(resolved.id) ||
         !input.capturedModules.has(resolved.id) ||
         isNonMaterializedAssetModuleId(resolved.id)
       ) {
+        if (isBarePackageSpecifier(specifier)) {
+          throw new Error(
+            `gccTsBundler() could not route package edge ${input.importerId} -> ${JSON.stringify(specifier)} -> ${resolved.id}: the resolved module was not captured by Vite.`,
+          );
+        }
         return;
       }
       bridgeModuleIds.add(resolved.id);
     }),
   );
   return bridgeModuleIds;
+}
+
+function isBarePackageSpecifier(specifier: string) {
+  return (
+    !specifier.startsWith(".") &&
+    !specifier.startsWith("/") &&
+    !specifier.startsWith("~") &&
+    !specifier.includes(":")
+  );
 }
 
 function hasFacadeModuleId(

@@ -95,6 +95,7 @@ async function buildViteFixture(fixture, overrides = {}) {
           ]
         : []),
       "    }),",
+      ...(overrides.trailingPluginEntries ?? []),
       "  ],",
       "};",
       "",
@@ -322,6 +323,38 @@ test("retained graph follows demanded names through impure, named, and star barr
   expect(result.materializedModuleIds).not.toContain(heavy);
 });
 
+test("retained bare package edges route to captured dependencies or fail with their chain", async () => {
+  const entry = "/src/entry.js";
+  const dependency = "/node_modules/react-is/index.js";
+  const context = createCapturePluginContext();
+  context.resolve = async (specifier) => ({
+    external: false,
+    id: specifier === "react-is" ? dependency : specifier,
+  });
+  const capturedModules = new Map([
+    [entry, { code: 'import { isValidElementType } from "react-is"; console.log(isValidElementType);', id: entry }],
+    [dependency, { code: "export const isValidElementType = () => true;", id: dependency }],
+  ]);
+  const routed = await resolveRetainedCapturedModuleIds.call(context, {
+    capturedModules,
+    metrics: undefined,
+    resolutionCache: new Map(),
+    retainedModuleIds: [entry],
+  });
+  expect(routed.materializedModuleIds).toContain(dependency);
+
+  await expect(
+    resolveRetainedCapturedModuleIds.call(context, {
+      capturedModules: new Map([[entry, capturedModules.get(entry)]]),
+      metrics: undefined,
+      resolutionCache: new Map(),
+      retainedModuleIds: [entry],
+    }),
+  ).rejects.toThrow(
+    `${entry} -> "react-is" -> ${dependency}`,
+  );
+});
+
 test("resolved Vite env values are removed before Closure chunk linking", async () => {
   const apply = createDefineApplier(
     { "import.meta.env.OVERRIDE": JSON.stringify("user") },
@@ -336,6 +369,52 @@ test("resolved Vite env values are removed before Closure chunk linking", async 
   expect(output).toContain('"https://cdn.example"');
   expect(output).toContain('"user"');
 });
+
+test.serial(
+  "generateBundle preserves Rollup chunk identities and manifest targets",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<div id="app"></div><script type="module" src="/src/main.js"></script>\n',
+    );
+    await fixture.write(
+      "src/main.js",
+      'document.querySelector("#app").textContent = "ready"; globalThis.loadLazyA = () => import("./lazy-a.js"); globalThis.loadLazyB = () => import("./lazy-b.js");\n',
+    );
+    await fixture.write("src/shared.js", 'export const value = "lazy";\n');
+    await fixture.write("src/lazy-a.js", 'export { value } from "./shared.js";\n');
+    await fixture.write("src/lazy-b.js", 'export { value } from "./shared.js";\n');
+    await buildViteFixture(fixture, {
+      buildLines: ["    manifest: true,"],
+      preambleLines: ["const originalChunkNames = new Set();"],
+      pluginEntries: [
+        "    { name: 'capture-rollup-identities', enforce: 'post', generateBundle(_options, bundle) { for (const [key, value] of Object.entries(bundle)) if (value.type === 'chunk') { originalChunkNames.add(key); if (key !== value.fileName) throw new Error('chunk key mismatch before gcc'); } } },",
+      ],
+      trailingPluginEntries: [
+        "    { name: 'verify-rollup-identities', enforce: 'post', generateBundle(_options, bundle) { const facades = []; for (const name of originalChunkNames) { const value = bundle[name]; if (!value || value.type !== 'chunk' || value.fileName !== name) throw new Error(`lost Rollup chunk identity: ${name}`); if (value.code.startsWith('export * from ')) facades.push(name); } this.emitFile({ type: 'asset', fileName: 'identity.json', source: JSON.stringify({ facades, names: [...originalChunkNames].sort() }) }); } },",
+      ],
+    });
+    const identities = JSON.parse(await fixture.read("dist/identity.json"));
+    expect(identities.names.length).toBeGreaterThan(2);
+    expect(identities.facades.length).toBeGreaterThan(0);
+    for (const fileName of identities.names) {
+      expect(await fixture.read(path.join("dist", fileName))).toBeTruthy();
+    }
+    const manifest = JSON.parse(await fixture.read("dist/.vite/manifest.json"));
+    const manifestFiles = new Set();
+    for (const value of Object.values(manifest)) {
+      if (typeof value.file === "string") manifestFiles.add(value.file);
+      for (const field of ["css", "assets"]) {
+        for (const file of value[field] ?? []) manifestFiles.add(file);
+      }
+    }
+    for (const fileName of manifestFiles) {
+      expect(await fixture.read(path.join("dist", fileName))).toBeTruthy();
+    }
+  },
+);
 
 test.serial(
   "lazy ESM chunks keep mutable shared exports linked through the registry",
@@ -1496,8 +1575,8 @@ test.serial(
     });
 
     const html = await fixture.read("dist/index.html");
-    expect(html).toContain("<script defer src=");
-    expect(html).not.toContain('<script type="module" crossorigin');
+    expect(html).toContain('<script type="module" crossorigin');
+    expect(html).not.toContain("<script defer src=");
     const jsFile = (await listFiles(fixture.outDir)).find((filePath) =>
       filePath.endsWith(".js"),
     );

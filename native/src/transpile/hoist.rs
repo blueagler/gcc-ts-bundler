@@ -157,8 +157,10 @@ struct ModuleScan {
     reexport_targets: Vec<String>,
     scan_failed: bool,
     local_export_modes: HashMap<String, BundlerExportSlotMode>,
-    /// Local names of top-level declarations whose bodies assign a `Live`
-    /// (mutable) top-level binding of the same module.
+    /// Local names of top-level declarations from which an assignment to a
+    /// top-level binding of the same module is reachable through the
+    /// module's internal reference graph (directly, or via helpers the
+    /// declaration references).
     live_assigners: BTreeSet<String>,
 }
 
@@ -264,20 +266,13 @@ pub(super) fn build_hoist_plan(
                     .collect::<Vec<_>>()
                     .join("\n"));
             }
-            let write_attributions = collect_top_level_write_attributions(&semantic.semantic);
+            let live_assigners = collect_state_writing_declarations(&semantic.semantic);
             let identity =
                 super::identity_oxc::ModuleIdentity::new(semantic.semantic.into_scoping());
             let mut scan = scan_esm_program(&program, &identity, &file_path, &resolution_context);
             scan.local_export_modes =
                 super::emit_runtime_oxc::collect_local_export_modes(&program, &identity);
-            scan.live_assigners = scan
-                .local_export_modes
-                .iter()
-                .filter(|(_, mode)| **mode == BundlerExportSlotMode::Live)
-                .filter_map(|(local, _)| write_attributions.get(local))
-                .flatten()
-                .cloned()
-                .collect();
+            scan.live_assigners = live_assigners;
             scan
         };
         if let Some(metadata) = metadata {
@@ -629,53 +624,76 @@ fn module_export_name(name: &ModuleExportName<'_>) -> String {
     }
 }
 
-/// For every top-level binding that is written after initialization, the
-/// names of the top-level declarations (functions, classes, or variable
-/// declarators) whose bodies contain those writes. Writes executed directly
-/// at module top level are not attributed: they run during module
-/// initialization inside the owner chunk and cannot be moved elsewhere.
-fn collect_top_level_write_attributions(
-    semantic: &oxc_semantic::Semantic,
-) -> HashMap<String, BTreeSet<String>> {
+/// Names of top-level declarations from which an assignment to a top-level
+/// binding of the same module is reachable. A direct write inside a
+/// declaration marks it; a declaration that references a marked declaration
+/// (a helper that performs the write, transitively) is marked too, because
+/// cross-chunk code motion moves exclusive helpers together with their
+/// callers. Writes executed directly at module top level are not attributed:
+/// they run during module initialization inside the owner chunk and cannot
+/// be moved elsewhere.
+fn collect_state_writing_declarations(semantic: &oxc_semantic::Semantic) -> BTreeSet<String> {
     use oxc_ast::AstKind;
     let scoping = semantic.scoping();
     let nodes = semantic.nodes();
-    let mut attributions = HashMap::<String, BTreeSet<String>>::new();
+    let attribute = |node_id| {
+        let mut attributed: Option<String> = None;
+        for ancestor in nodes.ancestors(node_id) {
+            match ancestor.kind() {
+                AstKind::Function(function) => {
+                    if let Some(id) = &function.id {
+                        attributed = Some(id.name.to_string());
+                    }
+                }
+                AstKind::Class(class) => {
+                    if let Some(id) = &class.id {
+                        attributed = Some(id.name.to_string());
+                    }
+                }
+                AstKind::VariableDeclarator(declarator) => {
+                    if let Some(id) = declarator.id.get_binding_identifier() {
+                        attributed = Some(id.name.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        attributed
+    };
+    // Reference graph between top-level declarations, and the declarations
+    // containing a direct write to a top-level binding.
+    let mut referencers = HashMap::<String, BTreeSet<String>>::new();
+    let mut writers = BTreeSet::<String>::new();
     for (name, &symbol_id) in scoping.get_bindings(scoping.root_scope_id()) {
         for reference in scoping.get_resolved_references(symbol_id) {
-            if !reference.flags().is_write() {
+            let Some(owner) = attribute(reference.node_id()) else {
                 continue;
+            };
+            if reference.flags().is_write() {
+                writers.insert(owner.clone());
             }
-            let mut attributed: Option<String> = None;
-            for ancestor in nodes.ancestors(reference.node_id()) {
-                match ancestor.kind() {
-                    AstKind::Function(function) => {
-                        if let Some(id) = &function.id {
-                            attributed = Some(id.name.to_string());
-                        }
-                    }
-                    AstKind::Class(class) => {
-                        if let Some(id) = &class.id {
-                            attributed = Some(id.name.to_string());
-                        }
-                    }
-                    AstKind::VariableDeclarator(declarator) => {
-                        if let Some(id) = declarator.id.get_binding_identifier() {
-                            attributed = Some(id.name.to_string());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if let Some(owner) = attributed {
-                attributions
+            if owner.as_str() != name.as_str() {
+                referencers
                     .entry(name.to_string())
                     .or_default()
                     .insert(owner);
             }
         }
     }
-    attributions
+    // Propagate: anything that references a state-writing declaration is
+    // itself capable of carrying the write along under code motion.
+    let mut marked = writers;
+    let mut worklist: Vec<String> = marked.iter().cloned().collect();
+    while let Some(name) = worklist.pop() {
+        if let Some(parents) = referencers.get(&name) {
+            for parent in parents {
+                if marked.insert(parent.clone()) {
+                    worklist.push(parent.clone());
+                }
+            }
+        }
+    }
+    marked
 }
 
 fn resolve_all_export_bindings(

@@ -22,11 +22,6 @@ export function applyViteBuildGuards(userConfig: UserConfig): UserConfig {
   if (userConfig.build?.lib) {
     throw new Error("gccTsBundler() does not support Vite library mode.");
   }
-  if (userConfig.build?.manifest) {
-    throw new Error(
-      "gccTsBundler() does not support Vite build.manifest output.",
-    );
-  }
   if (userConfig.build?.sourcemap) {
     throw new Error("gccTsBundler() does not support Vite sourcemaps.");
   }
