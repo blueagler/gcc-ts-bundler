@@ -44,6 +44,17 @@ pub(super) fn emit_module_program_oxc<'a>(
     commonjs_export_name: Option<&str>,
 ) -> std::result::Result<EmittedProgram, String> {
     strip_runtime_directives_oxc(program);
+    if context.chunk_mode == ChunkMode::BundlerRuntime {
+        super::emit_goog_oxc::quote_external_boundary_accesses(
+            allocator,
+            file_path,
+            program,
+            identity,
+            context,
+            file_metadata,
+            super::emit_goog_oxc::ExternalBoundaryEvidence::GlobalOnly,
+        );
+    }
     let mut reflective_property_names =
         super::emit_reflective_oxc::collect_reflective_property_names(program, identity);
     reflective_property_names

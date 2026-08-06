@@ -199,6 +199,167 @@ function createCapturePluginContext() {
   };
 }
 
+test.serial(
+  "Vite preserves an inline-script-produced global protocol",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write("package.json", '{"type":"module"}\n');
+    await fixture.write(
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          allowJs: true,
+          checkJs: false,
+          module: "ESNext",
+          moduleResolution: "Bundler",
+          target: "ESNext",
+        },
+        include: ["src"],
+      }),
+    );
+    await fixture.write(
+      "index.html",
+      [
+        '<div id="status">bootstrap-ready</div>',
+        '<script>self.$_TSR={buffer:[]}</script>',
+        '<script type="module" src="/src/main.js"></script>',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/main.js",
+      [
+        "const tsr = window.$_TSR;",
+        "tsr.t = new Map();",
+        "tsr.buffer.forEach((script) => script());",
+        "document.querySelector('#status').textContent = 'hydrated';",
+        "",
+      ].join("\n"),
+    );
+
+    await buildViteFixture(fixture);
+    const html = await fixture.read(path.join("dist", "index.html"));
+    const entryScript = readRewrittenEntryScript(html);
+    const mainJs = await fixture.read(
+      path.join("dist", toDistRelativeFile(entryScript)),
+    );
+    expect(html).toContain("self.$_TSR={buffer:[]}");
+    expect(mainJs).toContain("$_TSR");
+    expect(mainJs).toContain("buffer");
+  },
+);
+
+test.serial(
+  "Vite preserves nested members reached through an external global alias",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write("package.json", '{"type":"module"}\n');
+    await fixture.write(
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          allowJs: true,
+          checkJs: false,
+          module: "ESNext",
+          moduleResolution: "Bundler",
+          target: "ESNext",
+        },
+        include: ["src"],
+      }),
+    );
+    await fixture.write(
+      "index.html",
+      [
+        '<div id="status">bootstrap-ready</div>',
+        '<script>self.EXTERNAL_PROTOCOL={nestedState:{},items:[1,2]}</script>',
+        '<script type="module" src="/src/main.js"></script>',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/main.js",
+      [
+        "const globalAlias = window;",
+        "const protocol = globalAlias.EXTERNAL_PROTOCOL;",
+        "protocol.nestedState.assignedValue = 3;",
+        "let total = 0;",
+        "protocol.items.forEach((value) => { total += value; });",
+        "document.querySelector('#status').textContent = `${protocol.nestedState.assignedValue}:${total}`;",
+        "",
+      ].join("\n"),
+    );
+
+    await buildViteFixture(fixture);
+    const html = await fixture.read(path.join("dist", "index.html"));
+    const entryScript = readRewrittenEntryScript(html);
+    const mainJs = await fixture.read(
+      path.join("dist", toDistRelativeFile(entryScript)),
+    );
+    for (const property of [
+      "EXTERNAL_PROTOCOL",
+      "assignedValue",
+      "items",
+      "nestedState",
+    ]) {
+      expect(mainJs).toContain(property);
+    }
+  },
+);
+
+test.serial(
+  "Vite keeps an in-graph global write and read renameable",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write("package.json", '{"type":"module"}\n');
+    await fixture.write(
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          allowJs: true,
+          checkJs: false,
+          module: "ESNext",
+          moduleResolution: "Bundler",
+          target: "ESNext",
+        },
+        include: ["src"],
+      }),
+    );
+    await fixture.write(
+      "index.html",
+      [
+        '<div id="status"></div>',
+        '<script type="module" src="/src/main.js"></script>',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/main.js",
+      [
+        "window.INTERNAL_PROTOCOL = { nestedState: { assignedValue: 4 } };",
+        "Object.assign(window, { ASSIGNED_PROTOCOL: { assignedValue: 5 } });",
+        "const protocol = window.INTERNAL_PROTOCOL;",
+        "const assigned = window.ASSIGNED_PROTOCOL;",
+        "document.querySelector('#status').textContent = String(protocol.nestedState.assignedValue + assigned.assignedValue);",
+        "",
+      ].join("\n"),
+    );
+
+    await buildViteFixture(fixture);
+    const html = await fixture.read(path.join("dist", "index.html"));
+    const entryScript = readRewrittenEntryScript(html);
+    const mainJs = await fixture.read(
+      path.join("dist", toDistRelativeFile(entryScript)),
+    );
+    expect(mainJs).not.toContain("ASSIGNED_PROTOCOL");
+    expect(mainJs).not.toContain("INTERNAL_PROTOCOL");
+    expect(mainJs).not.toContain("assignedValue");
+    expect(mainJs).not.toContain("nestedState");
+  },
+);
+
 test("annotates aliased static class writes in place", () => {
   const source = [
     "var _a;",

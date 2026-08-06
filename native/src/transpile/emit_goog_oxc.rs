@@ -16,7 +16,7 @@ use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_codegen::{Codegen, Gen};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
-use oxc_span::{SourceType, SPAN};
+use oxc_span::{GetSpan, SourceType, SPAN};
 use oxc_str::Ident;
 
 use super::emit::EmittedProgram;
@@ -50,6 +50,7 @@ pub(crate) fn emit_goog_module_program<'a>(
         identity,
         context,
         file_metadata,
+        ExternalBoundaryEvidence::All,
     );
     let namespace_usage = scan_namespace_usage(program, identity);
     let live_imported_ids = collect_live_imported_binding_ids(program, identity, file_path);
@@ -419,54 +420,78 @@ fn fresh_boundary_name(
     }
 }
 
-fn quote_external_boundary_accesses<'a>(
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExternalBoundaryEvidence {
+    All,
+    GlobalOnly,
+}
+
+pub(super) fn quote_external_boundary_accesses<'a>(
     allocator: &'a Allocator,
     file_path: &Path,
     program: &mut Program<'a>,
     identity: &ModuleIdentity,
     context: &TranspileContext,
     file_metadata: Option<&ClosureFileMetadata>,
+    evidence: ExternalBoundaryEvidence,
 ) {
-    let external_member_starts = file_metadata
+    let external_root_starts = file_metadata
         .map(|metadata| {
             metadata
-                .external_owned_member_accesses
+                .external_global_member_accesses
                 .iter()
                 .copied()
                 .collect::<HashSet<_>>()
         })
         .unwrap_or_default();
+    let external_member_starts = file_metadata
+        .map(|metadata| {
+            metadata
+                .external_global_member_accesses
+                .iter()
+                .chain(
+                    (evidence == ExternalBoundaryEvidence::All)
+                        .then_some(metadata.external_owned_member_accesses.as_slice())
+                        .into_iter()
+                        .flatten(),
+                )
+                .copied()
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
     let mut candidates = BindingKeySet::default();
-    for statement in &program.body {
-        let Statement::ImportDeclaration(import) = statement else {
-            continue;
-        };
-        if !context
-            .external_specifiers
-            .contains_key(&resolved_import_key(
-                file_path,
-                import.source.value.as_str(),
-            ))
-        {
-            continue;
-        }
-        if import.import_kind == ImportOrExportKind::Type {
-            continue;
-        }
-        for specifier in import.specifiers.iter().flatten() {
-            match specifier {
-                ImportDeclarationSpecifier::ImportDefaultSpecifier(default) => {
-                    candidates.insert(identity.key_of_binding(&default.local));
+    if evidence == ExternalBoundaryEvidence::All {
+        for statement in &program.body {
+            let Statement::ImportDeclaration(import) = statement else {
+                continue;
+            };
+            if !context
+                .external_specifiers
+                .contains_key(&resolved_import_key(
+                    file_path,
+                    import.source.value.as_str(),
+                ))
+            {
+                continue;
+            }
+            if import.import_kind == ImportOrExportKind::Type {
+                continue;
+            }
+            for specifier in import.specifiers.iter().flatten() {
+                match specifier {
+                    ImportDeclarationSpecifier::ImportDefaultSpecifier(default) => {
+                        candidates.insert(identity.key_of_binding(&default.local));
+                    }
+                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) => {
+                        candidates.insert(identity.key_of_binding(&namespace.local));
+                    }
+                    ImportDeclarationSpecifier::ImportSpecifier(named)
+                        if named.import_kind != ImportOrExportKind::Type =>
+                    {
+                        candidates.insert(identity.key_of_binding(&named.local));
+                    }
+                    ImportDeclarationSpecifier::ImportSpecifier(_) => {}
                 }
-                ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) => {
-                    candidates.insert(identity.key_of_binding(&namespace.local));
-                }
-                ImportDeclarationSpecifier::ImportSpecifier(named)
-                    if named.import_kind != ImportOrExportKind::Type =>
-                {
-                    candidates.insert(identity.key_of_binding(&named.local));
-                }
-                ImportDeclarationSpecifier::ImportSpecifier(_) => {}
             }
         }
     }
@@ -477,6 +502,7 @@ fn quote_external_boundary_accesses<'a>(
         let mut collector = ExternalDerivedBindingCollector {
             candidates: &mut candidates,
             changed: false,
+            external_root_starts: &external_root_starts,
             identity,
         };
         collector.visit_program(program);
@@ -489,6 +515,7 @@ fn quote_external_boundary_accesses<'a>(
         builder: AstBuilder::new(allocator),
         candidates,
         external_member_starts,
+        external_root_starts,
         identity,
     }
     .visit_program(program);
@@ -499,25 +526,37 @@ struct ExternalBoundaryAccessQuoter<'a, 'b> {
     builder: AstBuilder<'a>,
     candidates: BindingKeySet,
     external_member_starts: HashSet<u32>,
+    external_root_starts: HashSet<u32>,
     identity: &'b ModuleIdentity,
 }
 
 impl ExternalBoundaryAccessQuoter<'_, '_> {
     fn is_external_boundary_value(&self, expression: &Expression<'_>) -> bool {
-        is_external_boundary_value(expression, &self.candidates, self.identity)
+        is_external_boundary_value(
+            expression,
+            &self.candidates,
+            &self.external_root_starts,
+            self.identity,
+        )
     }
 }
 
 struct ExternalDerivedBindingCollector<'b> {
     candidates: &'b mut BindingKeySet,
     changed: bool,
+    external_root_starts: &'b HashSet<u32>,
     identity: &'b ModuleIdentity,
 }
 
 impl<'a> Visit<'a> for ExternalDerivedBindingCollector<'_> {
     fn visit_variable_declarator(&mut self, declarator: &VariableDeclarator<'a>) {
         if declarator.init.as_ref().is_some_and(|initializer| {
-            is_external_boundary_value(initializer, self.candidates, self.identity)
+            is_external_boundary_value(
+                initializer,
+                self.candidates,
+                self.external_root_starts,
+                self.identity,
+            )
         }) {
             if let Some(binding) = declarator.id.get_binding_identifier() {
                 self.changed |= self
@@ -532,76 +571,52 @@ impl<'a> Visit<'a> for ExternalDerivedBindingCollector<'_> {
 fn is_external_boundary_value(
     expression: &Expression<'_>,
     candidates: &BindingKeySet,
+    external_member_starts: &HashSet<u32>,
     identity: &ModuleIdentity,
 ) -> bool {
+    let recurse = |expression| {
+        is_external_boundary_value(expression, candidates, external_member_starts, identity)
+    };
     match expression {
         Expression::Identifier(identifier) => identity
             .key_of_reference(identifier)
             .is_some_and(|binding| candidates.contains(&binding)),
         Expression::StaticMemberExpression(member) => {
-            is_external_boundary_value(&member.object, candidates, identity)
+            external_member_starts.contains(&member.property.span.start) || recurse(&member.object)
         }
         Expression::ComputedMemberExpression(member) => {
-            is_external_boundary_value(&member.object, candidates, identity)
+            external_member_starts.contains(&member.expression.span().start)
+                || recurse(&member.object)
         }
-        Expression::AssignmentExpression(assignment) => {
-            is_external_boundary_value(&assignment.right, candidates, identity)
-        }
-        Expression::AwaitExpression(awaited) => {
-            is_external_boundary_value(&awaited.argument, candidates, identity)
-        }
-        Expression::CallExpression(call) => {
-            is_external_boundary_value(&call.callee, candidates, identity)
-        }
+        Expression::AssignmentExpression(assignment) => recurse(&assignment.right),
+        Expression::AwaitExpression(awaited) => recurse(&awaited.argument),
+        Expression::CallExpression(call) => recurse(&call.callee),
         Expression::ConditionalExpression(conditional) => {
-            is_external_boundary_value(&conditional.consequent, candidates, identity)
-                || is_external_boundary_value(&conditional.alternate, candidates, identity)
+            recurse(&conditional.consequent) || recurse(&conditional.alternate)
         }
-        Expression::LogicalExpression(logical) => {
-            is_external_boundary_value(&logical.left, candidates, identity)
-                || is_external_boundary_value(&logical.right, candidates, identity)
+        Expression::LogicalExpression(logical) => recurse(&logical.left) || recurse(&logical.right),
+        Expression::NewExpression(constructor) => recurse(&constructor.callee),
+        Expression::ParenthesizedExpression(parenthesized) => recurse(&parenthesized.expression),
+        Expression::SequenceExpression(sequence) => {
+            sequence.expressions.last().is_some_and(recurse)
         }
-        Expression::NewExpression(constructor) => {
-            is_external_boundary_value(&constructor.callee, candidates, identity)
-        }
-        Expression::ParenthesizedExpression(parenthesized) => {
-            is_external_boundary_value(&parenthesized.expression, candidates, identity)
-        }
-        Expression::SequenceExpression(sequence) => sequence
-            .expressions
-            .last()
-            .is_some_and(|last| is_external_boundary_value(last, candidates, identity)),
-        Expression::TaggedTemplateExpression(tagged) => {
-            is_external_boundary_value(&tagged.tag, candidates, identity)
-        }
-        Expression::TSAsExpression(expression) => {
-            is_external_boundary_value(&expression.expression, candidates, identity)
-        }
-        Expression::TSSatisfiesExpression(expression) => {
-            is_external_boundary_value(&expression.expression, candidates, identity)
-        }
-        Expression::TSTypeAssertion(expression) => {
-            is_external_boundary_value(&expression.expression, candidates, identity)
-        }
-        Expression::TSNonNullExpression(expression) => {
-            is_external_boundary_value(&expression.expression, candidates, identity)
-        }
-        Expression::TSInstantiationExpression(expression) => {
-            is_external_boundary_value(&expression.expression, candidates, identity)
-        }
+        Expression::TaggedTemplateExpression(tagged) => recurse(&tagged.tag),
+        Expression::TSAsExpression(expression) => recurse(&expression.expression),
+        Expression::TSSatisfiesExpression(expression) => recurse(&expression.expression),
+        Expression::TSTypeAssertion(expression) => recurse(&expression.expression),
+        Expression::TSNonNullExpression(expression) => recurse(&expression.expression),
+        Expression::TSInstantiationExpression(expression) => recurse(&expression.expression),
         Expression::ChainExpression(chain) => match &chain.expression {
             ChainElement::StaticMemberExpression(member) => {
-                is_external_boundary_value(&member.object, candidates, identity)
+                external_member_starts.contains(&member.property.span.start)
+                    || recurse(&member.object)
             }
             ChainElement::ComputedMemberExpression(member) => {
-                is_external_boundary_value(&member.object, candidates, identity)
+                external_member_starts.contains(&member.expression.span().start)
+                    || recurse(&member.object)
             }
-            ChainElement::CallExpression(call) => {
-                is_external_boundary_value(&call.callee, candidates, identity)
-            }
-            ChainElement::TSNonNullExpression(expression) => {
-                is_external_boundary_value(&expression.expression, candidates, identity)
-            }
+            ChainElement::CallExpression(call) => recurse(&call.callee),
+            ChainElement::TSNonNullExpression(expression) => recurse(&expression.expression),
             _ => false,
         },
         _ => false,
@@ -1349,6 +1364,7 @@ mod tests {
             diagnostics: Vec::new(),
             enums: Vec::new(),
             erased_const_enums: Vec::new(),
+            external_global_member_accesses: Vec::new(),
             external_owned_member_accesses: vec![source
                 .find("resolvedFileName")
                 .unwrap()
@@ -1459,6 +1475,7 @@ mod tests {
             diagnostics: Vec::new(),
             enums: Vec::new(),
             erased_const_enums: Vec::new(),
+            external_global_member_accesses: Vec::new(),
             external_owned_member_accesses: vec![source
                 .rfind("value")
                 .unwrap()

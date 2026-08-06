@@ -12,6 +12,12 @@ interface RuntimeBoundaryDeclarationOrigins {
   ownedProperties: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
+export interface ExternalGlobalProtocolEvidence {
+  memberAccessesByFile: ReadonlyMap<string, readonly number[]>;
+  memberProperties: readonly string[];
+  rootProperties: readonly string[];
+}
+
 export function collectExternalDeclarationOrigins({
   boundaryModuleFileNames = [],
   externalSpecifiers,
@@ -624,22 +630,332 @@ function typeOwnerSymbols(type: ts.Type) {
   return [...symbols];
 }
 
+export function hasPotentialExternalGlobalProtocol(
+  sourceFile: ts.SourceFile,
+): boolean {
+  return /\b(?:globalThis|self|window)\b/u.test(sourceFile.text);
+}
+
+export function collectExternalGlobalProtocolEvidence({
+  checker,
+  platformPropertyNames = new Set(),
+  program,
+  sourceFiles,
+}: {
+  checker: ts.TypeChecker;
+  platformPropertyNames?: ReadonlySet<string> | undefined;
+  program: ts.Program;
+  sourceFiles: readonly ts.SourceFile[];
+}): ExternalGlobalProtocolEvidence {
+  const globalNames = new Set(["globalThis", "self", "window"]);
+  const aliases = new Set<ts.Symbol>();
+  const symbolAt = (node: ts.Node) => checker.getSymbolAtLocation(node);
+  const isAmbientGlobal = (identifier: ts.Identifier) => {
+    if (!globalNames.has(identifier.text)) return false;
+    const symbol = symbolAt(identifier);
+    return (
+      symbol === undefined ||
+      (symbol.declarations ?? []).every(
+        (declaration) => declaration.getSourceFile().isDeclarationFile,
+      )
+    );
+  };
+  const isGlobalRoot = (expression: ts.Expression): boolean => {
+    expression = unwrapExpression(expression);
+    if (!ts.isIdentifier(expression)) return false;
+    const symbol = symbolAt(expression);
+    return (
+      isAmbientGlobal(expression) ||
+      (symbol !== undefined && aliases.has(symbol))
+    );
+  };
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const sourceFile of sourceFiles) {
+      const visitAlias = (node: ts.Node) => {
+        if (
+          ts.isVariableDeclaration(node) &&
+          ts.isIdentifier(node.name) &&
+          node.initializer &&
+          ts.isVariableDeclarationList(node.parent) &&
+          (node.parent.flags & ts.NodeFlags.Const) !== 0 &&
+          isGlobalRoot(node.initializer)
+        ) {
+          const symbol = symbolAt(node.name);
+          if (symbol && !aliases.has(symbol)) {
+            aliases.add(symbol);
+            changed = true;
+          }
+        }
+        ts.forEachChild(node, visitAlias);
+      };
+      visitAlias(sourceFile);
+    }
+  }
+
+  type Access = {
+    nameNode: ts.Node;
+    platform: boolean;
+    sourceFile: ts.SourceFile;
+  };
+  const reads = new Map<string, Access[]>();
+  const writes = new Set<string>();
+  const addRead = (
+    name: string,
+    nameNode: ts.Node,
+    receiver: ts.Expression,
+    sourceFile: ts.SourceFile,
+  ) => {
+    const receiverType = checker.getTypeAtLocation(receiver);
+    const property = checker.getPropertyOfType(receiverType, name);
+    const platform = (property?.declarations ?? []).some((declaration) =>
+      program.isSourceFileDefaultLibrary(declaration.getSourceFile()),
+    );
+    const existing = reads.get(name) ?? [];
+    existing.push({ nameNode, platform, sourceFile });
+    reads.set(name, existing);
+  };
+  const accessMode = (node: ts.Expression) => {
+    const parent = node.parent;
+    if (
+      ts.isBinaryExpression(parent) &&
+      parent.left === node &&
+      isAssignmentOperator(parent.operatorToken.kind)
+    ) {
+      return {
+        read: parent.operatorToken.kind !== ts.SyntaxKind.EqualsToken,
+        write: true,
+      };
+    }
+    if (
+      (ts.isPrefixUnaryExpression(parent) ||
+        ts.isPostfixUnaryExpression(parent)) &&
+      (parent.operator === ts.SyntaxKind.PlusPlusToken ||
+        parent.operator === ts.SyntaxKind.MinusMinusToken)
+    ) {
+      return { read: true, write: true };
+    }
+    if (ts.isDeleteExpression(parent) && parent.expression === node) {
+      return { read: false, write: true };
+    }
+    return { read: true, write: false };
+  };
+  const staticAccess = (node: ts.Node) => {
+    if (ts.isPropertyAccessExpression(node) && isGlobalRoot(node.expression)) {
+      return {
+        expression: node,
+        name: node.name.text,
+        nameNode: node.name,
+        receiver: node.expression,
+      };
+    }
+    if (
+      ts.isElementAccessExpression(node) &&
+      isGlobalRoot(node.expression) &&
+      node.argumentExpression &&
+      ts.isStringLiteralLike(node.argumentExpression)
+    ) {
+      return {
+        expression: node,
+        name: node.argumentExpression.text,
+        nameNode: node.argumentExpression,
+        receiver: node.expression,
+      };
+    }
+    return null;
+  };
+  const isAmbientObject = (expression: ts.Expression) => {
+    expression = unwrapExpression(expression);
+    if (!ts.isIdentifier(expression) || expression.text !== "Object") {
+      return false;
+    }
+    const symbol = symbolAt(expression);
+    return (
+      symbol === undefined ||
+      (symbol.declarations ?? []).some((declaration) =>
+        program.isSourceFileDefaultLibrary(declaration.getSourceFile()),
+      )
+    );
+  };
+
+  for (const sourceFile of sourceFiles) {
+    const visit = (node: ts.Node) => {
+      const access = staticAccess(node);
+      if (access) {
+        const mode = accessMode(access.expression);
+        if (mode.read) {
+          addRead(access.name, access.nameNode, access.receiver, sourceFile);
+        }
+        if (mode.write) writes.add(access.name);
+      }
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === "assign" &&
+        isAmbientObject(node.expression.expression) &&
+        node.arguments[0] &&
+        isGlobalRoot(node.arguments[0])
+      ) {
+        for (const source of node.arguments.slice(1)) {
+          const unwrapped = unwrapExpression(source);
+          if (!ts.isObjectLiteralExpression(unwrapped)) continue;
+          for (const property of unwrapped.properties) {
+            if (ts.isSpreadAssignment(property) || !property.name) continue;
+            const name = getStaticPropertyName(property.name);
+            if (name !== null) writes.add(name);
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
+
+  const rootProperties = [...reads]
+    .filter(
+      ([name, accesses]) =>
+        !writes.has(name) &&
+        !platformPropertyNames.has(name) &&
+        !accesses.some((access) => access.platform),
+    )
+    .map(([name]) => name)
+    .sort();
+  const rootPropertySet = new Set(rootProperties);
+  const memberAccessesByFile = new Map<string, number[]>();
+  for (const name of rootProperties) {
+    for (const access of reads.get(name) ?? []) {
+      const fileName = path.normalize(access.sourceFile.fileName);
+      const starts = memberAccessesByFile.get(fileName) ?? [];
+      starts.push(
+        toUtf8Offset(
+          access.sourceFile,
+          access.nameNode.getStart(access.sourceFile),
+        ),
+      );
+      memberAccessesByFile.set(fileName, starts);
+    }
+  }
+  for (const starts of memberAccessesByFile.values()) {
+    starts.sort((left, right) => left - right);
+  }
+
+  const candidates = new Set<ts.Symbol>();
+  const isExternalValue = (expression: ts.Expression): boolean => {
+    expression = unwrapExpression(expression);
+    if (ts.isIdentifier(expression)) {
+      const symbol = symbolAt(expression);
+      return symbol !== undefined && candidates.has(symbol);
+    }
+    const access = staticAccess(expression);
+    if (access && rootPropertySet.has(access.name)) return true;
+    if (
+      ts.isPropertyAccessExpression(expression) ||
+      ts.isElementAccessExpression(expression)
+    ) {
+      return isExternalValue(expression.expression);
+    }
+    if (ts.isAwaitExpression(expression)) {
+      return isExternalValue(expression.expression);
+    }
+    if (ts.isCallExpression(expression) || ts.isNewExpression(expression)) {
+      return isExternalValue(expression.expression);
+    }
+    if (ts.isConditionalExpression(expression)) {
+      return (
+        isExternalValue(expression.whenTrue) ||
+        isExternalValue(expression.whenFalse)
+      );
+    }
+    if (ts.isBinaryExpression(expression)) {
+      return (
+        isExternalValue(expression.left) || isExternalValue(expression.right)
+      );
+    }
+    if (ts.isCommaListExpression(expression)) {
+      return expression.elements.some(isExternalValue);
+    }
+    if (ts.isTaggedTemplateExpression(expression)) {
+      return isExternalValue(expression.tag);
+    }
+    return false;
+  };
+  changed = true;
+  while (changed) {
+    changed = false;
+    for (const sourceFile of sourceFiles) {
+      const visitCandidate = (node: ts.Node) => {
+        if (
+          ts.isVariableDeclaration(node) &&
+          ts.isIdentifier(node.name) &&
+          node.initializer &&
+          isExternalValue(node.initializer)
+        ) {
+          const symbol = symbolAt(node.name);
+          if (symbol && !candidates.has(symbol)) {
+            candidates.add(symbol);
+            changed = true;
+          }
+        }
+        ts.forEachChild(node, visitCandidate);
+      };
+      visitCandidate(sourceFile);
+    }
+  }
+  const memberProperties = new Set<string>();
+  for (const sourceFile of sourceFiles) {
+    const visitMember = (node: ts.Node) => {
+      if (
+        ts.isPropertyAccessExpression(node) &&
+        isExternalValue(node.expression)
+      ) {
+        memberProperties.add(node.name.text);
+      } else if (
+        ts.isElementAccessExpression(node) &&
+        node.argumentExpression &&
+        ts.isStringLiteralLike(node.argumentExpression) &&
+        isExternalValue(node.expression)
+      ) {
+        memberProperties.add(node.argumentExpression.text);
+      }
+      ts.forEachChild(node, visitMember);
+    };
+    visitMember(sourceFile);
+  }
+
+  return {
+    memberAccessesByFile,
+    memberProperties: [...memberProperties].sort(),
+    rootProperties,
+  };
+}
+
+function isAssignmentOperator(kind: ts.SyntaxKind) {
+  return (
+    kind >= ts.SyntaxKind.FirstAssignment &&
+    kind <= ts.SyntaxKind.LastAssignment
+  );
+}
+
 export function collectExternalOwnedMemberAccesses({
   checker,
+  externalGlobalMemberAccesses = [],
   origins,
   sourceFile,
 }: {
   checker: ts.TypeChecker;
+  externalGlobalMemberAccesses?: readonly number[] | undefined;
   origins: RuntimeBoundaryDeclarationOrigins;
   sourceFile: ts.SourceFile;
 }): number[] {
+  const starts = new Set<number>(externalGlobalMemberAccesses);
   if (
     origins.files.size === 0 &&
     origins.moduleFiles.size === 0 &&
     origins.packageRoots.length === 0
   )
-    return [];
-  const starts = new Set<number>();
+    return [...starts].sort((left, right) => left - right);
   const visitedInitializers = new Set<ts.Node>();
   const isBoundaryType = (type: ts.Type | undefined) =>
     type !== undefined &&

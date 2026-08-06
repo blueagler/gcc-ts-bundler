@@ -4,7 +4,7 @@ import type {
   TypeMetadataDiagnostic as ClosureTypeMetadataDiagnostic,
 } from "../../build/transpile/closure-ir";
 
-export const VITE_TYPE_METADATA_VERSION = 2 as const;
+export const VITE_TYPE_METADATA_VERSION = 3 as const;
 
 export type ResolutionMode = "import" | "require";
 

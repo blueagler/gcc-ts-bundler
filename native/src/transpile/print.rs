@@ -39,6 +39,11 @@ pub(super) fn transform_source_with_oxc(
     let (prepared_source, opaque_commonjs_bindings, source_edits) =
         rewrite_commonjs_import_source(&allocator, source, source_type, context);
     let remapped_file_metadata = file_metadata.cloned().map(|mut metadata| {
+        metadata.external_global_member_accesses = metadata
+            .external_global_member_accesses
+            .into_iter()
+            .filter_map(|offset| remap_source_offset(offset, &source_edits))
+            .collect();
         metadata.external_owned_member_accesses = metadata
             .external_owned_member_accesses
             .into_iter()

@@ -9,6 +9,10 @@ import {
   createNativeTypeAnalysisContext,
   scanNativeTypeAnalysisContext,
 } from "../../build/transpile/closure-ir";
+import { collectExternalGlobalProtocolEvidence } from "../../build/transpile/closure-ir/metadata/external-ownership";
+import { loadPlatformExternArchive } from "../../build/closure/platform-externs/archive";
+import { getPlatformExternIndex } from "../../build/closure/platform-externs/index";
+import { getDefaultPersistentCacheRoot } from "../../shared/cache-store";
 import type {
   ClosureAnnotation,
   ClosureTypeDeclaration,
@@ -56,6 +60,11 @@ export async function collectViteTypeMetadata(input: {
   const sourceGraph = input.sourceGraph ?? input.materialized;
   const diagnostics: ViteTypeMetadataDiagnostic[] = [];
   const dependencies = new Set<string>();
+  const externalGlobalProtocol =
+    await collectMaterializedExternalGlobalProtocol(input.materialized);
+  for (const filePath of externalGlobalProtocol.filePaths) {
+    dependencies.add(filePath);
+  }
   const attachments: ViteTypeMetadataAttachment[] = [];
   const directTargets: TypeMetadataTarget[] = [];
   const directTargetKeys = new Set<string>();
@@ -178,7 +187,7 @@ export async function collectViteTypeMetadata(input: {
     return finalizeSidecar({
       dependencies,
       diagnostics,
-      files: [],
+      files: externalGlobalProtocol.files,
       provenance,
     });
   }
@@ -191,7 +200,7 @@ export async function collectViteTypeMetadata(input: {
     return finalizeSidecar({
       dependencies,
       diagnostics,
-      files: [],
+      files: externalGlobalProtocol.files,
       provenance,
     });
   }
@@ -223,7 +232,7 @@ export async function collectViteTypeMetadata(input: {
     return finalizeSidecar({
       dependencies,
       diagnostics,
-      files: [],
+      files: externalGlobalProtocol.files,
       provenance,
     });
   }
@@ -313,7 +322,7 @@ export async function collectViteTypeMetadata(input: {
   return finalizeSidecar({
     dependencies,
     diagnostics,
-    files: mergeMetadataFiles(files),
+    files: files.concat(externalGlobalProtocol.files),
     provenance,
   });
 }
@@ -745,6 +754,82 @@ function collectBindingNames(name: ts.BindingName, names: Set<string>) {
   }
 }
 
+async function collectMaterializedExternalGlobalProtocol(
+  materialized: MaterializedGraph,
+): Promise<{
+  filePaths: string[];
+  files: ClosureTypeMetadataFile[];
+}> {
+  const modulesByFile = new Map(
+    materialized.modules.map((module) => [
+      path.normalize(module.filePath),
+      module,
+    ]),
+  );
+  const filePaths = [...modulesByFile.keys()].sort((left, right) =>
+    left.localeCompare(right),
+  );
+  if (filePaths.length === 0) {
+    return {
+      filePaths,
+      files: [],
+    };
+  }
+  const program = ts.createProgram(filePaths, {
+    allowJs: true,
+    checkJs: false,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    noEmit: true,
+    noResolve: true,
+    skipLibCheck: true,
+    target: ts.ScriptTarget.ESNext,
+  });
+  const sourceFiles = filePaths
+    .map((filePath) => program.getSourceFile(filePath))
+    .filter(
+      (sourceFile): sourceFile is ts.SourceFile => sourceFile !== undefined,
+    );
+  const cacheRoot = getDefaultPersistentCacheRoot();
+  const archive = await loadPlatformExternArchive({ cacheRoot });
+  const platformPropertyNames = archive
+    ? (await getPlatformExternIndex(archive, { cacheRoot })).propertyNames
+    : new Set<string>();
+  const evidence = collectExternalGlobalProtocolEvidence({
+    checker: program.getTypeChecker(),
+    platformPropertyNames,
+    program,
+    sourceFiles,
+  });
+  const files = filePaths.flatMap((filePath) => {
+    const offsets = evidence.memberAccessesByFile.get(filePath) ?? [];
+    const module = modulesByFile.get(filePath);
+    if (offsets.length === 0 || !module) return [];
+    return [
+      {
+        annotations: [],
+        declarations: [],
+        decoratedOutputText: undefined,
+        diagnostics: [],
+        enums: [],
+        erasedConstEnums: [],
+        externalGlobalMemberAccesses: [...offsets],
+        externalOwnedMemberAccesses: [],
+        filePath,
+        runtimeModuleId: module.id,
+        sourceFilePath: filePath,
+        symbols: [],
+      } satisfies ClosureTypeMetadataFile,
+    ];
+  });
+  if (evidence.rootProperties.length > 0) {
+    console.warn(
+      `gcc-ts-bundler: preserved ${evidence.rootProperties.length} external global root ${evidence.rootProperties.length === 1 ? "property" : "properties"} and ${evidence.memberProperties.length} opaque nested ${evidence.memberProperties.length === 1 ? "member" : "members"}.`,
+    );
+  }
+  return { filePaths, files };
+}
+
 function mergeMetadataFiles(files: ClosureTypeMetadataFile[]) {
   const byTarget = new Map<string, ClosureTypeMetadataFile>();
   for (const file of files) {
@@ -760,6 +845,23 @@ function mergeMetadataFiles(files: ClosureTypeMetadataFile[]) {
       decoratedOutputText: undefined,
       diagnostics: dedupe(existing.diagnostics.concat(file.diagnostics)),
       enums: dedupe(existing.enums.concat(file.enums)),
+      erasedConstEnums: dedupe(
+        (existing.erasedConstEnums ?? []).concat(file.erasedConstEnums ?? []),
+      ),
+      externalGlobalMemberAccesses: [
+        ...new Set(
+          (existing.externalGlobalMemberAccesses ?? []).concat(
+            file.externalGlobalMemberAccesses ?? [],
+          ),
+        ),
+      ].sort((left, right) => left - right),
+      externalOwnedMemberAccesses: [
+        ...new Set(
+          (existing.externalOwnedMemberAccesses ?? []).concat(
+            file.externalOwnedMemberAccesses ?? [],
+          ),
+        ),
+      ].sort((left, right) => left - right),
       filePath: existing.filePath,
       runtimeModuleId: existing.runtimeModuleId,
       sourceFilePath:

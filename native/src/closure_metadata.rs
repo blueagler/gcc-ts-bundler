@@ -26,6 +26,9 @@ pub struct ClosureFileMetadata {
     pub diagnostics: Vec<TypeMetadataDiagnostic>,
     #[serde(default)]
     pub enums: Vec<ClosureEnumDeclaration>,
+    /// UTF-8 byte offsets of global-root reads proven to have an external producer.
+    #[serde(default)]
+    pub external_global_member_accesses: Vec<u32>,
     /// UTF-8 byte offsets of property names whose receiver type originates from
     /// a runtime external declaration module.
     #[serde(default)]
