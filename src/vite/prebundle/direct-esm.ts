@@ -7,6 +7,7 @@ import { applyTextEdits } from "../../shared/text-edits";
 import { toRelativeImportSpecifier } from "../capture";
 import type { MaterializedGraph } from "../internal-types";
 import { createBarrelFlattener } from "./barrels";
+import type { ParsedDependencyImport } from "./shared";
 import { normalizePath } from "./shared";
 
 interface ResolvedBinding {
@@ -18,6 +19,7 @@ interface ResolvedBinding {
 export async function rewriteDirectEsmImports(input: {
   directDependencyFilePaths: Set<string>;
   materialized: MaterializedGraph;
+  prebundleFilePaths: Set<string>;
 }) {
   const moduleByFilePath = new Map(
     input.materialized.modules.map((module) => [
@@ -39,10 +41,17 @@ export async function rewriteDirectEsmImports(input: {
         );
       })
       .map(async (module) => {
+        const filePath = normalizePath(module.filePath);
         const sourceText = await fs.readFile(module.filePath, "utf8");
         const rewritten = await rewriteModuleImports({
+          // Only a direct dependency module keeps its own import statements in
+          // the native graph; an authored module has its atom specifiers
+          // rewritten later against its region bundle instead.
+          atomFilePaths: input.directDependencyFilePaths.has(filePath)
+            ? input.prebundleFilePaths
+            : new Set<string>(),
           directDependencyFilePaths: input.directDependencyFilePaths,
-          filePath: normalizePath(module.filePath),
+          filePath,
           flattener,
           moduleByFilePath,
           sourceText,
@@ -55,6 +64,7 @@ export async function rewriteDirectEsmImports(input: {
 }
 
 async function rewriteModuleImports(input: {
+  atomFilePaths: Set<string>;
   directDependencyFilePaths: Set<string>;
   filePath: string;
   flattener: ReturnType<typeof createBarrelFlattener>;
@@ -107,10 +117,15 @@ async function rewriteModuleImports(input: {
       ),
     );
     const targetModule = input.moduleByFilePath.get(targetFilePath);
+    // An atom target keeps its specifier; only a namespace binding has to
+    // become fixed named bindings, because the bundled CommonJS core it points
+    // at has no enumerable namespace for the native pipeline to rebuild.
+    const isAtomTarget = input.atomFilePaths.has(targetFilePath);
     if (
       !targetModule ||
-      targetModule.renderedLength !== 0 ||
-      !input.directDependencyFilePaths.has(targetFilePath)
+      (!isAtomTarget &&
+        (targetModule.renderedLength !== 0 ||
+          !input.directDependencyFilePaths.has(targetFilePath)))
     ) {
       continue;
     }
@@ -121,7 +136,17 @@ async function rewriteModuleImports(input: {
         continue;
       }
       const memberUses = collectNamespaceMemberUses(sourceFile, bindings.name);
-      if (!memberUses || memberUses.size === 0) {
+      if (!memberUses) {
+        continue;
+      }
+      if (memberUses.size === 0) {
+        if (isAtomTarget) {
+          edits.push({
+            end: statement.getEnd(),
+            start: statement.getStart(sourceFile),
+            text: `import ${JSON.stringify(statement.moduleSpecifier.text)};`,
+          });
+        }
         continue;
       }
       const exportNames = [...memberUses.keys()].sort((left, right) =>
@@ -130,10 +155,9 @@ async function rewriteModuleImports(input: {
       const resolvedBindings: ResolvedBinding[] = [];
       let unresolved = false;
       for (const exportName of exportNames) {
-        const resolved = await input.flattener.resolveDeepExport(
-          targetFilePath,
-          exportName,
-        );
+        const resolved = isAtomTarget
+          ? { imported: exportName, targetFilePath }
+          : await input.flattener.resolveDeepExport(targetFilePath, exportName);
         if (!resolved) {
           unresolved = true;
           break;
@@ -173,6 +197,12 @@ async function rewriteModuleImports(input: {
           });
         }
       }
+      continue;
+    }
+
+    if (isAtomTarget) {
+      // Named and default bindings survive the move to the atom entry as they
+      // are; only the specifier changes, once the bundle output exists.
       continue;
     }
 
@@ -228,6 +258,32 @@ async function rewriteModuleImports(input: {
   return edits.length === 0
     ? input.sourceText
     : applyTextEdits(input.sourceText, edits);
+}
+
+/**
+ * Resolve a namespace import into the fixed member reads it makes, or null
+ * when the namespace escapes (a computed read, a bare reference) and so has no
+ * statically known member set.
+ */
+export function resolveNamespaceImportMembers(
+  dependencyImport: ParsedDependencyImport,
+) {
+  const statement = dependencyImport.node;
+  if (!ts.isImportDeclaration(statement)) {
+    return null;
+  }
+  const namedBindings = statement.importClause?.namedBindings;
+  if (
+    statement.importClause?.name ||
+    !namedBindings ||
+    !ts.isNamespaceImport(namedBindings)
+  ) {
+    return null;
+  }
+  return collectNamespaceMemberUses(
+    statement.getSourceFile(),
+    namedBindings.name,
+  );
 }
 
 function collectNamespaceMemberUses(

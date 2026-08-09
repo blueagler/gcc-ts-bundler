@@ -434,11 +434,6 @@ async function getNormalizedCapturedModule(
       code: record.normalizedCode,
       ...(record.format === undefined ? {} : { format: record.format }),
       id: record.id,
-      ...(record.requiresDependencyPrebundle === undefined
-        ? {}
-        : {
-            requiresDependencyPrebundle: record.requiresDependencyPrebundle,
-          }),
       ...(record.renderedLength === undefined
         ? {}
         : { renderedLength: record.renderedLength }),
@@ -465,11 +460,6 @@ async function getNormalizedCapturedModule(
     code: normalizedCode,
     ...(record.format === undefined ? {} : { format: record.format }),
     id: record.id,
-    ...(record.requiresDependencyPrebundle === undefined
-      ? {}
-      : {
-          requiresDependencyPrebundle: record.requiresDependencyPrebundle,
-        }),
     ...(record.renderedLength === undefined
       ? {}
       : { renderedLength: record.renderedLength }),
@@ -729,7 +719,6 @@ function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
   const bridgeSpecifiers = new Set<string>();
   let isForwardingOnly = true;
   let hasCommonJsSyntax = false;
-  let hasDependencyDefineReferences = false;
   let hasEsmSyntax = false;
   let hasExtendingClass = false;
   let needsClosureCompatibility = false;
@@ -791,13 +780,6 @@ function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
     const firstArgument = ts.isCallExpression(node)
       ? node.arguments[0]
       : undefined;
-    if (
-      (ts.isIdentifier(node) && /^__[A-Z\d_]+__$/u.test(node.text)) ||
-      isProcessNodeEnvAccess(node)
-    ) {
-      hasDependencyDefineReferences = true;
-    }
-
     if (
       ts.isCallExpression(node) &&
       ts.isIdentifier(node.expression) &&
@@ -888,7 +870,6 @@ function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
     dynamicImportSpecifiers: [...dynamicImportSpecifiers].sort((left, right) =>
       left.localeCompare(right),
     ),
-    hasDependencyDefineReferences,
     importSpecifiers: [...importSpecifiers].sort((left, right) =>
       left.localeCompare(right),
     ),
@@ -897,8 +878,6 @@ function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
     ),
     hasExtendingClass,
     isForwardingOnly,
-    isFusedDistributionModule:
-      (code.match(/(?:^|\n)\s*\/\/\s*#region\b/gu)?.length ?? 0) > 1,
     moduleFormat: hasEsmSyntax
       ? hasCommonJsSyntax
         ? "mixed"
@@ -909,17 +888,6 @@ function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
     needsClosureCompatibilityDownlevel: needsClosureCompatibility,
     needsTypeScriptCompatibilityDownlevel: needsTypeScriptCompatibility,
   };
-}
-
-function isProcessNodeEnvAccess(node: ts.Node) {
-  return (
-    ts.isPropertyAccessExpression(node) &&
-    node.name.text === "NODE_ENV" &&
-    ts.isPropertyAccessExpression(node.expression) &&
-    node.expression.name.text === "env" &&
-    ts.isIdentifier(node.expression.expression) &&
-    node.expression.expression.text === "process"
-  );
 }
 
 function isCommonJsExportTarget(node: ts.Expression): boolean {

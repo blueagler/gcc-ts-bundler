@@ -176,9 +176,6 @@ export function gccTsBundler(options: GccTsBundlerVitePluginOptions = {}): {
       const record: CapturedModule = { code: capturedCode, id };
       record.rawAnalysis = getCapturedModuleAnalysis(record);
       record.format = await resolveCapturedModuleFormat(record);
-      record.requiresDependencyPrebundle =
-        record.rawAnalysis.hasDependencyDefineReferences ||
-        record.rawAnalysis.isFusedDistributionModule;
       capturedModules.set(id, record);
       timingTotals.transformCaptureMs += performance.now() - startedAt;
       return null;

@@ -3,6 +3,9 @@ import path from "node:path";
 
 import type ts from "@typescript/typescript6";
 
+/** Region label for per-target atoms imported by direct dependency modules. */
+export const ATOM_REGION_LABEL = "@atom";
+
 export const DEP_BUNDLE_INPUT_DIR = "__dep-bundle-inputs";
 
 export const DEP_BUNDLE_OUTPUT_DIR = "__dep-bundles";
@@ -41,5 +44,14 @@ export interface ParsedMaterializedModule {
   dependencyImports: ParsedDependencyImport[];
   exportedNames: string[];
   hasDefaultExport: boolean;
+  /**
+   * True when the materialized text still reads a build-time define
+   * (`process.env.NODE_ENV`, an `__UPPER__` identifier). Materialization
+   * substitutes the defines Vite owns, so anything left is unresolved and
+   * must not reach the native pipeline unbundled.
+   */
+  hasDefineReferences: boolean;
+  /** True when the text carries more than one `// #region` fusion marker. */
+  isFusedDistribution: boolean;
   staticAuthoredImports: string[];
 }

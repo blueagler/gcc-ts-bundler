@@ -97,11 +97,6 @@ export async function materializeCapturedGraph(
       format: record?.format ?? record?.rawAnalysis?.moduleFormat ?? "unknown",
       id: moduleId,
       relativePath,
-      ...(record?.requiresDependencyPrebundle === undefined
-        ? {}
-        : {
-            requiresDependencyPrebundle: record.requiresDependencyPrebundle,
-          }),
       ...(record?.renderedLength === undefined
         ? {}
         : { renderedLength: record.renderedLength }),

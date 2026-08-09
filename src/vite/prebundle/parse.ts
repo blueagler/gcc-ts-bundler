@@ -99,10 +99,17 @@ export function createModuleParser(targets: ParseTargets) {
       }
     }
 
+    let hasDefineReferences = false;
     const visitDynamicImports = (node: ts.Node) => {
       const firstArgument = ts.isCallExpression(node)
         ? node.arguments[0]
         : undefined;
+      if (
+        (ts.isIdentifier(node) && /^__[A-Z\d_]+__$/u.test(node.text)) ||
+        isProcessNodeEnvAccess(node)
+      ) {
+        hasDefineReferences = true;
+      }
       if (
         ts.isCallExpression(node) &&
         node.expression.kind === ts.SyntaxKind.ImportKeyword &&
@@ -155,6 +162,9 @@ export function createModuleParser(targets: ParseTargets) {
         left.localeCompare(right),
       ),
       hasDefaultExport,
+      hasDefineReferences,
+      isFusedDistribution:
+        (sourceText.match(/(?:^|\n)\s*\/\/\s*#region\b/gu)?.length ?? 0) > 1,
       staticAuthoredImports: [...staticAuthoredImports].sort((left, right) =>
         left.localeCompare(right),
       ),
@@ -162,6 +172,18 @@ export function createModuleParser(targets: ParseTargets) {
     parseCache.set(normalizedFilePath, parsed);
     return parsed;
   };
+}
+
+/** Matches `process.env.NODE_ENV`, the define Vite substitutes at capture. */
+function isProcessNodeEnvAccess(node: ts.Node) {
+  return (
+    ts.isPropertyAccessExpression(node) &&
+    node.name.text === "NODE_ENV" &&
+    ts.isPropertyAccessExpression(node.expression) &&
+    node.expression.name.text === "env" &&
+    ts.isIdentifier(node.expression.expression) &&
+    node.expression.expression.text === "process"
+  );
 }
 
 function isBareSpecifier(specifier: string) {

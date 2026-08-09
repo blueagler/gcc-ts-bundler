@@ -4,7 +4,12 @@ import { classifyModuleId, toRelativeImportSpecifier } from "../capture";
 import type { CapturedRuntimeModule } from "../internal-types";
 import type { EsbuildBuild } from "./esbuild";
 import type { ParsedMaterializedModule } from "./shared";
-import { EAGER_REGION_LABEL, hashText, normalizePath } from "./shared";
+import {
+  ATOM_REGION_LABEL,
+  EAGER_REGION_LABEL,
+  hashText,
+  normalizePath,
+} from "./shared";
 
 export interface RegionBundleRequest {
   exportedNames: string[];
@@ -316,6 +321,9 @@ export function sanitizeEntryName(request: GroupedRegionBundleRequest) {
 export function sanitizeRegionKey(regionKey: string) {
   if (regionKey === EAGER_REGION_LABEL) {
     return "eager";
+  }
+  if (regionKey === ATOM_REGION_LABEL) {
+    return "atom";
   }
   const sanitized = regionKey
     .split("|")

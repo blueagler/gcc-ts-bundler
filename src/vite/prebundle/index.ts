@@ -7,6 +7,7 @@ import type { Plugin } from "esbuild";
 import { closureCompilerCapabilities } from "../../native/load";
 import { writeJson } from "../../shared/cache-store";
 import { syncDirectoryEntries } from "../../shared/files";
+import { logInternalDetail } from "../../shared/timing";
 import type {
   CapturedRuntimeModule,
   MaterializedGraph,
@@ -19,11 +20,15 @@ import {
 } from "../type-metadata";
 import type { PrebundleExportFacade } from "../type-metadata";
 import { createBarrelFlattener } from "./barrels";
-import { rewriteDirectEsmImports } from "./direct-esm";
+import {
+  resolveNamespaceImportMembers,
+  rewriteDirectEsmImports,
+} from "./direct-esm";
 import {
   canonicalizeDuplicateLazyEntryOutputs,
   collectCollapsibleBundleEntryOutputs,
   rewriteAuthoredModules,
+  rewriteDirectDependencyModules,
 } from "./entry-outputs";
 import { loadEsbuildBuild } from "./esbuild";
 import type { EsbuildBuild } from "./esbuild";
@@ -41,6 +46,7 @@ import type {
   WrittenRegionBundleRequest,
 } from "./regions";
 import {
+  ATOM_REGION_LABEL,
   DEP_BUNDLE_INPUT_DIR,
   DEP_BUNDLE_OUTPUT_DIR,
   EAGER_REGION_LABEL,
@@ -48,7 +54,10 @@ import {
   normalizePath,
   toPathIndependentKey,
 } from "./shared";
-import type { ParsedMaterializedModule } from "./shared";
+import type {
+  ParsedDependencyImport,
+  ParsedMaterializedModule,
+} from "./shared";
 
 const MATERIALIZED_DEPENDENCY_BUNDLE_MARKER =
   ".gcc-ts-bundler-materialized-dependency-bundles.json";
@@ -102,9 +111,11 @@ export async function prebundleMaterializedDependencies(input: {
   await rewriteDirectEsmImports({
     directDependencyFilePaths: dependencyRouting.directFilePaths,
     materialized: context.materialized,
+    prebundleFilePaths: dependencyRouting.prebundleFilePaths,
   });
   context = createPrebundleContext(input);
   const {
+    atomRequestKeyByTargetFilePath,
     bundleRequests,
     dynamicRootRequestKeyByTargetFilePath,
     entryRequestKeyByTargetFilePath,
@@ -112,6 +123,7 @@ export async function prebundleMaterializedDependencies(input: {
   } = await collectBundleRequests(
     context,
     input.dynamicRootModuleIds,
+    dependencyRouting.directFilePaths,
     dependencyRouting.prebundleFilePaths,
   );
   if (bundleRequests.size === 0) {
@@ -122,6 +134,7 @@ export async function prebundleMaterializedDependencies(input: {
     context,
     bundleRequests,
     new Set(dynamicRootRequestKeyByTargetFilePath.values()),
+    new Set([...context.authoredFiles, ...dependencyRouting.directFilePaths]),
   );
   if (!bundles) {
     return context.materialized;
@@ -142,7 +155,26 @@ export async function prebundleMaterializedDependencies(input: {
     authoredEntries,
     dependencyRouting.directFilePaths,
     entryRequestKeyByTargetFilePath,
+    resolveAtomOutputs(bundles, atomRequestKeyByTargetFilePath),
   );
+}
+
+/** Map each atom's target module to the bundle output that now replaces it. */
+function resolveAtomOutputs(
+  bundles: DependencyBundleSet,
+  atomRequestKeyByTargetFilePath: Map<string, string>,
+) {
+  const atomOutputByTargetFilePath = new Map<string, string>();
+  for (const [targetFilePath, requestKey] of atomRequestKeyByTargetFilePath) {
+    const outputFilePath =
+      bundles.canonicalizedEntryOutputs.outputByRequestKey.get(
+        bundles.requestGroupKeyByTarget.get(requestKey) ?? requestKey,
+      );
+    if (outputFilePath) {
+      atomOutputByTargetFilePath.set(targetFilePath, outputFilePath);
+    }
+  }
+  return atomOutputByTargetFilePath;
 }
 
 const AUTHORED_BOUNDARY_PREFIX = "gcc-authored:";
@@ -213,6 +245,8 @@ function rewriteAuthoredBoundarySpecifiers(input: {
 
 function createMaterializedDependencyResolverPlugin(
   sourceByMaterializedFile: Record<string, string> | undefined,
+  boundaryFiles: Set<string>,
+  srcDir: string,
 ): Plugin | undefined {
   if (!sourceByMaterializedFile) {
     return undefined;
@@ -252,11 +286,19 @@ function createMaterializedDependencyResolverPlugin(
           // instance as the graph entry that imported it. Origin-context
           // resolution remains the fallback for true transitives such as
           // react-dom's scheduler under Bun's isolated store.
-          return {
-            path:
-              materializedBySourceFile.get(resolvedSourceFile) ??
-              resolvedSourceFile,
-          };
+          const targetFilePath =
+            materializedBySourceFile.get(resolvedSourceFile) ??
+            resolvedSourceFile;
+          // A bare edge that lands back on a module the native pipeline owns
+          // must leave the bundle, or that module exists twice at runtime.
+          return boundaryFiles.has(targetFilePath)
+            ? {
+                external: true,
+                path: `${AUTHORED_BOUNDARY_PREFIX}${encodeURIComponent(
+                  path.relative(srcDir, targetFilePath).replace(/\\/g, "/"),
+                )}`,
+              }
+            : { path: targetFilePath };
         } catch {
           return undefined;
         }
@@ -331,6 +373,7 @@ function createPrebundleContext(input: {
 async function collectBundleRequests(
   context: PrebundleContext,
   dynamicRootModuleIds: string[],
+  directFilePaths: Set<string>,
   prebundleFilePaths: Set<string>,
 ) {
   const entryFilePaths = context.materialized.entries.map((entry) =>
@@ -457,7 +500,15 @@ async function collectBundleRequests(
     dynamicRootRequestKeyByTargetFilePath.set(targetFilePath, requestKey);
   }
 
+  const atomRequestKeyByTargetFilePath = await collectAtomBundleRequests({
+    bundleRequests,
+    context,
+    directFilePaths,
+    prebundleFilePaths,
+  });
+
   return {
+    atomRequestKeyByTargetFilePath,
     bundleRequests,
     dynamicRootRequestKeyByTargetFilePath,
     entryRequestKeyByTargetFilePath,
@@ -465,76 +516,144 @@ async function collectBundleRequests(
   };
 }
 
+/**
+ * Add one bundle request per unsafe module that a direct module imports. The
+ * atom is the esbuild closure of that single module, so an icon data file or a
+ * CommonJS core is bundled on its own instead of dragging the ESM tree that
+ * imports it into the same bundle.
+ */
+async function collectAtomBundleRequests(input: {
+  bundleRequests: Map<string, RegionBundleRequest>;
+  context: PrebundleContext;
+  directFilePaths: Set<string>;
+  prebundleFilePaths: Set<string>;
+}) {
+  const atomRequestKeyByTargetFilePath = new Map<string, string>();
+  for (const filePath of [...input.directFilePaths].sort((left, right) =>
+    left.localeCompare(right),
+  )) {
+    const parsed = await input.context.parseModule(filePath);
+    for (const dependencyImport of parsed.dependencyImports) {
+      const targetFilePath = normalizePath(dependencyImport.targetFilePath);
+      const targetModule = input.context.moduleByFilePath.get(targetFilePath);
+      if (!targetModule || !input.prebundleFilePaths.has(targetFilePath)) {
+        continue;
+      }
+      const requestKey = `${ATOM_REGION_LABEL}\u0000${targetFilePath}`;
+      const existing = input.bundleRequests.get(requestKey);
+      if (existing) {
+        existing.needsDefault ||= dependencyImport.hasDefault;
+        existing.needsExportAll ||= dependencyImport.hasNamespace;
+        existing.needsSideEffectOnly ||= dependencyImport.isSideEffectOnly;
+        for (const namedExport of dependencyImport.namedExports) {
+          existing.usedNamedExports.add(namedExport);
+        }
+        continue;
+      }
+      const parsedTarget = await input.context.parseModule(targetFilePath);
+      input.bundleRequests.set(requestKey, {
+        exportedNames: parsedTarget.exportedNames,
+        hasDefaultExport: parsedTarget.hasDefaultExport,
+        needsDefault: dependencyImport.hasDefault,
+        needsExportAll: dependencyImport.hasNamespace,
+        needsSideEffectOnly: dependencyImport.isSideEffectOnly,
+        regionKey: ATOM_REGION_LABEL,
+        sourceModuleIds: [...targetModule.sourceModuleIds],
+        targetFilePath,
+        targetModule,
+        usedNamedExports: new Set(dependencyImport.namedExports),
+      });
+      atomRequestKeyByTargetFilePath.set(targetFilePath, requestKey);
+    }
+  }
+  return atomRequestKeyByTargetFilePath;
+}
+
+/**
+ * Route every materialized dependency module either to the native pipeline
+ * (direct) or to an esbuild atom (prebundle).
+ *
+ * A module is unsafe on its own evidence only: a non-ESM format, a bare import
+ * the native resolver cannot follow, a static edge into authored code, a
+ * build-time define the materialized text still reads, or a fused multi-region
+ * distribution file. Unsafety is never propagated to importers: a clean module
+ * that imports an unsafe one stays direct and has that specifier rewritten to
+ * the unsafe module's atom bundle, so one CJS leaf cannot poison the whole ESM
+ * tree that reaches it.
+ */
 async function classifyDependencyRouting(context: PrebundleContext) {
   const dependencyFilePaths = new Set(
     context.materialized.modules
       .map((module) => normalizePath(module.filePath))
       .filter((filePath) => !context.authoredFiles.has(filePath)),
   );
-  const adjacentFilePaths = new Map<string, Set<string>>(
-    [...dependencyFilePaths].map((filePath) => [filePath, new Set<string>()]),
-  );
-  const unsafeFilePaths = new Set<string>();
-
-  for (const filePath of dependencyFilePaths) {
-    const module = context.moduleByFilePath.get(filePath);
-    if (
-      !module ||
-      module.format !== "esm" ||
-      module.requiresDependencyPrebundle !== false
-    ) {
-      unsafeFilePaths.add(filePath);
-    }
-    const parsed = await context.parseModule(filePath);
-    if (parsed.bareImportSpecifiers.length > 0) {
-      unsafeFilePaths.add(filePath);
-    }
-    if (parsed.staticAuthoredImports.length > 0) {
-      unsafeFilePaths.add(filePath);
-    }
-    for (const targetFilePath of parsed.dependencyFilePaths) {
-      const normalizedTarget = normalizePath(targetFilePath);
-      if (!dependencyFilePaths.has(normalizedTarget)) {
-        unsafeFilePaths.add(filePath);
-        continue;
-      }
-      adjacentFilePaths.get(filePath)?.add(normalizedTarget);
-      adjacentFilePaths.get(normalizedTarget)?.add(filePath);
-    }
-  }
-
   const directFilePaths = new Set<string>();
   const prebundleFilePaths = new Set<string>();
-  const visited = new Set<string>();
-  for (const rootFilePath of [...dependencyFilePaths].sort((left, right) =>
+
+  const sortedFilePaths = [...dependencyFilePaths].sort((left, right) =>
     left.localeCompare(right),
-  )) {
-    if (visited.has(rootFilePath)) {
-      continue;
-    }
-    const component = new Set<string>();
-    const pending = [rootFilePath];
-    let isEsmClean = true;
-    while (pending.length > 0) {
-      const filePath = pending.pop();
-      if (!filePath || visited.has(filePath)) {
-        continue;
-      }
-      visited.add(filePath);
-      component.add(filePath);
-      isEsmClean &&= !unsafeFilePaths.has(filePath);
-      pending.push(...(adjacentFilePaths.get(filePath) ?? []));
-    }
-    // A one-file package gives no graph evidence that it is source-granular;
-    // treat it as a potentially fused distribution artifact and fail closed.
-    const destination =
-      isEsmClean && component.size > 1 ? directFilePaths : prebundleFilePaths;
-    for (const filePath of component) {
-      destination.add(filePath);
+  );
+  const unsafeFilePaths = new Set<string>();
+  for (const filePath of sortedFilePaths) {
+    const module = context.moduleByFilePath.get(filePath);
+    const parsed = await context.parseModule(filePath);
+    const isSelfClean =
+      module !== undefined &&
+      module.format === "esm" &&
+      !parsed.hasDefineReferences &&
+      !parsed.isFusedDistribution &&
+      parsed.bareImportSpecifiers.length === 0 &&
+      parsed.staticAuthoredImports.length === 0 &&
+      parsed.dependencyFilePaths.every((targetFilePath) =>
+        dependencyFilePaths.has(normalizePath(targetFilePath)),
+      );
+    if (!isSelfClean) {
+      unsafeFilePaths.add(filePath);
+      prebundleFilePaths.add(filePath);
     }
   }
 
+  for (const filePath of sortedFilePaths) {
+    if (unsafeFilePaths.has(filePath)) {
+      continue;
+    }
+    const parsed = await context.parseModule(filePath);
+    const hasOpaqueAtomEdge = parsed.dependencyImports.some(
+      (dependencyImport) =>
+        unsafeFilePaths.has(normalizePath(dependencyImport.targetFilePath)) &&
+        !canBindAtomImport(context, dependencyImport),
+    );
+    (hasOpaqueAtomEdge ? prebundleFilePaths : directFilePaths).add(filePath);
+  }
+
+  logInternalDetail(
+    "vite:dependency-routing",
+    `direct=${directFilePaths.size} prebundle=${prebundleFilePaths.size} unsafe=${unsafeFilePaths.size} total=${dependencyFilePaths.size}`,
+  );
   return { directFilePaths, prebundleFilePaths };
+}
+
+/**
+ * True when a direct module's edge into an atom can be expressed as explicit
+ * named bindings. Named and default imports always can. A namespace import or
+ * an `export *` needs the atom's export list, which esbuild can enumerate for
+ * an ESM target but not for a CommonJS one; there the namespace must resolve
+ * to fixed member reads instead.
+ */
+function canBindAtomImport(
+  context: PrebundleContext,
+  dependencyImport: ParsedDependencyImport,
+) {
+  if (!dependencyImport.hasNamespace) {
+    return true;
+  }
+  const targetModule = context.moduleByFilePath.get(
+    normalizePath(dependencyImport.targetFilePath),
+  );
+  if (targetModule?.format !== "cjs" && targetModule?.format !== "mixed") {
+    return true;
+  }
+  return resolveNamespaceImportMembers(dependencyImport) !== null;
 }
 
 async function hasBarePackageEdges(context: PrebundleContext) {
@@ -597,6 +716,7 @@ async function buildDependencyBundles(
   context: PrebundleContext,
   bundleRequests: Map<string, RegionBundleRequest>,
   preservedRequestKeys: Set<string>,
+  sourceBoundaryFiles: Set<string>,
 ): Promise<DependencyBundleSet | null> {
   const { materialized, runtimeSrcDir } = context;
   const { groupedRequests, requestGroupKeyByTarget } = groupBundleRequests([
@@ -649,7 +769,6 @@ async function buildDependencyBundles(
   const entryPoints = writtenRequests.map((request) =>
     path.relative(materialized.srcDir, request.entryPoint).replace(/\\/g, "/"),
   );
-  const sourceBoundaryFiles = context.authoredFiles;
   const bundleResult = await esbuildBuild({
     absWorkingDir: materialized.srcDir,
     bundle: true,
@@ -677,6 +796,8 @@ async function buildDependencyBundles(
       createSourceBoundaryPlugin(sourceBoundaryFiles, materialized.srcDir),
       createMaterializedDependencyResolverPlugin(
         materialized.dependencySourceFileByMaterializedFile,
+        sourceBoundaryFiles,
+        materialized.srcDir,
       ),
     ].filter((plugin): plugin is Plugin => plugin !== undefined),
     outdir: DEP_BUNDLE_OUTPUT_DIR,
@@ -765,6 +886,7 @@ async function assembleGraph(
   authoredEntries: Array<{ content: string; relativePath: string }>,
   directDependencyFilePaths: Set<string>,
   entryRequestKeyByTargetFilePath: Map<string, string>,
+  atomOutputByTargetFilePath: Map<string, string>,
 ): Promise<MaterializedGraph> {
   const { authoredFiles, materialized, runtimeSrcDir } = context;
   const originalSourceIdsByFilePath = new Map(
@@ -779,16 +901,13 @@ async function assembleGraph(
       request.sourceModuleIds,
     ]),
   );
-  const directDependencyEntries = await Promise.all(
-    materialized.modules
-      .filter((module) =>
-        directDependencyFilePaths.has(normalizePath(module.filePath)),
-      )
-      .map(async (module) => ({
-        content: await fs.readFile(module.filePath, "utf8"),
-        relativePath: module.relativePath,
-      })),
-  );
+  const directDependencyEntries = await rewriteDirectDependencyModules({
+    atomOutputByTargetFilePath,
+    collapsedEntryOutputByPath: bundles.collapsedEntryOutputByPath,
+    directDependencyFilePaths,
+    materialized,
+    runtimeSrcDir,
+  });
   await syncDirectoryEntries(
     runtimeSrcDir,
     [...authoredEntries, ...directDependencyEntries],

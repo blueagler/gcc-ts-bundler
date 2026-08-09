@@ -23,6 +23,7 @@ import {
   renameCompiledNonBaseJsOutputs,
 } from "../src/vite/naming.ts";
 import { prebundleMaterializedDependencies } from "../src/vite/prebundle/index.ts";
+import { createModuleParser } from "../src/vite/prebundle/parse.ts";
 import { extractRuntimeInitManifest } from "../src/vite/runtime-manifest.ts";
 import {
   applyViteBuildGuards,
@@ -588,8 +589,6 @@ test("captured module analysis ignores comment-only hash text for compat downlev
   const analysis = getCapturedModuleAnalysis(record);
   expect(analysis.needsClosureCompatibilityDownlevel).toBe(false);
   expect(analysis.needsTypeScriptCompatibilityDownlevel).toBe(false);
-  expect(analysis.hasDependencyDefineReferences).toBe(false);
-  expect(analysis.isFusedDistributionModule).toBe(false);
   expect(analysis.importSpecifiers).toEqual(["./dep.js"]);
 });
 
@@ -785,24 +784,39 @@ test.serial(
   },
 );
 
-test("captured module analysis fails dependency routing closed on define and fused-distribution evidence", () => {
-  const analysis = getCapturedModuleAnalysis({
-    code: [
-      "//#region package/a",
-      "export const dev = process.env.NODE_ENV !== 'production' || __DEV__;",
-      "//#endregion",
-      "//#region package/b",
-      "export const value = 1;",
-      "//#endregion",
-      "",
-    ].join("\n"),
-    id: "/node_modules/pkg/dist/runtime.js",
-  });
+test.serial(
+  "materialized module parsing fails dependency routing closed on define and fused-distribution evidence",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "runtime.js",
+      [
+        "//#region package/a",
+        "export const dev = process.env.NODE_ENV !== 'production' || __DEV__;",
+        "//#endregion",
+        "//#region package/b",
+        "export const value = 1;",
+        "//#endregion",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write("clean.js", "export const value = 1;\n");
+    const runtimeFile = path.join(fixture.projectRoot, "runtime.js");
+    const cleanFile = path.join(fixture.projectRoot, "clean.js");
+    const parseModule = createModuleParser({
+      authoredFiles: new Set(),
+      moduleFilePaths: new Set([runtimeFile, cleanFile]),
+    });
 
-  expect(analysis.moduleFormat).toBe("esm");
-  expect(analysis.hasDependencyDefineReferences).toBe(true);
-  expect(analysis.isFusedDistributionModule).toBe(true);
-});
+    const fused = await parseModule(runtimeFile);
+    expect(fused.hasDefineReferences).toBe(true);
+    expect(fused.isFusedDistribution).toBe(true);
+
+    const clean = await parseModule(cleanFile);
+    expect(clean.hasDefineReferences).toBe(false);
+    expect(clean.isFusedDistribution).toBe(false);
+  },
+);
 
 test.serial(
   "resolveNormalizedBridgeModuleIds follows bridge imports introduced by compat normalization",
@@ -1046,7 +1060,6 @@ test.serial(
       id: filePath,
       relativePath,
       renderedLength,
-      requiresDependencyPrebundle: false,
       sourceModuleIds: [filePath],
     });
     const prebundled = await prebundleMaterializedDependencies({
