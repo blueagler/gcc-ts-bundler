@@ -5,6 +5,7 @@ import ts from "@typescript/typescript6";
 import type { ChunkMetadata, ResolvedConfig } from "vite";
 
 import { applyTextEdits } from "../shared/text-edits";
+import { buildChunkModuleIdLookup } from "./chunk-modules";
 import { isRecordOf, isString } from "../shared/validation";
 
 import type {
@@ -93,20 +94,17 @@ export async function preserveCompiledChunkIdentities(input: {
   if (!isRecordOf(parsedRuntimeSourceMap, isString)) {
     throw new Error("gccTsBundler() found an invalid runtime source map.");
   }
-  const runtimeSourceMap = parsedRuntimeSourceMap;
-  const sourceIdsByRuntimeId = buildRuntimeSourceIds(
-    input.materialized,
-    runtimeSourceMap,
-  );
+  const chunkModuleIds = buildChunkModuleIdLookup({
+    jsChunks: input.jsChunks,
+    manifest: input.manifest,
+    materialized: input.materialized,
+    runtimeModuleSourceMap: parsedRuntimeSourceMap,
+  });
   const compiledChunks = Object.entries(input.manifest.chunks).map(
     ([chunkId, chunk]) => ({
       chunkId,
       fileName: stripPublicPath(chunk.url, input.publicPath),
-      moduleIds: new Set(
-        chunk.modules.flatMap(
-          (runtimeId) => sourceIdsByRuntimeId.get(runtimeId) ?? [],
-        ),
-      ),
+      moduleIds: chunkModuleIds.get(chunkId) ?? new Set<string>(),
     }),
   );
   const base =
@@ -224,24 +222,6 @@ export async function preserveCompiledChunkIdentities(input: {
   };
 }
 
-function buildRuntimeSourceIds(
-  materialized: MaterializedGraph,
-  runtimeSourceMap: Record<string, string>,
-) {
-  const modules = new Map(
-    materialized.modules.map((module) => [
-      path.normalize(module.filePath),
-      module.sourceModuleIds,
-    ]),
-  );
-  const result = new Map<string, string[]>();
-  for (const [runtimeId, sourcePath] of Object.entries(runtimeSourceMap)) {
-    const sourceIds = modules.get(path.normalize(sourcePath));
-    if (sourceIds) result.set(runtimeId, sourceIds);
-  }
-  return result;
-}
-
 async function rewriteAndRenameCompiledFiles(
   outDir: string,
   outputFiles: string[],
@@ -263,6 +243,11 @@ async function rewriteAndRenameCompiledFiles(
           JSON.stringify(newSpecifier),
         );
         source = source.replaceAll(`'${candidate}'`, `'${newSpecifier}'`);
+        // Final minification runs before this pass and re-quotes with
+        // backticks, and the runtime manifest's chunk urls are ordinary
+        // strings inside the base chunk: miss this spelling and a renamed
+        // lazy chunk keeps a url that no longer exists.
+        source = source.replaceAll(`\`${candidate}\``, `\`${newSpecifier}\``);
       }
     }
     await fs.writeFile(outputFile, source, "utf8");
