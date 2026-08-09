@@ -82,7 +82,7 @@ pub(crate) fn emit_hoisted_module_text<'a>(
         renames,
         shared_helper_names,
     } = collect_top_level_renames(program, identity, ordinal);
-    let module_bindings = if context.vendor_module_ids.contains(&module_id) {
+    let module_bindings = if context.assigner_pin_module_ids.contains(&module_id) {
         renames.values().cloned().collect()
     } else {
         HashSet::new()

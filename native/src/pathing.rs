@@ -17,10 +17,6 @@ pub fn vendor_chunk_name(base_chunk_name: &str) -> String {
     format!("{base_chunk_name}{VENDOR_CHUNK_NAME_SUFFIX}")
 }
 
-pub fn is_vendor_chunk_name(chunk_name: &str) -> bool {
-    chunk_name.ends_with(VENDOR_CHUNK_NAME_SUFFIX)
-}
-
 pub fn to_goog_module_id(file_path: &Path, root_dir: &Path) -> String {
     let normalized_path = normalize_path(file_path);
     let relative_path = normalized_path

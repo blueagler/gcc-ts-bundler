@@ -336,7 +336,11 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         // The transpiler annotated these; reading the marker back out of the
         // assembled text is what carries the list across the per-module file
         // boundary, and keeps the pin exactly in step with what was annotated.
-        let assigner_names = if chunk.kind.as_deref() == Some("vendor") {
+        // Pinning a chunk's own state-mutating functions to the loader object
+        // is the half of the guard that survives `CrossChunkCodeMotion`; the
+        // `@noinline` half lives in `transpile::assigners`. Any chunk boundary
+        // creates the hazard, so every chunk in a split plan carries the pin.
+        let assigner_names = if resolved_chunks.len() > 1 {
             collect_annotated_assigner_names(module_text)
         } else {
             Vec::new()

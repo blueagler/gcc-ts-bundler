@@ -43,9 +43,7 @@ use crate::closure_metadata::{
     EmittedTypeMetadata,
 };
 use crate::commonjs::analyze_commonjs_source;
-use crate::pathing::{
-    is_vendor_chunk_name, normalize_path, to_bundler_runtime_module_id, to_goog_module_id,
-};
+use crate::pathing::{normalize_path, to_bundler_runtime_module_id, to_goog_module_id};
 use crate::support_files::{collect_commonjs_specifiers, emit_package_support_files};
 
 use self::cjs_opacity::*;
@@ -381,7 +379,7 @@ pub fn transpile_sources(
         preserved_property_names,
         static_property_names,
         type_metadata_enabled: !type_inference_disabled,
-        vendor_module_ids: collect_vendor_module_ids(&chunk_graph, &workspace_dir),
+        assigner_pin_module_ids: collect_assigner_pin_module_ids(&chunk_graph, &workspace_dir),
         workspace_dir: workspace_dir.clone(),
     };
     let emitted_outputs = compiled_file_names
@@ -523,11 +521,15 @@ pub fn transpile_sources(
 
 /// Places each pooled lowering-helper declaration exactly once.
 ///
-/// A helper claimed by a single module stays in that module, where Closure can
-/// still inline it locally. A helper claimed by two or more modules moves to
-/// the first file of the first chunk — the chunk every other chunk transitively
-/// depends on — so one definition dominates every use. Closure compiles all
-/// chunks as one job and sinks the definition again if only one chunk uses it.
+/// Every pooled helper moves to the first file of the first chunk — the chunk
+/// every other chunk transitively depends on — so one definition dominates
+/// every use. Closure compiles all chunks as one job and sinks the definition
+/// back down if only one chunk turns out to use it.
+///
+/// Leaving a helper where it was declared is not an option even when exactly
+/// one module declares it: the *users* are what the placement has to dominate,
+/// and a helper reference is a bare identifier with no import edge behind it,
+/// so nothing orders the declaring file before a sibling that uses it.
 fn plan_shared_helper_placement(
     emitted_outputs: &[(PathBuf, PathBuf, EmittedProgram)],
     chunk_graph: &[TranspileChunkInput],
@@ -562,14 +564,10 @@ fn plan_shared_helper_placement(
 
     let mut prefixes: HashMap<PathBuf, Vec<String>> = HashMap::new();
     for (_, (text, claimants)) in claims {
-        let owner = if claimants.len() == 1 {
-            claimants.into_iter().next()
-        } else {
-            program_owner
-                .clone()
-                .or_else(|| claimants.into_iter().next())
-        };
-        if let Some(owner) = owner {
+        if let Some(owner) = program_owner
+            .clone()
+            .or_else(|| claimants.into_iter().next())
+        {
             prefixes.entry(owner).or_default().push(text);
         }
     }
@@ -622,18 +620,26 @@ fn collect_prelowered_decorator_property_names(
     Ok(names)
 }
 
-/// Module ids the chunk plan placed in the vendor chunk.
+/// Module ids whose state-mutating exported functions must stay put.
 ///
-/// Only the chunk name and its file list cross the napi boundary, so the name
-/// is how a vendor chunk is recognised here; `pathing::VENDOR_CHUNK_NAME_SUFFIX`
-/// is shared with the planner that mints it so the two cannot drift.
-fn collect_vendor_module_ids(
+/// A function that writes hoisted module state has to execute in the chunk that
+/// owns that state: `CrossChunkCodeMotion` relocating it into its only consumer
+/// turns the write into an assignment to an ES-module import, which is illegal
+/// and which Closure rejects outright. The `@noinline` tag this set drives is
+/// half the guard; `render_assigner_pin` is the other half.
+///
+/// Any chunk boundary at all is enough to create the hazard, so a plan with
+/// more than one chunk pins every module. A single-chunk plan has nowhere to
+/// move anything and is left exactly as it was.
+fn collect_assigner_pin_module_ids(
     chunk_graph: &[TranspileChunkInput],
     workspace_dir: &Path,
 ) -> HashSet<String> {
+    if chunk_graph.len() < 2 {
+        return HashSet::new();
+    }
     chunk_graph
         .iter()
-        .filter(|chunk| is_vendor_chunk_name(&chunk.name))
         .flat_map(|chunk| chunk.files.iter())
         .map(|relative_file| to_goog_module_id(&workspace_dir.join(relative_file), workspace_dir))
         .collect()

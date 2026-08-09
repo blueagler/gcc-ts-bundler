@@ -35,7 +35,7 @@ pub(super) struct TranspileContext {
     pub(super) preserved_property_names: HashSet<String>,
     pub(super) static_property_names: HashSet<String>,
     pub(super) type_metadata_enabled: bool,
-    pub(super) vendor_module_ids: HashSet<String>,
+    pub(super) assigner_pin_module_ids: HashSet<String>,
     pub(super) workspace_dir: PathBuf,
 }
 
@@ -111,7 +111,7 @@ pub(super) fn collect_bundler_module_slots(
         preserved_property_names: HashSet::new(),
         static_property_names: HashSet::new(),
         type_metadata_enabled: false,
-        vendor_module_ids: HashSet::new(),
+        assigner_pin_module_ids: HashSet::new(),
         workspace_dir: workspace_dir.to_path_buf(),
     };
 
