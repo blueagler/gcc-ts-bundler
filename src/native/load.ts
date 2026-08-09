@@ -150,6 +150,22 @@ interface NativeLazyImportEntry {
   targetPath: string;
 }
 
+/**
+ * One Rollup output chunk, as the Vite plugin sees it at `generateBundle`.
+ *
+ * `fileName` is the identity because Rollup chunk names are not unique, so
+ * import edges travel as file names too. `moduleFiles` are materialized source
+ * files, already joined from Rollup module ids and absolute.
+ */
+export interface NativeRollupChunkInput {
+  dynamicImportedChunkFileNames: string[];
+  fileName: string;
+  importedChunkFileNames: string[];
+  isEntry: boolean;
+  moduleFiles: string[];
+  name: string;
+}
+
 export interface NativePreservedModuleEntry {
   exportNames: string[];
   filePath: string;
@@ -297,6 +313,7 @@ interface NativeBinding {
     entryFiles: NativeChunkPlanEntryInput[],
     graphEntries: NativeDependencyGraphEntry[],
     lazyImports: NativeLazyImportEntry[],
+    rollupChunks: NativeRollupChunkInput[],
     shimFiles: string[],
     vendorChunk: boolean,
   ): NativeChunkPlanChunkOutput[];
@@ -437,6 +454,8 @@ export function planChunks(input: {
   entryFiles: NativeChunkPlanEntryInput[];
   graphEntries: NativeDependencyGraphEntry[];
   lazyImports: NativeLazyImportEntry[];
+  /** Rollup's own chunk graph; present only under Vite, and mirrored when it is. */
+  rollupChunks: NativeRollupChunkInput[];
   shimFiles: string[];
   /** Already gated by `resolveVendorChunk`; native ignores it off bundler-runtime. */
   vendorChunk: boolean;
@@ -449,6 +468,7 @@ export function planChunks(input: {
     input.entryFiles,
     input.graphEntries,
     input.lazyImports,
+    input.rollupChunks,
     input.shimFiles,
     input.vendorChunk,
   );

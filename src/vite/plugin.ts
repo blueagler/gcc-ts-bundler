@@ -80,6 +80,7 @@ import {
   rewritePreservedImportSpecifiers,
 } from "./output";
 import { prebundleMaterializedDependencies } from "./prebundle";
+import { serializeRollupChunkGraph } from "./rollup-chunks";
 import { parseGccRuntimeManifest } from "./runtime-manifest";
 import { collectMaterializedGraphStats } from "./size";
 import { collectViteTypeMetadata } from "./type-metadata";
@@ -260,8 +261,10 @@ async function prepareViteGraph(
       resolveRetainedCapturedModuleIds.call(this, {
         capturedModules: input.capturedModules,
         metrics: input.buildMetrics,
+        projectRoot: input.config.root,
         resolutionCache: input.resolutionCache,
         retainedModuleIds,
+        unshakenModuleIds: [...entryModuleIds, ...dynamicRootModuleIds],
       }),
   );
   if (retainedCaptured.missingModuleIds.length > 0) {
@@ -555,6 +558,10 @@ async function compileViteGraph(
     // Vite has a second output-finalization phase for hashed names, resolved
     // asset URLs, and preserved-import specifiers. Minify only after that.
     finalMinify: false,
+    rollupChunks: serializeRollupChunkGraph({
+      jsChunks: prepared.jsChunks,
+      materialized: prepared.materialized,
+    }),
   };
   const buildEnvironment: EnvironmentOverrides = {
     GCC_VITE_AUTHORED_FILES_FILE: authoredFilesFilePath,

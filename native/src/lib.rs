@@ -63,6 +63,7 @@ pub fn plan_chunks(
     entry_files: Vec<graph::ChunkPlanEntryInput>,
     graph_entries: Vec<graph::DependencyGraphEntry>,
     lazy_imports: Vec<graph::LazyImportEntry>,
+    rollup_chunks: Vec<graph::RollupChunkInput>,
     shim_files: Vec<String>,
     vendor_chunk: bool,
 ) -> Result<Vec<graph::ChunkPlanChunkOutput>> {
@@ -74,6 +75,7 @@ pub fn plan_chunks(
             entry_files,
             graph_entries,
             lazy_imports,
+            rollup_chunks,
             shim_files,
             vendor_chunk,
         )

@@ -376,6 +376,22 @@ function createResolveMetadata(
       })),
     ],
     lazyImports: fresh.graphResult.lazyImports,
+    // The plugin reports module files relative to the source root it
+    // materialized; the graph is keyed by their path inside the build
+    // workspace, which only this side knows.
+    // Spelled out rather than spread: these keys reach the native addon, and
+    // only a literal written against the boundary type keeps its property
+    // names through the self-build's renaming.
+    rollupChunks: options.rollupChunks.map((chunk) => ({
+      dynamicImportedChunkFileNames: chunk.dynamicImportedChunkFileNames,
+      fileName: chunk.fileName,
+      importedChunkFileNames: chunk.importedChunkFileNames,
+      isEntry: chunk.isEntry,
+      moduleFiles: chunk.moduleFiles.map((relativePath) =>
+        path.join(env.sourceRoot, relativePath),
+      ),
+      name: chunk.name,
+    })),
     shimFiles,
     vendorChunk: options.chunks.vendorChunk,
     workspaceDir: env.cacheStore.workspaceDir,

@@ -110,6 +110,7 @@ export function normalizeBuildOptions(
     ),
     cssRuntime: options.cssRuntime ?? false,
     finalMinify: options.finalMinify ?? true,
+    rollupChunks: options.rollupChunks ?? [],
     diagnostics: {
       preflight: requireChoice(
         options.diagnostics?.preflight ??

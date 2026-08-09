@@ -19,6 +19,23 @@ export interface BuildTypeMetadataSidecar {
   version: number;
 }
 
+/**
+ * One chunk of the host bundler's own output graph.
+ *
+ * `fileName` is the identity: Rollup chunk names are not unique, file names
+ * are, so import edges travel as file names too. `moduleFiles` are the
+ * materialized source files of that chunk, relative to `srcDir` until the
+ * resolver rebases them onto the build workspace.
+ */
+export interface RollupChunkInput {
+  dynamicImportedChunkFileNames: string[];
+  fileName: string;
+  importedChunkFileNames: string[];
+  isEntry: boolean;
+  moduleFiles: string[];
+  name: string;
+}
+
 export type InternalBuildOptions = BuildOptions & {
   /**
    * Whether the caller attaches CSS rows to the runtime manifest after the
@@ -30,12 +47,19 @@ export type InternalBuildOptions = BuildOptions & {
   cssRuntime?: boolean | undefined;
   /** Vite runs this after its URL and import finalization instead. */
   finalMinify?: boolean | undefined;
+  /**
+   * The host bundler's final chunk layout. Only the Vite plugin has one, and
+   * when it does the planner mirrors it instead of deriving its own
+   * boundaries, so Closure optimizes inside a split that already ships.
+   */
+  rollupChunks?: readonly RollupChunkInput[] | undefined;
   typeMetadata?: BuildTypeMetadataSidecar | undefined;
 };
 
 export interface ResolvedBuildOptions extends PublicResolvedBuildOptions {
   cssRuntime: boolean;
   finalMinify: boolean;
+  rollupChunks: readonly RollupChunkInput[];
   typeMetadata: BuildTypeMetadataSidecar | undefined;
 }
 

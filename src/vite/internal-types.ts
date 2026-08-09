@@ -29,6 +29,8 @@ export interface CapturedModuleAnalysis {
 }
 
 export interface CapturedModule {
+  /** Transform output before re-export shaking rewrote `code`. */
+  capturedCode?: string;
   code: string;
   format?: CapturedModuleFormat;
   id: string;

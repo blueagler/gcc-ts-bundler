@@ -106,14 +106,6 @@ export async function renameCompiledNonBaseJsOutputs(input: {
     }))
     .sort((left, right) => left.chunkId.localeCompare(right.chunkId));
 
-  // Chunks the base depends on (the vendor chunk) are not lazy targets and
-  // must not be named through the Rollup-seed overlap heuristic — their
-  // module set overlaps every Rollup chunk that used the deps, which used to
-  // steal a panel's name.
-  const baseDependencyChunkIds = new Set(
-    manifest.chunks[baseChunkId]?.deps ?? [],
-  );
-
   for (const chunk of nonBaseChunks) {
     const currentFilePath = outputFilesByRelativePath.get(chunk.oldFileName);
     if (!currentFilePath) {
@@ -122,23 +114,13 @@ export async function renameCompiledNonBaseJsOutputs(input: {
       );
     }
     const sourceText = await fs.readFile(currentFilePath, "utf8");
-    const preferredSeed = baseDependencyChunkIds.has(chunk.chunkId)
-      ? {
-          info: {
-            ...createFallbackChunkInfo({
-              chunkId: chunk.chunkId,
-              dynamicRootModuleIds,
-              moduleIds: new Set<string>(),
-            }),
-            name: "vendor",
-          },
-          preferredName: null,
-        }
-      : findPreferredRollupChunkSeed({
-          chunkModuleIds: chunk.sourceModuleIds,
-          dynamicRootModuleIds,
-          jsChunks: input.jsChunks,
-        });
+    // The plan mirrors Rollup's chunk graph, so every compiled chunk has one
+    // Rollup chunk with the same modules and the overlap seed is exact.
+    const preferredSeed = findPreferredRollupChunkSeed({
+      chunkModuleIds: chunk.sourceModuleIds,
+      dynamicRootModuleIds,
+      jsChunks: input.jsChunks,
+    });
     const renderableInfo =
       preferredSeed?.info ??
       createFallbackChunkInfo({

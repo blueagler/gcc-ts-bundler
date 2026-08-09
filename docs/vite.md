@@ -220,6 +220,12 @@ targets and for output loaded by anything other than a module script.
 
 ### `compiler.chunks.vendorChunk`
 
+**No-op under this plugin.** A Vite build plans its chunks by mirroring
+Rollup's own chunk graph, so the dependency split is whatever Rollup already
+decided and there is nothing left for this flag to partition. It still applies
+to standalone (non-Vite) `bundler-runtime` builds, which have no host chunk
+graph to mirror; the rest of this section describes those.
+
 Moves eagerly reachable dependency modules (`node_modules`, prebundled
 dependency chunks, virtual modules) out of the entry chunk into a separate
 `<baseChunkName>-vendor` chunk.

@@ -941,6 +941,7 @@ fn off_mode_chunk_plan_disambiguates_colliding_output_basenames() {
                 },
             ],
             vec![],
+            vec![],
             vec![
                 "/workspace/entries/index-mjs.ts".to_string(),
                 "/workspace/entries/vite-index-mjs.ts".to_string(),
@@ -997,6 +998,7 @@ fn plans_bundler_runtime_chunks_in_native_graph_layer() {
             specifier: "./feature".to_string(),
             targetPath: "/workspace/src/feature.ts".to_string(),
         }],
+        vec![],
         vec![],
         false,
     )
@@ -1056,6 +1058,7 @@ fn plans_off_mode_chunks_in_native_graph_layer() {
                 dependencies: vec![],
             },
         ],
+        vec![],
         vec![],
         vec![
             "/workspace/entries/first.ts".to_string(),
@@ -1123,6 +1126,7 @@ fn plan_vendor(vendor_chunk: bool, chunk_mode: &str) -> Vec<ChunkPlanChunkOutput
         graph,
         vec![],
         vec![],
+        vec![],
         vendor_chunk,
     )
     .unwrap()
@@ -1182,6 +1186,7 @@ fn vendor_chunk_excludes_virtual_modules_with_authored_dependencies() {
         ],
         vec![],
         vec![],
+        vec![],
         true,
     )
     .unwrap();
@@ -1221,6 +1226,7 @@ fn vendor_chunk_never_claims_an_entry_file() {
         ],
         vec![],
         vec![],
+        vec![],
         true,
     )
     .unwrap();
@@ -1245,6 +1251,7 @@ fn empty_vendor_partition_emits_no_vendor_chunk() {
             filePath: "/workspace/src/main.ts".to_string(),
             dependencies: vec![],
         }],
+        vec![],
         vec![],
         vec![],
         true,
@@ -1291,7 +1298,8 @@ fn vendor_chunk_flag_off_leaves_the_plan_byte_identical() {
                 }],
                 vec![],
                 vec![],
-                vendor_chunk,
+                vec![],
+                vendor_chunk
             )
             .unwrap()
         )
@@ -1342,6 +1350,7 @@ fn vendor_chunk_coexists_with_shared_and_lazy_chunks() {
             specifier: "./panel".to_string(),
             targetPath: "/workspace/src/panel.ts".to_string(),
         }],
+        vec![],
         vec![],
         true,
     )
@@ -1555,4 +1564,325 @@ fn every_known_module_extension_suppresses_appending() {
             "{extension}: {candidates:?}"
         );
     }
+}
+
+// --- Rollup-mirrored chunk plan ------------------------------------------
+
+/// A six-chunk Rollup graph with two dependency-free chunks, a shared chunk
+/// behind two dynamic routes, an unassigned atom consumed from two chunks, and
+/// an entry shim nothing consumes.
+fn mirror_fixture() -> (
+    Vec<ChunkPlanEntryInput>,
+    Vec<DependencyGraphEntry>,
+    Vec<LazyImportEntry>,
+    Vec<RollupChunkInput>,
+) {
+    let entries = vec![ChunkPlanEntryInput {
+        chunkName: "index".to_string(),
+        outputName: "index.js".to_string(),
+        sourcePath: "/workspace/src/main.js".to_string(),
+    }];
+    let graph = vec![
+        DependencyGraphEntry {
+            filePath: "/workspace/entries/index.ts".to_string(),
+            dependencies: vec!["/workspace/src/main.js".to_string()],
+        },
+        DependencyGraphEntry {
+            filePath: "/workspace/src/main.js".to_string(),
+            dependencies: vec![
+                "/workspace/src/atom.js".to_string(),
+                "/workspace/src/polyfill.js".to_string(),
+                "/workspace/src/ui.js".to_string(),
+                "/workspace/node_modules/lib/index.js".to_string(),
+            ],
+        },
+        DependencyGraphEntry {
+            filePath: "/workspace/src/ui.js".to_string(),
+            dependencies: vec!["/workspace/node_modules/lib/index.js".to_string()],
+        },
+        DependencyGraphEntry {
+            filePath: "/workspace/src/shared.js".to_string(),
+            dependencies: vec!["/workspace/src/atom.js".to_string()],
+        },
+        DependencyGraphEntry {
+            filePath: "/workspace/src/route-a.js".to_string(),
+            dependencies: vec![
+                "/workspace/src/shared.js".to_string(),
+                "/workspace/src/ui.js".to_string(),
+            ],
+        },
+        DependencyGraphEntry {
+            filePath: "/workspace/src/route-b.js".to_string(),
+            dependencies: vec!["/workspace/src/shared.js".to_string()],
+        },
+        DependencyGraphEntry {
+            filePath: "/workspace/node_modules/lib/index.js".to_string(),
+            dependencies: vec![],
+        },
+        DependencyGraphEntry {
+            filePath: "/workspace/src/atom.js".to_string(),
+            dependencies: vec![],
+        },
+        DependencyGraphEntry {
+            filePath: "/workspace/src/polyfill.js".to_string(),
+            dependencies: vec![],
+        },
+    ];
+    let lazy_imports = vec![
+        LazyImportEntry {
+            importerFilePath: "/workspace/src/main.js".to_string(),
+            moduleId: "gcc.src.route-a".to_string(),
+            specifier: "./route-a.js".to_string(),
+            targetPath: "/workspace/src/route-a.js".to_string(),
+        },
+        LazyImportEntry {
+            importerFilePath: "/workspace/src/main.js".to_string(),
+            moduleId: "gcc.src.route-b".to_string(),
+            specifier: "./route-b.js".to_string(),
+            targetPath: "/workspace/src/route-b.js".to_string(),
+        },
+    ];
+    let rollup_chunk = |name: &str,
+                        file_name: &str,
+                        is_entry: bool,
+                        module_files: &[&str],
+                        imports: &[&str],
+                        dynamic_imports: &[&str]| RollupChunkInput {
+        dynamicImportedChunkFileNames: dynamic_imports
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        fileName: file_name.to_string(),
+        importedChunkFileNames: imports.iter().map(|value| (*value).to_string()).collect(),
+        isEntry: is_entry,
+        moduleFiles: module_files
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        name: name.to_string(),
+    };
+    let rollup_chunks = vec![
+        rollup_chunk(
+            "index",
+            "index-aaaa.js",
+            true,
+            &["/workspace/src/main.js"],
+            &["vendor-bbbb.js", "ui-cccc.js", "polyfill-gggg.js"],
+            &["route-a-eeee.js", "route-b-ffff.js"],
+        ),
+        rollup_chunk(
+            "vendor",
+            "vendor-bbbb.js",
+            false,
+            &["/workspace/node_modules/lib/index.js"],
+            &[],
+            &[],
+        ),
+        rollup_chunk(
+            "ui",
+            "ui-cccc.js",
+            false,
+            &["/workspace/src/ui.js"],
+            &["vendor-bbbb.js"],
+            &[],
+        ),
+        rollup_chunk(
+            "shared",
+            "shared-dddd.js",
+            false,
+            &["/workspace/src/shared.js"],
+            &["vendor-bbbb.js"],
+            &[],
+        ),
+        rollup_chunk(
+            "route-a",
+            "route-a-eeee.js",
+            false,
+            &["/workspace/src/route-a.js"],
+            &["shared-dddd.js", "ui-cccc.js"],
+            &[],
+        ),
+        rollup_chunk(
+            "route-b",
+            "route-b-ffff.js",
+            false,
+            &["/workspace/src/route-b.js"],
+            &["shared-dddd.js"],
+            &[],
+        ),
+        rollup_chunk(
+            "polyfill",
+            "polyfill-gggg.js",
+            false,
+            &["/workspace/src/polyfill.js"],
+            &[],
+            &[],
+        ),
+    ];
+    (entries, graph, lazy_imports, rollup_chunks)
+}
+
+fn plan_mirror(rollup_chunks: Vec<RollupChunkInput>) -> Vec<ChunkPlanChunkOutput> {
+    let (entries, graph, lazy_imports, _) = mirror_fixture();
+    plan_chunks(
+        "bundler-runtime".to_string(),
+        "index".to_string(),
+        "/workspace".to_string(),
+        entries,
+        graph,
+        lazy_imports,
+        rollup_chunks,
+        vec![],
+        false,
+    )
+    .expect("the mirrored Rollup graph should plan")
+}
+
+#[test]
+fn mirrored_plan_reproduces_the_rollup_chunk_graph() {
+    let (_, _, _, rollup_chunks) = mirror_fixture();
+    let plan = plan_mirror(rollup_chunks);
+    let names = plan
+        .iter()
+        .map(|chunk| chunk.name.as_str())
+        .collect::<Vec<_>>();
+
+    // One Closure chunk per Rollup chunk, dependencies before dependents.
+    assert_eq!(
+        names,
+        vec!["polyfill", "vendor", "shared", "route-b", "ui", "index", "route-a"]
+    );
+    let by_name = plan
+        .iter()
+        .map(|chunk| (chunk.name.as_str(), chunk))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(by_name["ui"].dependencies, vec!["vendor"]);
+    assert_eq!(by_name["shared"].dependencies, vec!["vendor"]);
+    assert_eq!(by_name["route-a"].dependencies, vec!["ui", "shared"]);
+    assert_eq!(by_name["route-b"].dependencies, vec!["shared"]);
+    assert_eq!(
+        by_name["index"].dependencies,
+        vec!["vendor", "ui", "polyfill"]
+    );
+
+    // The entry chunk is a sink in Rollup's graph, so it is base by kind, not
+    // by position, and it still carries the entry files.
+    assert_eq!(by_name["index"].kind.as_deref(), Some("base"));
+    assert_eq!(
+        by_name["index"].entryFiles.as_deref(),
+        Some(["src/main.js".to_string()].as_slice())
+    );
+    assert!(plan
+        .iter()
+        .filter(|chunk| chunk.name != "index")
+        .all(|chunk| chunk.entryFiles.is_none()));
+
+    // Rollup's dynamic imports become lazy roots that pruning can never erase.
+    assert_eq!(by_name["route-a"].kind.as_deref(), Some("lazy"));
+    assert_eq!(
+        by_name["route-a"].lazyModuleIds.as_deref(),
+        Some(["gcc.src.route-a".to_string()].as_slice())
+    );
+    assert_eq!(by_name["route-b"].kind.as_deref(), Some("lazy"));
+    // A plain shared chunk keeps neither kind nor lazy ids, so an empty one is
+    // still prunable.
+    assert_eq!(by_name["shared"].kind, None);
+    assert_eq!(by_name["shared"].lazyModuleIds, None);
+}
+
+#[test]
+fn mirrored_plan_gives_multi_root_rollup_graphs_one_closure_root() {
+    let (_, _, _, rollup_chunks) = mirror_fixture();
+    let plan = plan_mirror(rollup_chunks);
+
+    // Closure's JSChunkGraph.getRootChunk accepts exactly one dependency-free
+    // chunk; Rollup produced two. The extra root is chained onto the leader,
+    // which is the chunk that carries the runtime core and the leading inputs.
+    assert_eq!(plan[0].name, "polyfill");
+    assert!(plan[0].dependencies.is_empty());
+    assert_eq!(plan[1].name, "vendor");
+    assert_eq!(plan[1].dependencies, vec!["polyfill"]);
+    assert_eq!(
+        plan.iter()
+            .filter(|chunk| chunk.dependencies.is_empty())
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn mirrored_plan_places_unassigned_files_at_the_deepest_shared_ancestor() {
+    let (_, _, _, rollup_chunks) = mirror_fixture();
+    let plan = plan_mirror(rollup_chunks);
+    let by_name = plan
+        .iter()
+        .map(|chunk| (chunk.name.as_str(), chunk))
+        .collect::<BTreeMap<_, _>>();
+
+    // atom.js is in no Rollup chunk and is consumed from both the entry chunk
+    // and the shared chunk, whose only common ancestors are the two roots.
+    assert_eq!(
+        by_name["vendor"].files,
+        vec!["node_modules/lib/index.js", "src/atom.js"]
+    );
+    assert!(!by_name["index"].files.contains(&"src/atom.js".to_string()));
+    assert!(!by_name["shared"].files.contains(&"src/atom.js".to_string()));
+
+    // Every Rollup-owned module stays in the chunk Rollup chose.
+    assert_eq!(by_name["index"].files, vec!["src/main.js"]);
+    assert_eq!(by_name["ui"].files, vec!["src/ui.js"]);
+    assert_eq!(by_name["shared"].files, vec!["src/shared.js"]);
+    assert_eq!(by_name["route-a"].files, vec!["src/route-a.js"]);
+
+    // The entry shim only imports; nothing consumes it, so it is dead weight
+    // the mirror drops instead of shipping.
+    assert!(plan
+        .iter()
+        .all(|chunk| !chunk.files.iter().any(|file| file.contains("entries/"))));
+}
+
+#[test]
+fn mirrored_plan_rejects_a_cyclic_rollup_chunk_graph() {
+    let (entries, graph, lazy_imports, mut rollup_chunks) = mirror_fixture();
+    // Closure chunk dependencies are a DAG; a cycle has no legal ordering.
+    rollup_chunks[1]
+        .importedChunkFileNames
+        .push("ui-cccc.js".to_string());
+    let error = plan_chunks(
+        "bundler-runtime".to_string(),
+        "index".to_string(),
+        "/workspace".to_string(),
+        entries,
+        graph,
+        lazy_imports,
+        rollup_chunks,
+        vec![],
+        false,
+    )
+    .expect_err("a cyclic chunk graph has no topological order");
+
+    assert!(error.contains("import cycle"), "{error}");
+}
+
+#[test]
+fn absent_rollup_chunks_keep_the_standalone_lazy_planner() {
+    let (entries, graph, lazy_imports, _) = mirror_fixture();
+    let plan = plan_chunks(
+        "bundler-runtime".to_string(),
+        "index".to_string(),
+        "/workspace".to_string(),
+        entries,
+        graph,
+        lazy_imports,
+        vec![],
+        vec![],
+        false,
+    )
+    .expect("the standalone chunked build has no Rollup graph to mirror");
+
+    assert_eq!(plan[0].name, "index");
+    assert_eq!(plan[0].kind.as_deref(), Some("base"));
+    assert!(plan
+        .iter()
+        .any(|chunk| chunk.kind.as_deref() == Some("lazy")));
 }

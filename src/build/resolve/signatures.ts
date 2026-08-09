@@ -73,6 +73,9 @@ export function getOptionsSignature(
       path.relative(options.projectRoot, filePath),
     ),
     projectRoot: options.projectRoot,
+    // The plan mirrors this, so a different host layout is a different build
+    // even when every source byte is unchanged.
+    rollupChunks: hashJson(options.rollupChunks),
     srcDir: options.srcDir,
     target: options.target,
     typeMetadata: hashJson(options.typeMetadata ?? null),

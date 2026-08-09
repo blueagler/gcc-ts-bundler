@@ -349,7 +349,7 @@ pub(super) fn build_bundler_chunk_plan(
     chunks
 }
 
-fn dedupe_lazy_imports(lazy_imports: &[LazyImportEntry]) -> Vec<LazyImportEntry> {
+pub(super) fn dedupe_lazy_imports(lazy_imports: &[LazyImportEntry]) -> Vec<LazyImportEntry> {
     let mut positions = HashMap::<String, usize>::new();
     let mut deduped = Vec::new();
     for lazy_import in lazy_imports {
@@ -382,7 +382,10 @@ fn walk_reachable_files(
     reachable
 }
 
-fn topological_sort(files: Vec<String>, graph: &HashMap<String, Vec<String>>) -> Vec<String> {
+pub(super) fn topological_sort(
+    files: Vec<String>,
+    graph: &HashMap<String, Vec<String>>,
+) -> Vec<String> {
     let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
     let mut visited = BTreeSet::new();
     let mut ordered = Vec::new();
@@ -416,7 +419,7 @@ fn topological_sort(files: Vec<String>, graph: &HashMap<String, Vec<String>>) ->
     ordered
 }
 
-fn to_relative_files(files: &[String], workspace_dir: &Path) -> Vec<String> {
+pub(super) fn to_relative_files(files: &[String], workspace_dir: &Path) -> Vec<String> {
     let mut seen_emitted_paths = BTreeSet::new();
     let mut relative_files = Vec::new();
 

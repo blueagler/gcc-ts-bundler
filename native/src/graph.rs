@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 
+mod chunk_mirror;
 mod chunk_plan;
 mod deps;
 mod exports;
@@ -18,6 +19,8 @@ use sha2::{Digest, Sha256};
 use crate::commonjs::{analyze_commonjs_source, CommonJsAnalysis};
 use crate::pathing::to_goog_module_id;
 
+pub use self::chunk_mirror::RollupChunkInput;
+use self::chunk_mirror::*;
 use self::chunk_plan::*;
 use self::deps::*;
 use self::exports::*;
@@ -334,6 +337,7 @@ pub fn plan_chunks(
     entry_files: Vec<ChunkPlanEntryInput>,
     graph_entries: Vec<DependencyGraphEntry>,
     lazy_imports: Vec<LazyImportEntry>,
+    rollup_chunks: Vec<RollupChunkInput>,
     shim_files: Vec<String>,
     vendor_chunk: bool,
 ) -> std::result::Result<Vec<ChunkPlanChunkOutput>, String> {
@@ -345,6 +349,18 @@ pub fn plan_chunks(
         .collect::<HashMap<_, _>>();
 
     Ok(match chunk_mode {
+        // Rollup chunk data means the host bundler already split this graph and
+        // proved the split ships; mirroring it lets Closure optimize inside
+        // those boundaries instead of re-deriving its own. Only the Vite plugin
+        // has that data - the standalone chunked build derives boundaries from
+        // its lazy imports, which is a different product, not a fallback.
+        ChunkMode::BundlerRuntime if !rollup_chunks.is_empty() => build_mirror_chunk_plan(
+            &entry_files,
+            &graph,
+            &lazy_imports,
+            &rollup_chunks,
+            &workspace_dir,
+        )?,
         ChunkMode::BundlerRuntime => build_bundler_chunk_plan(
             &sanitize_chunk_name(&base_chunk_name),
             &entry_files,

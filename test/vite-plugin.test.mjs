@@ -626,16 +626,38 @@ test("retained graph follows demanded names through impure, named, and star barr
       : path.resolve(path.dirname(importer), specifier),
   });
 
-  const result = await resolveRetainedCapturedModuleIds.call(context, {
+  const kept = await resolveRetainedCapturedModuleIds.call(context, {
     capturedModules,
     metrics: undefined,
+    projectRoot: "/src",
     resolutionCache: new Map(),
-    retainedModuleIds: [entry],
+    retainedModuleIds: [entry, barrel, hook, star, starLeaf],
+    unshakenModuleIds: [entry],
   });
-  expect(result.materializedModuleIds).toEqual(
+  // Rollup kept the barrel, so it stays and keeps its `export *` reach. The
+  // demanded names still travel to their leaves and `heavy` never enters,
+  // because nothing demands `unused`.
+  expect(kept.materializedModuleIds).toEqual(
     [barrel, hook, star, starLeaf, entry].sort(),
   );
-  expect(result.materializedModuleIds).not.toContain(heavy);
+  expect(kept.materializedModuleIds).not.toContain(heavy);
+
+  const shaken = await resolveRetainedCapturedModuleIds.call(context, {
+    capturedModules: new Map(
+      [...capturedModules].map(([id, record]) => [
+        id,
+        { code: record.code, id },
+      ]),
+    ),
+    metrics: undefined,
+    projectRoot: "/src",
+    resolutionCache: new Map(),
+    retainedModuleIds: [entry, hook, starLeaf],
+    unshakenModuleIds: [entry],
+  });
+  // Rollup erased the barrel and the star hop, so the entry has to name the
+  // modules that declare the values, exactly as Rollup's bindings did.
+  expect(shaken.materializedModuleIds).toEqual([entry, hook, starLeaf].sort());
 });
 
 test("retained bare package edges route to captured dependencies or fail with their chain", async () => {
@@ -653,8 +675,10 @@ test("retained bare package edges route to captured dependencies or fail with th
   const routed = await resolveRetainedCapturedModuleIds.call(context, {
     capturedModules,
     metrics: undefined,
+    projectRoot: "/src",
     resolutionCache: new Map(),
-    retainedModuleIds: [entry],
+    retainedModuleIds: [entry, dependency],
+    unshakenModuleIds: [entry],
   });
   expect(routed.materializedModuleIds).toContain(dependency);
 
@@ -662,8 +686,10 @@ test("retained bare package edges route to captured dependencies or fail with th
     resolveRetainedCapturedModuleIds.call(context, {
       capturedModules: new Map([[entry, capturedModules.get(entry)]]),
       metrics: undefined,
+      projectRoot: "/src",
       resolutionCache: new Map(),
       retainedModuleIds: [entry],
+      unshakenModuleIds: [entry],
     }),
   ).rejects.toThrow(
     `${entry} -> "react-is" -> ${dependency}`,
@@ -713,7 +739,13 @@ test.serial(
     });
     const identities = JSON.parse(await fixture.read("dist/identity.json"));
     expect(identities.names.length).toBeGreaterThan(2);
-    expect(identities.facades.length).toBeGreaterThan(0);
+    // The plan mirrors Rollup's chunk graph one for one, so a chunk that still
+    // carries code always owns its own compiled chunk. Only the shared chunk
+    // degrades to a re-export facade here, and only because Closure copied its
+    // one constant into both routes and pruning then removed the empty chunk.
+    expect(
+      identities.facades.filter((name) => !name.includes("shared")),
+    ).toEqual([]);
     for (const fileName of identities.names) {
       expect(await fixture.read(path.join("dist", fileName))).toBeTruthy();
     }
@@ -728,6 +760,108 @@ test.serial(
     for (const fileName of manifestFiles) {
       expect(await fixture.read(path.join("dist", fileName))).toBeTruthy();
     }
+  },
+);
+
+test.serial(
+  "the captured graph is a subgraph of Rollup's shaken module graph",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<div id="app"></div><script type="module" src="/src/main.js"></script>\n',
+    );
+    // `barrel.js` re-exports both leaves, `main.js` reads only one of them, and
+    // `unused-leaf.js` is reachable only through the name nobody reads. Rollup
+    // shakes the barrel and that leaf out of existence, so neither may survive
+    // in the captured graph either.
+    await fixture.write(
+      "src/main.js",
+      [
+        'import { used } from "./barrel.js";',
+        'import { kept } from "./mixed.js";',
+        'document.querySelector("#app").textContent = used + kept;',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/barrel.js",
+      [
+        'export { used } from "./used-leaf.js";',
+        'export { unused } from "./unused-leaf.js";',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write("src/used-leaf.js", 'export const used = "used";\n');
+    await fixture.write(
+      "src/unused-leaf.js",
+      'import { deep } from "./deep-leaf.js";\nexport const unused = deep;\n',
+    );
+    await fixture.write("src/deep-leaf.js", 'export const deep = "deep";\n');
+    await fixture.write(
+      "src/mixed.js",
+      [
+        'import { helper } from "./helper-leaf.js";',
+        'export const kept = "kept";',
+        "export function shaken() {",
+        "  return helper();",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/helper-leaf.js",
+      'export const helper = () => "helper";\n',
+    );
+
+    await buildViteFixture(fixture, {
+      debugDir: ".gcc-capture",
+      trailingPluginEntries: [
+        "    { name: 'capture-retained-modules', enforce: 'post', generateBundle(_options, bundle) { const ids = new Set(); for (const value of Object.values(bundle)) if (value.type === 'chunk') for (const id of Object.keys(value.modules)) ids.add(id); this.emitFile({ type: 'asset', fileName: 'retained.json', source: JSON.stringify([...ids].sort()) }); } },",
+      ],
+    });
+
+    const retained = new Set(
+      JSON.parse(await fixture.read("dist/retained.json")).map((id) =>
+        id.replace(/\\/g, "/"),
+      ),
+    );
+    const authoredRetained = new Set(
+      [...retained]
+        .filter((id) => id.includes("/src/"))
+        .map((id) => id.slice(id.lastIndexOf("/src/") + "/src/".length)),
+    );
+    expect(authoredRetained.has("used-leaf.js")).toBe(true);
+    expect(authoredRetained.has("barrel.js")).toBe(false);
+    expect(authoredRetained.has("unused-leaf.js")).toBe(false);
+
+    const capturedSrcDir = path.join(
+      fixture.projectRoot,
+      ".gcc-capture",
+      "src",
+      "src",
+    );
+    const capturedFiles = await fs.readdir(capturedSrcDir);
+    for (const fileName of capturedFiles) {
+      if (!fileName.endsWith(".js")) continue;
+      expect(authoredRetained.has(fileName)).toBe(true);
+    }
+    // The barrel is gone, so `main.js` has to name the leaf itself, and the
+    // shaken export took its only import with it.
+    const capturedMain = await fs.readFile(
+      path.join(capturedSrcDir, "main.js"),
+      "utf8",
+    );
+    expect(capturedMain).toContain("used-leaf");
+    expect(capturedMain).not.toContain("barrel");
+    const capturedMixed = await fs.readFile(
+      path.join(capturedSrcDir, "mixed.js"),
+      "utf8",
+    );
+    expect(capturedMixed).not.toContain("helper-leaf");
+    expect(capturedFiles).not.toContain("helper-leaf.js");
+    expect(capturedFiles).not.toContain("deep-leaf.js");
   },
 );
 
@@ -2120,9 +2254,12 @@ test.serial(
     );
     const runtimeModuleFiles = Object.values(runtimeModuleSourceMap).join("\n");
     expect(runtimeModuleFiles).toContain("/src/main.js");
-    expect(runtimeModuleFiles).toContain("/src/entry.js");
     expect(runtimeModuleFiles).toContain("/src/alive.js");
     expect(runtimeModuleFiles).not.toContain("/src/dead.js");
+    // `entry.js` only forwards `alive`, so the binding now comes straight from
+    // the module that declares it and the barrel itself has no reader left -
+    // which is exactly what Rollup's own binding resolution did.
+    expect(runtimeModuleFiles).not.toContain("/src/entry.js");
 
     const html = await fixture.read("dist/index.html");
     const entryScript = readRewrittenEntryScript(html);
@@ -2956,7 +3093,7 @@ const ESM_VENDOR_SOURCE = "export var dep=1;\n";
 const ESM_BASE_WITH_VENDOR_SOURCE =
   'import{dep}from"./vendor.js";var r=globalThis.__g;r.a([0,[[[],"",[]],[[0],"./vendor.js",[]],[[0],"./lazy.js",[]]],[0,1,2],"/assets/"]);export{r};\n';
 
-test("esm chunk naming gives base-dependency chunks the stable vendor name", async () => {
+test("esm chunk naming rewrites base-dependency import specifiers", async () => {
   const workspace = await createNamingWorkspace({
     baseSource: ESM_BASE_WITH_VENDOR_SOURCE,
     lazySource: ESM_LAZY_SOURCE,
@@ -2966,17 +3103,17 @@ test("esm chunk naming gives base-dependency chunks the stable vendor name", asy
 
   const vendorFileName = toDistRelativeFile(result.manifest.chunks.vendor.url);
   const lazyFileName = toDistRelativeFile(result.manifest.chunks.lazy.url);
-  expect(vendorFileName).toMatch(/^assets\/vendor-[\w-]{8}\.js$/u);
   expect(result.emitted.sort()).toEqual(
     [result.baseScriptFileName, lazyFileName, vendorFileName].sort(),
   );
 
-  // The base chunk's import of the vendor chunk is rewritten to the final
+  // The base chunk's import of a chunk it depends on is rewritten to the final
   // hashed name, exactly like the manifest urls of the lazy chunks.
   const baseSource = await result.read(result.baseScriptFileName);
   expect(baseSource).toContain(`"./${path.posix.basename(vendorFileName)}"`);
   expect(baseSource).not.toContain('"./vendor.js"');
 });
+
 
 test("vendor chunk keeps its file name across an app-code edit", async () => {
   // Only the base chunk body differs; vendor and lazy bytes are identical.

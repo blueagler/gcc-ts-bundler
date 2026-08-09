@@ -8,6 +8,11 @@ import {
   resolveCapturedSpecifier,
   type CapturedModuleResolutionCache,
 } from "./capture";
+import { bypassDroppedReexports } from "./dropped-reexports";
+import {
+  pruneShakenReexports,
+  restoreCapturedModuleCode,
+} from "./shaken-exports";
 import type {
   CapturedModule,
   OutputBundle,
@@ -91,19 +96,88 @@ export function resolveDynamicRootModuleIds(chunks: OutputChunk[]) {
   ].sort((left, right) => left.localeCompare(right));
 }
 
+/**
+ * The export names some importer still asks a module for.
+ *
+ * `all` means a namespace import, a dynamic import, a `require`, or an entry
+ * point: the whole surface is live and nothing about it can be shaken.
+ */
+export interface ExportDemand {
+  all: boolean;
+  names: Set<string>;
+}
+
+/**
+ * The captured modules the compiler will read, with every re-export nobody
+ * demands already shaken out of them.
+ *
+ * Rollup shook those re-exports before it chunked, so keeping them would leave
+ * our module graph a strict superset of the one Rollup split. Shaking makes the
+ * walk's own demand chains and the materialized text the same statement set,
+ * and shrinks the retained graph in turn, so the two run to a joint fixpoint.
+ */
 export async function resolveRetainedCapturedModuleIds(
   this: PluginContext,
   input: {
     capturedModules: Map<string, CapturedModule>;
     metrics: ViteBuildMetrics | undefined;
+    projectRoot: string;
     resolutionCache: CapturedModuleResolutionCache;
     retainedModuleIds: string[];
+    unshakenModuleIds: readonly string[];
+  },
+) {
+  restoreCapturedModuleCode(input.capturedModules);
+  const retainedModuleIds = new Set(input.retainedModuleIds);
+  for (;;) {
+    const walked = await walkRetainedCapturedModuleIds.call(this, input);
+    // Re-point bindings first, then walk again: shaking a name out of a module
+    // is only sound against a demand map read from the text as it stands now.
+    const bypassedModuleCount = await bypassDroppedReexports.call(this, {
+      capturedModules: input.capturedModules,
+      materializedModuleIds: walked.materializedModuleIds,
+      metrics: input.metrics,
+      resolutionCache: input.resolutionCache,
+      retainedModuleIds,
+    });
+    if (bypassedModuleCount > 0) {
+      continue;
+    }
+    const prunedModuleCount = pruneShakenReexports({
+      capturedModules: input.capturedModules,
+      demand: walked.demand,
+      moduleIds: walked.materializedModuleIds,
+      projectRoot: input.projectRoot,
+    });
+    if (prunedModuleCount === 0) {
+      return {
+        materializedModuleIds: [...walked.materializedModuleIds].sort(
+          (left, right) => left.localeCompare(right),
+        ),
+        missingModuleIds: [...walked.missingModuleIds].sort((left, right) =>
+          left.localeCompare(right),
+        ),
+      };
+    }
+  }
+}
+
+async function walkRetainedCapturedModuleIds(
+  this: PluginContext,
+  input: {
+    capturedModules: Map<string, CapturedModule>;
+    metrics: ViteBuildMetrics | undefined;
+    projectRoot: string;
+    resolutionCache: CapturedModuleResolutionCache;
+    retainedModuleIds: string[];
+    unshakenModuleIds: readonly string[];
   },
 ) {
   const retainedModuleIds = new Set(input.retainedModuleIds);
   const materializedModuleIds = new Set<string>();
   const missingModuleIds = new Set<string>();
   const pendingModuleIds: string[] = [];
+  let demand: Map<string, ExportDemand> | undefined;
 
   for (const moduleId of input.retainedModuleIds) {
     if (input.capturedModules.has(moduleId)) {
@@ -144,29 +218,31 @@ export async function resolveRetainedCapturedModuleIds(
       }
     }
 
-    const demandedReexportModuleIds =
-      await collectDemandedReexportModuleIds.call(this, {
-        capturedModules: input.capturedModules,
-        materializedModuleIds,
-        metrics: input.metrics,
-        resolutionCache: input.resolutionCache,
-      });
-    if (demandedReexportModuleIds.size === 0) {
+    demand = await collectExportDemand.call(this, {
+      capturedModules: input.capturedModules,
+      materializedModuleIds,
+      metrics: input.metrics,
+      resolutionCache: input.resolutionCache,
+      unshakenModuleIds: input.unshakenModuleIds,
+    });
+    const demandedModuleIds = [...demand.keys()].filter(
+      (moduleId) =>
+        !materializedModuleIds.has(moduleId) &&
+        !isNonMaterializedAssetModuleId(moduleId),
+    );
+    if (demandedModuleIds.length === 0) {
       break;
     }
-    for (const moduleId of demandedReexportModuleIds) {
+    for (const moduleId of demandedModuleIds) {
       materializedModuleIds.add(moduleId);
       pendingModuleIds.push(moduleId);
     }
   }
 
   return {
-    materializedModuleIds: [...materializedModuleIds].sort((left, right) =>
-      left.localeCompare(right),
-    ),
-    missingModuleIds: [...missingModuleIds].sort((left, right) =>
-      left.localeCompare(right),
-    ),
+    demand: demand ?? new Map<string, ExportDemand>(),
+    materializedModuleIds,
+    missingModuleIds,
   };
 }
 
@@ -220,16 +296,27 @@ export async function resolveNormalizedBridgeModuleIds(
   );
 }
 
-async function collectDemandedReexportModuleIds(
+/**
+ * Which export names each module still has to provide, as a fixpoint over the
+ * re-export chains.
+ *
+ * A named import demands names; a namespace import, a dynamic import, a
+ * `require` and an entry point demand everything, because none of them names
+ * what it reads. `export ... from` forwards the demand it received, which is
+ * what walks the demand through a chain of barrels down to the module that
+ * declares the value.
+ */
+async function collectExportDemand(
   this: PluginContext,
   input: {
     capturedModules: Map<string, CapturedModule>;
     materializedModuleIds: Set<string>;
     metrics: ViteBuildMetrics | undefined;
     resolutionCache: CapturedModuleResolutionCache;
+    unshakenModuleIds: readonly string[];
   },
 ) {
-  type Demand = { all: boolean; names: Set<string> };
+  type Demand = ExportDemand;
   const demands = new Map<string, Demand>();
   const pending: string[] = [];
   const addDemand = (
@@ -261,6 +348,9 @@ async function collectDemandedReexportModuleIds(
       : null;
   };
 
+  for (const moduleId of input.unshakenModuleIds) {
+    addDemand(moduleId, true, []);
+  }
   for (const importerId of input.materializedModuleIds) {
     const record = input.capturedModules.get(importerId);
     if (!record) continue;
@@ -271,6 +361,29 @@ async function collectDemandedReexportModuleIds(
       true,
       ts.ScriptKind.JS,
     );
+    const opaqueSpecifiers = new Set<string>();
+    const visitOpaqueImports = (node: ts.Node) => {
+      const firstArgument = ts.isCallExpression(node)
+        ? node.arguments[0]
+        : undefined;
+      if (
+        ts.isCallExpression(node) &&
+        (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+          (ts.isIdentifier(node.expression) &&
+            node.expression.text === "require")) &&
+        firstArgument !== undefined &&
+        ts.isStringLiteralLike(firstArgument)
+      ) {
+        opaqueSpecifiers.add(firstArgument.text);
+      }
+      ts.forEachChild(node, visitOpaqueImports);
+    };
+    visitOpaqueImports(sourceFile);
+    for (const specifier of opaqueSpecifiers) {
+      const targetId = await resolve(specifier, importerId);
+      if (targetId) addDemand(targetId, true, []);
+    }
+
     for (const statement of sourceFile.statements) {
       if (
         !ts.isImportDeclaration(statement) ||
@@ -300,7 +413,6 @@ async function collectDemandedReexportModuleIds(
     }
   }
 
-  const additions = new Set<string>();
   while (pending.length > 0) {
     const moduleId = pending.pop();
     if (!moduleId) continue;
@@ -314,7 +426,64 @@ async function collectDemandedReexportModuleIds(
       true,
       ts.ScriptKind.JS,
     );
+    // Vite rewrites `export { a } from "m"` into an import plus a local
+    // `export { a }`, so a demand chain that only reads the first form stops
+    // at the first barrel Vite touched.
+    const importBindings = new Map<
+      string,
+      { imported: string; specifier: string }
+    >();
     for (const statement of sourceFile.statements) {
+      if (
+        !ts.isImportDeclaration(statement) ||
+        !statement.importClause ||
+        statement.importClause.isTypeOnly ||
+        !ts.isStringLiteralLike(statement.moduleSpecifier)
+      ) {
+        continue;
+      }
+      const specifier = statement.moduleSpecifier.text;
+      if (statement.importClause.name) {
+        importBindings.set(statement.importClause.name.text, {
+          imported: "default",
+          specifier,
+        });
+      }
+      const namedBindings = statement.importClause.namedBindings;
+      if (namedBindings && ts.isNamedImports(namedBindings)) {
+        for (const element of namedBindings.elements) {
+          if (!element.isTypeOnly) {
+            importBindings.set(element.name.text, {
+              imported: (element.propertyName ?? element.name).text,
+              specifier,
+            });
+          }
+        }
+      }
+    }
+
+    for (const statement of sourceFile.statements) {
+      if (
+        ts.isExportDeclaration(statement) &&
+        !statement.isTypeOnly &&
+        !statement.moduleSpecifier &&
+        statement.exportClause &&
+        ts.isNamedExports(statement.exportClause)
+      ) {
+        for (const element of statement.exportClause.elements) {
+          if (element.isTypeOnly) continue;
+          if (!demand.all && !demand.names.has(element.name.text)) continue;
+          const forwarded = importBindings.get(
+            (element.propertyName ?? element.name).text,
+          );
+          if (!forwarded) continue;
+          const forwardedId = await resolve(forwarded.specifier, moduleId);
+          if (forwardedId) {
+            addDemand(forwardedId, false, [forwarded.imported]);
+          }
+        }
+        continue;
+      }
       if (
         !ts.isExportDeclaration(statement) ||
         statement.isTypeOnly ||
@@ -346,11 +515,10 @@ async function collectDemandedReexportModuleIds(
         }
       }
       if (!targetAll && targetNames.size === 0) continue;
-      if (!input.materializedModuleIds.has(targetId)) additions.add(targetId);
       addDemand(targetId, targetAll, targetNames);
     }
   }
-  return additions;
+  return demands;
 }
 
 export function summarizeModuleIdsByPackage(moduleIds: Iterable<string>) {

@@ -110,7 +110,7 @@ Both chunked modes are for browser applications:
 - standalone `auto` resolves to `script` (Vite selects ESM when its target allows it); basic builds may explicitly request `esm`;
 - `manifestFile`, when non-empty, is a safe relative path emitted inside `outDir`; absolute paths and `..` escapes are rejected.
 
-`vendorChunk: true` moves eager dependencies into a separate vendor chunk only for `bundler-runtime` with resolved ESM output. `"auto"` and the default `false` leave the entry unsplit.
+`vendorChunk: true` moves eager dependencies into a separate vendor chunk only for `bundler-runtime` with resolved ESM output. `"auto"` and the default `false` leave the entry unsplit. It is a no-op under the Vite plugin: there the chunk plan mirrors Rollup's own chunk graph, which already separates dependency code.
 
 `split` (recommended) compiles every module as one Closure program with
 `--chunk`, so eager code keeps flat-build optimization quality: modules are
