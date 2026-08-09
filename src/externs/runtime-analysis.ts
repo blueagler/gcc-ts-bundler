@@ -124,9 +124,11 @@ export interface RuntimeRenameHazards {
   selfReferentialKeys: Set<string>;
   /**
    * `__publicField(this, "x")`, `defineProperty`, `this["x"] =`, `"x" = v`.
-   * Hyphenated keys also record their camelCase alias: framework prop
-   * systems bridge quoted kebab-case pass sites to camelCase declaration
-   * keys via `camelize`, so the camelCase side must not rename either.
+   * Hyphenated keys also record their identifier aliases — camelCase and
+   * underscored. A hyphen is not a legal identifier, so a hyphenated site can
+   * only ever reach a member through one of those spellings: framework prop
+   * systems bridge quoted kebab-case pass sites to camelCase declaration keys
+   * via `camelize`, and locale tables bridge `"zh-CN"` to `zh_CN`.
    */
   stringDefined: Set<string>;
   /** `o["x"]` read or `"x" in o`. */
@@ -375,9 +377,15 @@ function collectEnumeratedKeyNames(
   sourceFile: ts.SourceFile,
   hazards: RuntimeRenameHazards,
 ) {
-  const record = (keyNames: readonly string[]) => {
+  const arrayBindings = collectUniqueConstBindings(sourceFile);
+  const record = (
+    keyNames: readonly string[],
+    keyTransforms: readonly KeyTransform[],
+  ) => {
     for (const keyName of keyNames) {
-      addMember(hazards.enumeratedKeyNames, keyName);
+      for (const keyTransform of keyTransforms) {
+        addMember(hazards.enumeratedKeyNames, keyTransform(keyName));
+      }
     }
   };
 
@@ -387,34 +395,37 @@ function collectEnumeratedKeyNames(
       // because helpers disagree on them (`arrayEach(list, fn)` versus a
       // `fn`-first signature) and the consumer check carries the proof.
       for (const [index, argument] of node.arguments.entries()) {
-        const keyNames = literalKeyList(argument);
+        const keyNames = literalKeyList(argument, arrayBindings);
         if (!keyNames) continue;
         for (const [otherIndex, other] of node.arguments.entries()) {
           if (otherIndex === index) continue;
-          if (consumesParameterAsKey(other)) record(keyNames);
+          record(keyNames, parameterKeyTransforms(other));
         }
       }
       // `<key list>.forEach(function (k) { … })`, and every other iterator
       // method shaped like it.
       if (ts.isPropertyAccessExpression(node.expression)) {
-        const keyNames = literalKeyList(node.expression.expression);
-        if (keyNames && node.arguments.some(consumesParameterAsKey)) {
-          record(keyNames);
+        const keyNames = literalKeyList(
+          node.expression.expression,
+          arrayBindings,
+        );
+        if (keyNames) {
+          for (const argument of node.arguments) {
+            record(keyNames, parameterKeyTransforms(argument));
+          }
         }
       }
     } else if (
       ts.isForOfStatement(node) &&
       ts.isVariableDeclarationList(node.initializer)
     ) {
-      const keyNames = literalKeyList(node.expression);
+      const keyNames = literalKeyList(node.expression, arrayBindings);
       const [declaration] = node.initializer.declarations;
-      if (
-        keyNames &&
-        declaration &&
-        ts.isIdentifier(declaration.name) &&
-        isComputedKeyIn(node.statement, declaration.name.text)
-      ) {
-        record(keyNames);
+      if (keyNames && declaration && ts.isIdentifier(declaration.name)) {
+        record(
+          keyNames,
+          collectKeyTransforms(node.statement, declaration.name.text),
+        );
       }
     }
     ts.forEachChild(node, visit);
@@ -424,18 +435,71 @@ function collectEnumeratedKeyNames(
 }
 
 /**
+ * Names declared exactly once in the file by a `const` with an initializer.
+ *
+ * One declaration is what makes the binding resolvable without scope analysis:
+ * nothing shadows the name, `const` forbids reassignment, so the initializer
+ * is what every mention of it holds. antd's responsive observer needs this —
+ * its key list is a module-level `const`, not an inline literal.
+ */
+function collectUniqueConstBindings(sourceFile: ts.SourceFile) {
+  const declarationCounts = new Map<string, number>();
+  const constantInitializers = new Map<string, ts.Expression>();
+  const visit = (node: ts.Node) => {
+    const declaredName = ts.isVariableDeclaration(node)
+      ? node.name
+      : ts.isParameter(node)
+        ? node.name
+        : ts.isBindingElement(node)
+          ? node.name
+          : ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)
+            ? node.name
+            : ts.isImportSpecifier(node) ||
+                ts.isImportClause(node) ||
+                ts.isNamespaceImport(node)
+              ? node.name
+              : undefined;
+    if (declaredName && ts.isIdentifier(declaredName)) {
+      declarationCounts.set(
+        declaredName.text,
+        (declarationCounts.get(declaredName.text) ?? 0) + 1,
+      );
+      if (
+        ts.isVariableDeclaration(node) &&
+        node.initializer &&
+        (ts.getCombinedNodeFlags(node) & ts.NodeFlags.Const) !== 0
+      ) {
+        constantInitializers.set(declaredName.text, node.initializer);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+
+  const bindings = new Map<string, ts.Expression>();
+  for (const [name, initializer] of constantInitializers) {
+    if (declarationCounts.get(name) === 1) bindings.set(name, initializer);
+  }
+  return bindings;
+}
+
+/**
  * The finite set of strings an expression provably evaluates to, or null.
  *
  * Only shapes whose every element is a literal qualify. A `split` on a
  * non-literal, a spread, a hole, or a computed element makes the set unknown,
- * and an unknown set is not evidence.
+ * and an unknown set is not evidence. `concat`, `reverse` and `slice` are
+ * admitted because they copy, permute or drop elements and can never invent
+ * one, so the resulting key *set* is bounded by the literal list either way.
  */
 function literalKeyList(
   expression: ts.Expression | undefined,
+  bindings: ReadonlyMap<string, ts.Expression>,
+  resolving: ReadonlySet<string> = new Set(),
 ): string[] | null {
   if (!expression) return null;
   if (ts.isParenthesizedExpression(expression)) {
-    return literalKeyList(expression.expression);
+    return literalKeyList(expression.expression, bindings, resolving);
   }
   // `['a', 'b']`
   if (ts.isArrayLiteralExpression(expression)) {
@@ -444,89 +508,219 @@ function literalKeyList(
       if (!ts.isStringLiteralLike(element)) return null;
       keyNames.push(element.text);
     }
-    return keyNames.length > 0 ? keyNames : null;
+    return keyNames;
   }
-  // `'a b c'.split(' ')`
+  // `responsiveArray`, resolved through its single `const` declaration.
+  if (ts.isIdentifier(expression)) {
+    const initializer = bindings.get(expression.text);
+    if (!initializer || resolving.has(expression.text)) return null;
+    return literalKeyList(
+      initializer,
+      bindings,
+      new Set([...resolving, expression.text]),
+    );
+  }
   if (
     ts.isCallExpression(expression) &&
-    ts.isPropertyAccessExpression(expression.expression) &&
-    expression.expression.name.text === "split" &&
-    ts.isStringLiteralLike(expression.expression.expression) &&
-    expression.arguments.length === 1 &&
-    expression.arguments[0] !== undefined &&
-    ts.isStringLiteralLike(expression.arguments[0])
+    ts.isPropertyAccessExpression(expression.expression)
   ) {
-    const keyNames = expression.expression.expression.text
-      .split(expression.arguments[0].text)
-      .filter((keyName) => keyName.length > 0);
-    return keyNames.length > 0 ? keyNames : null;
+    const method = expression.expression.name.text;
+    const receiver = expression.expression.expression;
+    // `'a b c'.split(' ')`
+    if (
+      method === "split" &&
+      ts.isStringLiteralLike(receiver) &&
+      expression.arguments.length === 1 &&
+      expression.arguments[0] !== undefined &&
+      ts.isStringLiteralLike(expression.arguments[0])
+    ) {
+      return receiver.text
+        .split(expression.arguments[0].text)
+        .filter((keyName) => keyName.length > 0);
+    }
+    // `[].concat(responsiveArray).reverse()` — antd's spelling of the same
+    // list. Order and multiplicity are irrelevant to a key set.
+    if (method === "reverse" || method === "slice") {
+      return literalKeyList(receiver, bindings, resolving);
+    }
+    if (method === "concat") {
+      const keyNames = literalKeyList(receiver, bindings, resolving);
+      if (!keyNames) return null;
+      for (const argument of expression.arguments) {
+        const argumentNames = ts.isStringLiteralLike(argument)
+          ? [argument.text]
+          : literalKeyList(argument, bindings, resolving);
+        if (!argumentNames) return null;
+        keyNames.push(...argumentNames);
+      }
+      return keyNames;
+    }
+    return null;
   }
   // `cond ? ['a'] : ['b']` — both arms must be literal lists.
   if (ts.isConditionalExpression(expression)) {
-    const whenTrue = literalKeyList(expression.whenTrue);
-    const whenFalse = literalKeyList(expression.whenFalse);
+    const whenTrue = literalKeyList(expression.whenTrue, bindings, resolving);
+    const whenFalse = literalKeyList(expression.whenFalse, bindings, resolving);
     return whenTrue && whenFalse ? [...whenTrue, ...whenFalse] : null;
   }
   return null;
 }
 
-/** True when `argument` is a function using a parameter as a computed key. */
-function consumesParameterAsKey(argument: ts.Expression | undefined) {
+/** A total, statically evaluable transformation of one list element. */
+type KeyTransform = (element: string) => string;
+
+/**
+ * One piece of a key built from a list element: either a fixed literal, or a
+ * part that carries the element through a chain of total transformations.
+ */
+type KeyPart =
+  | { apply: KeyTransform; kind: "element" }
+  | { kind: "literal"; text: string };
+
+/** Keys the parameters of a callback argument build from a list element. */
+function parameterKeyTransforms(argument: ts.Expression | undefined) {
   if (
     !argument ||
     !(ts.isFunctionExpression(argument) || ts.isArrowFunction(argument))
   ) {
-    return false;
+    return [];
   }
-  return argument.parameters.some(
-    (parameter) =>
-      ts.isIdentifier(parameter.name) &&
-      isComputedKeyIn(argument.body, parameter.name.text),
+  return argument.parameters.flatMap((parameter) =>
+    ts.isIdentifier(parameter.name)
+      ? collectKeyTransforms(argument.body, parameter.name.text)
+      : [],
   );
 }
 
 /**
- * True when `name` reaches computed member-access position inside `body`.
+ * Every key that `elementName` provably reaches computed member-access
+ * position as, inside `body`.
  *
- * A concatenated key (`o[k + 'Right']`) counts, but only when every literal
- * joined to it is identifier-safe: the fragment class pins the literal suffix,
- * while the stem it is joined to is known only from the list. jQuery shows why
- * the guard is needed — `class2type["[object " + name + "]"] = …` runs the same
- * name list through element access, yet the key it builds
- * (`[object Boolean]`) can never be a renameable identifier property, so
- * `Boolean`, `Date`, `Error` and five more would be pinned for nothing.
+ * The plain case is the identity (`speed[axis]`), but antd routes the element
+ * through two intermediate `const`s before using it:
+ *
+ * ```js
+ * const breakpointUpper = breakpoint.toUpperCase();       // 'XS'
+ * const screenMin = `screen${breakpointUpper}Min`;        // 'screenXSMin'
+ * if (!(token[screenMin] <= token[screen])) throw …       // STRING reads
+ * ```
+ *
+ * Following those bindings needs no scope analysis: they are `const`, they are
+ * visited in source order, and each one is admitted only when it evaluates to
+ * a *total* transformation of the element — `toUpperCase`, `toLowerCase`, and
+ * concatenation with fixed literals. Anything partial or unknown (a `replace`,
+ * a lookup, another variable) stops the chain, so the computed key set stays
+ * exactly as large as the literal list.
  */
-function isComputedKeyIn(body: ts.Node, name: string) {
-  let found = false;
-  const isIdentifierSafeLiteral = (expression: ts.Expression) =>
-    !ts.isStringLiteralLike(expression) || /^[\w$]*$/u.test(expression.text);
-  const mentionsName = (expression: ts.Expression): boolean => {
-    if (ts.isIdentifier(expression)) return expression.text === name;
-    if (
-      ts.isBinaryExpression(expression) &&
-      expression.operatorToken.kind === ts.SyntaxKind.PlusToken
-    ) {
-      return (
-        isIdentifierSafeLiteral(expression.left) &&
-        isIdentifierSafeLiteral(expression.right) &&
-        (mentionsName(expression.left) || mentionsName(expression.right))
-      );
-    }
-    return false;
-  };
+function collectKeyTransforms(body: ts.Node, elementName: string) {
+  const transforms = new Map<string, KeyTransform>([
+    [elementName, (element) => element],
+  ]);
+  const keyTransforms: KeyTransform[] = [];
   const visit = (node: ts.Node) => {
-    if (found) return;
     if (
-      ts.isElementAccessExpression(node) &&
-      mentionsName(node.argumentExpression)
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer &&
+      (ts.getCombinedNodeFlags(node) & ts.NodeFlags.Const) !== 0
     ) {
-      found = true;
-      return;
+      const part = evaluateKeyPart(node.initializer, transforms);
+      if (part?.kind === "element") transforms.set(node.name.text, part.apply);
+    } else if (ts.isElementAccessExpression(node)) {
+      const part = evaluateKeyPart(node.argumentExpression, transforms);
+      if (part?.kind === "element") keyTransforms.push(part.apply);
     }
     ts.forEachChild(node, visit);
   };
   visit(body);
-  return found;
+  return keyTransforms;
+}
+
+/** How an expression builds a key out of the element bound in `transforms`. */
+function evaluateKeyPart(
+  expression: ts.Expression,
+  transforms: ReadonlyMap<string, KeyTransform>,
+): KeyPart | null {
+  if (ts.isParenthesizedExpression(expression)) {
+    return evaluateKeyPart(expression.expression, transforms);
+  }
+  if (ts.isStringLiteralLike(expression)) {
+    return { kind: "literal", text: expression.text };
+  }
+  if (ts.isIdentifier(expression)) {
+    const apply = transforms.get(expression.text);
+    return apply ? { apply, kind: "element" } : null;
+  }
+  // `k.toUpperCase()` / `k.toLowerCase()`: total on every string, so the key
+  // set stays the size of the list.
+  if (
+    ts.isCallExpression(expression) &&
+    expression.arguments.length === 0 &&
+    ts.isPropertyAccessExpression(expression.expression) &&
+    (expression.expression.name.text === "toUpperCase" ||
+      expression.expression.name.text === "toLowerCase")
+  ) {
+    const toUpperCase = expression.expression.name.text === "toUpperCase";
+    const inner = evaluateKeyPart(expression.expression.expression, transforms);
+    if (!inner) return null;
+    const changeCase = (value: string) =>
+      toUpperCase ? value.toUpperCase() : value.toLowerCase();
+    return inner.kind === "element"
+      ? {
+          apply: (element) => changeCase(inner.apply(element)),
+          kind: "element",
+        }
+      : { kind: "literal", text: changeCase(inner.text) };
+  }
+  // `` `screen${upper}Min` ``
+  if (ts.isTemplateExpression(expression)) {
+    const parts: KeyPart[] = [{ kind: "literal", text: expression.head.text }];
+    for (const span of expression.templateSpans) {
+      const part = evaluateKeyPart(span.expression, transforms);
+      if (!part) return null;
+      parts.push(part, { kind: "literal", text: span.literal.text });
+    }
+    return joinKeyParts(parts);
+  }
+  // `k + 'Right'`
+  if (
+    ts.isBinaryExpression(expression) &&
+    expression.operatorToken.kind === ts.SyntaxKind.PlusToken
+  ) {
+    const left = evaluateKeyPart(expression.left, transforms);
+    const right = evaluateKeyPart(expression.right, transforms);
+    return left && right ? joinKeyParts([left, right]) : null;
+  }
+  return null;
+}
+
+/**
+ * Concatenate key parts, or null when the result cannot name a property that
+ * Closure would rename.
+ *
+ * jQuery is why the literal guard exists: `class2type["[object " + name + "]"]`
+ * runs a name list through element access, yet `[object Boolean]` is not an
+ * identifier, so `Boolean`, `Date`, `Error` and five more would be pinned for
+ * nothing. antd's `` `(max-width: ${token.screenXSMax}px)` `` is the same
+ * shape and equally not a key.
+ */
+function joinKeyParts(parts: readonly KeyPart[]): KeyPart | null {
+  const applyPart = (part: KeyPart, element: string) =>
+    part.kind === "element" ? part.apply(element) : part.text;
+  if (!parts.some((part) => part.kind === "element")) {
+    return {
+      kind: "literal",
+      text: parts.map((part) => applyPart(part, "")).join(""),
+    };
+  }
+  const identifierSafe = parts.every(
+    (part) => part.kind === "element" || /^[\w$]*$/u.test(part.text),
+  );
+  if (!identifierSafe) return null;
+  return {
+    apply: (element) => parts.map((part) => applyPart(part, element)).join(""),
+    kind: "element",
+  };
 }
 
 /** Shortest literal fragment worth pinning on; below this it matches noise. */
@@ -604,15 +798,24 @@ function collectConstructedKeyPrefix(
 function addMember(target: Set<string>, memberName: string | null | undefined) {
   if (memberName && isRuntimeExternPropertyName(memberName)) {
     target.add(memberName);
+    // A hyphenated key is never the renamed form of an identifier member, so
+    // its identifier spellings are what a hyphenated site actually reaches.
     // Prop systems bridge quoted kebab-case pass sites ("click-count") to
-    // camelCase declaration keys via camelize, so a hyphenated string
-    // definition means the camelCase member must not rename either.
+    // camelCase declaration keys via camelize; locale tables bridge dashed
+    // keys ("zh-CN") to underscored ones. pro-components builds its intl map
+    // with `Object.fromEntries(Object.keys(localeMessages).map(k =>
+    // [k.replace("_", "-"), …]))` and then reads `intlMap["zh-CN"]`, so
+    // renaming `zh_CN` leaves every lookup undefined.
     if (memberName.includes("-")) {
       const camelized = memberName.replace(/-(\w)/gu, (_, letter: string) =>
         letter.toUpperCase(),
       );
       if (isRuntimeExternPropertyName(camelized)) {
         target.add(camelized);
+      }
+      const underscored = memberName.replace(/-/gu, "_");
+      if (isRuntimeExternPropertyName(underscored)) {
+        target.add(underscored);
       }
     }
   }

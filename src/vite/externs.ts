@@ -43,7 +43,9 @@ type CachedRuntimeHazards = {
 // v5: runtime hazards gained `constructedKeyFragments`.
 // v6: runtime hazards gained `selfReferentialKeys`.
 // v7: runtime hazards gained `enumeratedKeyNames`.
-const VITE_EXTERN_PACKAGE_CACHE_VERSION = 7;
+// v8: `enumeratedKeyNames` resolves const-bound lists and element transforms.
+// v9: hyphenated keys also record their underscored identifier alias.
+const VITE_EXTERN_PACKAGE_CACHE_VERSION = 9;
 
 export async function resolveCompilerExterns(input: {
   captureRoot: string;

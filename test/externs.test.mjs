@@ -308,6 +308,15 @@ test.serial(
         "export function declare(props) {",
         "  return props.clickCount;",
         "}",
+        "// pro-components' intl map: the locale table is dot-defined, its keys",
+        "// are re-published dashed, and the lookup is a dashed string literal.",
+        "const localeMessages = { zh_CN: 1, en_US: 2 };",
+        "const intlMap = Object.fromEntries(",
+        "  Object.keys(localeMessages).map((k) => [k.replace('_', '-'), k]),",
+        ");",
+        "export function zhCN() {",
+        '  return intlMap["zh-CN"];',
+        "}",
         "// An ordinary message template must not become prefix evidence.",
         "export function label(kind) {",
         "  return `count: ${kind}`;",
@@ -331,6 +340,10 @@ test.serial(
     expect(result.text).toContain("Object.prototype.$evtclick;");
     // Hyphenated string definition externs its camelCase alias too.
     expect(result.text).toContain("Object.prototype.clickCount;");
+    // …and its underscored alias, which is what the dashed locale lookup
+    // reaches. Renaming `zh_CN` leaves `intlMap["zh-CN"]` undefined.
+    expect(result.text).toContain("Object.prototype.zh_CN;");
+    expect(result.text).not.toContain("Object.prototype.en_US;");
     // Non-$/_ template heads are not prefix evidence.
     expect(result.text).not.toContain("Object.prototype.countLabel;");
   },
@@ -874,7 +887,7 @@ test("finite literal key lists that reach computed access are rename evidence", 
       // for…of over a literal list.
       "const speed = { x: 0, y: 0 };",
       "for (const axis of ['x', 'y']) { speed[axis] = 0; }",
-      // Concatenated use still needs the stem pinned.
+      // A concatenated key is recorded as the key it actually builds.
       "const lazy = {};",
       "arrayEach(['drop'], function (name) { lazy[name + 'Right'] = 1; });",
       // jQuery's `class2type["[object " + name + "]"] = …` runs a name list
@@ -901,7 +914,7 @@ test("finite literal key lists that reach computed access are rename evidence", 
     "beta",
     "bind",
     "curry",
-    "drop",
+    "dropRight",
     "x",
     "y",
   ]);
@@ -912,7 +925,7 @@ test("finite literal key lists that reach computed access are rename evidence", 
   });
   expect([...lines]).toContain("Object.prototype.bind;");
   expect([...lines]).toContain("Object.prototype.curry;");
-  expect([...lines]).toContain("Object.prototype.drop;");
+  expect([...lines]).toContain("Object.prototype.dropRight;");
   // An unindexed literal array stays out; admitting it would pin every
   // message table and enum in the program.
   expect([...lines]).not.toContain("Object.prototype.notFound;");
@@ -920,6 +933,71 @@ test("finite literal key lists that reach computed access are rename evidence", 
   // A concatenation that cannot produce an identifier is not a rename hazard.
   expect([...lines]).not.toContain("Object.prototype.Boolean;");
   expect([...lines]).not.toContain("Object.prototype.Number;");
+});
+
+test("const-bound key lists and element transforms are rename evidence", async () => {
+  const { analyzeRuntimeUsage } = await import(
+    "../src/externs/runtime-analysis.ts"
+  );
+  const fixture = await createFixture();
+  await fixture.write(
+    "runtime.js",
+    [
+      // antd's responsive observer, reduced to three breakpoints: the list is
+      // a module-level const, reaches the loop through `concat`/`reverse`, and
+      // every key is built by `toUpperCase` plus a template.
+      "const responsiveArray = ['xxl', 'md', 'xs'];",
+      "export const validateBreakpoints = (token) => {",
+      "  const revBreakpoints = [].concat(responsiveArray).reverse();",
+      "  revBreakpoints.forEach((breakpoint, i) => {",
+      "    const breakpointUpper = breakpoint.toUpperCase();",
+      "    const screenMin = `screen${breakpointUpper}Min`;",
+      "    const screen = `screen${breakpointUpper}`;",
+      "    const screenMax = `screen${breakpointUpper}Max`;",
+      "    if (!(token[screenMin] <= token[screen])) throw new Error('bad');",
+      "    if (!(token[screen] <= token[screenMax])) throw new Error('bad');",
+      "  });",
+      "};",
+      // for…of over the same const binding.
+      "export const matchScreen = (screens) => {",
+      "  for (const breakpoint of responsiveArray) {",
+      "    if (screens[breakpoint]) return breakpoint;",
+      "  }",
+      "};",
+      // Negative: the list is not literal, so nothing about it is known.
+      "const dynamicList = Object.keys(globalThis);",
+      "const dynamic = {};",
+      "dynamicList.forEach((key) => { dynamic[key] = 1; });",
+      // Negative: a partial transformation breaks the chain, and a template
+      // that cannot build an identifier is a message, not a key.
+      "const partialList = ['alpha', 'beta'];",
+      "const probe = {};",
+      "partialList.forEach((key) => {",
+      "  const trimmed = key.slice(1);",
+      "  probe[trimmed] = 1;",
+      "  probe[`(max-width: ${key}px)`] = 2;",
+      "});",
+    ].join("\n"),
+  );
+
+  const hazards = await analyzeRuntimeUsage(
+    [path.join(fixture.projectRoot, "runtime.js")],
+    { keyExclusionListCallees: [], keyReadCallees: [] },
+  );
+  expect([...hazards.enumeratedKeyNames].sort()).toEqual([
+    "md",
+    "screenMD",
+    "screenMDMax",
+    "screenMDMin",
+    "screenXS",
+    "screenXSMax",
+    "screenXSMin",
+    "screenXXL",
+    "screenXXLMax",
+    "screenXXLMin",
+    "xs",
+    "xxl",
+  ]);
 });
 
 // The audit that justified shipping the rule unconditionally: across all 12
