@@ -11,13 +11,11 @@ import type { AppUsageMembers } from "../externs/render";
 import { classifyModuleId, stripQuery } from "./capture";
 import {
   analyzeRuntimeUsage,
+  createKeyNameReader,
   mergeRuntimeHazards,
 } from "../externs/runtime-analysis";
 import type { RuntimeRenameHazards } from "../externs/runtime-analysis";
-import {
-  getStringLiteralMemberName,
-  isRuntimeExternPropertyName,
-} from "../externs/shared";
+import { isRuntimeExternPropertyName } from "../externs/shared";
 import {
   getDefaultPersistentCacheRoot,
   readJsonIfExists,
@@ -47,7 +45,8 @@ type CachedRuntimeHazards = {
 // v8: `enumeratedKeyNames` resolves const-bound lists and element transforms.
 // v9: hyphenated keys also record their underscored identifier alias.
 // v10: runtime hazards gained `cssVariableKeyNames`.
-const VITE_EXTERN_PACKAGE_CACHE_VERSION = 10;
+// v11: key reads resolve const-bound string literals (`const K = "x"; K in o`).
+const VITE_EXTERN_PACKAGE_CACHE_VERSION = 11;
 
 export async function resolveCompilerExterns(input: {
   captureRoot: string;
@@ -344,19 +343,17 @@ async function analyzeJsUsageMembers(
         target.add(memberName);
       }
     };
+    const readKeyName = createKeyNameReader(sourceFile);
     const visit = (node: ts.Node) => {
       if (ts.isPropertyAccessExpression(node)) {
         add(dotAccessed, node.name.text);
       } else if (ts.isElementAccessExpression(node)) {
-        add(
-          stringLiteralRead,
-          getStringLiteralMemberName(node.argumentExpression),
-        );
+        add(stringLiteralRead, readKeyName(node.argumentExpression));
       } else if (
         ts.isBinaryExpression(node) &&
         node.operatorToken.kind === ts.SyntaxKind.InKeyword
       ) {
-        add(stringLiteralRead, getStringLiteralMemberName(node.left));
+        add(stringLiteralRead, readKeyName(node.left));
       }
       ts.forEachChild(node, visit);
     };

@@ -954,3 +954,101 @@ test.serial(
     await executeFixtureInChromium(fixture, "eager-ok-keylist-ok");
   },
 );
+
+
+// `@ant-design/cssinjs` wraps an RTL-exempt CSS value as
+// `margin: { _skip_check_: true, value: "0 0 0 8px" }` and recognises the
+// wrapper with `SKIP_CHECK in value`, where `const SKIP_CHECK =
+// "_skip_check_"`. The marker is defined as an object-literal identifier key,
+// so Closure ADVANCED renames it; the const string does not follow;
+// `isCompoundCSSProperty` returns false; `parseStyle` treats the wrapper as a
+// nested selector and emits `.tab margin{va:true;value:0 0 0 8px;}` instead of
+// `.tab{margin:0 0 0 8px;}`. Nothing throws — the tabs just lose their gap.
+test.serial(
+  "object keys read through a const-bound string survive a chunked build",
+  { timeout: 60000 },
+  async () => {
+    const fixture = await createFixture();
+    await writeHtmlFixture(fixture);
+    await fixture.write(
+      "node_modules/marker-pkg/package.json",
+      `${JSON.stringify({ main: "index.js", name: "marker-pkg", version: "1.0.0" }, null, 2)}\n`,
+    );
+    await fixture.write(
+      "node_modules/marker-pkg/index.js",
+      [
+        // Read side: the marker name only ever exists as a const string.
+        "const SKIP_CHECK = '_skip_check_';",
+        "function isCompound(value) {",
+        "  return typeof value === 'object' && value !== null && SKIP_CHECK in value;",
+        "}",
+        "",
+        "export function parseStyle(style) {",
+        "  let out = '';",
+        "  for (const key of Object.keys(style)) {",
+        "    const value = style[key];",
+        "    if (typeof value === 'object' && value !== null && !isCompound(value)) {",
+        "      out += `${key}{${parseStyle(value)}}`;",
+        "    } else {",
+        "      out += `${key}:${value && value.value !== undefined ? value.value : value};`;",
+        "    }",
+        "  }",
+        "  return out;",
+        "}",
+        "",
+        // Definition side: a plain object-literal identifier key.
+        "export const tabStyle = {",
+        "  '.tab': { margin: { _skip_check_: true, value: '0 0 0 8px' } },",
+        "};",
+        "",
+      ].join("\n"),
+    );
+    // A second entry keeps the dependency in a shared chunk rather than
+    // inlined into one entry, so the build under test is genuinely chunked.
+    await fixture.write(
+      "src/lazy.js",
+      [
+        'import { parseStyle, tabStyle } from "marker-pkg";',
+        "export function render() {",
+        "  return parseStyle(tabStyle) === '.tab{margin:0 0 0 8px;}'",
+        "    ? 'marker-ok'",
+        "    : 'marker-broken';",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/main.js",
+      [
+        'import { parseStyle, tabStyle } from "marker-pkg";',
+        "const eager =",
+        "  parseStyle(tabStyle) === '.tab{margin:0 0 0 8px;}'",
+        '    ? "eager-ok"',
+        '    : "eager-broken";',
+        'import("./lazy.js").then((module) => {',
+        "  document.body.textContent = `${eager}-${module.render()}`;",
+        "});",
+        "",
+      ].join("\n"),
+    );
+
+    const built = await buildViteFixture(fixture, {
+      pluginEntries: [
+        [
+          "gccTsBundler({",
+          '  compiler: { cache: { mode: "off" } },',
+          '  externs: { generate: { modules: ["marker-pkg"] } },',
+          "})",
+        ].join(" "),
+      ],
+    });
+    expect(buildErrorText(built)).toBe("");
+    expect(built.ok).toBe(true);
+
+    // The pin really happened: the marker key kept its literal spelling.
+    const sources = (await readJavaScript(fixture)).join("\n");
+    expect(sources).toContain("_skip_check_");
+
+    await executeFixtureInChromium(fixture, "eager-ok-marker-ok");
+  },
+);

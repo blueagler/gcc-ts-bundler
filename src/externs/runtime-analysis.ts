@@ -144,7 +144,11 @@ export interface RuntimeRenameHazards {
    * via `camelize`, and locale tables bridge `"zh-CN"` to `zh_CN`.
    */
   stringDefined: Set<string>;
-  /** `o["x"]` read or `"x" in o`. */
+  /**
+   * `o["x"]` read or `"x" in o`, with the key spelled either as a literal or
+   * as a file-local `const` bound once to one (`const K = "x"; K in o`). See
+   * `createKeyNameReader`.
+   */
   stringLiteralRead: Set<string>;
 }
 
@@ -233,6 +237,7 @@ function collectFileHazards(
 ) {
   const knownConstructors = collectKnownConstructorBindings(sourceFile);
   const provenFieldHelpers = collectProvenFieldHelperNames(sourceFile);
+  const readKeyName = createKeyNameReader(sourceFile);
   collectLiteralIndexedKeyReaders(sourceFile, hazards);
   collectEnumeratedKeyNames(sourceFile, hazards);
   const visit = (node: ts.Node) => {
@@ -246,7 +251,7 @@ function collectFileHazards(
       if (!isAssignmentTarget(node)) {
         addMember(
           hazards.stringLiteralRead,
-          getStringLiteralMemberName(node.argumentExpression),
+          readKeyName(node.argumentExpression),
         );
       }
     } else if (ts.isTemplateExpression(node)) {
@@ -255,10 +260,7 @@ function collectFileHazards(
       if (isAssignmentOperator(node.operatorToken.kind)) {
         collectRuntimeAssignmentMembers(node.left, knownConstructors, hazards);
       } else if (node.operatorToken.kind === ts.SyntaxKind.InKeyword) {
-        addMember(
-          hazards.stringLiteralRead,
-          getStringLiteralMemberName(node.left),
-        );
+        addMember(hazards.stringLiteralRead, readKeyName(node.left));
       }
     } else if (ts.isCallExpression(node)) {
       collectProtocolHelperMembers(node, hazards, protocolHelpers);
@@ -808,6 +810,47 @@ function collectConstructedKeyPrefix(
   if (/^[$_][\w$]*$/u.test(head) && head.length >= 2) {
     hazards.constructedKeyPrefixes.add(head);
   }
+}
+
+/**
+ * The property name an `o[k]` or `k in o` key expression provably reads.
+ *
+ * A string literal is the direct case. The other one is a *named* literal — a
+ * file-local `const` bound once to a string, spelled out at the read site:
+ *
+ * ```js
+ * const SKIP_CHECK  = "_skip_check_";                    // cssinjs
+ * const MULTI_VALUE = "_multi_value_";
+ * SKIP_CHECK in value || MULTI_VALUE in value            // the read
+ * ```
+ *
+ * `in` with an identifier operand is the novel shape here, and it is the whole
+ * hazard: antd defines the marker as an object-literal identifier key
+ * (`margin: { _skip_check_: true, value: … }`), so the definition renames while
+ * the const string does not. cssinjs then stops recognising its own RTL-exempt
+ * wrapper, treats it as a nested selector and emits
+ * `.ant-tabs-tab margin{va:true;value:…}` instead of `.ant-tabs-tab{margin:…}`.
+ * No other evidence class sees it: the definition is a plain dot, so
+ * `stringDefined ∩ dotAccessed` misses it; nothing is concatenated or
+ * templated; no literal key list feeds a loop variable; no sibling names the
+ * key. Only the resolution step was missing — the pin itself is the existing
+ * `dotDefined ∩ stringLiteralRead` intersection.
+ *
+ * `collectUniqueConstBindings` supplies the proof: one declaration of the name
+ * in the file, `const`, initialised to a literal. Measured over a 5,280-file
+ * materialized tree: 9 names read this way, 4 of them dot-defined.
+ */
+export function createKeyNameReader(sourceFile: ts.SourceFile) {
+  const constBindings = collectUniqueConstBindings(sourceFile);
+  return (expression: ts.Expression | undefined) => {
+    const literalName = getStringLiteralMemberName(expression);
+    if (literalName !== null) {
+      return literalName;
+    }
+    return expression && ts.isIdentifier(expression)
+      ? getStringLiteralMemberName(constBindings.get(expression.text))
+      : null;
+  };
 }
 
 function addMember(target: Set<string>, memberName: string | null | undefined) {

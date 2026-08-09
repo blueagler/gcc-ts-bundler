@@ -1185,3 +1185,67 @@ test("enumeration without a `--` construction pins nothing", async () => {
   expect([...result.keyNames]).toEqual([]);
   expect(result.sinkSites).toEqual([]);
 });
+
+// `@ant-design/cssinjs` marks an RTL-exempt CSS value with a wrapper object,
+// `margin: { _skip_check_: true, value: "0 0 0 8px" }`, and recognises it with
+// `SKIP_CHECK in value` where `const SKIP_CHECK = "_skip_check_"`. The key is
+// an object-literal identifier, so it renames; the const string does not
+// follow, `parseStyle` mistakes the wrapper for a nested selector and emits
+// `.ant-tabs-tab margin{va:true;value:…}` instead of `.ant-tabs-tab{margin:…}`.
+// The tabs lose their gap with no error anywhere.
+test("keys read through a const-bound string are rename evidence", async () => {
+  const { analyzeRuntimeUsage } = await import(
+    "../src/externs/runtime-analysis.ts"
+  );
+  const { collectRuntimeUsageExternLines } = await import(
+    "../src/externs/render.ts"
+  );
+  const fixture = await createFixture();
+  await fixture.write(
+    "runtime.js",
+    [
+      // The read side: a const string in `in` and in computed-index position.
+      "const SKIP_CHECK = '_skip_check_';",
+      "const MULTI_VALUE = '_multi_value_';",
+      "export function isCompound(value) {",
+      "  return typeof value === 'object' && value && (SKIP_CHECK in value || value[MULTI_VALUE]);",
+      "}",
+      // The definition side: plain object-literal identifier keys.
+      "export const wrapped = { _skip_check_: true, value: '0 0 0 8px' };",
+      "export const multi = { _multi_value_: true, value: [1, 2] };",
+      // A const string that never reaches key position is not evidence.
+      "const BANNER = 'headline';",
+      "export const notice = { headline: 'hi' };",
+      "export function log() { return BANNER; }",
+      // A name declared twice is not a proven binding.
+      "let mode = 'variant';",
+      "mode = 'other';",
+      "export const themed = { variant: 1 };",
+      "export function pick(bag) { return bag[mode]; }",
+      // A const key in ASSIGNMENT position defines, it does not read.
+      "const SLOT = 'stored';",
+      "export const box = { stored: 0 };",
+      "export function put(bag, v) { bag[SLOT] = v; }",
+    ].join("\n"),
+  );
+
+  const hazards = await analyzeRuntimeUsage(
+    [path.join(fixture.projectRoot, "runtime.js")],
+    { keyExclusionListCallees: [], keyReadCallees: [] },
+  );
+  expect(hazards.stringLiteralRead.has("_skip_check_")).toBe(true);
+  expect(hazards.stringLiteralRead.has("_multi_value_")).toBe(true);
+  expect(hazards.stringLiteralRead.has("headline")).toBe(false);
+  expect(hazards.stringLiteralRead.has("variant")).toBe(false);
+  expect(hazards.stringLiteralRead.has("stored")).toBe(false);
+
+  const lines = collectRuntimeUsageExternLines(hazards, {
+    dotAccessed: new Set(),
+    stringLiteralRead: new Set(),
+  });
+  expect([...lines]).toContain("Object.prototype._skip_check_;");
+  expect([...lines]).toContain("Object.prototype._multi_value_;");
+  expect([...lines]).not.toContain("Object.prototype.headline;");
+  expect([...lines]).not.toContain("Object.prototype.variant;");
+  expect([...lines]).not.toContain("Object.prototype.stored;");
+});
