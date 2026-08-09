@@ -408,6 +408,15 @@ impl<'a> VisitMut<'a> for PreservedPropertyVisitor<'a, '_> {
 
     fn visit_property_definition(&mut self, property: &mut PropertyDefinition<'a>) {
         walk_mut::walk_property_definition(self, property);
+        // A quoted STATIC field crashes Closure: ConvertToDottedProperties
+        // reads the value of `static "x" = v` from the wrong child and
+        // dereferences null ("Cannot invoke Node.detach() because rightElem is
+        // null"). Quoting a class field buys nothing anyway — that same pass
+        // converts `"x" = v` straight back to `x = v`, and the extern entry is
+        // what keeps the name out of renaming.
+        if property.r#static {
+            return;
+        }
         if self.quote_key(&mut property.key) {
             property.computed = false;
             if property.value.is_none() {
@@ -1088,6 +1097,30 @@ mod tests {
             lowered("export const a = (function () { return 1; })();\nexport const b = 1 || 2;\n");
         assert!(!output.contains("((function"), "{output}");
         assert!(output.contains("1 || 2"), "{output}");
+    }
+
+    #[test]
+    fn preserved_static_field_name_stays_dotted() {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(
+            &allocator,
+            "class Schema { static warning = 1; rules = null; }",
+            SourceType::mjs(),
+        )
+        .parse();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let mut program = parsed.program;
+        PreservedPropertyVisitor {
+            allocator: &allocator,
+            builder: AstBuilder::new(&allocator),
+            names: &HashSet::from(["warning".to_string(), "rules".to_string()]),
+        }
+        .visit_program(&mut program);
+        let output = Codegen::new().build(&program).code;
+        // Quoting the static field is what crashes Closure; the instance field
+        // is unaffected.
+        assert!(output.contains("static warning = 1"), "{output}");
+        assert!(output.contains("\"rules\" = null"), "{output}");
     }
 
     #[test]
