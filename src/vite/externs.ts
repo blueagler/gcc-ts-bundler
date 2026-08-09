@@ -5,6 +5,7 @@ import ts from "@typescript/typescript6";
 
 import { DEFAULT_BUILD_OPTIONS } from "../api/types";
 import { generateExterns } from "../api/build";
+import { analyzeCssVariableProtocol } from "../externs/css-variable-protocol";
 import { collectRuntimeUsageExternLines } from "../externs/render";
 import type { AppUsageMembers } from "../externs/render";
 import { classifyModuleId, stripQuery } from "./capture";
@@ -45,7 +46,8 @@ type CachedRuntimeHazards = {
 // v7: runtime hazards gained `enumeratedKeyNames`.
 // v8: `enumeratedKeyNames` resolves const-bound lists and element transforms.
 // v9: hyphenated keys also record their underscored identifier alias.
-const VITE_EXTERN_PACKAGE_CACHE_VERSION = 9;
+// v10: runtime hazards gained `cssVariableKeyNames`.
+const VITE_EXTERN_PACKAGE_CACHE_VERSION = 10;
 
 export async function resolveCompilerExterns(input: {
   captureRoot: string;
@@ -168,6 +170,12 @@ async function generateViteRuntimeAwareExterns(input: {
   );
 
   const postPrebundle = await input.postPrebundleMaterialized;
+  // The CSS custom-property taint crosses package boundaries — the token
+  // literal, the merge and the enumeration each live in a different package —
+  // so it cannot be cached per package and runs once over the whole graph.
+  const cssVariablePromise = analyzeCssVariableProtocol(
+    postPrebundle.modules.map((module) => module.filePath),
+  );
   const { dependencyFilesByPackage } = splitRuntimeModules(postPrebundle);
   const cacheStats = {
     hits: 0,
@@ -194,10 +202,14 @@ async function generateViteRuntimeAwareExterns(input: {
     ),
   );
 
+  const cssVariables = await cssVariablePromise;
   const runtimeUsage = mergeRuntimeHazards(
     await appRuntimeUsagePromise,
     ...packageHazards,
   );
+  for (const member of cssVariables.keyNames) {
+    runtimeUsage.cssVariableKeyNames.add(member);
+  }
   const appUsage = await appUsagePromise;
   const emittedLines = collectRuntimeUsageExternLines(runtimeUsage, appUsage);
 
@@ -211,7 +223,11 @@ async function generateViteRuntimeAwareExterns(input: {
   );
   logInternalDetail(
     "vite:extern-hazards",
-    `stringDefined=${runtimeUsage.stringDefined.size} dotDefined=${runtimeUsage.dotDefined.size} stringRead=${runtimeUsage.stringLiteralRead.size} protocol=${runtimeUsage.protocolMembers.size} enumeratedKeys=${runtimeUsage.enumeratedKeyNames.size}`,
+    `stringDefined=${runtimeUsage.stringDefined.size} dotDefined=${runtimeUsage.dotDefined.size} stringRead=${runtimeUsage.stringLiteralRead.size} protocol=${runtimeUsage.protocolMembers.size} enumeratedKeys=${runtimeUsage.enumeratedKeyNames.size} cssVariableKeys=${runtimeUsage.cssVariableKeyNames.size}`,
+  );
+  logInternalDetail(
+    "vite:extern-css-variable-protocol",
+    `names=${cssVariables.keyNames.size} sinks=${cssVariables.sinkSites.length}`,
   );
 
   const text = [
@@ -354,6 +370,7 @@ async function analyzeJsUsageMembers(
 const isCachedRuntimeHazards = isObjectOf<CachedRuntimeHazards>({
   constructedKeyFragments: isStringArray,
   constructedKeyPrefixes: isStringArray,
+  cssVariableKeyNames: isStringArray,
   dotAccessed: isStringArray,
   dotDefined: isStringArray,
   enumeratedKeyNames: isStringArray,
@@ -371,6 +388,7 @@ function serializeRuntimeHazards(
   return {
     constructedKeyFragments: sorted(hazards.constructedKeyFragments),
     constructedKeyPrefixes: sorted(hazards.constructedKeyPrefixes),
+    cssVariableKeyNames: sorted(hazards.cssVariableKeyNames),
     dotAccessed: sorted(hazards.dotAccessed),
     dotDefined: sorted(hazards.dotDefined),
     enumeratedKeyNames: sorted(hazards.enumeratedKeyNames),
@@ -385,6 +403,7 @@ function toRuntimeHazards(hazards: CachedRuntimeHazards): RuntimeRenameHazards {
   return {
     constructedKeyFragments: new Set(hazards.constructedKeyFragments),
     constructedKeyPrefixes: new Set(hazards.constructedKeyPrefixes),
+    cssVariableKeyNames: new Set(hazards.cssVariableKeyNames),
     dotAccessed: new Set(hazards.dotAccessed),
     dotDefined: new Set(hazards.dotDefined),
     enumeratedKeyNames: new Set(hazards.enumeratedKeyNames),

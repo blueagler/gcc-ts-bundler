@@ -22,6 +22,7 @@ test("mergeRuntimeHazards merges every hazard set without runtime string indexin
   const first = {
     constructedKeyFragments: new Set(["fragment-a"]),
     constructedKeyPrefixes: new Set(["prefix-a"]),
+    cssVariableKeyNames: new Set(["css-variable-a"]),
     dotAccessed: new Set(["accessed-a"]),
     dotDefined: new Set(["defined-a"]),
     enumeratedKeyNames: new Set(["enumerated-a"]),
@@ -1063,4 +1064,124 @@ test("jquery example pins proven barriers, not a type surface", async () => {
   // Two orders of magnitude below the 761 the type surface produced.
   expect(runtime.renameBarriers.propertyNames.length).toBeLessThan(60);
   expect(runtime.barrierWarnings).toEqual([]);
+});
+
+// The CSS custom-property protocol. `@ant-design/cssinjs` turns a token object
+// into CSS variables by enumerating its keys and transliterating each one into
+// a `--ant-…` name, so a renamed key is what lands in the stylesheet — and `$`
+// is not a legal CSS identifier, so the declaration is dropped outright. The
+// keys never appear as a string literal and the object is assembled by three
+// packages of spreads, dot-writes and higher-order calls, so no other evidence
+// class reaches them.
+test("keys that reach a `--` string construction are rename evidence", async () => {
+  const { analyzeCssVariableProtocol } = await import(
+    "../src/externs/css-variable-protocol.ts"
+  );
+  const fixture = await createFixture();
+  // Module 1: the sink. The enumerated key escapes into a template with a
+  // literal `--` head, through a call — exactly `token2CSSVar(key, prefix)`.
+  await fixture.write(
+    "css.js",
+    [
+      "const token2CSSVar = (token, prefix) => `--${prefix}-${token}`;",
+      "export const transformToken = (token, config) => {",
+      "  const cssVars = {};",
+      "  Object.entries(token).forEach(([key, value]) => {",
+      "    cssVars[token2CSSVar(key, config.prefix)] = value;",
+      "  });",
+      "  return cssVars;",
+      "};",
+      // Negative, same module: `k:v;` declaration text is not a custom
+      // property name. This is antd-style's `convertStylishToString` and
+      // antd's watermark `getStyleStr`, the round-1 false positives.
+      "export const serializeStyle = (style) =>",
+      "  Object.keys(style).map((key) => `${key}:${style[key]};`).join('');",
+    ].join("\n"),
+  );
+  // Module 2: the token, assembled the way antd assembles it — an object
+  // literal behind a spread helper, a dot-write onto a merged local, and a
+  // component token that only arrives through a parameter two calls up.
+  await fixture.write(
+    "theme.js",
+    [
+      "import { serializeStyle, transformToken } from './css.js';",
+      "const seed = { colorPrimary: '#1677ff' };",
+      "function formatToken(base) {",
+      "  const merged = Object.assign({}, base);",
+      "  merged.motionDurationFast = '0.1s';",
+      "  return merged;",
+      "}",
+      "const buildToken = (overrides) => ({ ...formatToken(seed), ...overrides });",
+      "export function useTheme(componentToken) {",
+      "  return transformToken(buildToken(componentToken), { prefix: 'ant' });",
+      "}",
+      "export const render = () => {",
+      "  useTheme({ iconGap: 8 });",
+      "  return serializeStyle({ neverPinned: '1px' });",
+      "};",
+    ].join("\n"),
+  );
+
+  const result = await analyzeCssVariableProtocol([
+    path.join(fixture.projectRoot, "css.js"),
+    path.join(fixture.projectRoot, "theme.js"),
+  ]);
+
+  expect([...result.keyNames].sort()).toEqual([
+    // Object-literal key behind a spread helper and a transparent merge.
+    "colorPrimary",
+    // Component token, reached only by expanding two call sites upward.
+    "iconGap",
+    // Dot-write onto the merged local the helper returns.
+    "motionDurationFast",
+  ]);
+  expect(result.sinkSites.length).toBe(1);
+  expect(result.sinkSites[0]).toContain("css.js");
+});
+
+// The `--` head is the whole discriminator. Enumerating an object and building
+// a string out of its keys is ordinary — `pickAttrs`, `dequal` and every
+// serializer do it — and pinning on that alone is what made the round-1 probe
+// unusable. Without a custom-property name in the output, nothing is pinned.
+test("enumeration without a `--` construction pins nothing", async () => {
+  const { analyzeCssVariableProtocol } = await import(
+    "../src/externs/css-variable-protocol.ts"
+  );
+  const fixture = await createFixture();
+  await fixture.write(
+    "serialize.js",
+    [
+      // Declaration text: `k:v;`, no custom-property name.
+      "export const toStyleString = (style) =>",
+      "  Object.keys(style).map((key) => `${key}:${style[key]};`).join('');",
+      // A computed read that copies keys through, with no string built at all.
+      "export function pickAttrs(props) {",
+      "  const picked = {};",
+      "  for (const key in props) { picked[key] = props[key]; }",
+      "  return picked;",
+      "}",
+      // A single hyphen is a CSS property name, not a custom property.
+      "export const toRule = (rules) =>",
+      "  Object.entries(rules).map(([key, value]) => `-${key}:${value}`).join('');",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "app.js",
+    [
+      "import { pickAttrs, toRule, toStyleString } from './serialize.js';",
+      "export const run = () => [",
+      "  toStyleString({ fontSize: 12 }),",
+      "  pickAttrs({ ariaLabel: 'x' }),",
+      "  toRule({ webkitBoxOrient: 'vertical' }),",
+      "];",
+    ].join("\n"),
+  );
+
+  const result = await analyzeCssVariableProtocol([
+    path.join(fixture.projectRoot, "serialize.js"),
+    path.join(fixture.projectRoot, "app.js"),
+  ]);
+
+  expect([...result.keyNames]).toEqual([]);
+  expect(result.sinkSites).toEqual([]);
 });

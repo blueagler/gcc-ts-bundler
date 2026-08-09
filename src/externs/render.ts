@@ -24,6 +24,7 @@ function createEmptyAppUsageMembers(): AppUsageMembers {
  * extern = protocolMembers
  *        ∪ selfReferentialKeys
  *        ∪ enumeratedKeyNames
+ *        ∪ cssVariableKeyNames
  *        ∪ (stringDefined ∩ dotAccessed)
  *        ∪ (dotDefined    ∩ stringLiteralRead)
  *        ∪ (dotAccessed   ∩ constructedKeyPrefix match)
@@ -49,6 +50,7 @@ export function collectRuntimeUsageExternLines(
   runtimeUsage: {
     constructedKeyFragments: ReadonlySet<string>;
     constructedKeyPrefixes: ReadonlySet<string>;
+    cssVariableKeyNames: Iterable<string>;
     dotAccessed: ReadonlySet<string>;
     dotDefined: Iterable<string>;
     enumeratedKeyNames: Iterable<string>;
@@ -76,6 +78,13 @@ export function collectRuntimeUsageExternLines(
   // often invisible anyway — lodash publishes half its surface through
   // `mixin`, which copies under keys taken from `keys(source)`.
   for (const member of runtimeUsage.enumeratedKeyNames) {
+    emittedLines.add(renderStructuralExternLine(member));
+  }
+  // CSS custom-property names are unconditional and need no read witness at
+  // all: the consumer is a stylesheet, not JavaScript. There is nothing in the
+  // program to intersect with — the only place the name is read back is the
+  // `var(--ant-…)` reference the same pass emitted.
+  for (const member of runtimeUsage.cssVariableKeyNames) {
     emittedLines.add(renderStructuralExternLine(member));
   }
   for (const member of runtimeUsage.stringDefined) {

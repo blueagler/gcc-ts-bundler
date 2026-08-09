@@ -55,6 +55,19 @@ export interface RuntimeRenameHazards {
    * program.
    */
   constructedKeyFragments: Set<string>;
+  /**
+   * Member names a stylesheet spells out as CSS custom properties.
+   *
+   * `@ant-design/cssinjs` enumerates a token object and transliterates every
+   * key into a `--ant-…` custom-property name, so the renamed spelling is what
+   * lands in the stylesheet — and `$` is not a legal CSS identifier, so the
+   * declaration is dropped. Collected by a k-bounded backward taint from the
+   * escape site; see `externs/css-variable-protocol.ts`.
+   *
+   * The flow crosses three packages, so this class is filled by a global pass
+   * over the whole post-prebundle graph, not by the per-package hazard scan.
+   */
+  cssVariableKeyNames: Set<string>;
   /** `o.x` read anywhere. */
   dotAccessed: Set<string>;
   /** `this.x = v`, class members, object-literal keys. */
@@ -152,6 +165,7 @@ function createEmptyRuntimeHazards(): RuntimeRenameHazards {
   return {
     constructedKeyFragments: new Set(),
     constructedKeyPrefixes: new Set(),
+    cssVariableKeyNames: new Set(),
     dotAccessed: new Set(),
     dotDefined: new Set(),
     enumeratedKeyNames: new Set(),
@@ -175,6 +189,7 @@ export function mergeRuntimeHazards(
       merged.constructedKeyPrefixes,
       hazards.constructedKeyPrefixes,
     );
+    mergeHazardSet(merged.cssVariableKeyNames, hazards.cssVariableKeyNames);
     mergeHazardSet(merged.dotAccessed, hazards.dotAccessed);
     mergeHazardSet(merged.dotDefined, hazards.dotDefined);
     mergeHazardSet(merged.enumeratedKeyNames, hazards.enumeratedKeyNames);
