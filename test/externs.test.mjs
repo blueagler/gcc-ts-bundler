@@ -24,6 +24,7 @@ test("mergeRuntimeHazards merges every hazard set without runtime string indexin
     constructedKeyPrefixes: new Set(["prefix-a"]),
     dotAccessed: new Set(["accessed-a"]),
     dotDefined: new Set(["defined-a"]),
+    enumeratedKeyNames: new Set(["enumerated-a"]),
     protocolMembers: new Set(["protocol-a"]),
     selfReferentialKeys: new Set(["self-a"]),
     stringDefined: new Set(["string-defined-a"]),
@@ -698,6 +699,64 @@ test("literal arguments indexed into object-key probes are rename evidence", asy
   expect([...lines]).not.toContain("Object.prototype.z;");
 });
 
+// esbuild lowers class fields to `__publicField(this, "x", v)`; Babel lowers
+// the same fields to `_defineProperty(this, "x", v)`, and published bundles
+// often ship that helper already minified, so its name carries no signal.
+// Every form defines the key as a string that survives renaming while the
+// `this.x` reads of it rename — `TypeError: Cannot read properties of
+// undefined (reading 'set')` on the real login page, from
+// `_defineProperty(this, "map", new Map())` beside `this.map.set(…)`.
+test("Babel and minified field helpers are string-defined rename evidence", async () => {
+  const { analyzeRuntimeUsage } = await import(
+    "../src/externs/runtime-analysis.ts"
+  );
+  const { collectRuntimeUsageExternLines } = await import(
+    "../src/externs/render.ts"
+  );
+  const fixture = await createFixture();
+  await fixture.write(
+    "runtime.js",
+    [
+      // The real Babel helper, minified to a single letter, exactly as
+      // @wecom/jssdk ships it.
+      "function J(e, t, n) {",
+      "  return t in e ? Object.defineProperty(e, t, { value: n }) : (e[t] = n), e;",
+      "}",
+      // A same-arity impostor whose body defines no field.
+      "function notAHelper(a, b, c) { return a.handle(b, c); }",
+      "function Store() {",
+      '  _defineProperty(this, "map", new Map());',
+      '  _defineProperty2.default(this, "interop", 1);',
+      '  J(this, "url", void 0);',
+      '  notAHelper(this, "ignored", 1);',
+      '  this.listeners.set(this, "alsoIgnored", 1);',
+      "}",
+      "Store.prototype.read = function () {",
+      "  return [this.map.size, this.interop, this.url];",
+      "};",
+      "",
+    ].join("\n"),
+  );
+
+  const hazards = await analyzeRuntimeUsage(
+    [path.join(fixture.projectRoot, "runtime.js")],
+    { keyExclusionListCallees: [], keyReadCallees: [] },
+  );
+  expect([...hazards.stringDefined].sort()).toEqual(["interop", "map", "url"]);
+
+  const lines = collectRuntimeUsageExternLines(hazards, {
+    dotAccessed: new Set(),
+    stringLiteralRead: new Set(),
+  });
+  expect([...lines]).toContain("Object.prototype.map;");
+  expect([...lines]).toContain("Object.prototype.interop;");
+  expect([...lines]).toContain("Object.prototype.url;");
+  // Shape alone is not evidence: three arguments led by `this` also describe
+  // `fn.call(this, name, value)` and `store.set(this, key, value)`.
+  expect([...lines]).not.toContain("Object.prototype.ignored;");
+  expect([...lines]).not.toContain("Object.prototype.alsoIgnored;");
+});
+
 test("Babel class descriptors are string-defined rename evidence", async () => {
   const { analyzeRuntimeUsage } = await import(
     "../src/externs/runtime-analysis.ts"
@@ -782,6 +841,85 @@ test("a string value naming a sibling key is rename evidence", async () => {
   expect([...lines]).not.toContain("Object.prototype.Heading;");
   expect([...lines]).not.toContain("Object.prototype.deep;");
   expect([...lines]).not.toContain("Object.prototype.kept;");
+});
+
+// lodash publishes `lodash.bind = func.bind` with a plain dot, then reads the
+// same members back through a literal name list:
+// `arrayEach(['bind', 'bindKey', …], (methodName) => lodash[methodName]…)`.
+// Closure renames the definition, the array string does not follow, and the
+// module throws `Cannot set properties of undefined (setting 'placeholder')`
+// the moment it evaluates. Every other evidence class misses this shape.
+test("finite literal key lists that reach computed access are rename evidence", async () => {
+  const { analyzeRuntimeUsage } = await import(
+    "../src/externs/runtime-analysis.ts"
+  );
+  const { collectRuntimeUsageExternLines } = await import(
+    "../src/externs/render.ts"
+  );
+  const fixture = await createFixture();
+  await fixture.write(
+    "runtime.js",
+    [
+      "function arrayEach(items, fn) { items.forEach(fn); }",
+      "const lodash = {};",
+      "lodash.bind = function () {};",
+      "lodash.curry = function () {};",
+      // Array-literal list carried by a helper callback.
+      "arrayEach(['bind', 'curry'], function (methodName) {",
+      "  lodash[methodName].placeholder = lodash;",
+      "});",
+      // Split-string list, the other spelling of the same idiom.
+      "const store = {};",
+      "'alpha beta'.split(' ').forEach(function (key) { store[key] = 1; });",
+      // for…of over a literal list.
+      "const speed = { x: 0, y: 0 };",
+      "for (const axis of ['x', 'y']) { speed[axis] = 0; }",
+      // Concatenated use still needs the stem pinned.
+      "const lazy = {};",
+      "arrayEach(['drop'], function (name) { lazy[name + 'Right'] = 1; });",
+      // jQuery's `class2type["[object " + name + "]"] = …` runs a name list
+      // through element access, but the key it builds is never a renameable
+      // identifier property, so the list must not become evidence.
+      "const class2type = {};",
+      "arrayEach(['Boolean', 'Number'], function (typeName) {",
+      "  class2type['[object ' + typeName + ']'] = typeName.toLowerCase();",
+      "});",
+      // A literal array nothing indexes with is a lookup table, not evidence.
+      "export const MESSAGES = ['notFound', 'serverError'];",
+      "export function report(code) { return MESSAGES.indexOf(code); }",
+      // A dynamic key must not drag the literal names of an unrelated list in.
+      "export function pick(bag, key) { return bag[key]; }",
+    ].join("\n"),
+  );
+
+  const hazards = await analyzeRuntimeUsage(
+    [path.join(fixture.projectRoot, "runtime.js")],
+    { keyExclusionListCallees: [], keyReadCallees: [] },
+  );
+  expect([...hazards.enumeratedKeyNames].sort()).toEqual([
+    "alpha",
+    "beta",
+    "bind",
+    "curry",
+    "drop",
+    "x",
+    "y",
+  ]);
+
+  const lines = collectRuntimeUsageExternLines(hazards, {
+    dotAccessed: new Set(),
+    stringLiteralRead: new Set(),
+  });
+  expect([...lines]).toContain("Object.prototype.bind;");
+  expect([...lines]).toContain("Object.prototype.curry;");
+  expect([...lines]).toContain("Object.prototype.drop;");
+  // An unindexed literal array stays out; admitting it would pin every
+  // message table and enum in the program.
+  expect([...lines]).not.toContain("Object.prototype.notFound;");
+  expect([...lines]).not.toContain("Object.prototype.serverError;");
+  // A concatenation that cannot produce an identifier is not a rename hazard.
+  expect([...lines]).not.toContain("Object.prototype.Boolean;");
+  expect([...lines]).not.toContain("Object.prototype.Number;");
 });
 
 // The audit that justified shipping the rule unconditionally: across all 12

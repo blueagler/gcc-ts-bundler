@@ -845,3 +845,112 @@ test.serial(
     expect((await buildViteFixture(fixture)).ok).toBe(true);
   },
 );
+
+// A dependency that defines its surface with plain dots, then reads the same
+// members back through a finite literal name list — lodash's shape:
+//
+//   lodash.bind = func.bind;                                   lodash.js:101
+//   arrayEach(['bind', 'bindKey', …], function (methodName) {  lodash.js:427
+//     lodash[methodName].placeholder = lodash;                 lodash.js:428
+//   });
+//
+// Closure ADVANCED renames the definitions, the array strings do not follow,
+// and the module throws `Cannot set properties of undefined (setting
+// 'placeholder')` while it is still initialising. Before the enumerated-key
+// evidence class this build produced exactly that fault on a real
+// TanStack Start + AntD Pro login page, from both a lazy and an eager chunk.
+test.serial(
+  "dot-defined members read through a literal key list survive a chunked build",
+  { timeout: 60000 },
+  async () => {
+    const fixture = await createFixture();
+    await writeHtmlFixture(fixture);
+    await fixture.write(
+      "node_modules/keylist-pkg/package.json",
+      `${JSON.stringify({ main: "index.js", name: "keylist-pkg", version: "1.0.0" }, null, 2)}\n`,
+    );
+    await fixture.write(
+      "node_modules/keylist-pkg/index.js",
+      [
+        "function arrayEach(items, iteratee) {",
+        "  for (let index = 0; index < items.length; index += 1) {",
+        "    iteratee(items[index], index);",
+        "  }",
+        "}",
+        "",
+        "export const toolkit = {};",
+        // Static dot definitions: Closure renames these.
+        "toolkit.bind = function bind(value) { return value; };",
+        "toolkit.curry = function curry(value) { return value; };",
+        "toolkit.partial = function partial(value) { return value; };",
+        "",
+        // Array-literal key list read back through computed access.
+        "arrayEach(['bind', 'curry', 'partial'], function (methodName) {",
+        "  toolkit[methodName].placeholder = toolkit;",
+        "});",
+        "",
+        // Split-string key list, the other spelling of the same idiom.
+        "export const registry = {};",
+        "registry.alpha = 1;",
+        "registry.beta = 2;",
+        "'alpha beta'.split(' ').forEach(function (key) {",
+        "  registry[key] = registry[key] + 10;",
+        "});",
+        "",
+        "export function describe() {",
+        "  return [",
+        "    toolkit.bind.placeholder === toolkit,",
+        "    toolkit.curry.placeholder === toolkit,",
+        "    toolkit.partial.placeholder === toolkit,",
+        "    registry.alpha === 11,",
+        "    registry.beta === 12,",
+        "  ].every(Boolean);",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    // A second entry keeps the dependency in a shared chunk rather than
+    // inlined into one entry, so the build under test is genuinely chunked.
+    await fixture.write(
+      "src/lazy.js",
+      [
+        'import { describe } from "keylist-pkg";',
+        "export function render() {",
+        "  return describe() ? 'keylist-ok' : 'keylist-broken';",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/main.js",
+      [
+        'import { describe } from "keylist-pkg";',
+        'const eager = describe() ? "eager-ok" : "eager-broken";',
+        'import("./lazy.js").then((module) => {',
+        "  document.body.textContent = `${eager}-${module.render()}`;",
+        "});",
+        "",
+      ].join("\n"),
+    );
+
+    const built = await buildViteFixture(fixture, {
+      pluginEntries: [
+        [
+          "gccTsBundler({",
+          '  compiler: { cache: { mode: "off" } },',
+          '  externs: { generate: { modules: ["keylist-pkg"] } },',
+          "})",
+        ].join(" "),
+      ],
+    });
+    expect(buildErrorText(built)).toBe("");
+    expect(built.ok).toBe(true);
+
+    // The renaming really happened: if Closure had left the members alone the
+    // test would pass for the wrong reason.
+    const sources = (await readJavaScript(fixture)).join("\n");
+    expect(sources).toContain("placeholder");
+
+    await executeFixtureInChromium(fixture, "eager-ok-keylist-ok");
+  },
+);

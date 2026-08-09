@@ -23,6 +23,7 @@ function createEmptyAppUsageMembers(): AppUsageMembers {
  * ```
  * extern = protocolMembers
  *        ∪ selfReferentialKeys
+ *        ∪ enumeratedKeyNames
  *        ∪ (stringDefined ∩ dotAccessed)
  *        ∪ (dotDefined    ∩ stringLiteralRead)
  *        ∪ (dotAccessed   ∩ constructedKeyPrefix match)
@@ -50,6 +51,7 @@ export function collectRuntimeUsageExternLines(
     constructedKeyPrefixes: ReadonlySet<string>;
     dotAccessed: ReadonlySet<string>;
     dotDefined: Iterable<string>;
+    enumeratedKeyNames: Iterable<string>;
     protocolMembers: Iterable<string>;
     selfReferentialKeys: Iterable<string>;
     stringDefined: Iterable<string>;
@@ -66,6 +68,14 @@ export function collectRuntimeUsageExternLines(
   // with a read class would only lose the hazard it exists to catch (the read
   // goes through a variable and is statically invisible).
   for (const member of runtimeUsage.selfReferentialKeys) {
+    emittedLines.add(renderStructuralExternLine(member));
+  }
+  // Enumerated key names are unconditional for the same reason, and on
+  // stronger evidence: the collector already proved the computed access
+  // exists, so the read side needs no second witness. The definition side is
+  // often invisible anyway — lodash publishes half its surface through
+  // `mixin`, which copies under keys taken from `keys(source)`.
+  for (const member of runtimeUsage.enumeratedKeyNames) {
     emittedLines.add(renderStructuralExternLine(member));
   }
   for (const member of runtimeUsage.stringDefined) {

@@ -59,6 +59,39 @@ export interface RuntimeRenameHazards {
   dotAccessed: Set<string>;
   /** `this.x = v`, class members, object-literal keys. */
   dotDefined: Set<string>;
+  /**
+   * Member names enumerated by a *finite literal key list* that provably
+   * reaches computed member-access position.
+   *
+   * ```js
+   * lodash.bind = func.bind;                                   // lodash.js:101
+   * arrayEach(['bind', 'bindKey', 'curry', 'curryRight',       // :427
+   *            'partial', 'partialRight'], function (methodName) {
+   *   lodash[methodName].placeholder = lodash;                 // :428
+   * });
+   * ```
+   *
+   * No other evidence class sees this. The definition is a plain dot, so
+   * `stringDefined ∩ dotAccessed` misses it; the read goes through a loop
+   * variable rather than a literal, so `dotDefined ∩ stringLiteralRead` misses
+   * it; nothing is concatenated or templated, so the constructed-key classes
+   * miss it; the names live in an array, not as a sibling value of the literal
+   * they name, so `selfReferentialKeys` misses it. Closure renames
+   * `lodash.bind` to `nZ.cY`, the array string stays `"bind"`, and
+   * `lodash["bind"]` yields `undefined` — `TypeError: Cannot set properties of
+   * undefined (setting 'placeholder')` at first evaluation of the module.
+   *
+   * The rule is a proof, not a guess: the list must be a literal
+   * (`['a', 'b']` or `'a b'.split(' ')`, including a literal ternary between
+   * two such lists), and the binding it feeds — a callback parameter of the
+   * same call, or a `for…of` variable — must be used as a computed key inside
+   * that callback or loop body. Concatenated uses (`o[k + 'Right']`) count,
+   * because the fragment class pins the suffix but not the stem.
+   *
+   * Measured over 4,469 materialized dependency files of a TanStack Start +
+   * AntD Pro app: 11 sites, 44 names.
+   */
+  enumeratedKeyNames: Set<string>;
   protocolMembers: Set<string>;
   /**
    * Keys of an object literal that a *sibling* property of the same literal
@@ -119,6 +152,7 @@ function createEmptyRuntimeHazards(): RuntimeRenameHazards {
     constructedKeyPrefixes: new Set(),
     dotAccessed: new Set(),
     dotDefined: new Set(),
+    enumeratedKeyNames: new Set(),
     protocolMembers: new Set(),
     selfReferentialKeys: new Set(),
     stringDefined: new Set(),
@@ -141,6 +175,7 @@ export function mergeRuntimeHazards(
     );
     mergeHazardSet(merged.dotAccessed, hazards.dotAccessed);
     mergeHazardSet(merged.dotDefined, hazards.dotDefined);
+    mergeHazardSet(merged.enumeratedKeyNames, hazards.enumeratedKeyNames);
     mergeHazardSet(merged.protocolMembers, hazards.protocolMembers);
     mergeHazardSet(merged.selfReferentialKeys, hazards.selfReferentialKeys);
     mergeHazardSet(merged.stringDefined, hazards.stringDefined);
@@ -180,7 +215,9 @@ function collectFileHazards(
   protocolHelpers: RuntimeProtocolHelpers,
 ) {
   const knownConstructors = collectKnownConstructorBindings(sourceFile);
+  const provenFieldHelpers = collectProvenFieldHelperNames(sourceFile);
   collectLiteralIndexedKeyReaders(sourceFile, hazards);
+  collectEnumeratedKeyNames(sourceFile, hazards);
   const visit = (node: ts.Node) => {
     if (ts.isPropertyAccessExpression(node)) {
       addMember(hazards.dotAccessed, node.name.text);
@@ -208,7 +245,12 @@ function collectFileHazards(
       }
     } else if (ts.isCallExpression(node)) {
       collectProtocolHelperMembers(node, hazards, protocolHelpers);
-      collectRuntimeCallMembers(node, knownConstructors, hazards);
+      collectRuntimeCallMembers(
+        node,
+        knownConstructors,
+        provenFieldHelpers,
+        hazards,
+      );
     } else if (ts.isClassLike(node)) {
       collectClassMemberDefinitions(node, hazards);
     } else if (ts.isObjectLiteralExpression(node)) {
@@ -309,6 +351,182 @@ function collectLiteralIndexedKeyReaders(
     ts.forEachChild(node, collectCalls);
   };
   collectCalls(sourceFile);
+}
+
+/**
+ * Member names a finite literal key list feeds into computed member access.
+ *
+ * Three binding forms carry the list to the key position, and all three keep
+ * the list and its consumer inside one expression or statement, so resolving
+ * them needs no scope tracking:
+ *
+ * ```js
+ * arrayEach(['bind', 'bindKey'], function (k) { lodash[k]… });  // callback arg
+ * ['title', 'extra'].forEach((k) => { props[k]… });             // callback receiver
+ * for (const axis of ['x', 'y']) { speed[axis] = 0; }           // for…of
+ * ```
+ *
+ * Requiring the *consumer* — a computed access keyed by the bound name — is
+ * what makes this evidence rather than a string census. A literal array of
+ * strings that nothing indexes with is a lookup table, a message list or an
+ * enum, and pinning it would be a barrier explosion.
+ */
+function collectEnumeratedKeyNames(
+  sourceFile: ts.SourceFile,
+  hazards: RuntimeRenameHazards,
+) {
+  const record = (keyNames: readonly string[]) => {
+    for (const keyName of keyNames) {
+      addMember(hazards.enumeratedKeyNames, keyName);
+    }
+  };
+
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node)) {
+      // `helper(<key list>, function (k) { … })`: argument positions are free,
+      // because helpers disagree on them (`arrayEach(list, fn)` versus a
+      // `fn`-first signature) and the consumer check carries the proof.
+      for (const [index, argument] of node.arguments.entries()) {
+        const keyNames = literalKeyList(argument);
+        if (!keyNames) continue;
+        for (const [otherIndex, other] of node.arguments.entries()) {
+          if (otherIndex === index) continue;
+          if (consumesParameterAsKey(other)) record(keyNames);
+        }
+      }
+      // `<key list>.forEach(function (k) { … })`, and every other iterator
+      // method shaped like it.
+      if (ts.isPropertyAccessExpression(node.expression)) {
+        const keyNames = literalKeyList(node.expression.expression);
+        if (keyNames && node.arguments.some(consumesParameterAsKey)) {
+          record(keyNames);
+        }
+      }
+    } else if (
+      ts.isForOfStatement(node) &&
+      ts.isVariableDeclarationList(node.initializer)
+    ) {
+      const keyNames = literalKeyList(node.expression);
+      const [declaration] = node.initializer.declarations;
+      if (
+        keyNames &&
+        declaration &&
+        ts.isIdentifier(declaration.name) &&
+        isComputedKeyIn(node.statement, declaration.name.text)
+      ) {
+        record(keyNames);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+}
+
+/**
+ * The finite set of strings an expression provably evaluates to, or null.
+ *
+ * Only shapes whose every element is a literal qualify. A `split` on a
+ * non-literal, a spread, a hole, or a computed element makes the set unknown,
+ * and an unknown set is not evidence.
+ */
+function literalKeyList(
+  expression: ts.Expression | undefined,
+): string[] | null {
+  if (!expression) return null;
+  if (ts.isParenthesizedExpression(expression)) {
+    return literalKeyList(expression.expression);
+  }
+  // `['a', 'b']`
+  if (ts.isArrayLiteralExpression(expression)) {
+    const keyNames: string[] = [];
+    for (const element of expression.elements) {
+      if (!ts.isStringLiteralLike(element)) return null;
+      keyNames.push(element.text);
+    }
+    return keyNames.length > 0 ? keyNames : null;
+  }
+  // `'a b c'.split(' ')`
+  if (
+    ts.isCallExpression(expression) &&
+    ts.isPropertyAccessExpression(expression.expression) &&
+    expression.expression.name.text === "split" &&
+    ts.isStringLiteralLike(expression.expression.expression) &&
+    expression.arguments.length === 1 &&
+    expression.arguments[0] !== undefined &&
+    ts.isStringLiteralLike(expression.arguments[0])
+  ) {
+    const keyNames = expression.expression.expression.text
+      .split(expression.arguments[0].text)
+      .filter((keyName) => keyName.length > 0);
+    return keyNames.length > 0 ? keyNames : null;
+  }
+  // `cond ? ['a'] : ['b']` — both arms must be literal lists.
+  if (ts.isConditionalExpression(expression)) {
+    const whenTrue = literalKeyList(expression.whenTrue);
+    const whenFalse = literalKeyList(expression.whenFalse);
+    return whenTrue && whenFalse ? [...whenTrue, ...whenFalse] : null;
+  }
+  return null;
+}
+
+/** True when `argument` is a function using a parameter as a computed key. */
+function consumesParameterAsKey(argument: ts.Expression | undefined) {
+  if (
+    !argument ||
+    !(ts.isFunctionExpression(argument) || ts.isArrowFunction(argument))
+  ) {
+    return false;
+  }
+  return argument.parameters.some(
+    (parameter) =>
+      ts.isIdentifier(parameter.name) &&
+      isComputedKeyIn(argument.body, parameter.name.text),
+  );
+}
+
+/**
+ * True when `name` reaches computed member-access position inside `body`.
+ *
+ * A concatenated key (`o[k + 'Right']`) counts, but only when every literal
+ * joined to it is identifier-safe: the fragment class pins the literal suffix,
+ * while the stem it is joined to is known only from the list. jQuery shows why
+ * the guard is needed — `class2type["[object " + name + "]"] = …` runs the same
+ * name list through element access, yet the key it builds
+ * (`[object Boolean]`) can never be a renameable identifier property, so
+ * `Boolean`, `Date`, `Error` and five more would be pinned for nothing.
+ */
+function isComputedKeyIn(body: ts.Node, name: string) {
+  let found = false;
+  const isIdentifierSafeLiteral = (expression: ts.Expression) =>
+    !ts.isStringLiteralLike(expression) || /^[\w$]*$/u.test(expression.text);
+  const mentionsName = (expression: ts.Expression): boolean => {
+    if (ts.isIdentifier(expression)) return expression.text === name;
+    if (
+      ts.isBinaryExpression(expression) &&
+      expression.operatorToken.kind === ts.SyntaxKind.PlusToken
+    ) {
+      return (
+        isIdentifierSafeLiteral(expression.left) &&
+        isIdentifierSafeLiteral(expression.right) &&
+        (mentionsName(expression.left) || mentionsName(expression.right))
+      );
+    }
+    return false;
+  };
+  const visit = (node: ts.Node) => {
+    if (found) return;
+    if (
+      ts.isElementAccessExpression(node) &&
+      mentionsName(node.argumentExpression)
+    ) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(body);
+  return found;
 }
 
 /** Shortest literal fragment worth pinning on; below this it matches noise. */
@@ -623,6 +841,7 @@ function collectRuntimeAssignmentMembers(
 function collectRuntimeCallMembers(
   node: ts.CallExpression,
   knownConstructors: Set<string>,
+  provenFieldHelpers: ReadonlySet<string>,
   hazards: RuntimeRenameHazards,
 ) {
   const callee = node.expression;
@@ -638,7 +857,7 @@ function collectRuntimeCallMembers(
     collectClassDescriptorMembers(memberExpression, hazards);
   }
 
-  if (isPublicFieldHelperCall(callee)) {
+  if (isFieldHelperCall(callee, provenFieldHelpers)) {
     if (isRelevantRuntimeTarget(target, knownConstructors)) {
       addMember(
         hazards.stringDefined,
@@ -691,17 +910,150 @@ function collectClassDescriptorMembers(
   }
 }
 
-function isPublicFieldHelperCall(expression: ts.Expression): boolean {
+/**
+ * Callees that define a field under a *string* key.
+ *
+ * Two toolchains, one hazard. esbuild lowers class fields to
+ * `__publicField(this, "x", v)`; Babel lowers them to
+ * `_defineProperty(this, "x", v)`, and bundler interop spells the same helper
+ * `_defineProperty2.default(...)`. Either way the key survives renaming
+ * verbatim while every `this.x` read of it renames, which is the
+ * `stringDefined ∩ dotAccessed` hazard.
+ *
+ * Trailing digits are accepted because bundlers suffix duplicate helper
+ * bindings (`__publicField2`, `_defineProperty3`) when they merge modules.
+ */
+function isFieldHelperName(name: string) {
+  return (
+    name.startsWith("__publicField") || /^_+defineProperty\d*$/u.test(name)
+  );
+}
+
+function isFieldHelperCall(
+  expression: ts.Expression,
+  provenFieldHelpers: ReadonlySet<string>,
+): boolean {
   if (ts.isIdentifier(expression)) {
-    return expression.text.startsWith("__publicField");
+    return (
+      isFieldHelperName(expression.text) ||
+      provenFieldHelpers.has(expression.text)
+    );
   }
   if (ts.isPropertyAccessExpression(expression)) {
-    return expression.name.text.startsWith("__publicField");
+    // `ns.__publicField(...)`, and Babel's CJS interop `_defineProperty2.default(...)`.
+    return (
+      isFieldHelperName(expression.name.text) ||
+      (expression.name.text === "default" &&
+        ts.isIdentifier(expression.expression) &&
+        isFieldHelperName(expression.expression.text))
+    );
   }
   if (ts.isParenthesizedExpression(expression)) {
-    return isPublicFieldHelperCall(expression.expression);
+    return isFieldHelperCall(expression.expression, provenFieldHelpers);
   }
   return false;
+}
+
+/**
+ * Local functions that *are* a field-definition helper, whatever they are called.
+ *
+ * A published bundle often ships the Babel helper already minified, so the
+ * name carries no signal: `@wecom/jssdk` emits `J(this, "url", void 0)` beside
+ * `this.url = …`, and a name-matching rule cannot see it. The body can:
+ *
+ * ```js
+ * function J(e, t, n) {                                  // wecom.prod.js:141
+ *   return t in e ? Object.defineProperty(e, t, { value: n, … }) : e[t] = n, e;
+ * }
+ * ```
+ *
+ * Requiring three parameters, a single declaration of the name, and a body
+ * that writes `param0[param1]` — by element assignment or through
+ * `Object.defineProperty` — keeps this a proof rather than an arity guess.
+ * Shape alone would be far too loose: `fn.call(this, "name", value)` and
+ * `store.set(this, "key", value)` have the same three arguments and define no
+ * field at all.
+ */
+function collectProvenFieldHelperNames(sourceFile: ts.SourceFile) {
+  const proven = new Set<string>();
+  const declarationCounts = new Map<string, number>();
+
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isFunctionDeclaration(node) &&
+      node.name &&
+      node.body &&
+      node.parameters.length === 3
+    ) {
+      const helperName = node.name.text;
+      declarationCounts.set(
+        helperName,
+        (declarationCounts.get(helperName) ?? 0) + 1,
+      );
+      const [targetName, keyName] = node.parameters.map((parameter) =>
+        ts.isIdentifier(parameter.name) ? parameter.name.text : undefined,
+      );
+      if (
+        targetName !== undefined &&
+        keyName !== undefined &&
+        writesParameterKeyedField(node.body, targetName, keyName)
+      ) {
+        proven.add(helperName);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+
+  for (const helperName of [...proven]) {
+    if (declarationCounts.get(helperName) !== 1) {
+      proven.delete(helperName);
+    }
+  }
+  return proven;
+}
+
+/** True when `body` writes `target[key]` for the two named parameters. */
+function writesParameterKeyedField(
+  body: ts.Node,
+  targetName: string,
+  keyName: string,
+) {
+  let found = false;
+  const namesParameters = (
+    targetExpression: ts.Expression | undefined,
+    keyExpression: ts.Expression | undefined,
+  ) =>
+    targetExpression !== undefined &&
+    keyExpression !== undefined &&
+    ts.isIdentifier(targetExpression) &&
+    targetExpression.text === targetName &&
+    ts.isIdentifier(keyExpression) &&
+    keyExpression.text === keyName;
+
+  const visit = (node: ts.Node) => {
+    if (found) return;
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isElementAccessExpression(node.left) &&
+      namesParameters(node.left.expression, node.left.argumentExpression)
+    ) {
+      found = true;
+      return;
+    }
+    if (
+      ts.isCallExpression(node) &&
+      isObjectDefinePropertyCall(node.expression) &&
+      namesParameters(node.arguments[0], node.arguments[1])
+    ) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(body);
+  return found;
 }
 
 function isRelevantRuntimeTarget(

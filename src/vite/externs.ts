@@ -42,7 +42,8 @@ type CachedRuntimeHazards = {
 // v3: hazard payload split into evidence classes (see externs/render.ts).
 // v5: runtime hazards gained `constructedKeyFragments`.
 // v6: runtime hazards gained `selfReferentialKeys`.
-const VITE_EXTERN_PACKAGE_CACHE_VERSION = 6;
+// v7: runtime hazards gained `enumeratedKeyNames`.
+const VITE_EXTERN_PACKAGE_CACHE_VERSION = 7;
 
 export async function resolveCompilerExterns(input: {
   captureRoot: string;
@@ -208,7 +209,7 @@ async function generateViteRuntimeAwareExterns(input: {
   );
   logInternalDetail(
     "vite:extern-hazards",
-    `stringDefined=${runtimeUsage.stringDefined.size} dotDefined=${runtimeUsage.dotDefined.size} stringRead=${runtimeUsage.stringLiteralRead.size} protocol=${runtimeUsage.protocolMembers.size}`,
+    `stringDefined=${runtimeUsage.stringDefined.size} dotDefined=${runtimeUsage.dotDefined.size} stringRead=${runtimeUsage.stringLiteralRead.size} protocol=${runtimeUsage.protocolMembers.size} enumeratedKeys=${runtimeUsage.enumeratedKeyNames.size}`,
   );
 
   const text = [
@@ -353,6 +354,7 @@ const isCachedRuntimeHazards = isObjectOf<CachedRuntimeHazards>({
   constructedKeyPrefixes: isStringArray,
   dotAccessed: isStringArray,
   dotDefined: isStringArray,
+  enumeratedKeyNames: isStringArray,
   protocolMembers: isStringArray,
   selfReferentialKeys: isStringArray,
   stringDefined: isStringArray,
@@ -369,6 +371,7 @@ function serializeRuntimeHazards(
     constructedKeyPrefixes: sorted(hazards.constructedKeyPrefixes),
     dotAccessed: sorted(hazards.dotAccessed),
     dotDefined: sorted(hazards.dotDefined),
+    enumeratedKeyNames: sorted(hazards.enumeratedKeyNames),
     protocolMembers: sorted(hazards.protocolMembers),
     selfReferentialKeys: sorted(hazards.selfReferentialKeys),
     stringDefined: sorted(hazards.stringDefined),
@@ -382,6 +385,7 @@ function toRuntimeHazards(hazards: CachedRuntimeHazards): RuntimeRenameHazards {
     constructedKeyPrefixes: new Set(hazards.constructedKeyPrefixes),
     dotAccessed: new Set(hazards.dotAccessed),
     dotDefined: new Set(hazards.dotDefined),
+    enumeratedKeyNames: new Set(hazards.enumeratedKeyNames),
     protocolMembers: new Set(hazards.protocolMembers),
     selfReferentialKeys: new Set(hazards.selfReferentialKeys),
     stringDefined: new Set(hazards.stringDefined),
