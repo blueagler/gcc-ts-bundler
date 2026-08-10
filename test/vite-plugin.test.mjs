@@ -162,6 +162,57 @@ test.serial(
 );
 
 test.serial(
+  "gccTsBundler lowers a finite local key in namespace constructor position",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<script type="module" src="/src/main.js"></script>\n',
+    );
+    await fixture.write(
+      "src/graphic.js",
+      [
+        "export class Circle { constructor(value) { this.value = `circle:${value}`; } }",
+        "export class Arc { constructor(value) { this.value = `arc:${value}`; } }",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/main.js",
+      [
+        'import * as graphic from "./graphic.js";',
+        'var shapeType = globalThis["__useCircle"] ? "Circle" : "Arc";',
+        'globalThis["__finiteBoundNamespaceResult"] = new graphic[shapeType]("radius").value;',
+        "",
+      ].join("\n"),
+    );
+
+    await buildViteFixture(fixture);
+    const html = await fixture.read("dist/index.html");
+    const entryScript = readRewrittenEntryScript(html);
+    const previousLocation = globalThis.location;
+    const previousRuntime = globalThis.__g;
+    globalThis["__useCircle"] = true;
+    try {
+      globalThis.location = { href: "http://vite.test/index.html" };
+      delete globalThis.__g;
+      await import(
+        `${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?finite-bound-namespace=${Date.now()}`,
+      );
+      expect(globalThis["__finiteBoundNamespaceResult"]).toBe("circle:radius");
+    } finally {
+      delete globalThis["__useCircle"];
+      delete globalThis["__finiteBoundNamespaceResult"];
+      if (previousLocation === undefined) delete globalThis.location;
+      else globalThis.location = previousLocation;
+      if (previousRuntime === undefined) delete globalThis.__g;
+      else globalThis.__g = previousRuntime;
+    }
+  },
+);
+
+test.serial(
   "named exports preserve namespace import values across Vite chunks",
   { timeout: 30000 },
   async () => {

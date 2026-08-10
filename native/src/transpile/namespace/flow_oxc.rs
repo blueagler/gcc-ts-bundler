@@ -8,12 +8,12 @@ use std::path::Path;
 use oxc_allocator::{Allocator, CloneIn, FromIn, TakeIn};
 use oxc_ast::ast::*;
 use oxc_ast::builder::AstBuilder;
-use oxc_ast_visit::{walk_mut, VisitMut};
+use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_codegen::Codegen;
 use oxc_span::SPAN;
 use oxc_str::Str;
 use oxc_syntax::number::NumberBase;
-use oxc_syntax::operator::AssignmentOperator;
+use oxc_syntax::operator::{AssignmentOperator, BinaryOperator};
 
 use super::wrappers_oxc::{
     collect_dynamic_import_object_carriers, collect_dynamic_import_promise_carriers,
@@ -83,6 +83,7 @@ fn rewrite_namespace_usage<'a, 'i>(
         direct_namespace_targets: HashMap::new(),
         errors: Vec::new(),
         file_path: file_path.to_path_buf(),
+        finite_property_bindings: collect_finite_property_bindings(program, identity),
         hoist,
         identity,
         namespace_bindings: HashMap::new(),
@@ -105,6 +106,49 @@ struct HoistNamespaceInfo<'i> {
     plan: &'i HoistPlan,
 }
 
+struct FinitePropertyBindingCollector<'i> {
+    bindings: BindingKeyMap<Vec<String>>,
+    identity: &'i ModuleIdentity,
+    seen: BindingKeySet,
+}
+
+impl<'a> Visit<'a> for FinitePropertyBindingCollector<'_> {
+    fn visit_variable_declarator(&mut self, declarator: &VariableDeclarator<'a>) {
+        let candidate = declarator
+            .id
+            .get_binding_identifier()
+            .map(|binding| self.identity.key_of_binding(binding));
+        let mut candidate_is_unique = true;
+        for (key, _) in binding_names_with_ids(&declarator.id, self.identity) {
+            if !self.seen.insert(key) {
+                self.bindings.remove(&key);
+                candidate_is_unique &= candidate != Some(key);
+            }
+        }
+        if let Some(key) = candidate.filter(|_| candidate_is_unique) {
+            if self.identity.is_stable_local_binding(key) {
+                if let Some(properties) = declarator.init.as_ref().and_then(finite_property_names) {
+                    self.bindings.insert(key, properties);
+                }
+            }
+        }
+        walk::walk_variable_declarator(self, declarator);
+    }
+}
+
+fn collect_finite_property_bindings(
+    program: &Program<'_>,
+    identity: &ModuleIdentity,
+) -> BindingKeyMap<Vec<String>> {
+    let mut collector = FinitePropertyBindingCollector {
+        bindings: HashMap::new(),
+        identity,
+        seen: HashSet::new(),
+    };
+    collector.visit_program(program);
+    collector.bindings
+}
+
 struct BundlerRuntimeNamespaceVisitor<'a, 'i> {
     allocator: &'a Allocator,
     builder: AstBuilder<'a>,
@@ -112,6 +156,7 @@ struct BundlerRuntimeNamespaceVisitor<'a, 'i> {
     direct_namespace_targets: BindingKeyMap<String>,
     errors: Vec<String>,
     file_path: std::path::PathBuf,
+    finite_property_bindings: BindingKeyMap<Vec<String>>,
     hoist: Option<HoistNamespaceInfo<'i>>,
     identity: &'i ModuleIdentity,
     namespace_bindings: BindingKeyMap<BTreeSet<String>>,
@@ -335,27 +380,51 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
         let Expression::ComputedMemberExpression(member) = expression else {
             return false;
         };
-        if computed_property_name(&member.expression).is_some()
-            || !finite_computed_property(&member.expression)
+        if computed_property_name(&member.expression).is_some() {
+            return false;
+        }
+        let Expression::Identifier(object_identifier) = &member.object else {
+            return false;
+        };
+        let Some(object_binding) = self.identity.key_of_reference(object_identifier) else {
+            return false;
+        };
+        if !self.namespace_bindings.contains_key(&object_binding)
+            && !self.direct_namespace_targets.contains_key(&object_binding)
         {
             return false;
         }
-        let Expression::Identifier(identifier) = &member.object else {
-            return false;
-        };
-        let Some(binding) = self.identity.key_of_reference(identifier) else {
-            return false;
-        };
-        if !self.namespace_bindings.contains_key(&binding)
-            && !self.direct_namespace_targets.contains_key(&binding)
-        {
-            return false;
+
+        if finite_computed_property(&member.expression) {
+            let object = member.object.take_in(&self.builder);
+            let property = member.expression.take_in(&self.builder);
+            *expression = lower_finite_namespace_member(
+                object,
+                property,
+                member.optional,
+                self.allocator,
+                &self.builder,
+            );
+            return true;
         }
+
+        let Expression::Identifier(property_identifier) = &member.expression else {
+            return false;
+        };
+        let Some(properties) = self
+            .identity
+            .key_of_reference(property_identifier)
+            .and_then(|key| self.finite_property_bindings.get(&key))
+            .cloned()
+        else {
+            return false;
+        };
         let object = member.object.take_in(&self.builder);
         let property = member.expression.take_in(&self.builder);
-        *expression = lower_finite_namespace_member(
+        *expression = lower_bound_finite_namespace_member(
             object,
             property,
+            &properties,
             member.optional,
             self.allocator,
             &self.builder,
@@ -772,6 +841,27 @@ fn computed_property_name(expression: &Expression<'_>) -> Option<String> {
     }
 }
 
+fn finite_property_names(expression: &Expression<'_>) -> Option<Vec<String>> {
+    if let Some(property) = computed_property_name(expression) {
+        return Some(vec![property]);
+    }
+    match expression {
+        Expression::ConditionalExpression(conditional) => {
+            let mut properties = finite_property_names(&conditional.consequent)?;
+            for property in finite_property_names(&conditional.alternate)? {
+                if !properties.contains(&property) {
+                    properties.push(property);
+                }
+            }
+            Some(properties)
+        }
+        Expression::ParenthesizedExpression(parenthesized) => {
+            finite_property_names(&parenthesized.expression)
+        }
+        _ => None,
+    }
+}
+
 fn finite_computed_property(expression: &Expression<'_>) -> bool {
     if computed_property_name(expression).is_some() {
         return true;
@@ -834,6 +924,52 @@ fn lower_finite_namespace_member<'a>(
             Expression::new_computed_member_expression(SPAN, object, property, optional, builder)
         }
     }
+}
+
+fn lower_bound_finite_namespace_member<'a>(
+    object: Expression<'a>,
+    property: Expression<'a>,
+    properties: &[String],
+    optional: bool,
+    allocator: &'a Allocator,
+    builder: &AstBuilder<'a>,
+) -> Expression<'a> {
+    let (last, preceding) = properties
+        .split_last()
+        .expect("finite property binding must have a value");
+    let string = |value: &str| {
+        Expression::new_string_literal(SPAN, Str::from_in(value, allocator), None, builder)
+    };
+    let mut consequents = preceding
+        .iter()
+        .map(|name| {
+            Expression::new_computed_member_expression(
+                SPAN,
+                clone_namespace_object(&object, allocator),
+                string(name),
+                optional,
+                builder,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut selection =
+        Expression::new_computed_member_expression(SPAN, object, string(last), optional, builder);
+    for (name, consequent) in preceding.iter().zip(consequents.drain(..)).rev() {
+        selection = Expression::new_conditional_expression(
+            SPAN,
+            Expression::new_binary_expression(
+                SPAN,
+                clone_namespace_object(&property, allocator),
+                BinaryOperator::StrictEquality,
+                string(name),
+                builder,
+            ),
+            consequent,
+            selection,
+            builder,
+        );
+    }
+    selection
 }
 
 fn print_node(node: &Expression<'_>) -> String {
@@ -932,6 +1068,7 @@ fn remove_maybe_default_carriers<T>(
 mod tests {
     use super::*;
     use oxc_parser::Parser;
+    use oxc_semantic::SemanticBuilder;
     use oxc_span::SourceType;
 
     fn computed_initializer<'a>(
@@ -946,6 +1083,62 @@ mod tests {
             panic!("expected computed initializer");
         };
         member
+    }
+
+    fn finite_bindings(source: &str) -> HashMap<String, Vec<String>> {
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, SourceType::mjs()).parse();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let identity = ModuleIdentity::new(
+            SemanticBuilder::new()
+                .with_build_nodes(true)
+                .build(&parsed.program)
+                .semantic
+                .into_scoping(),
+        );
+        collect_finite_property_bindings(&parsed.program, &identity)
+            .into_iter()
+            .map(|(key, properties)| (identity.symbol(key).to_string(), properties))
+            .collect()
+    }
+
+    #[test]
+    fn follows_a_bound_finite_ternary() {
+        let bindings = finite_bindings(
+            r#"function draw(condition) { const shapeType = condition ? "Circle" : "Arc"; return graphic[shapeType]; }"#,
+        );
+        assert_eq!(bindings["shapeType"], ["Circle", "Arc"]);
+    }
+
+    #[test]
+    fn follows_a_bound_nested_finite_ternary() {
+        let bindings = finite_bindings(
+            r#"function draw(first, second) { const shapeType = first ? "Circle" : second ? "Arc" : "Line"; return graphic[shapeType]; }"#,
+        );
+        assert_eq!(bindings["shapeType"], ["Circle", "Arc", "Line"]);
+    }
+
+    #[test]
+    fn rejects_a_reassigned_finite_binding() {
+        let bindings = finite_bindings(
+            r#"function draw(condition) { let shapeType = condition ? "Circle" : "Arc"; shapeType = "Line"; return graphic[shapeType]; }"#,
+        );
+        assert!(!bindings.contains_key("shapeType"));
+    }
+
+    #[test]
+    fn rejects_a_binding_with_multiple_declarations() {
+        let bindings = finite_bindings(
+            r#"function draw(condition, source) { var shapeType = condition ? "Circle" : "Arc"; var { shapeType } = source; return graphic[shapeType]; }"#,
+        );
+        assert!(!bindings.contains_key("shapeType"));
+    }
+
+    #[test]
+    fn rejects_a_parameter_as_finite_binding() {
+        let bindings =
+            finite_bindings(r#"function draw(shapeType) { return graphic[shapeType]; }"#);
+        assert!(!bindings.contains_key("shapeType"));
     }
 
     #[test]

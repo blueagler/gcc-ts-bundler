@@ -101,6 +101,37 @@ impl ModuleIdentity {
         self.scoping.symbol_name(key.0)
     }
 
+    /// True when the binding is never written after its declaration and every
+    /// reference stays in the declaring function.
+    pub(crate) fn is_stable_local_binding(&self, key: BindingKey) -> bool {
+        let owner = self.enclosing_function_scope(self.scoping.symbol_scope_id(key.0));
+        if self.scoping.scope_flags(owner).contains_direct_eval() {
+            return false;
+        }
+        self.scoping
+            .get_resolved_references(key.0)
+            .all(|reference| {
+                !reference.flags().is_write()
+                    && self.enclosing_function_scope(reference.scope_id()) == owner
+            })
+    }
+
+    fn enclosing_function_scope(
+        &self,
+        mut scope: oxc_syntax::scope::ScopeId,
+    ) -> oxc_syntax::scope::ScopeId {
+        loop {
+            let flags = self.scoping.scope_flags(scope);
+            if flags.is_function() || flags.is_top() {
+                return scope;
+            }
+            scope = self
+                .scoping
+                .scope_parent_id(scope)
+                .expect("non-root scope must have a parent");
+        }
+    }
+
     /// True when this reference resolves to no declaration in this file: oxc's
     /// replacement for "carries the unresolved mark", and the same query island
     /// 3 already uses.
