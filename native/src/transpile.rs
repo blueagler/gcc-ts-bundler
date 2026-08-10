@@ -65,8 +65,10 @@ pub struct TranspileOutput {
     pub externsPath: String,
     pub preservedImports: Vec<PreservedImportOutput>,
     pub preservedPropertyCount: u32,
+    pub reifiedNamespaceCount: u32,
     pub supportFiles: Vec<String>,
     pub typeMetadata: Vec<EmittedTypeMetadata>,
+    pub warnings: Vec<String>,
 }
 
 #[allow(non_snake_case)]
@@ -437,6 +439,20 @@ pub fn transpile_sources(
 
     let shared_helper_prefixes =
         plan_shared_helper_placement(&emitted_outputs, &chunk_graph, &out_dir, &workspace_dir);
+    let mut reification_warnings = BTreeMap::<String, String>::new();
+    for reification in emitted_outputs
+        .iter()
+        .flat_map(|(_, _, emitted)| &emitted.reifications)
+    {
+        reification_warnings
+            .entry(reification.module_id.clone())
+            .and_modify(|warning| {
+                if reification.warning < *warning {
+                    warning.clone_from(&reification.warning);
+                }
+            })
+            .or_insert_with(|| reification.warning.clone());
+    }
 
     let mut runtime_module_source_map = BTreeMap::new();
     let mut emitted_files = Vec::with_capacity(emitted_outputs.len());
@@ -514,8 +530,10 @@ pub fn transpile_sources(
         externsPath: externs_path,
         preservedImports: preserved_imports,
         preservedPropertyCount: preserved_property_names.len() as u32,
+        reifiedNamespaceCount: reification_warnings.len() as u32,
         supportFiles: support_files,
         typeMetadata: emitted_type_metadata,
+        warnings: reification_warnings.into_values().collect(),
     })
 }
 

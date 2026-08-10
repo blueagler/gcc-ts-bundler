@@ -248,6 +248,7 @@ pub(crate) fn emit_goog_module_program<'a>(
         preserved_imports,
         shared_helpers: Vec::new(),
         reflective_property_names: Default::default(),
+        reifications: Vec::new(),
         type_metadata: type_metadata.finish(),
     })
 }

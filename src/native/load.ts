@@ -240,8 +240,10 @@ interface NativeTranspileOutput {
   externsPath: string;
   preservedImports: NativePreservedImportOutput[];
   preservedPropertyCount: number;
+  reifiedNamespaceCount: number;
   supportFiles: string[];
   typeMetadata: NativeEmittedTypeMetadata[];
+  warnings: string[];
 }
 
 interface NativeLazyImportInput {

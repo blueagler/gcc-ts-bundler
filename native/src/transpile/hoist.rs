@@ -40,6 +40,7 @@ pub(super) struct HoistPlan {
     pub(super) export_bindings: HashMap<String, BTreeMap<String, ResolvedExportBinding>>,
     namespace_reexports: HashMap<String, BTreeMap<String, String>>,
     namespace_object_modules: HashSet<String>,
+    reified_namespace_modules: HashSet<String>,
     pub(super) facade_slots: HashMap<String, FacadeSlots>,
     pub(super) hoisted_modules: HashSet<String>,
     pub(super) module_chunks: HashMap<String, usize>,
@@ -81,6 +82,10 @@ impl HoistPlan {
 
     pub(super) fn is_namespace_object_module(&self, module_id: &str) -> bool {
         self.namespace_object_modules.contains(module_id)
+    }
+
+    pub(super) fn is_reified_namespace_module(&self, module_id: &str) -> bool {
+        self.reified_namespace_modules.contains(module_id)
     }
 
     /// A resolved binding can be referenced directly only when the loader has
@@ -322,9 +327,19 @@ pub(super) fn build_hoist_plan(
 
     let export_bindings = resolve_all_export_bindings(&scans);
     let namespace_reexports = resolve_all_namespace_reexports(&scans);
+    let reified_namespace_modules = scans
+        .values()
+        .flat_map(|scan| {
+            scan.import_edges
+                .iter()
+                .filter(|edge| edge.namespace && edge.namespace_members.is_none())
+                .map(|edge| edge.target_module_id.clone())
+        })
+        .collect::<HashSet<_>>();
     let namespace_object_modules = namespace_reexports
         .values()
         .flat_map(|targets| targets.values().cloned())
+        .chain(reified_namespace_modules.iter().cloned())
         .collect();
 
     let plan_without_facades = HoistPlan {
@@ -332,6 +347,7 @@ pub(super) fn build_hoist_plan(
         export_bindings,
         namespace_reexports,
         namespace_object_modules,
+        reified_namespace_modules,
         facade_slots: HashMap::new(),
         hoisted_modules: hoistable,
         module_chunks,
@@ -1164,5 +1180,65 @@ mod tests {
         let api_id = to_goog_module_id(&api, &workspace);
         assert!(plan.is_hoisted(&api_id));
         fs::remove_dir_all(workspace).unwrap();
+    }
+
+    fn namespace_plan(consumer_source: &str) -> (HoistPlan, String) {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("gcc-hoist-reify-{unique}"));
+        let src = workspace.join("src");
+        fs::create_dir_all(&src).unwrap();
+        let target = src.join("graphic.js");
+        let consumer = src.join("main.js");
+        fs::write(&target, "export class Circle {}\nexport class Arc {}\n").unwrap();
+        fs::write(&consumer, consumer_source).unwrap();
+        let files = vec![
+            target.to_string_lossy().into_owned(),
+            consumer.to_string_lossy().into_owned(),
+        ];
+        let chunks = vec![TranspileChunkInput {
+            dependencies: Vec::new(),
+            files: vec!["src/graphic.js".to_string(), "src/main.js".to_string()],
+            name: "main".to_string(),
+        }];
+        let plan = build_hoist_plan(
+            &files,
+            &workspace,
+            &[],
+            &HashMap::new(),
+            &chunks,
+            &[],
+            &HashMap::new(),
+        )
+        .unwrap()
+        .unwrap();
+        let target_id = to_goog_module_id(&target, &workspace);
+        fs::remove_dir_all(workspace).unwrap();
+        (plan, target_id)
+    }
+
+    #[test]
+    fn dynamic_namespace_access_reifies_the_target() {
+        let (plan, target) = namespace_plan(
+            "import * as graphic from './graphic.js';\nconst option = { type: key };\nnew graphic[option.type]();\n",
+        );
+        assert!(plan.is_reified_namespace_module(&target));
+    }
+
+    #[test]
+    fn finite_namespace_access_does_not_reify_the_target() {
+        let (plan, target) = namespace_plan(
+            "import * as graphic from './graphic.js';\nconst type = flag ? 'Circle' : 'Arc';\nnew graphic[type]();\n",
+        );
+        assert!(!plan.is_namespace_object_module(&target));
+    }
+
+    #[test]
+    fn namespace_call_argument_reifies_the_target() {
+        let (plan, target) =
+            namespace_plan("import * as graphic from './graphic.js';\nconsume(graphic);\n");
+        assert!(plan.is_reified_namespace_module(&target));
     }
 }

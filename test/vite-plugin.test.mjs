@@ -233,6 +233,8 @@ test.serial(
       "src/main.js",
       [
         'import * as directUtil from "./util.js";',
+        'import * as api from "./api.js";',
+        'globalThis["__staticNamespaceReexport"] = api.util.answer;',
         'globalThis["__loadNamespace"] = () => import("./api.js").then(({ util }) => [util === directUtil, util.answer]);',
         "",
       ].join("\n"),
@@ -255,12 +257,14 @@ test.serial(
       await import(
         `${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?namespace-reexport=${Date.now()}`,
       );
+      expect(globalThis["__staticNamespaceReexport"]).toBe("namespace-ok");
       expect(await globalThis["__loadNamespace"]()).toEqual([
         true,
         "namespace-ok",
       ]);
     } finally {
       delete globalThis["__loadNamespace"];
+      delete globalThis["__staticNamespaceReexport"];
       if (previousDocument === undefined) delete globalThis.document;
       else globalThis.document = previousDocument;
       if (previousLocation === undefined) delete globalThis.location;
@@ -272,7 +276,7 @@ test.serial(
 );
 
 test.serial(
-  "gccTsBundler rejects dynamic computed module namespace calls with source context",
+  "gccTsBundler reifies unprovable computed module namespace access",
   { timeout: 30000 },
   async () => {
     const fixture = await createFixture();
@@ -281,21 +285,111 @@ test.serial(
       '<script type="module" src="/src/main.js"></script>\n',
     );
     await fixture.write(
-      "src/ops.js",
-      "export function initProps() { return 'init'; }\n",
+      "src/graphic.js",
+      [
+        "export class Line { constructor(value) { this.value = `line:${value}`; } }",
+        "export class Rect { constructor(value) { this.value = `rect:${value}`; } }",
+        "export class Unused { constructor() { throw new Error('retained'); } }",
+        "",
+      ].join("\n"),
     );
     await fixture.write(
       "src/main.js",
       [
-        'import * as graphic from "./ops.js";',
-        'const dynamicKey = globalThis["__dynamicNamespaceKey"];',
-        "graphic[dynamicKey]();",
+        'import * as graphic from "./graphic.js";',
+        'const pointerOption = { type: globalThis["__pointerType"] };',
+        'globalThis["__dynamicNamespaceResult"] = new graphic[pointerOption["type"]]("axis").value;',
         "",
       ].join("\n"),
     );
 
+    globalThis["__pointerType"] = "Rect";
+    try {
+      const build = await buildViteFixture(fixture);
+      const html = await fixture.read("dist/index.html");
+      const entryScript = readRewrittenEntryScript(html);
+      const previousLocation = globalThis.location;
+      const previousRuntime = globalThis.__g;
+      try {
+        globalThis.location = { href: "http://vite.test/index.html" };
+        delete globalThis.__g;
+        await import(
+          `${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?dynamic-namespace=${Date.now()}`,
+        );
+        expect(globalThis["__dynamicNamespaceResult"]).toBe("rect:axis");
+      } finally {
+        if (previousLocation === undefined) delete globalThis.location;
+        else globalThis.location = previousLocation;
+        if (previousRuntime === undefined) delete globalThis.__g;
+        else globalThis.__g = previousRuntime;
+      }
+      expect(build.stderr).toMatch(
+        /gcc-ts-bundler: reified namespace .*graphic for dynamic member access at .*main\.js:graphic\[pointerOption(?:\$\$\d+)?\["type"\]\]/u,
+      );
+    } finally {
+      delete globalThis["__pointerType"];
+      delete globalThis["__dynamicNamespaceResult"];
+    }
+  },
+);
+
+
+test.serial(
+  "gccTsBundler passes reified module namespaces to calls",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write("index.html", '<script type="module" src="/src/main.js"></script>\n');
+    await fixture.write("src/ops.js", "export const answer = 42;\n");
+    await fixture.write(
+      "src/main.js",
+      [
+        'import * as ops from "./ops.js";',
+        'const read = (namespace) => namespace[globalThis["__answerKey"]];',
+        'globalThis["__namespaceCallResult"] = read(ops);',
+        "",
+      ].join("\n"),
+    );
+
+    globalThis["__answerKey"] = "answer";
+    try {
+      await buildViteFixture(fixture);
+      const html = await fixture.read("dist/index.html");
+      const entryScript = readRewrittenEntryScript(html);
+      const previousLocation = globalThis.location;
+      const previousRuntime = globalThis.__g;
+      try {
+        globalThis.location = { href: "http://vite.test/index.html" };
+        delete globalThis.__g;
+        await import(`${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?namespace-call=${Date.now()}`);
+        expect(globalThis["__namespaceCallResult"]).toBe(42);
+      } finally {
+        if (previousLocation === undefined) delete globalThis.location;
+        else globalThis.location = previousLocation;
+        if (previousRuntime === undefined) delete globalThis.__g;
+        else globalThis.__g = previousRuntime;
+      }
+    } finally {
+      delete globalThis["__answerKey"];
+      delete globalThis["__namespaceCallResult"];
+    }
+  },
+);
+
+test.serial(
+  "gccTsBundler rejects mutation through a module namespace",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write("index.html", '<script type="module" src="/src/main.js"></script>\n');
+    await fixture.write("src/ops.js", "export let answer = 42;\n");
+    await fixture.write(
+      "src/main.js",
+      'import * as ops from "./ops.js";\nops[globalThis["__answerKey"]] = 7;\n',
+    );
+
     await expect(buildViteFixture(fixture)).rejects.toThrow(
-      /src\/main\.js: bundler-runtime does not support computed namespace property access: graphic\[dynamicKey(?:\$\$1)?\]/u,
+      /cannot mutate a read-only module namespace/u,
     );
   },
 );

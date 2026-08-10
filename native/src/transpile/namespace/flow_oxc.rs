@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use oxc_allocator::{Allocator, CloneIn, FromIn, TakeIn};
@@ -13,7 +13,7 @@ use oxc_codegen::Codegen;
 use oxc_span::SPAN;
 use oxc_str::Str;
 use oxc_syntax::number::NumberBase;
-use oxc_syntax::operator::{AssignmentOperator, BinaryOperator};
+use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, UnaryOperator};
 
 use super::wrappers_oxc::{
     collect_dynamic_import_object_carriers, collect_dynamic_import_promise_carriers,
@@ -21,7 +21,7 @@ use super::wrappers_oxc::{
     DynamicImportWrappers,
 };
 use crate::transpile::emit_runtime_oxc::binding_names_with_ids;
-use crate::transpile::identity_oxc::{BindingKeyMap, BindingKeySet, ModuleIdentity};
+use crate::transpile::identity_oxc::{BindingKey, BindingKeyMap, BindingKeySet, ModuleIdentity};
 use crate::transpile::{
     lowering_oxc::closure_input_codegen_options, resolve_module_id_for_specifier,
     to_bundler_runtime_module_id, HoistPlan, TranspileContext,
@@ -33,7 +33,7 @@ pub(crate) fn rewrite_bundler_runtime_namespace_usage<'a>(
     identity: &ModuleIdentity,
     file_path: &Path,
     context: &TranspileContext,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<Vec<NamespaceReification>, String> {
     rewrite_namespace_usage(allocator, program, identity, file_path, context, None)
 }
 
@@ -48,7 +48,7 @@ pub(crate) fn rewrite_hoisted_namespace_usage<'a>(
     consumer_module_id: &str,
     direct_namespace_ids: &BindingKeySet,
     lexical_binding_names: &HashSet<String>,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<Vec<NamespaceReification>, String> {
     rewrite_namespace_usage(
         allocator,
         program,
@@ -71,7 +71,7 @@ fn rewrite_namespace_usage<'a, 'i>(
     file_path: &Path,
     context: &'i TranspileContext,
     hoist: Option<HoistNamespaceInfo<'i>>,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<Vec<NamespaceReification>, String> {
     let wrappers = collect_dynamic_import_wrappers(program, identity);
     let object_carriers = collect_dynamic_import_object_carriers(program, &wrappers, identity);
     let promise_carriers =
@@ -89,14 +89,25 @@ fn rewrite_namespace_usage<'a, 'i>(
         namespace_bindings: HashMap::new(),
         object_carriers,
         promise_carriers,
+        reifications: BTreeMap::new(),
         wrappers,
     };
     visitor.visit_program(program);
     if visitor.errors.is_empty() {
-        Ok(())
+        Ok(visitor
+            .reifications
+            .into_iter()
+            .map(|(module_id, warning)| NamespaceReification { module_id, warning })
+            .collect())
     } else {
         Err(visitor.errors.join("\n"))
     }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct NamespaceReification {
+    pub(crate) module_id: String,
+    pub(crate) warning: String,
 }
 
 struct HoistNamespaceInfo<'i> {
@@ -136,7 +147,7 @@ impl<'a> Visit<'a> for FinitePropertyBindingCollector<'_> {
     }
 }
 
-fn collect_finite_property_bindings(
+pub(crate) fn collect_finite_property_bindings(
     program: &Program<'_>,
     identity: &ModuleIdentity,
 ) -> BindingKeyMap<Vec<String>> {
@@ -162,6 +173,7 @@ struct BundlerRuntimeNamespaceVisitor<'a, 'i> {
     namespace_bindings: BindingKeyMap<BTreeSet<String>>,
     object_carriers: BindingKeyMap<DynamicImportObjectWrapper>,
     promise_carriers: BindingKeyMap<BTreeSet<String>>,
+    reifications: BTreeMap<String, String>,
     wrappers: DynamicImportWrappers,
 }
 
@@ -169,6 +181,46 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
     fn push_error(&mut self, message: impl Into<String>) {
         self.errors
             .push(format!("{}: {}", self.file_path.display(), message.into()));
+    }
+
+    fn reify(&mut self, module_ids: &BTreeSet<String>, expression: &Expression<'a>) {
+        let rendered = print_node(expression);
+        for module_id in module_ids {
+            self.reifications
+                .entry(module_id.clone())
+                .or_insert_with(|| {
+                    format!(
+                        "reified namespace {module_id} for dynamic member access at {}:{rendered}",
+                        self.file_path.display()
+                    )
+                });
+        }
+    }
+
+    fn reify_binding(&mut self, binding: BindingKey, expression: &Expression<'a>) {
+        if let Some(module_ids) = self.namespace_bindings.get(&binding).cloned() {
+            self.reify(&module_ids, expression);
+        } else if let Some(module_id) = self.direct_namespace_targets.get(&binding).cloned() {
+            self.reify(&BTreeSet::from([module_id]), expression);
+        }
+    }
+
+    fn namespace_binding(&self, expression: &Expression<'a>) -> Option<BindingKey> {
+        let Expression::Identifier(identifier) = expression else {
+            return None;
+        };
+        self.identity
+            .key_of_reference(identifier)
+            .filter(|binding| {
+                self.namespace_bindings.contains_key(binding)
+                    || self.direct_namespace_targets.contains_key(binding)
+            })
+    }
+
+    fn reify_namespace_value(&mut self, expression: &Expression<'a>) {
+        if let Some(binding) = self.namespace_binding(expression) {
+            self.reify_binding(binding, expression);
+        }
     }
 
     fn module_ids_for_promise(&self, expression: &Expression<'a>) -> Option<BTreeSet<String>> {
@@ -248,21 +300,19 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
                     .insert(self.identity.key_of_binding(binding), module_ids.clone());
                 true
             }
-            BindingPattern::ObjectPattern(object) => {
-                for property in &mut object.properties {
-                    let Some(export_name) = property_key_name(&property.key) else {
-                        self.push_error(
-                            "bundler-runtime only supports literal namespace destructuring keys",
-                        );
-                        return false;
-                    };
-                    let Ok(slot) = self.slot_for_module_ids(module_ids, &export_name) else {
-                        self.push_error(format!(
-                            "bundler-runtime cannot destructure namespace export {:?}",
-                            export_name
-                        ));
-                        return false;
-                    };
+            BindingPattern::ObjectPattern(object) if object.rest.is_none() => {
+                let slots = object
+                    .properties
+                    .iter()
+                    .map(|property| {
+                        property_key_name(&property.key)
+                            .and_then(|name| self.slot_for_module_ids(module_ids, &name).ok())
+                    })
+                    .collect::<Option<Vec<_>>>();
+                let Some(slots) = slots else {
+                    return false;
+                };
+                for (property, slot) in object.properties.iter_mut().zip(slots) {
                     property.key = PropertyKey::new_numeric_literal(
                         SPAN,
                         slot as f64,
@@ -273,20 +323,9 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
                     property.computed = false;
                     property.shorthand = false;
                 }
-                if object.rest.is_some() {
-                    self.push_error(
-                        "bundler-runtime does not support namespace rest destructuring",
-                    );
-                    return false;
-                }
                 true
             }
-            _ => {
-                self.push_error(
-                    "bundler-runtime only supports identifier and object destructuring for namespace values",
-                );
-                false
-            }
+            _ => false,
         }
     }
 
@@ -450,10 +489,7 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
             return false;
         };
         let Some(property) = property else {
-            let rendered = print_node(expression);
-            self.push_error(format!(
-                "bundler-runtime does not support computed namespace property access: {rendered}"
-            ));
+            self.reify(&module_ids, expression);
             return true;
         };
         let slot = match self.slot_for_module_ids(&module_ids, &property) {
@@ -500,10 +536,7 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
             return false;
         };
         let Some(property) = property else {
-            let rendered = print_node(expression);
-            self.push_error(format!(
-                "bundler-runtime does not support computed namespace property access: {rendered}"
-            ));
+            self.reify(&BTreeSet::from([target_module_id]), expression);
             return true;
         };
         let Some(hoist) = &self.hoist else {
@@ -633,7 +666,9 @@ impl<'a> VisitMut<'a> for BundlerRuntimeNamespaceVisitor<'a, '_> {
             return;
         };
         if let Some(module_ids) = self.module_ids_for_namespace(initializer) {
-            self.rewrite_namespace_pattern(&mut declarator.id, &module_ids);
+            if !self.rewrite_namespace_pattern(&mut declarator.id, &module_ids) {
+                self.reify(&module_ids, initializer);
+            }
             return;
         }
         let Some(module_ids) = self.module_ids_for_promise(initializer) else {
@@ -690,57 +725,48 @@ impl<'a> VisitMut<'a> for BundlerRuntimeNamespaceVisitor<'a, '_> {
         }
 
         if let Some((object, method)) = member_call_parts(&call.callee) {
-            if matches!(object, Expression::Identifier(identifier)
-                if identifier.name == "Object" && self.identity.is_global(identifier))
-                && matches!(method.as_str(), "assign" | "entries" | "keys" | "values")
-                && call.arguments.iter().any(|argument| {
-                    argument.as_expression().is_some_and(|expression| {
-                        matches!(expression, Expression::Identifier(identifier)
-                            if self.identity.key_of_reference(identifier).is_some_and(|binding| self.namespace_bindings.contains_key(&binding)))
-                    })
-                })
+            let mutates_first = matches!(object, Expression::Identifier(identifier)
+                    if identifier.name == "Object" && self.identity.is_global(identifier))
+                && matches!(
+                    method.as_str(),
+                    "assign" | "defineProperty" | "defineProperties"
+                )
+                || matches!(object, Expression::Identifier(identifier)
+                    if identifier.name == "Reflect" && self.identity.is_global(identifier))
+                    && matches!(method.as_str(), "set" | "deleteProperty" | "defineProperty");
+            if mutates_first
+                && call
+                    .arguments
+                    .first()
+                    .and_then(Argument::as_expression)
+                    .is_some_and(|expression| self.namespace_binding(expression).is_some())
             {
-                self.push_error(
-                    "bundler-runtime does not support reflective Object.* operations on module namespace values",
-                );
+                self.push_error("bundler-runtime cannot mutate a read-only module namespace");
             }
         }
-
-        let passthrough = call.arguments.len() == 1
-            && call.arguments[0].as_expression().is_some_and(|expression| {
-                matches!(expression, Expression::Identifier(identifier)
-                    if self.identity.key_of_reference(identifier).is_some_and(|binding| self.namespace_bindings.contains_key(&binding)))
-            });
-        if !passthrough
-            && call.arguments.iter().any(|argument| {
-                argument.as_expression().is_some_and(|expression| {
-                    matches!(expression, Expression::Identifier(identifier)
-                        if self.identity.key_of_reference(identifier).is_some_and(|binding| self.namespace_bindings.contains_key(&binding)))
-                })
-            })
-        {
-            self.push_error(
-                "bundler-runtime does not support passing module namespace values to calls",
-            );
+        for argument in &call.arguments {
+            if let Some(expression) = argument.as_expression() {
+                self.reify_namespace_value(expression);
+            }
         }
     }
 
     fn visit_return_statement(&mut self, statement: &mut ReturnStatement<'a>) {
-        walk_mut::walk_return_statement(self, statement);
-        if statement.argument.as_ref().is_some_and(|argument| {
-            matches!(argument, Expression::Identifier(identifier)
-                if self.identity.key_of_reference(identifier).is_some_and(|binding| self.namespace_bindings.contains_key(&binding)))
-        }) {
-            self.push_error(
-                "bundler-runtime does not support returning module namespace values",
-            );
+        if let Some(argument) = &statement.argument {
+            self.reify_namespace_value(argument);
         }
+        walk_mut::walk_return_statement(self, statement);
     }
 
     fn visit_assignment_expression(&mut self, assignment: &mut AssignmentExpression<'a>) {
+        if assignment_target_namespace_object(&assignment.left)
+            .and_then(|object| self.namespace_binding(object))
+            .is_some()
+        {
+            self.push_error("bundler-runtime cannot mutate a read-only module namespace");
+        }
+        self.reify_namespace_value(&assignment.right);
         walk_mut::walk_assignment_expression(self, assignment);
-        let stores_namespace = matches!(&assignment.right, Expression::Identifier(identifier)
-            if self.identity.key_of_reference(identifier).is_some_and(|binding| self.namespace_bindings.contains_key(&binding)));
         if let AssignmentTarget::AssignmentTargetIdentifier(identifier) = &assignment.left {
             if let Some(binding) = self.identity.key_of_reference(identifier) {
                 self.namespace_bindings.remove(&binding);
@@ -765,14 +791,26 @@ impl<'a> VisitMut<'a> for BundlerRuntimeNamespaceVisitor<'a, '_> {
                 &mut self.promise_carriers,
             );
         }
-        if stores_namespace {
-            self.push_error(
-                "bundler-runtime does not support reassigning or storing module namespace values",
-            );
+    }
+
+    fn visit_unary_expression(&mut self, unary: &mut UnaryExpression<'a>) {
+        if unary.operator == UnaryOperator::Delete
+            && expression_namespace_object(&unary.argument)
+                .and_then(|object| self.namespace_binding(object))
+                .is_some()
+        {
+            self.push_error("bundler-runtime cannot mutate a read-only module namespace");
         }
+        walk_mut::walk_unary_expression(self, unary);
     }
 
     fn visit_update_expression(&mut self, update: &mut UpdateExpression<'a>) {
+        if simple_assignment_target_namespace_object(&update.argument)
+            .and_then(|object| self.namespace_binding(object))
+            .is_some()
+        {
+            self.push_error("bundler-runtime cannot mutate a read-only module namespace");
+        }
         walk_mut::walk_update_expression(self, update);
         if let SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) = &update.argument {
             if let Some(binding) = self.identity.key_of_reference(identifier) {
@@ -783,29 +821,17 @@ impl<'a> VisitMut<'a> for BundlerRuntimeNamespaceVisitor<'a, '_> {
     }
 
     fn visit_for_in_statement(&mut self, statement: &mut ForInStatement<'a>) {
+        self.reify_namespace_value(&statement.right);
         walk_mut::walk_for_in_statement(self, statement);
-        let iterates_namespace = matches!(&statement.right, Expression::Identifier(identifier)
-            if self.identity.key_of_reference(identifier).is_some_and(|binding| self.namespace_bindings.contains_key(&binding)));
         remove_for_left_carriers(&statement.left, self.identity, &mut self.namespace_bindings);
         remove_for_left_carriers(&statement.left, self.identity, &mut self.promise_carriers);
-        if iterates_namespace {
-            self.push_error(
-                "bundler-runtime does not support iterating over module namespace values",
-            );
-        }
     }
 
     fn visit_for_of_statement(&mut self, statement: &mut ForOfStatement<'a>) {
+        self.reify_namespace_value(&statement.right);
         walk_mut::walk_for_of_statement(self, statement);
-        let iterates_namespace = matches!(&statement.right, Expression::Identifier(identifier)
-            if self.identity.key_of_reference(identifier).is_some_and(|binding| self.namespace_bindings.contains_key(&binding)));
         remove_for_left_carriers(&statement.left, self.identity, &mut self.namespace_bindings);
         remove_for_left_carriers(&statement.left, self.identity, &mut self.promise_carriers);
-        if iterates_namespace {
-            self.push_error(
-                "bundler-runtime does not support iterating over module namespace values",
-            );
-        }
     }
 }
 
@@ -841,7 +867,7 @@ fn computed_property_name(expression: &Expression<'_>) -> Option<String> {
     }
 }
 
-fn finite_property_names(expression: &Expression<'_>) -> Option<Vec<String>> {
+pub(crate) fn finite_property_names(expression: &Expression<'_>) -> Option<Vec<String>> {
     if let Some(property) = computed_property_name(expression) {
         return Some(vec![property]);
     }
@@ -988,6 +1014,36 @@ fn member_call_parts<'b, 'a>(
         Expression::ComputedMemberExpression(member) => {
             computed_property_name(&member.expression).map(|property| (&member.object, property))
         }
+        _ => None,
+    }
+}
+
+fn expression_namespace_object<'b, 'a>(
+    expression: &'b Expression<'a>,
+) -> Option<&'b Expression<'a>> {
+    match expression {
+        Expression::StaticMemberExpression(member) => Some(&member.object),
+        Expression::ComputedMemberExpression(member) => Some(&member.object),
+        _ => None,
+    }
+}
+
+fn assignment_target_namespace_object<'b, 'a>(
+    target: &'b AssignmentTarget<'a>,
+) -> Option<&'b Expression<'a>> {
+    match target {
+        AssignmentTarget::StaticMemberExpression(member) => Some(&member.object),
+        AssignmentTarget::ComputedMemberExpression(member) => Some(&member.object),
+        _ => None,
+    }
+}
+
+fn simple_assignment_target_namespace_object<'b, 'a>(
+    target: &'b SimpleAssignmentTarget<'a>,
+) -> Option<&'b Expression<'a>> {
+    match target {
+        SimpleAssignmentTarget::StaticMemberExpression(member) => Some(&member.object),
+        SimpleAssignmentTarget::ComputedMemberExpression(member) => Some(&member.object),
         _ => None,
     }
 }

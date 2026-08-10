@@ -26,8 +26,9 @@ use super::type_metadata_oxc::{runtime_type_names_from_program, BoundTypeMetadat
 use super::{
     apply_js_compat_text_fixes, is_valid_js_identifier, render_closure_enum,
     render_live_export_slot_with, render_namespace_export_slots_with,
-    render_static_export_slot_with, resolve_module_id_for_specifier, stable_slot_access,
-    to_bundler_runtime_module_id, to_goog_module_id, BundlerModuleSlots, TranspileContext,
+    render_reified_namespace_export_slots_with, render_static_export_slot_with,
+    resolve_module_id_for_specifier, stable_slot_access, to_bundler_runtime_module_id,
+    to_goog_module_id, BundlerModuleSlots, TranspileContext,
 };
 use crate::closure_metadata::ClosureFileMetadata;
 
@@ -398,6 +399,7 @@ struct BundlerImportPlan {
 #[derive(Debug)]
 pub(crate) struct RuntimeEmit {
     pub(crate) code: String,
+    pub(crate) reifications: Vec<super::namespace::flow_oxc::NamespaceReification>,
     pub(crate) type_metadata: TypeMetadataDelivery,
 }
 
@@ -424,7 +426,7 @@ pub(crate) fn emit_bundler_runtime_module_text<'a>(
         .get(&module_id)
         .ok_or_else(|| format!("Missing bundler-runtime export slots for {module_id}"))?;
 
-    super::namespace::flow_oxc::rewrite_bundler_runtime_namespace_usage(
+    let reifications = super::namespace::flow_oxc::rewrite_bundler_runtime_namespace_usage(
         allocator, program, identity, file_path, context,
     )?;
     let (runtime_names, mut fresh_names) =
@@ -748,10 +750,20 @@ pub(crate) fn emit_bundler_runtime_module_text<'a>(
             })
             .collect::<Vec<_>>();
         if !namespace_slots.is_empty() {
-            output.push(render_namespace_export_slots_with(
-                &runtime_names.exports,
-                &namespace_slots,
-            ));
+            output.push(
+                if context
+                    .hoist_plan
+                    .as_ref()
+                    .is_some_and(|plan| plan.is_reified_namespace_module(&module_id))
+                {
+                    render_reified_namespace_export_slots_with(
+                        &runtime_names.exports,
+                        &namespace_slots,
+                    )
+                } else {
+                    render_namespace_export_slots_with(&runtime_names.exports, &namespace_slots)
+                },
+            );
         }
         if current_slots.slot_for("default") == Some(0) {
             output.push(format!("{}.__esModule = true;", runtime_names.exports));
@@ -774,6 +786,7 @@ pub(crate) fn emit_bundler_runtime_module_text<'a>(
     );
     Ok(RuntimeEmit {
         code: apply_js_compat_text_fixes(source),
+        reifications,
         type_metadata: type_metadata.finish(),
     })
 }

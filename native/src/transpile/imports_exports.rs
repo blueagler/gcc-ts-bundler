@@ -108,6 +108,25 @@ pub(crate) fn render_namespace_export_slots_with(
     format!("Object.defineProperties({exports_name},{{{descriptors}}});")
 }
 
+pub(crate) fn render_reified_namespace_export_slots_with(
+    exports_name: &str,
+    export_slots: &[(String, usize)],
+) -> String {
+    let original_descriptors = export_slots
+        .iter()
+        .map(|(export_name, slot)| {
+            format!(
+                "{export_name:?}:{{configurable:true,enumerable:true,get:function(){{return {exports_name}[{slot}];}}}}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{}\nObject.defineProperties({exports_name},{{{original_descriptors}}});",
+        render_namespace_export_slots_with(exports_name, export_slots)
+    )
+}
+
 pub(crate) fn render_static_export_slot(slot: usize, value_expression: &str) -> String {
     render_static_export_slot_with("__exports", slot, value_expression)
 }

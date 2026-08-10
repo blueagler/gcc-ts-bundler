@@ -25,8 +25,9 @@ use super::hoist::{suffixed_name, FacadeSlots, HoistPlan};
 use super::hoist_oxc::{collect_used_binding_ids, scan_namespace_usage};
 use super::identity_oxc::{BindingKey, BindingKeyMap, BindingKeySet, ModuleIdentity};
 use super::imports_exports::{
-    render_live_export_slot, render_namespace_export_slots_with, render_static_export_slot,
-    BundlerExportSlotMode, ImportBindingSlotAlias,
+    render_live_export_slot, render_namespace_export_slots_with,
+    render_reified_namespace_export_slots_with, render_static_export_slot, BundlerExportSlotMode,
+    ImportBindingSlotAlias,
 };
 use super::lowering_oxc::closure_input_codegen_options;
 use super::nocollapse_oxc::NocollapseAssignments;
@@ -94,7 +95,7 @@ pub(crate) fn emit_hoisted_module_text<'a>(
 
     let direct_namespace_ids =
         collect_direct_safe_namespace_ids(program, identity, file_path, context, plan);
-    super::namespace::flow_oxc::rewrite_hoisted_namespace_usage(
+    let reifications = super::namespace::flow_oxc::rewrite_hoisted_namespace_usage(
         allocator,
         program,
         identity,
@@ -313,6 +314,7 @@ pub(crate) fn emit_hoisted_module_text<'a>(
         preserved_extern_lines,
         preserved_imports,
         reflective_property_names: Default::default(),
+        reifications,
         shared_helpers,
         type_metadata: type_metadata.finish(),
     })
@@ -469,10 +471,11 @@ fn render_facade(
             })
             .collect::<Vec<_>>();
         if !namespace_slots.is_empty() {
-            lines.push(render_namespace_export_slots_with(
-                "__exports",
-                &namespace_slots,
-            ));
+            lines.push(if plan.is_reified_namespace_module(module_id) {
+                render_reified_namespace_export_slots_with("__exports", &namespace_slots)
+            } else {
+                render_namespace_export_slots_with("__exports", &namespace_slots)
+            });
         }
         if slots.slot_for("default") == Some(0) {
             lines.push("__exports.__esModule = true;".to_string());
@@ -1246,7 +1249,11 @@ fn collect_direct_safe_namespace_ids(
         for specifier in import.specifiers.iter().flatten() {
             if let ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) = specifier {
                 let binding = identity.key_of_binding(&namespace.local);
-                if usage.member_only_usage(binding).is_some() {
+                if usage.member_only_usage(binding).is_some_and(|members| {
+                    members
+                        .iter()
+                        .all(|member| plan.resolve_export(&target_module_id, member).is_some())
+                }) {
                     direct.insert(binding);
                 }
             }

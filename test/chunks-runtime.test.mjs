@@ -917,15 +917,11 @@ test.serial(
 );
 
 test.serial(
-  "split inherits the scope-hoisting restriction on escaping namespaces",
+  "split reifies an escaping namespace",
   { timeout: 20000 },
   async () => {
-    // The old split runtime handed out a real registry object, so a namespace
-    // could escape anywhere. The shared runtime lowers a namespace to its
-    // module slot -- which is where the byte win comes from -- so property
-    // reads through an escaped namespace still work (they rename to slot
-    // indices), but handing the namespace itself back to un-analysed code does
-    // not. That case must fail closed with a diagnostic rather than miscompile.
+    // Escaping a namespace retains its complete getter facade instead of
+    // rejecting the build. Finite member-only imports still lower to slots.
     const fixture = await createFixture();
     await fixture.write(
       "src/main.ts",
@@ -949,10 +945,7 @@ test.serial(
       srcDir: fixture.srcDir,
     });
 
-    expect(result.ok).toBe(false);
-    expect(
-      result.diagnostics.map((d) => String(d.message)).join("\n"),
-    ).toMatch(/does not support returning module namespace values/);
+    expect(result.ok).toBe(true);
   },
 );
 

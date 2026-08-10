@@ -77,6 +77,9 @@ pub(crate) fn scan_namespace_usage(
     }
     let mut scanner = NamespaceMemberScanner {
         candidates,
+        finite_property_bindings: super::namespace::flow_oxc::collect_finite_property_bindings(
+            program, identity,
+        ),
         identity,
         usage: NamespaceUsage {
             disqualified: HashSet::new(),
@@ -89,6 +92,7 @@ pub(crate) fn scan_namespace_usage(
 
 struct NamespaceMemberScanner<'a> {
     candidates: BindingKeySet,
+    finite_property_bindings: BindingKeyMap<Vec<String>>,
     identity: &'a ModuleIdentity,
     usage: NamespaceUsage,
 }
@@ -129,15 +133,20 @@ impl<'a> VisitJs<'a> for NamespaceMemberScanner<'_> {
                     self.visit_expression(&member.expression);
                     return;
                 }
-                if let Expression::StringLiteral(value) = &member.expression {
-                    self.usage
-                        .members
-                        .entry(binding)
-                        .or_default()
-                        .insert(value.value.to_string());
-                    return;
+                let names = super::namespace::flow_oxc::finite_property_names(&member.expression)
+                    .or_else(|| {
+                        let Expression::Identifier(identifier) = &member.expression else {
+                            return None;
+                        };
+                        self.identity
+                            .key_of_reference(identifier)
+                            .and_then(|key| self.finite_property_bindings.get(&key).cloned())
+                    });
+                if let Some(names) = names {
+                    self.usage.members.entry(binding).or_default().extend(names);
+                } else {
+                    self.usage.disqualified.insert(binding);
                 }
-                self.usage.disqualified.insert(binding);
                 self.visit_expression(&member.expression);
                 return;
             }

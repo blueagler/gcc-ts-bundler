@@ -17,6 +17,7 @@ pub(super) struct EmittedProgram {
     pub(super) preserved_imports: Vec<PreservedImportPlan>,
     pub(super) shared_helpers: Vec<emit_helpers::SharedHelperDeclaration>,
     pub(super) reflective_property_names: std::collections::BTreeSet<String>,
+    pub(super) reifications: Vec<super::namespace::flow_oxc::NamespaceReification>,
     pub(super) type_metadata: TypeMetadataDelivery,
 }
 
@@ -95,6 +96,7 @@ pub(super) fn emit_module_program_oxc<'a>(
                 preserved_imports: Vec::new(),
                 shared_helpers: Vec::new(),
                 reflective_property_names: Default::default(),
+                reifications: emitted.reifications,
                 type_metadata: emitted.type_metadata,
             }
         }
