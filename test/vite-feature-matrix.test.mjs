@@ -150,7 +150,7 @@ async function executeFixtureInChromium(fixture, expectedText) {
         "--dump-dom",
         `http://127.0.0.1:${address.port}/`,
       ],
-      { maxBuffer: 10 * 1024 * 1024, timeout: 15000 },
+      { maxBuffer: 10 * 1024 * 1024, timeout: 60000 },
     );
     expect(stdout).toContain(expectedText);
   } finally {

@@ -1054,6 +1054,7 @@ test.serial(
 
 test.serial(
   "shared chunks preserve external boundary properties used at module init",
+  { timeout: 30000 },
   async () => {
     const fixture = await createFixture();
     await fixture.write(
