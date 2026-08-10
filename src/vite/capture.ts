@@ -717,6 +717,20 @@ function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
   const importSpecifiers = new Set<string>();
   const dynamicImportSpecifiers = new Set<string>();
   const bridgeSpecifiers = new Set<string>();
+  const commonJsExportAliases = new Set<string>();
+  const commonJsNamedExports = new Set<string>();
+  const collectCommonJsAliases = (node: ts.Node) => {
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      isModuleExportsAccess(node.left) &&
+      ts.isIdentifier(node.right)
+    ) {
+      commonJsExportAliases.add(node.right.text);
+    }
+    ts.forEachChild(node, collectCommonJsAliases);
+  };
+  collectCommonJsAliases(sourceFile);
   let isForwardingOnly = true;
   let hasCommonJsSyntax = false;
   let hasEsmSyntax = false;
@@ -791,6 +805,23 @@ function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
       isCommonJsExportTarget(node.left)
     ) {
       hasCommonJsSyntax = true;
+    }
+
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+    ) {
+      const directExportName = commonJsExportName(node.left);
+      if (directExportName && directExportName !== "default") {
+        commonJsNamedExports.add(directExportName);
+      }
+      const aliasedExportName = commonJsAliasedExportName(
+        node.left,
+        commonJsExportAliases,
+      );
+      if (aliasedExportName) {
+        commonJsNamedExports.add(aliasedExportName);
+      }
     } else if (isModuleExportsAccess(node)) {
       hasCommonJsSyntax = true;
     } else if (
@@ -867,6 +898,9 @@ function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
     bridgeSpecifiers: [...bridgeSpecifiers].sort((left, right) =>
       left.localeCompare(right),
     ),
+    commonJsNamedExports: [...commonJsNamedExports].sort((left, right) =>
+      left.localeCompare(right),
+    ),
     dynamicImportSpecifiers: [...dynamicImportSpecifiers].sort((left, right) =>
       left.localeCompare(right),
     ),
@@ -891,13 +925,53 @@ function analyzeModuleCode(id: string, code: string): CapturedModuleAnalysis {
 }
 
 function isCommonJsExportTarget(node: ts.Expression): boolean {
+  return commonJsExportName(node) !== null;
+}
+
+function commonJsExportName(node: ts.Expression): string | null {
+  if (isModuleExportsAccess(node)) {
+    return "default";
+  }
   if (
     !ts.isPropertyAccessExpression(node) &&
     !ts.isElementAccessExpression(node)
   ) {
-    return false;
+    return null;
   }
-  return isExportsIdentifier(node.expression) || isModuleExportsAccess(node);
+  if (
+    !isExportsIdentifier(node.expression) &&
+    !isModuleExportsAccess(node.expression)
+  ) {
+    return null;
+  }
+  return propertyAccessName(node);
+}
+
+function commonJsAliasedExportName(
+  node: ts.Expression,
+  aliases: Set<string>,
+): string | null {
+  if (
+    (!ts.isPropertyAccessExpression(node) &&
+      !ts.isElementAccessExpression(node)) ||
+    !ts.isIdentifier(node.expression) ||
+    !aliases.has(node.expression.text)
+  ) {
+    return null;
+  }
+  return propertyAccessName(node);
+}
+
+function propertyAccessName(
+  node: ts.PropertyAccessExpression | ts.ElementAccessExpression,
+): string | null {
+  if (ts.isPropertyAccessExpression(node)) {
+    return node.name.text;
+  }
+  return node.argumentExpression &&
+    ts.isStringLiteralLike(node.argumentExpression)
+    ? node.argumentExpression.text
+    : null;
 }
 
 function isExportsIdentifier(node: ts.Node) {

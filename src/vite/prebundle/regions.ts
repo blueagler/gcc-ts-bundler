@@ -12,6 +12,7 @@ import {
 } from "./shared";
 
 export interface RegionBundleRequest {
+  commonJsFacadeNamedExports: string[];
   exportedNames: string[];
   hasDefaultExport: boolean;
   needsDefault: boolean;
@@ -98,7 +99,7 @@ export async function renderBundleEntrySource(input: {
 }) {
   const lines: string[] = [];
 
-  for (const request of input.requests) {
+  for (const [requestIndex, request] of input.requests.entries()) {
     const importPath = toRelativeImportSpecifier(
       input.entryPoint,
       request.targetFilePath,
@@ -116,15 +117,42 @@ export async function renderBundleEntrySource(input: {
       lines.push(`export * from ${JSON.stringify(importPath)};`);
     }
 
+    const derivedNamedExports = new Set(
+      request.commonJsFacadeNamedExports.filter(
+        (name) => request.needsExportAll || request.usedNamedExports.has(name),
+      ),
+    );
     const exportSpecifiers = new Set<string>();
-    if (
+    const needsDefault =
       request.hasDefaultExport &&
-      (request.needsDefault || request.needsExportAll)
-    ) {
+      (request.needsDefault || request.needsExportAll);
+    if (needsDefault && derivedNamedExports.size === 0) {
       exportSpecifiers.add("default");
     }
     for (const namedExport of request.usedNamedExports) {
-      exportSpecifiers.add(namedExport);
+      if (!derivedNamedExports.has(namedExport)) {
+        exportSpecifiers.add(namedExport);
+      }
+    }
+
+    if (derivedNamedExports.size > 0) {
+      const facadeLocal = `__gcc_cjs_facade_${requestIndex}`;
+      lines.push(`import ${facadeLocal} from ${JSON.stringify(importPath)};`);
+      const derivedSpecifiers: string[] = [];
+      let exportIndex = 0;
+      for (const exportName of [...derivedNamedExports].sort((left, right) =>
+        left.localeCompare(right),
+      )) {
+        const localName = `__gcc_cjs_named_${requestIndex}_${exportIndex++}`;
+        lines.push(
+          `const ${localName} = ${facadeLocal}[${JSON.stringify(exportName)}];`,
+        );
+        derivedSpecifiers.push(`${localName} as ${exportName}`);
+      }
+      if (needsDefault) {
+        derivedSpecifiers.push(`${facadeLocal} as default`);
+      }
+      lines.push(`export { ${derivedSpecifiers.join(", ")} };`);
     }
 
     // Resolve names through pure barrel modules to their defining modules so

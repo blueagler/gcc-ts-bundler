@@ -93,6 +93,12 @@ export async function materializeCapturedGraph(
     filePathByModuleId.set(moduleId, filePath);
     const record = input.capturedModules.get(moduleId);
     modules.push({
+      ...(record?.normalizedAnalysis?.commonJsNamedExports.length
+        ? {
+            commonJsNamedExports:
+              record.normalizedAnalysis.commonJsNamedExports,
+          }
+        : {}),
       filePath,
       format: record?.format ?? record?.rawAnalysis?.moduleFormat ?? "unknown",
       id: moduleId,

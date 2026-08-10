@@ -370,6 +370,29 @@ function createPrebundleContext(input: {
   };
 }
 
+function resolveCommonJsFacadeNamedExports(
+  context: PrebundleContext,
+  parsedTarget: ParsedMaterializedModule,
+) {
+  if (!parsedTarget.hasDefaultExport) {
+    return [];
+  }
+  return [
+    ...new Set(
+      parsedTarget.dependencyImports
+        .filter((dependencyImport) =>
+          dependencyImport.namedExports.includes("__require"),
+        )
+        .flatMap(
+          (dependencyImport) =>
+            context.moduleByFilePath.get(
+              normalizePath(dependencyImport.targetFilePath),
+            )?.commonJsNamedExports ?? [],
+        ),
+    ),
+  ].sort((left, right) => left.localeCompare(right));
+}
+
 async function collectBundleRequests(
   context: PrebundleContext,
   dynamicRootModuleIds: string[],
@@ -430,8 +453,18 @@ async function collectBundleRequests(
       }
 
       const parsedTarget = await context.parseModule(targetModule.filePath);
+      const commonJsFacadeNamedExports = resolveCommonJsFacadeNamedExports(
+        context,
+        parsedTarget,
+      );
       bundleRequests.set(requestKey, {
-        exportedNames: parsedTarget.exportedNames,
+        commonJsFacadeNamedExports,
+        exportedNames: [
+          ...new Set([
+            ...parsedTarget.exportedNames,
+            ...commonJsFacadeNamedExports,
+          ]),
+        ],
         hasDefaultExport: parsedTarget.hasDefaultExport,
         needsDefault: dependencyImport.hasDefault,
         needsExportAll: dependencyImport.hasNamespace,
@@ -457,8 +490,18 @@ async function collectBundleRequests(
     }
     const requestKey = `${EAGER_REGION_LABEL}\u0000${targetFilePath}`;
     const parsedTarget = await context.parseModule(targetFilePath);
+    const commonJsFacadeNamedExports = resolveCommonJsFacadeNamedExports(
+      context,
+      parsedTarget,
+    );
     bundleRequests.set(requestKey, {
-      exportedNames: parsedTarget.exportedNames,
+      commonJsFacadeNamedExports,
+      exportedNames: [
+        ...new Set([
+          ...parsedTarget.exportedNames,
+          ...commonJsFacadeNamedExports,
+        ]),
+      ],
       hasDefaultExport: parsedTarget.hasDefaultExport,
       needsDefault: parsedTarget.hasDefaultExport,
       needsExportAll: true,
@@ -485,8 +528,18 @@ async function collectBundleRequests(
     const regionKey = `dynamic:${targetFilePath}`;
     const requestKey = `${regionKey}\u0000${targetFilePath}`;
     const parsedTarget = await context.parseModule(targetFilePath);
+    const commonJsFacadeNamedExports = resolveCommonJsFacadeNamedExports(
+      context,
+      parsedTarget,
+    );
     bundleRequests.set(requestKey, {
-      exportedNames: parsedTarget.exportedNames,
+      commonJsFacadeNamedExports,
+      exportedNames: [
+        ...new Set([
+          ...parsedTarget.exportedNames,
+          ...commonJsFacadeNamedExports,
+        ]),
+      ],
       hasDefaultExport: parsedTarget.hasDefaultExport,
       needsDefault: parsedTarget.hasDefaultExport,
       needsExportAll: true,
@@ -551,8 +604,18 @@ async function collectAtomBundleRequests(input: {
         continue;
       }
       const parsedTarget = await input.context.parseModule(targetFilePath);
+      const commonJsFacadeNamedExports = resolveCommonJsFacadeNamedExports(
+        input.context,
+        parsedTarget,
+      );
       input.bundleRequests.set(requestKey, {
-        exportedNames: parsedTarget.exportedNames,
+        commonJsFacadeNamedExports,
+        exportedNames: [
+          ...new Set([
+            ...parsedTarget.exportedNames,
+            ...commonJsFacadeNamedExports,
+          ]),
+        ],
         hasDefaultExport: parsedTarget.hasDefaultExport,
         needsDefault: dependencyImport.hasDefault,
         needsExportAll: dependencyImport.hasNamespace,

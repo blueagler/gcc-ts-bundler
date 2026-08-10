@@ -1864,6 +1864,84 @@ test.serial(
 );
 
 test.serial(
+  "prebundle derives eventemitter3-style named exports for an atom facade",
+  async () => {
+    const fixture = await createFixture();
+    const srcDir = path.join(fixture.projectRoot, "captured-src");
+    const runtimeDir = path.join(fixture.projectRoot, "runtime-src");
+    const authoredEntry = path.join(srcDir, "src", "entry.js");
+    const wrapper = path.join(srcDir, "node_modules", "wrapper", "index.js");
+    const facade = path.join(srcDir, "__virtual__", "callable-cjs-facade.js");
+    const commonJs = path.join(srcDir, "node_modules", "callable-cjs", "index.js");
+    const commonJsCode = [
+      "var state = { exports: {} };",
+      "function requireCallable() {",
+      "  (function(module) {",
+      "    function EventEmitter() { this.value = 42; }",
+      "    EventEmitter.EventEmitter = EventEmitter;",
+      "    module.exports = EventEmitter;",
+      "  })(state);",
+      "  return state.exports;",
+      "}",
+      "export { requireCallable as __require };",
+      "",
+    ].join("\n");
+    const commonJsNamedExports = getCapturedModuleAnalysis({
+      code: commonJsCode,
+      id: commonJs,
+    }).commonJsNamedExports;
+    expect(commonJsNamedExports).toEqual(["EventEmitter"]);
+    await fixture.write(
+      path.relative(fixture.projectRoot, authoredEntry),
+      'import { EventEmitter } from "../node_modules/wrapper/index.js"; export const value = new EventEmitter().value;\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, wrapper),
+      'import Callable, { EventEmitter } from "../../__virtual__/callable-cjs-facade.js"; export { Callable as default, EventEmitter };\n',
+    );
+    await fixture.write(
+      path.relative(fixture.projectRoot, facade),
+      [
+        'import { __require as requireCallable } from "../node_modules/callable-cjs/index.js";',
+        "var callableExports = requireCallable();",
+        "var callableDefault = callableExports;",
+        "export { callableDefault as default };",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(path.relative(fixture.projectRoot, commonJs), commonJsCode);
+
+    const prebundled = await prebundleMaterializedDependencies({
+      dynamicRootModuleIds: [],
+      materialized: {
+        authoredFiles: [authoredEntry],
+        entries: ["./src/entry.js"],
+        modules: [
+          { filePath: authoredEntry, format: "esm", id: authoredEntry, relativePath: "src/entry.js", sourceModuleIds: [authoredEntry] },
+          { filePath: wrapper, format: "esm", id: wrapper, relativePath: "node_modules/wrapper/index.js", sourceModuleIds: [wrapper] },
+          { filePath: facade, format: "cjs", id: "\0callable-cjs?commonjs-es-import", relativePath: "__virtual__/callable-cjs-facade.js", sourceModuleIds: ["\0callable-cjs?commonjs-es-import"] },
+          { commonJsNamedExports, filePath: commonJs, format: "mixed", id: commonJs, relativePath: "node_modules/callable-cjs/index.js", sourceModuleIds: [commonJs] },
+        ],
+        prunedEmptyModuleIds: [],
+        retainedEmptyModuleIds: [],
+        runtimeEntries: ["./src/entry.js", "./node_modules/wrapper/index.js", "./__virtual__/callable-cjs-facade.js", "./node_modules/callable-cjs/index.js"],
+        srcDir,
+      },
+      outputSrcDir: runtimeDir,
+    });
+
+    const atom = prebundled.modules.find((module) =>
+      module.relativePath.startsWith("__dep-bundles/atom/"),
+    );
+    expect(atom).toBeDefined();
+    if (!atom) throw new Error("Expected a callable CommonJS atom");
+    const exports = await import(`${pathToFileURL(atom.filePath).href}?eventemitter3`);
+    expect(new exports.EventEmitter().value).toBe(42);
+    expect(exports.EventEmitter).toBe(exports.default.EventEmitter);
+  },
+);
+
+test.serial(
   "gccTsBundler recognizes local named default exports in dependency metadata",
   { timeout: 20000 },
   async () => {

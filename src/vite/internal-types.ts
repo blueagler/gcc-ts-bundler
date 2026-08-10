@@ -17,6 +17,8 @@ export type CapturedModuleFormat = "cjs" | "esm" | "mixed" | "unknown";
 
 export interface CapturedModuleAnalysis {
   bridgeSpecifiers: string[];
+  /** Named properties proven on the value assigned to `module.exports`. */
+  commonJsNamedExports: string[];
   /** True when the module declares a class with an `extends` clause. */
   hasExtendingClass: boolean;
   dynamicImportSpecifiers: string[];
@@ -41,6 +43,8 @@ export interface CapturedModule {
 }
 
 export interface CapturedRuntimeModule {
+  /** Named properties proven on the canonical CommonJS export value. */
+  commonJsNamedExports?: string[];
   filePath: string;
   format?: CapturedModuleFormat;
   id: string;
