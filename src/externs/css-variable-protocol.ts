@@ -209,7 +209,11 @@ export async function analyzeCssVariableProtocol(
   for (const sourceFile of parsed) {
     modules.set(sourceFile.fileName, buildModuleInfo(sourceFile));
   }
-  return new ModuleGraph(modules).run();
+  const result = new ModuleGraph(modules).run();
+  for (const sourceFile of parsed) {
+    collectSelectorElementKeys(sourceFile, result.keyNames);
+  }
+  return result;
 }
 
 function isFunctionLikeNode(node: ts.Node): node is FunctionLikeNode {
@@ -219,6 +223,67 @@ function isFunctionLikeNode(node: ts.Node): node is FunctionLikeNode {
     ts.isFunctionExpression(node) ||
     ts.isMethodDeclaration(node)
   );
+}
+
+/**
+ * Element-name keys in selector position of a style object.
+ *
+ * cssinjs `parseStyle` prints an identifier key whose value is an object as a
+ * nested selector: antd's `svg: { … }` under `.anticon` emits `.anticon svg`.
+ * Closure renames the key and the emitted rule selects nothing — and the
+ * changed rule text shifts the cssinjs content hash, so a prerendered shell
+ * no longer matches the client render (React #418).
+ *
+ * The evidence is local and shape-based. An object literal is style-shaped
+ * when one of its keys is a string or template whose text carries selector
+ * syntax (`&`, `.`, `:`, whitespace, `>`, `[`). Inside a style-shaped
+ * literal, an identifier key with an object-literal value is a selector
+ * element name — unless the value is the `_skip_check_`/`_multi_value_`
+ * declaration wrapper, which parseStyle prints as a declaration.
+ */
+export function collectSelectorElementKeys(
+  sourceFile: ts.SourceFile,
+  keyNames: Set<string>,
+) {
+  const selectorSyntax = /[&.:\s>[]/u;
+  const isStyleShaped = (candidate: ts.ObjectLiteralExpression) =>
+    candidate.properties.some((member) => {
+      if (!ts.isPropertyAssignment(member)) return false;
+      if (ts.isStringLiteralLike(member.name)) {
+        return selectorSyntax.test(member.name.text);
+      }
+      if (!ts.isComputedPropertyName(member.name)) return false;
+      const expression = member.name.expression;
+      return (
+        ts.isTemplateExpression(expression) ||
+        ts.isStringLiteralLike(expression)
+      );
+    });
+  const isDeclarationWrapper = (candidate: ts.ObjectLiteralExpression) =>
+    candidate.properties.some(
+      (member) =>
+        ts.isPropertyAssignment(member) &&
+        (ts.isIdentifier(member.name) || ts.isStringLiteralLike(member.name)) &&
+        (member.name.text === "_skip_check_" ||
+          member.name.text === "_multi_value_"),
+    );
+  const visit = (node: ts.Node) => {
+    if (ts.isObjectLiteralExpression(node) && isStyleShaped(node)) {
+      for (const member of node.properties) {
+        if (
+          ts.isPropertyAssignment(member) &&
+          ts.isIdentifier(member.name) &&
+          ts.isObjectLiteralExpression(member.initializer) &&
+          !isDeclarationWrapper(member.initializer) &&
+          isRuntimeExternPropertyName(member.name.text)
+        ) {
+          keyNames.add(member.name.text);
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
 }
 
 function buildModuleInfo(sourceFile: ts.SourceFile): ModuleInfo {

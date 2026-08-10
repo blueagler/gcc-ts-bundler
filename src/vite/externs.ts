@@ -46,7 +46,8 @@ type CachedRuntimeHazards = {
 // v9: hyphenated keys also record their underscored identifier alias.
 // v10: runtime hazards gained `cssVariableKeyNames`.
 // v11: key reads resolve const-bound string literals (`const K = "x"; K in o`).
-const VITE_EXTERN_PACKAGE_CACHE_VERSION = 11;
+// v12: element-name keys in selector position of a tainted style object.
+const VITE_EXTERN_PACKAGE_CACHE_VERSION = 12;
 
 export async function resolveCompilerExterns(input: {
   captureRoot: string;

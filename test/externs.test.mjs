@@ -1186,6 +1186,79 @@ test("enumeration without a `--` construction pins nothing", async () => {
   expect(result.sinkSites).toEqual([]);
 });
 
+// antd writes a nested selector as an element-name identifier key with an
+// object value: `.anticon { svg: { display: 'block' } }` in
+// antd/es/style/index.js. `parseStyle` prints such a key as a *selector*
+// (`.anticon svg`), not a declaration, so a renamed key emits `.anticon RA`,
+// the rule matches nothing, and the shifted rule text changes the cssinjs
+// content hash — a prerendered shell then fails hydration (React #418).
+// Cross-module flow cannot reach these objects (they pass through factory
+// indirection), so the evidence is local shape: a literal is style-shaped
+// when a string key carries selector syntax; its identifier keys with object
+// values are selector element names.
+test("element-name keys in selector position are rename evidence", async () => {
+  const { analyzeCssVariableProtocol } = await import(
+    "../src/externs/css-variable-protocol.ts"
+  );
+  const fixture = await createFixture();
+  await fixture.write(
+    "style.js",
+    [
+      "export const genIconStyle = () => ({",
+      "  anticon: {",
+      // Selector position: identifier key, object value. Pinned.
+      "    svg: { display: 'block' },",
+      // Declaration: identifier key, scalar value. `parseStyle` hyphenates it
+      // itself, so renaming is harmless and it stays out.
+      "    lineHeight: 1,",
+      // Already a literal in the output; nothing to rename. Its presence is
+      // the style-shape evidence for this literal.
+      "    '&:hover': { color: 'red' },",
+      "    legend: { padding: 0 },",
+      "  },",
+      "});",
+    ].join("\n"),
+  );
+
+  const result = await analyzeCssVariableProtocol([
+    path.join(fixture.projectRoot, "style.js"),
+  ]);
+
+  // `anticon` keys a literal with no selector-syntax sibling, so the outer
+  // object is not style-shaped and `anticon` stays renamable.
+  expect([...result.keyNames].sort()).toEqual(["legend", "svg"]);
+});
+
+// Without style-shape evidence nothing pins; and inside a style-shaped
+// literal, the `_skip_check_`/`_multi_value_` wrapper is a declaration,
+// not a selector, so its key stays renamable too.
+test("selector keys need style-shape evidence; wrappers stay out", async () => {
+  const { analyzeCssVariableProtocol } = await import(
+    "../src/externs/css-variable-protocol.ts"
+  );
+  const fixture = await createFixture();
+  await fixture.write(
+    "plain.js",
+    "export const config = { anticon: { svg: { display: 'block' } } };\n",
+  );
+  await fixture.write(
+    "wrapped.js",
+    [
+      "export const style = () => ({",
+      "  '&:focus': { color: 'blue' },",
+      "  margin: { _skip_check_: true, value: '0 0 0 8px' },",
+      "});",
+    ].join("\n"),
+  );
+
+  const result = await analyzeCssVariableProtocol([
+    path.join(fixture.projectRoot, "plain.js"),
+    path.join(fixture.projectRoot, "wrapped.js"),
+  ]);
+
+  expect([...result.keyNames]).toEqual([]);
+});
+
 // `@ant-design/cssinjs` marks an RTL-exempt CSS value with a wrapper object,
 // `margin: { _skip_check_: true, value: "0 0 0 8px" }`, and recognises it with
 // `SKIP_CHECK in value` where `const SKIP_CHECK = "_skip_check_"`. The key is
