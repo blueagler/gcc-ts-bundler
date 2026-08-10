@@ -322,6 +322,30 @@ test("the generated slice passes Closure type validation", async () => {
  * `collectPlatformExternSeeds`: property access (`window.setTimeout`) and
  * string element access (`window["requestAnimationFrame"]`).
  */
+test("bare Window data properties get global aliases", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gcc-platform-"));
+  const input = path.join(directory, "input.js");
+  try {
+    await fs.writeFile(
+      input,
+      "void pageXOffset; void pageYOffset; void open;\n",
+    );
+    const text = await generatePlatformExternsText(
+      [input],
+      [],
+      testCacheRoot,
+    );
+    expect(text).not.toBeNull();
+    expect(text).toContain("Window.prototype.pageXOffset;");
+    expect(text).toContain("Window.prototype.pageYOffset;");
+    expect(text).toContain("var pageXOffset;");
+    expect(text).toContain("var pageYOffset;");
+    expect(text).not.toContain("var open;");
+  } finally {
+    await fs.rm(directory, { force: true, recursive: true });
+  }
+});
+
 test("bare-global names seed through property and element access", async () => {
   const archive = await loadPlatformExternArchive(testCacheRoot);
   expect(archive).not.toBeNull();

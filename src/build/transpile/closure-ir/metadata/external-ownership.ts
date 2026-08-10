@@ -13,6 +13,7 @@ interface RuntimeBoundaryDeclarationOrigins {
 }
 
 export interface ExternalGlobalProtocolEvidence {
+  externalGlobals: readonly string[];
   memberAccessesByFile: ReadonlyMap<string, readonly number[]>;
   memberProperties: readonly string[];
   rootProperties: readonly string[];
@@ -638,11 +639,15 @@ export function hasPotentialExternalGlobalProtocol(
 
 export function collectExternalGlobalProtocolEvidence({
   checker,
+  platformGlobalNames = new Set(),
+  platformGlobalPropertyAliases = new Set(),
   platformPropertyNames = new Set(),
   program,
   sourceFiles,
 }: {
   checker: ts.TypeChecker;
+  platformGlobalNames?: ReadonlySet<string> | undefined;
+  platformGlobalPropertyAliases?: ReadonlySet<string> | undefined;
   platformPropertyNames?: ReadonlySet<string> | undefined;
   program: ts.Program;
   sourceFiles: readonly ts.SourceFile[];
@@ -669,6 +674,23 @@ export function collectExternalGlobalProtocolEvidence({
       (symbol !== undefined && aliases.has(symbol))
     );
   };
+  const isGlobalAliasValue = (expression: ts.Expression): boolean => {
+    expression = unwrapExpression(expression);
+    if (isGlobalRoot(expression)) return true;
+    if (ts.isConditionalExpression(expression)) {
+      return (
+        isGlobalAliasValue(expression.whenTrue) ||
+        isGlobalAliasValue(expression.whenFalse)
+      );
+    }
+    if (ts.isBinaryExpression(expression)) {
+      return (
+        isGlobalAliasValue(expression.left) ||
+        isGlobalAliasValue(expression.right)
+      );
+    }
+    return false;
+  };
 
   let changed = true;
   while (changed) {
@@ -679,9 +701,7 @@ export function collectExternalGlobalProtocolEvidence({
           ts.isVariableDeclaration(node) &&
           ts.isIdentifier(node.name) &&
           node.initializer &&
-          ts.isVariableDeclarationList(node.parent) &&
-          (node.parent.flags & ts.NodeFlags.Const) !== 0 &&
-          isGlobalRoot(node.initializer)
+          isGlobalAliasValue(node.initializer)
         ) {
           const symbol = symbolAt(node.name);
           if (symbol && !aliases.has(symbol)) {
@@ -701,8 +721,10 @@ export function collectExternalGlobalProtocolEvidence({
     sourceFile: ts.SourceFile;
   };
   const reads = new Map<string, Access[]>();
+  const writeAccesses = new Map<string, Access[]>();
   const writes = new Set<string>();
-  const addRead = (
+  const addAccess = (
+    target: Map<string, Access[]>,
     name: string,
     nameNode: ts.Node,
     receiver: ts.Expression,
@@ -713,10 +735,22 @@ export function collectExternalGlobalProtocolEvidence({
     const platform = (property?.declarations ?? []).some((declaration) =>
       program.isSourceFileDefaultLibrary(declaration.getSourceFile()),
     );
-    const existing = reads.get(name) ?? [];
+    const existing = target.get(name) ?? [];
     existing.push({ nameNode, platform, sourceFile });
-    reads.set(name, existing);
+    target.set(name, existing);
   };
+  const addRead = (
+    name: string,
+    nameNode: ts.Node,
+    receiver: ts.Expression,
+    sourceFile: ts.SourceFile,
+  ) => addAccess(reads, name, nameNode, receiver, sourceFile);
+  const addWriteAccess = (
+    name: string,
+    nameNode: ts.Node,
+    receiver: ts.Expression,
+    sourceFile: ts.SourceFile,
+  ) => addAccess(writeAccesses, name, nameNode, receiver, sourceFile);
   const accessMode = (node: ts.Expression) => {
     const parent = node.parent;
     if (
@@ -788,7 +822,15 @@ export function collectExternalGlobalProtocolEvidence({
         if (mode.read) {
           addRead(access.name, access.nameNode, access.receiver, sourceFile);
         }
-        if (mode.write) writes.add(access.name);
+        if (mode.write) {
+          writes.add(access.name);
+          addWriteAccess(
+            access.name,
+            access.nameNode,
+            access.receiver,
+            sourceFile,
+          );
+        }
       }
       if (
         ts.isCallExpression(node) &&
@@ -813,19 +855,132 @@ export function collectExternalGlobalProtocolEvidence({
     visit(sourceFile);
   }
 
-  const rootProperties = [...reads]
-    .filter(
-      ([name, accesses]) =>
+  const isBareRead = (identifier: ts.Identifier) => {
+    const parent = identifier.parent;
+    if (
+      (ts.isPropertyAccessExpression(parent) && parent.name === identifier) ||
+      (ts.isPropertyAssignment(parent) && parent.name === identifier) ||
+      (ts.isMethodDeclaration(parent) && parent.name === identifier) ||
+      (ts.isPropertyDeclaration(parent) && parent.name === identifier) ||
+      (ts.isVariableDeclaration(parent) && parent.name === identifier) ||
+      (ts.isParameter(parent) && parent.name === identifier) ||
+      ((ts.isFunctionDeclaration(parent) || ts.isClassDeclaration(parent)) &&
+        parent.name === identifier) ||
+      ts.isImportSpecifier(parent) ||
+      ts.isImportClause(parent) ||
+      ts.isExportSpecifier(parent) ||
+      ts.isLabeledStatement(parent) ||
+      (ts.isBinaryExpression(parent) &&
+        parent.left === identifier &&
+        parent.operatorToken.kind === ts.SyntaxKind.EqualsToken)
+    ) {
+      return false;
+    }
+    return true;
+  };
+  const producerNames = new Set<string>();
+  const producerSymbols = new Set<ts.Symbol>();
+  const addBindingSymbols = (name: ts.BindingName) => {
+    if (ts.isIdentifier(name)) {
+      producerNames.add(name.text);
+      const symbol = symbolAt(name);
+      if (symbol) producerSymbols.add(symbol);
+      return;
+    }
+    for (const element of name.elements) {
+      if (!ts.isOmittedExpression(element)) addBindingSymbols(element.name);
+    }
+  };
+  for (const sourceFile of sourceFiles) {
+    const visitProducer = (node: ts.Node) => {
+      if (ts.isVariableDeclaration(node) || ts.isParameter(node)) {
+        addBindingSymbols(node.name);
+      } else if (
+        (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) &&
+        node.name
+      ) {
+        addBindingSymbols(node.name);
+      } else if (ts.isImportClause(node) && node.name) {
+        addBindingSymbols(node.name);
+      } else if (ts.isImportSpecifier(node)) {
+        addBindingSymbols(node.name);
+      } else if (ts.isNamespaceImport(node)) {
+        addBindingSymbols(node.name);
+      } else if (ts.isImportEqualsDeclaration(node)) {
+        addBindingSymbols(node.name);
+      }
+      ts.forEachChild(node, visitProducer);
+    };
+    visitProducer(sourceFile);
+  }
+  const isEnvironmentIdentifier = (identifier: ts.Identifier) => {
+    const symbol = symbolAt(identifier);
+    if (
+      (symbol?.declarations ?? []).some((declaration) =>
+        program.isSourceFileDefaultLibrary(declaration.getSourceFile()),
+      )
+    ) {
+      return true;
+    }
+    return (
+      !producerNames.has(identifier.text) &&
+      (symbol === undefined || !producerSymbols.has(symbol))
+    );
+  };
+  const externalGlobals = new Set<string>();
+  const bindingNameCache = new Map<string, boolean>();
+  const isBindingName = (name: string) => {
+    let valid = bindingNameCache.get(name);
+    if (valid === undefined) {
+      valid =
+        ts
+          .createScanner(
+            ts.ScriptTarget.Latest,
+            false,
+            ts.LanguageVariant.Standard,
+            name,
+          )
+          .scan() === ts.SyntaxKind.Identifier;
+      bindingNameCache.set(name, valid);
+    }
+    return valid;
+  };
+  for (const sourceFile of sourceFiles) {
+    const visit = (node: ts.Node) => {
+      if (
+        ts.isIdentifier(node) &&
+        isBareRead(node) &&
+        isEnvironmentIdentifier(node) &&
+        isBindingName(node.text) &&
+        !globalNames.has(node.text) &&
+        !platformGlobalNames.has(node.text) &&
+        !platformGlobalPropertyAliases.has(node.text)
+      ) {
+        externalGlobals.add(node.text);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
+
+  const rootProperties = [...new Set([...reads.keys(), ...externalGlobals])]
+    .filter((name) => {
+      if (externalGlobals.has(name)) return true;
+      const accesses = reads.get(name) ?? [];
+      return (
         !writes.has(name) &&
         !platformPropertyNames.has(name) &&
-        !accesses.some((access) => access.platform),
-    )
-    .map(([name]) => name)
+        !accesses.some((access) => access.platform)
+      );
+    })
     .sort();
   const rootPropertySet = new Set(rootProperties);
   const memberAccessesByFile = new Map<string, number[]>();
   for (const name of rootProperties) {
-    for (const access of reads.get(name) ?? []) {
+    for (const access of [
+      ...(reads.get(name) ?? []),
+      ...(externalGlobals.has(name) ? (writeAccesses.get(name) ?? []) : []),
+    ]) {
       const fileName = path.normalize(access.sourceFile.fileName);
       const starts = memberAccessesByFile.get(fileName) ?? [];
       starts.push(
@@ -837,8 +992,30 @@ export function collectExternalGlobalProtocolEvidence({
       memberAccessesByFile.set(fileName, starts);
     }
   }
-  for (const starts of memberAccessesByFile.values()) {
-    starts.sort((left, right) => left - right);
+  for (const sourceFile of sourceFiles) {
+    const visitExternalNameAccess = (node: ts.Node) => {
+      const nameNode = ts.isPropertyAccessExpression(node)
+        ? node.name
+        : ts.isElementAccessExpression(node) &&
+            node.argumentExpression &&
+            ts.isStringLiteralLike(node.argumentExpression)
+          ? node.argumentExpression
+          : null;
+      if (nameNode && externalGlobals.has(nameNode.text)) {
+        const fileName = path.normalize(sourceFile.fileName);
+        const starts = memberAccessesByFile.get(fileName) ?? [];
+        starts.push(toUtf8Offset(sourceFile, nameNode.getStart(sourceFile)));
+        memberAccessesByFile.set(fileName, starts);
+      }
+      ts.forEachChild(node, visitExternalNameAccess);
+    };
+    visitExternalNameAccess(sourceFile);
+  }
+  for (const [fileName, starts] of memberAccessesByFile) {
+    memberAccessesByFile.set(
+      fileName,
+      [...new Set(starts)].sort((left, right) => left - right),
+    );
   }
 
   const candidates = new Set<ts.Symbol>();
@@ -925,6 +1102,7 @@ export function collectExternalGlobalProtocolEvidence({
   }
 
   return {
+    externalGlobals: [...externalGlobals].sort(),
     memberAccessesByFile,
     memberProperties: [...memberProperties].sort(),
     rootProperties,

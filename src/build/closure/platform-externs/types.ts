@@ -39,6 +39,7 @@ export interface PlatformExternIndex {
 }
 
 export interface PlatformExternSeeds {
+  globalPropertyAliases: ReadonlySet<string>;
   globals: ReadonlySet<string>;
   properties: ReadonlySet<string>;
   typeNames: ReadonlySet<string>;

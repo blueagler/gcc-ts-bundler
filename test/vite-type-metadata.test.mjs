@@ -3,7 +3,9 @@ import os from "node:os";
 import path from "node:path";
 
 import { expect, onTestFinished, test } from "bun:test";
+import ts from "@typescript/typescript6";
 
+import { collectExternalGlobalProtocolEvidence } from "../src/build/transpile/closure-ir/metadata/external-ownership.ts";
 import { prebundleMaterializedDependencies } from "../src/vite/prebundle/index.ts";
 import { createCompilerOptions } from "../src/vite/config.ts";
 import {
@@ -17,6 +19,49 @@ import {
   resolveRuntimeResolutionIdentity,
   resolveRuntimeExportGraph,
 } from "../src/vite/type-metadata/index.ts";
+
+test("classifies optional bare global protocols without a producer", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "gcc-global-protocol-"));
+  onTestFinished(() => fs.rm(root, { force: true, recursive: true }));
+  const filePath = path.join(root, "input.js");
+  await fs.writeFile(
+    filePath,
+    [
+      "var root = typeof globalThis !== 'undefined' ? globalThis : window;",
+      "root.Prism = {};",
+      "Prism.use();",
+      "if (typeof global !== 'undefined') nodeCrypto.randomFillSync([]);",
+      "if (typeof OPTIONAL_GLOBAL !== 'undefined') OPTIONAL_GLOBAL.run();",
+      "void open;",
+      "void pageXOffset;",
+      "const { class: local } = {};",
+      "",
+    ].join("\n"),
+  );
+  const program = ts.createProgram([filePath], {
+    allowJs: true,
+    module: ts.ModuleKind.ESNext,
+    noEmit: true,
+    target: ts.ScriptTarget.ESNext,
+  });
+  const sourceFile = program.getSourceFile(filePath);
+  if (!sourceFile) throw new Error("fixture source is missing");
+  const evidence = collectExternalGlobalProtocolEvidence({
+    checker: program.getTypeChecker(),
+    platformGlobalNames: new Set(["global"]),
+    platformGlobalPropertyAliases: new Set(["pageXOffset"]),
+    program,
+    sourceFiles: [sourceFile],
+  });
+  expect(evidence.externalGlobals).toEqual([
+    "OPTIONAL_GLOBAL",
+    "Prism",
+    "nodeCrypto",
+    "open",
+  ]);
+  expect(evidence.rootProperties).toContain("Prism");
+  expect(evidence.memberAccessesByFile.get(filePath)?.length).toBe(1);
+});
 
 async function createWorkspace() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "gcc-vite-types-"));

@@ -35,15 +35,13 @@ export function pruneShakenReexports(input: {
     const demand = demandByFile.get(
       toMaterializedRelativePath(input.projectRoot, moduleId),
     );
-    if (!record || !demand || demand.all) {
+    if (!record || !demand) {
       continue;
     }
 
-    const shakenCode = shakeModuleReexports(
-      moduleId,
-      record.code,
-      demand.names,
-    );
+    const shakenCode = demand.all
+      ? dropUnreachableTails(moduleId, record.code)
+      : shakeModuleReexports(moduleId, record.code, demand.names);
     if (shakenCode === record.code) {
       continue;
     }
@@ -140,7 +138,38 @@ function shakeModuleReexports(
     }
     shaken = next;
   }
-  return shaken;
+  return dropUnreachableTails(moduleId, shaken);
+}
+
+/** Drops a function tail that cannot run after an expressionless return. */
+function dropUnreachableTails(moduleId: string, code: string) {
+  const sourceFile = ts.createSourceFile(
+    moduleId,
+    code,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS,
+  );
+  const edits: Array<{ end: number; start: number; text: string }> = [];
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isBlock(node) &&
+      node.statements[0] &&
+      ts.isReturnStatement(node.statements[0]) &&
+      node.statements[0].expression === undefined &&
+      node.statements[1]
+    ) {
+      edits.push({
+        end: node.statements.at(-1)?.getEnd() ?? node.getEnd(),
+        start: node.statements[1].getStart(sourceFile),
+        text: "",
+      });
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return edits.length === 0 ? code : applyTextEdits(code, edits);
 }
 
 function shakeModuleOnce(

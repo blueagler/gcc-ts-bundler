@@ -1,10 +1,14 @@
 import { getDefaultPersistentCacheRoot } from "../../shared/cache-store";
+import { hashContent } from "../../shared/hash";
 import { loadPlatformExternArchive } from "./platform-externs/archive";
 import {
   getPlatformExternIndex,
   platformExternParserDigest,
 } from "./platform-externs/index";
-import { collectPlatformExternSeeds } from "./platform-externs/seeds";
+import {
+  collectPlatformExternSeeds,
+  windowGlobalPropertyAliases,
+} from "./platform-externs/seeds";
 import {
   collectExpiredEntries,
   digestSliceInputs,
@@ -13,6 +17,19 @@ import {
   writeCachedSlice,
 } from "./platform-externs/slice-cache";
 import { slicePlatformExterns } from "./platform-externs/slice";
+
+function platformExternSliceDigest() {
+  return hashContent(
+    [
+      platformExternParserDigest(),
+      collectPlatformExternSeeds,
+      windowGlobalPropertyAliases,
+      slicePlatformExterns,
+    ]
+      .map(String)
+      .join("\0"),
+  ).slice(0, 16);
+}
 
 /**
  * Builds a typed, dependency-closed platform extern slice from the exact
@@ -55,7 +72,7 @@ export async function generatePlatformExternsText(
             cacheRoot: sliceCacheRoot,
             inputDigest,
             jarHash: archive.jarHash,
-            schemaDigest: platformExternParserDigest(),
+            schemaDigest: platformExternSliceDigest(),
           }
         : null;
     if (cacheKey) {

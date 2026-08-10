@@ -12,6 +12,7 @@ import {
 import { collectExternalGlobalProtocolEvidence } from "../../build/transpile/closure-ir/metadata/external-ownership";
 import { loadPlatformExternArchive } from "../../build/closure/platform-externs/archive";
 import { getPlatformExternIndex } from "../../build/closure/platform-externs/index";
+import { windowGlobalPropertyAliases } from "../../build/closure/platform-externs/seeds";
 import { getDefaultPersistentCacheRoot } from "../../shared/cache-store";
 import type {
   ClosureAnnotation,
@@ -792,21 +793,30 @@ async function collectMaterializedExternalGlobalProtocol(
     );
   const cacheRoot = getDefaultPersistentCacheRoot();
   const archive = await loadPlatformExternArchive({ cacheRoot });
-  const platformPropertyNames = archive
-    ? (await getPlatformExternIndex(archive, { cacheRoot })).propertyNames
-    : new Set<string>();
+  const platformIndex = archive
+    ? await getPlatformExternIndex(archive, { cacheRoot })
+    : null;
   const evidence = collectExternalGlobalProtocolEvidence({
     checker: program.getTypeChecker(),
-    platformPropertyNames,
+    platformGlobalNames: platformIndex?.globalNames,
+    platformGlobalPropertyAliases: platformIndex
+      ? windowGlobalPropertyAliases(platformIndex)
+      : undefined,
+    platformPropertyNames: platformIndex?.propertyNames,
     program,
     sourceFiles,
   });
   const files = filePaths.flatMap((filePath) => {
     const offsets = evidence.memberAccessesByFile.get(filePath) ?? [];
     const module = modulesByFile.get(filePath);
-    if (offsets.length === 0 || !module) return [];
+    const ambientGlobals =
+      filePath === filePaths[0] ? evidence.externalGlobals : [];
+    if ((offsets.length === 0 && ambientGlobals.length === 0) || !module) {
+      return [];
+    }
     return [
       {
+        ambientGlobals: [...ambientGlobals],
         annotations: [],
         declarations: [],
         decoratedOutputText: undefined,
@@ -840,6 +850,9 @@ function mergeMetadataFiles(files: ClosureTypeMetadataFile[]) {
       continue;
     }
     byTarget.set(key, {
+      ambientGlobals: dedupe(
+        (existing.ambientGlobals ?? []).concat(file.ambientGlobals ?? []),
+      ),
       annotations: dedupe(existing.annotations.concat(file.annotations)),
       declarations: dedupeById(existing.declarations.concat(file.declarations)),
       decoratedOutputText: undefined,

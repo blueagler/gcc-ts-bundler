@@ -59,6 +59,10 @@ export function slicePlatformExterns(
   // adding their sources here would redeclare every ECMAScript builtin.
   const chunks = ["/** @externs */"];
   for (const unit of browser) chunks.push(unit.text.trim());
+  for (const name of [...seeds.globalPropertyAliases].sort()) {
+    chunks.push(`/** @type {?} */
+var ${name};`);
+  }
   chunks.push("");
   return chunks.join("\n\n");
 }

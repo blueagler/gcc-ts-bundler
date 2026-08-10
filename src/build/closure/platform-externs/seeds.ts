@@ -10,9 +10,11 @@ export async function collectPlatformExternSeeds(
   index: PlatformExternIndex,
   typeDependencyFiles: readonly string[] = [],
 ): Promise<PlatformExternSeeds | null> {
+  const globalPropertyAliases = new Set<string>();
   const globals = new Set<string>();
   const properties = new Set<string>();
   const typeNames = new Set<string>();
+  const windowAliases = windowGlobalPropertyAliases(index);
 
   for (const filePath of jsFiles) {
     if (filePath.toLowerCase().endsWith(".json")) continue;
@@ -47,6 +49,10 @@ export async function collectPlatformExternSeeds(
         if (index.globalNames.has(name)) globals.add(name);
       } else if (ts.isIdentifier(node) && isValueIdentifier(node)) {
         if (index.globalNames.has(node.text)) globals.add(node.text);
+        if (windowAliases.has(node.text)) {
+          globalPropertyAliases.add(node.text);
+          properties.add(node.text);
+        }
       } else if (
         (ts.isPropertyAssignment(node) ||
           ts.isShorthandPropertyAssignment(node)) &&
@@ -69,12 +75,47 @@ export async function collectPlatformExternSeeds(
     } catch {
       return null;
     }
+    const sourceFile = parseJavaScriptSource(filePath, source);
+    if (!sourceFile) return null;
+    for (const statement of sourceFile.statements) {
+      if (
+        (ts.isFunctionDeclaration(statement) ||
+          ts.isClassDeclaration(statement)) &&
+        statement.name
+      ) {
+        globalPropertyAliases.delete(statement.name.text);
+      } else if (ts.isVariableStatement(statement)) {
+        for (const declaration of statement.declarationList.declarations) {
+          if (ts.isIdentifier(declaration.name)) {
+            globalPropertyAliases.delete(declaration.name.text);
+          }
+        }
+      }
+    }
     for (const name of parseClosureTypeReferences(source)) {
       if (index.unitsByName.has(name)) typeNames.add(name);
     }
   }
 
-  return { globals, properties, typeNames };
+  return { globalPropertyAliases, globals, properties, typeNames };
+}
+
+/** Window data properties also resolve as bare names in browser modules. */
+export function windowGlobalPropertyAliases(index: PlatformExternIndex) {
+  const names = new Set<string>();
+  for (const [name, units] of index.unitsByProperty) {
+    if (
+      !index.globalNames.has(name) &&
+      units.some(
+        (unit) =>
+          unit.owner === "Window" &&
+          unit.text.trim().endsWith(`Window.prototype.${name};`),
+      )
+    ) {
+      names.add(name);
+    }
+  }
+  return names;
 }
 
 function visit(node: ts.Node, callback: (node: ts.Node) => void) {

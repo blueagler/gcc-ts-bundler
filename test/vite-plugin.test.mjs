@@ -1063,7 +1063,8 @@ test.serial(
       "src/main.js",
       [
         'import { used } from "./barrel.js";',
-        'import { kept } from "./mixed.js";',
+        'import { initDeadTail, kept } from "./mixed.js";',
+        'initDeadTail();',
         'document.querySelector("#app").textContent = used + kept;',
         "",
       ].join("\n"),
@@ -1086,10 +1087,16 @@ test.serial(
       "src/mixed.js",
       [
         'import { helper } from "./helper-leaf.js";',
-        'export const kept = "kept";',
-        "export function shaken() {",
+        'const kept = "kept";',
+        "function initDeadTail() {",
+        "  return;",
+        '  const strandedStyle = { style: "red" };',
+        "  function deadReader() { return strandedStyle.style; }",
+        "}",
+        "function shaken() {",
         "  return helper();",
         "}",
+        "export { initDeadTail, kept, shaken };",
         "",
       ].join("\n"),
     );
@@ -1143,6 +1150,7 @@ test.serial(
       "utf8",
     );
     expect(capturedMixed).not.toContain("helper-leaf");
+    expect(capturedMixed).not.toContain("strandedStyle");
     expect(capturedFiles).not.toContain("helper-leaf.js");
     expect(capturedFiles).not.toContain("deep-leaf.js");
   },
