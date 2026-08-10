@@ -5,10 +5,11 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use oxc_allocator::{Allocator, FromIn, TakeIn};
+use oxc_allocator::{Allocator, CloneIn, FromIn, TakeIn};
 use oxc_ast::ast::*;
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk_mut, VisitMut};
+use oxc_codegen::Codegen;
 use oxc_span::SPAN;
 use oxc_str::Str;
 use oxc_syntax::number::NumberBase;
@@ -22,7 +23,8 @@ use super::wrappers_oxc::{
 use crate::transpile::emit_runtime_oxc::binding_names_with_ids;
 use crate::transpile::identity_oxc::{BindingKeyMap, BindingKeySet, ModuleIdentity};
 use crate::transpile::{
-    resolve_module_id_for_specifier, to_bundler_runtime_module_id, HoistPlan, TranspileContext,
+    lowering_oxc::closure_input_codegen_options, resolve_module_id_for_specifier,
+    to_bundler_runtime_module_id, HoistPlan, TranspileContext,
 };
 
 pub(crate) fn rewrite_bundler_runtime_namespace_usage<'a>(
@@ -329,6 +331,38 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
         }
     }
 
+    fn lower_finite_computed_member(&mut self, expression: &mut Expression<'a>) -> bool {
+        let Expression::ComputedMemberExpression(member) = expression else {
+            return false;
+        };
+        if computed_property_name(&member.expression).is_some()
+            || !finite_computed_property(&member.expression)
+        {
+            return false;
+        }
+        let Expression::Identifier(identifier) = &member.object else {
+            return false;
+        };
+        let Some(binding) = self.identity.key_of_reference(identifier) else {
+            return false;
+        };
+        if !self.namespace_bindings.contains_key(&binding)
+            && !self.direct_namespace_targets.contains_key(&binding)
+        {
+            return false;
+        }
+        let object = member.object.take_in(&self.builder);
+        let property = member.expression.take_in(&self.builder);
+        *expression = lower_finite_namespace_member(
+            object,
+            property,
+            member.optional,
+            self.allocator,
+            &self.builder,
+        );
+        true
+    }
+
     fn rewrite_member_expression(&mut self, expression: &mut Expression<'a>) -> bool {
         let (object, property, optional) = match expression {
             Expression::StaticMemberExpression(member) => (
@@ -347,7 +381,10 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
             return false;
         };
         let Some(property) = property else {
-            self.push_error("bundler-runtime does not support computed namespace property access");
+            let rendered = print_node(expression);
+            self.push_error(format!(
+                "bundler-runtime does not support computed namespace property access: {rendered}"
+            ));
             return true;
         };
         let slot = match self.slot_for_module_ids(&module_ids, &property) {
@@ -394,7 +431,10 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
             return false;
         };
         let Some(property) = property else {
-            self.push_error("bundler-runtime does not support computed namespace property access");
+            let rendered = print_node(expression);
+            self.push_error(format!(
+                "bundler-runtime does not support computed namespace property access: {rendered}"
+            ));
             return true;
         };
         let Some(hoist) = &self.hoist else {
@@ -507,6 +547,10 @@ impl<'a> VisitMut<'a> for BundlerRuntimeNamespaceVisitor<'a, '_> {
     }
 
     fn visit_expression(&mut self, expression: &mut Expression<'a>) {
+        if self.lower_finite_computed_member(expression) {
+            self.visit_expression(expression);
+            return;
+        }
         if self.rewrite_direct_namespace_member(expression) {
             return;
         }
@@ -728,6 +772,76 @@ fn computed_property_name(expression: &Expression<'_>) -> Option<String> {
     }
 }
 
+fn finite_computed_property(expression: &Expression<'_>) -> bool {
+    if computed_property_name(expression).is_some() {
+        return true;
+    }
+    match expression {
+        Expression::ConditionalExpression(conditional) => {
+            finite_computed_property(&conditional.consequent)
+                && finite_computed_property(&conditional.alternate)
+        }
+        Expression::ParenthesizedExpression(parenthesized) => {
+            finite_computed_property(&parenthesized.expression)
+        }
+        _ => false,
+    }
+}
+
+fn clone_namespace_object<'a>(object: &Expression<'a>, allocator: &'a Allocator) -> Expression<'a> {
+    let cloned = object.clone_in(allocator);
+    if let (Expression::Identifier(source), Expression::Identifier(target)) = (object, &cloned) {
+        target.reference_id.set(source.reference_id.get());
+    }
+    cloned
+}
+
+fn lower_finite_namespace_member<'a>(
+    object: Expression<'a>,
+    property: Expression<'a>,
+    optional: bool,
+    allocator: &'a Allocator,
+    builder: &AstBuilder<'a>,
+) -> Expression<'a> {
+    match property {
+        Expression::ConditionalExpression(mut conditional) => {
+            let test = conditional.test.take_in(builder);
+            let consequent = conditional.consequent.take_in(builder);
+            let alternate = conditional.alternate.take_in(builder);
+            let consequent_object = clone_namespace_object(&object, allocator);
+            Expression::new_conditional_expression(
+                conditional.span,
+                test,
+                lower_finite_namespace_member(
+                    consequent_object,
+                    consequent,
+                    optional,
+                    allocator,
+                    builder,
+                ),
+                lower_finite_namespace_member(object, alternate, optional, allocator, builder),
+                builder,
+            )
+        }
+        Expression::ParenthesizedExpression(mut parenthesized) => lower_finite_namespace_member(
+            object,
+            parenthesized.expression.take_in(builder),
+            optional,
+            allocator,
+            builder,
+        ),
+        property => {
+            Expression::new_computed_member_expression(SPAN, object, property, optional, builder)
+        }
+    }
+}
+
+fn print_node(node: &Expression<'_>) -> String {
+    let mut codegen = Codegen::new().with_options(closure_input_codegen_options());
+    codegen.print_expression(node);
+    codegen.into_source_text()
+}
+
 fn member_call_parts<'b, 'a>(
     expression: &'b Expression<'a>,
 ) -> Option<(&'b Expression<'a>, String)> {
@@ -811,5 +925,56 @@ fn remove_maybe_default_carriers<T>(
             remove_assignment_target_carriers(&default.binding, identity, carriers);
         }
         _ => remove_assignment_target_carriers(target.to_assignment_target(), identity, carriers),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    fn computed_initializer<'a>(
+        program: &'a mut Program<'a>,
+    ) -> &'a mut ComputedMemberExpression<'a> {
+        let Statement::VariableDeclaration(declaration) = &mut program.body[0] else {
+            panic!("expected variable declaration");
+        };
+        let Some(Expression::ComputedMemberExpression(member)) =
+            declaration.declarations[0].init.as_mut()
+        else {
+            panic!("expected computed initializer");
+        };
+        member
+    }
+
+    #[test]
+    fn lowers_nested_finite_namespace_members_to_static_selections() {
+        let allocator = Allocator::default();
+        let source = r#"const value = ns[first ? "a" : second ? "b" : "c"];"#;
+        let mut program = Parser::new(&allocator, source, SourceType::mjs())
+            .parse()
+            .program;
+        let builder = AstBuilder::new(&allocator);
+        let member = computed_initializer(&mut program);
+        assert!(finite_computed_property(&member.expression));
+        let object = member.object.take_in(&builder);
+        let property = member.expression.take_in(&builder);
+        let lowered = lower_finite_namespace_member(object, property, false, &allocator, &builder);
+        assert_eq!(
+            print_node(&lowered),
+            r#"first ? ns["a"] : second ? ns["b"] : ns["c"]"#
+        );
+    }
+
+    #[test]
+    fn rejects_dynamic_namespace_member_evidence() {
+        let allocator = Allocator::default();
+        let source = r#"const value = ns[first ? "a" : dynamicKey];"#;
+        let mut program = Parser::new(&allocator, source, SourceType::mjs())
+            .parse()
+            .program;
+        let member = computed_initializer(&mut program);
+        assert!(!finite_computed_property(&member.expression));
     }
 }

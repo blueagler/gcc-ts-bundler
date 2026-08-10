@@ -112,6 +112,84 @@ async function buildViteFixture(fixture, overrides = {}) {
   });
 }
 
+test.serial(
+  "gccTsBundler lowers finite computed module namespace calls",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<script type="module" src="/src/main.js"></script>\n',
+    );
+    await fixture.write(
+      "src/ops.js",
+      [
+        'export function initProps(value) { return `init:${value}`; }',
+        'export function updateProps(value) { return `update:${value}`; }',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/main.js",
+      [
+        'import * as graphic from "./ops.js";',
+        "const isInit = true;",
+        'globalThis["__finiteNamespaceResult"] = graphic[isInit ? "initProps" : "updateProps"]("radar");',
+        "",
+      ].join("\n"),
+    );
+
+    await buildViteFixture(fixture);
+    const html = await fixture.read("dist/index.html");
+    const entryScript = readRewrittenEntryScript(html);
+    const previousLocation = globalThis.location;
+    const previousRuntime = globalThis.__g;
+    try {
+      globalThis.location = { href: "http://vite.test/index.html" };
+      delete globalThis.__g;
+      await import(
+        `${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?finite-namespace=${Date.now()}`,
+      );
+      expect(globalThis["__finiteNamespaceResult"]).toBe("init:radar");
+    } finally {
+      delete globalThis["__finiteNamespaceResult"];
+      if (previousLocation === undefined) delete globalThis.location;
+      else globalThis.location = previousLocation;
+      if (previousRuntime === undefined) delete globalThis.__g;
+      else globalThis.__g = previousRuntime;
+    }
+  },
+);
+
+test.serial(
+  "gccTsBundler rejects dynamic computed module namespace calls with source context",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<script type="module" src="/src/main.js"></script>\n',
+    );
+    await fixture.write(
+      "src/ops.js",
+      "export function initProps() { return 'init'; }\n",
+    );
+    await fixture.write(
+      "src/main.js",
+      [
+        'import * as graphic from "./ops.js";',
+        'const dynamicKey = globalThis["__dynamicNamespaceKey"];',
+        "graphic[dynamicKey]();",
+        "",
+      ].join("\n"),
+    );
+
+    await expect(buildViteFixture(fixture)).rejects.toThrow(
+      /src\/main\.js: bundler-runtime does not support computed namespace property access: graphic\[dynamicKey(?:\$\$1)?\]/u,
+    );
+  },
+);
+
 function readRewrittenEntryScript(html) {
   // script mode emits `<script defer src>`; esm mode (the bundler-runtime
   // default) emits `<script type="module" crossorigin src>`.
