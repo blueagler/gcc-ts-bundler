@@ -592,13 +592,13 @@ async function collectBridgeModuleIds(
         }
         return;
       }
-      if (input.retainedModuleIds.has(resolved.id)) {
-        return;
-      }
       if (
-        !input.capturedModules.has(resolved.id) ||
+        input.retainedModuleIds.has(resolved.id) ||
         isNonMaterializedAssetModuleId(resolved.id)
       ) {
+        return;
+      }
+      if (!input.capturedModules.has(resolved.id)) {
         if (isBarePackageSpecifier(specifier)) {
           throw new Error(
             `gccTsBundler() could not route package edge ${input.importerId} -> ${JSON.stringify(specifier)} -> ${resolved.id}: the resolved module was not captured by Vite.`,

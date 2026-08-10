@@ -215,6 +215,31 @@ test.serial(
 );
 
 test.serial(
+  "Vite classifies aliased Less imports as assets",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await writeHtmlFixture(fixture, "/src/main.ts");
+    await fixture.write(
+      "src/main.ts",
+      'import "@/styles/index.less"; globalThis.__aliasedLess = true;\n',
+    );
+    await fixture.write(
+      "src/styles/index.less",
+      "@color: red; body { color: @color; }\n",
+    );
+
+    const result = await buildViteFixture(fixture, {
+      configLines: [
+        '  resolve: { alias: { "@": new URL("./src", import.meta.url).pathname } },',
+      ],
+    });
+    expect(buildErrorText(result)).toBe("");
+    expect(result.ok).toBe(true);
+  },
+);
+
+test.serial(
   "Vite eager and lazy globs retain mixed TypeScript, JSON, and CSS surfaces",
   { timeout: 30000 },
   async () => {
