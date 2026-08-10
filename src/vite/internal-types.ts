@@ -116,6 +116,7 @@ export interface ManifestFileSettings {
 
 export interface ViteBuildMetrics {
   normalizedRetainedModuleCount: number;
+  reassignedConstantDemotionCount: number;
   parseCacheHits: number;
   parseCacheMisses: number;
   retainedEdgeResolutionCount: number;

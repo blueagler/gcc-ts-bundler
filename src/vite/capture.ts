@@ -227,12 +227,137 @@ function isMissingFileError(error: unknown) {
   return hasErrorCode(error, "ENOENT");
 }
 
+export function demoteReassignedConstants(code: string) {
+  if (!code.includes("const ")) {
+    return { code, names: [] as string[] };
+  }
+
+  const fileName = "/__gcc_ts_bundler_capture__.js";
+  const options: ts.CompilerOptions = {
+    allowJs: true,
+    noLib: true,
+    noResolve: true,
+    target: ts.ScriptTarget.Latest,
+  };
+  const host = ts.createCompilerHost(options, true);
+  host.fileExists = (name) => name === fileName;
+  host.readFile = (name) => (name === fileName ? code : undefined);
+  host.getSourceFile = (name, languageVersion) =>
+    name === fileName
+      ? ts.createSourceFile(name, code, languageVersion, true, ts.ScriptKind.JS)
+      : undefined;
+  const program = ts.createProgram([fileName], options, host);
+  const sourceFile = program.getSourceFile(fileName);
+  if (!sourceFile) {
+    return { code, names: [] as string[] };
+  }
+  const checker = program.getTypeChecker();
+  const constLists = new Map<ts.Symbol, ts.VariableDeclarationList>();
+  const assignedSymbols = new Set<ts.Symbol>();
+
+  const addBinding = (
+    name: ts.BindingName,
+    declarationList: ts.VariableDeclarationList,
+  ) => {
+    if (ts.isIdentifier(name)) {
+      const symbol = checker.getSymbolAtLocation(name);
+      if (symbol) constLists.set(symbol, declarationList);
+      return;
+    }
+    for (const element of name.elements) {
+      if (!ts.isOmittedExpression(element))
+        addBinding(element.name, declarationList);
+    }
+  };
+  const addTarget = (target: ts.Expression) => {
+    if (ts.isIdentifier(target)) {
+      const symbol = checker.getSymbolAtLocation(target);
+      if (symbol) assignedSymbols.add(symbol);
+    } else if (ts.isParenthesizedExpression(target)) {
+      addTarget(target.expression);
+    } else if (ts.isArrayLiteralExpression(target)) {
+      for (const element of target.elements) {
+        if (!ts.isOmittedExpression(element)) addTarget(element);
+      }
+    } else if (ts.isObjectLiteralExpression(target)) {
+      for (const property of target.properties) {
+        if (ts.isShorthandPropertyAssignment(property)) {
+          addTarget(property.name);
+        } else if (ts.isPropertyAssignment(property)) {
+          addTarget(property.initializer);
+        } else if (ts.isSpreadAssignment(property)) {
+          addTarget(property.expression);
+        }
+      }
+    } else if (ts.isSpreadElement(target)) {
+      addTarget(target.expression);
+    }
+  };
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isVariableDeclarationList(node) &&
+      (node.flags & ts.NodeFlags.Const) !== 0
+    ) {
+      for (const declaration of node.declarations) {
+        addBinding(declaration.name, node);
+      }
+    } else if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+    ) {
+      addTarget(node.left);
+    } else if (
+      (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+      (node.operator === ts.SyntaxKind.PlusPlusToken ||
+        node.operator === ts.SyntaxKind.MinusMinusToken)
+    ) {
+      addTarget(node.operand);
+    } else if (
+      (ts.isForInStatement(node) || ts.isForOfStatement(node)) &&
+      !ts.isVariableDeclarationList(node.initializer)
+    ) {
+      addTarget(node.initializer);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+
+  const lists = new Set<ts.VariableDeclarationList>();
+  const names: string[] = [];
+  for (const symbol of assignedSymbols) {
+    const declarationList = constLists.get(symbol);
+    if (declarationList) {
+      lists.add(declarationList);
+      names.push(String(symbol.escapedName));
+    }
+  }
+  const edits = [...lists].map((declarationList) => ({
+    end: declarationList.getStart(sourceFile) + "const".length,
+    start: declarationList.getStart(sourceFile),
+    text: "let",
+  }));
+  return {
+    code: edits.length === 0 ? code : applyTextEdits(code, edits),
+    names: names.sort(),
+  };
+}
+
 async function normalizeCapturedCode(
   id: string,
   code: string,
   analysis?: CapturedModuleAnalysis,
+  metrics?: ViteBuildMetrics,
 ) {
-  let nextCode = code;
+  const demoted = demoteReassignedConstants(code);
+  let nextCode = demoted.code;
+  if (demoted.names.length > 0) {
+    if (metrics)
+      metrics.reassignedConstantDemotionCount += demoted.names.length;
+    console.warn(
+      `gcc-ts-bundler: changed reassigned const binding(s) to let in ${stripQuery(id)}: ${demoted.names.join(", ")}. The original module would throw when these writes run.`,
+    );
+  }
   const moduleAnalysis = analysis ?? analyzeModuleCode(id, code);
 
   // Dependency compatibility syntax is owned downstream: ESM-clean graphs use
@@ -451,6 +576,7 @@ async function getNormalizedCapturedModule(
     record.id,
     record.code,
     analysis,
+    metrics,
   );
   record.normalizedCode = normalizedCode;
   if (normalizedCode === record.code) {

@@ -491,6 +491,10 @@ async function logCapturedGraph(input: {
       `${input.buildMetrics.normalizedRetainedModuleCount}`,
     );
     logInternalDetail(
+      "vite:reassigned-constants",
+      `${input.buildMetrics.reassignedConstantDemotionCount}`,
+    );
+    logInternalDetail(
       "vite:parse-cache",
       `hits=${input.buildMetrics.parseCacheHits} misses=${input.buildMetrics.parseCacheMisses}`,
     );
@@ -789,6 +793,7 @@ function applyRenderedModuleEvidence(
 function createBuildMetrics(): ViteBuildMetrics {
   return {
     normalizedRetainedModuleCount: 0,
+    reassignedConstantDemotionCount: 0,
     parseCacheHits: 0,
     parseCacheMisses: 0,
     retainedEdgeResolutionCount: 0,
@@ -797,6 +802,7 @@ function createBuildMetrics(): ViteBuildMetrics {
 
 function resetBuildMetrics(metrics: ViteBuildMetrics) {
   metrics.normalizedRetainedModuleCount = 0;
+  metrics.reassignedConstantDemotionCount = 0;
   metrics.parseCacheHits = 0;
   metrics.parseCacheMisses = 0;
   metrics.retainedEdgeResolutionCount = 0;

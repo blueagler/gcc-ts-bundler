@@ -172,16 +172,17 @@ pub(crate) fn emit_hoisted_module_text<'a>(
         type_metadata.count_enum();
     }
 
-    let mut import_plans = import_plans.into_iter();
+    // ESM imports are instantiated before every module statement, regardless
+    // of their textual position. Keep generated registry requires equivalent.
+    output.extend(
+        import_plans
+            .iter()
+            .flat_map(|import_plan| import_plan.lines.iter().cloned()),
+    );
     let body = std::mem::replace(&mut program.body, ArenaVec::new_in(&allocator));
     for statement in body {
         match statement {
-            Statement::ImportDeclaration(_) => {
-                let plan = import_plans
-                    .next()
-                    .ok_or_else(|| "Missing hoisted import plan".to_string())?;
-                output.extend(plan.lines);
-            }
+            Statement::ImportDeclaration(_) => {}
             Statement::ExportNamedDeclaration(export) => {
                 let export = export.unbox();
                 if export.export_kind == ImportOrExportKind::Type {

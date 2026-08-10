@@ -9,6 +9,7 @@ import {
   getCapturedModuleAnalysis,
   normalizeRetainedCapturedModules,
   annotateAliasedStaticClassMemberWrites,
+  demoteReassignedConstants,
   resolveViteCaptureRootPath,
 } from "../src/vite/capture.ts";
 import {
@@ -1231,6 +1232,53 @@ test.serial(
     const clean = await parseModule(cleanFile);
     expect(clean.hasDefineReferences).toBe(false);
     expect(clean.isFusedDistribution).toBe(false);
+  },
+);
+
+test("capture demotes only const bindings that the module writes", () => {
+  const result = demoteReassignedConstants([
+    "const crudSchemas = reactive([]);",
+    "const untouched = 1;",
+    "const object = { value: 1 };",
+    "const render = () => ($event) => crudSchemas = $event;",
+    "object.value = 2;",
+    "function shadow(crudSchemas) { crudSchemas = []; }",
+  ].join("\n"));
+
+  expect(result.names).toEqual(["crudSchemas"]);
+  expect(result.code).toContain("let crudSchemas = reactive([])");
+  expect(result.code).toContain("const untouched = 1");
+  expect(result.code).toContain("const object = { value: 1 }");
+});
+
+test.serial(
+  "Vite chunk hoists registry requires above earlier namespace uses",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<script type="module" src="/src/main.js"></script>\n',
+    );
+    await fixture.write("src/dep.js", "export const value = 42;\n");
+    await fixture.write(
+      "src/main.js",
+      [
+        "const namespace = {};",
+        "Object.assign(namespace, dep);",
+        'import * as dep from "./dep.js";',
+        "globalThis.result = namespace.value;",
+        "",
+      ].join("\n"),
+    );
+
+    await buildViteFixture(fixture);
+    const sources = await Promise.all(
+      (await listFiles(path.join(fixture.projectRoot, "dist")))
+        .filter((file) => file.endsWith(".js"))
+        .map((file) => fixture.read(path.join("dist", file))),
+    );
+    expect(sources.join("\n")).toContain("result");
   },
 );
 
