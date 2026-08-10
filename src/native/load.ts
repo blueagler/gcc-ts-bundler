@@ -295,6 +295,7 @@ export interface ClosureCompilerCapabilities {
 
 interface NativeBinding {
   closureCompilerCapabilities(): ClosureCompilerCapabilities;
+  resolveViteTargetLanguageOut(target: string): string | null;
   collectFileStates(filePaths: string[]): NativeFileStateEntry[];
   collectPublishedOutputStats(
     filePaths: string[],
@@ -371,6 +372,7 @@ const NATIVE_BINDING_METHOD_FLAGS: Record<keyof NativeBinding, true> = {
   publishedOutputSnapshotMatches: true,
   publishedOutputsMatch: true,
   resolveGraph: true,
+  resolveViteTargetLanguageOut: true,
   rewriteGccExports: true,
   emitPreservedModule: true,
   transpileSources: true,
@@ -403,6 +405,10 @@ function isNativeBinding(value: unknown): value is NativeBinding {
 
 export function closureCompilerCapabilities() {
   return loadBinding().closureCompilerCapabilities();
+}
+
+export function resolveViteTargetLanguageOut(target: string) {
+  return loadBinding().resolveViteTargetLanguageOut(target);
 }
 
 export function resolveGraph(input: {

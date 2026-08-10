@@ -31,6 +31,11 @@ pub fn closure_compiler_capabilities() -> closure_capabilities::ClosureCompilerC
     closure_capabilities::closure_compiler_capabilities()
 }
 
+#[napi(js_name = "resolveViteTargetLanguageOut")]
+pub fn resolve_vite_target_language_out(target: String) -> Option<String> {
+    closure_capabilities::resolve_vite_target_language_out(&target).map(str::to_string)
+}
+
 #[napi(js_name = "resolveGraph")]
 pub fn resolve_graph(
     entries: Vec<String>,

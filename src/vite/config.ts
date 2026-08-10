@@ -2,6 +2,10 @@ import type { ResolvedConfig, UserConfig } from "vite";
 
 import { DEFAULT_BUILD_OPTIONS } from "../api/types";
 import type { BuildOptions, LanguageOut } from "../api/types";
+import {
+  languageOutRank,
+  mapViteTargetToLanguageOut,
+} from "../build/closure/capabilities";
 import { isRecord } from "../shared/validation";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type { ManifestFileSettings } from "./internal-types";
@@ -150,11 +154,12 @@ export function resolveViteLanguageOutTarget(
 
   let resolvedLanguageOut: LanguageOut | null = null;
   for (const target of targets) {
-    const mapped = mapSingleViteTarget(target);
+    const mapped =
+      target === false ? "ECMASCRIPT_NEXT" : mapViteTargetToLanguageOut(target);
     if (!mapped) {
       throw new Error(
         `gccTsBundler() could not derive a compiler output level from Vite build.target ${JSON.stringify(target)}. ` +
-          'Use false, "esnext", "es3", "es5", "baseline-widely-available", or an "es2015+" target.',
+          'Use false, an "es2015+" target, or a versioned Chrome, Edge, Firefox, Safari, iOS, Node, or IE target.',
       );
     }
     if (
@@ -184,40 +189,4 @@ function normalizeViteTargets(
     return ["baseline-widely-available"];
   }
   return Array.isArray(target) ? [...target] : [target];
-}
-
-function mapSingleViteTarget(target: string | false): LanguageOut | null {
-  if (target === false) {
-    return "ECMASCRIPT_NEXT";
-  }
-  const normalized = target.trim().toLowerCase();
-  if (normalized === "esnext") {
-    return "ECMASCRIPT_NEXT";
-  }
-  if (normalized === "es3") {
-    return "ECMASCRIPT3";
-  }
-  if (normalized === "es5") {
-    return "ECMASCRIPT5";
-  }
-  if (normalized === "baseline-widely-available") {
-    return "ECMASCRIPT6";
-  }
-  if (/^es20(?:1[5-9]|[2-9]\d)$/u.test(normalized)) {
-    return "ECMASCRIPT6";
-  }
-  return null;
-}
-
-function languageOutRank(languageOut: LanguageOut) {
-  switch (languageOut) {
-    case "ECMASCRIPT3":
-      return 0;
-    case "ECMASCRIPT5":
-      return 1;
-    case "ECMASCRIPT6":
-      return 2;
-    case "ECMASCRIPT_NEXT":
-      return 3;
-  }
 }

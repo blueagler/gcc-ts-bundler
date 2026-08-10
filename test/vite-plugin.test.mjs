@@ -2802,6 +2802,51 @@ test.serial(
   },
 );
 
+
+test.serial(
+  "Vite es2020 keeps Unicode property escapes in a dependency chunk",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<script type="module" src="/src/main.js"></script>\n',
+    );
+    await fixture.write(
+      "node_modules/property-regex/package.json",
+      JSON.stringify({ name: "property-regex", type: "module", version: "1.0.0" }),
+    );
+    await fixture.write(
+      "node_modules/property-regex/index.js",
+      'export const isIdeographPair = (value) => /^\\p{Unified_Ideograph}{2}$/u.test(value);\n',
+    );
+    await fixture.write(
+      "src/main.js",
+      'import { isIdeographPair } from "property-regex"; globalThis["__regexResult"] = isIdeographPair("漢字");\n',
+    );
+
+    await buildViteFixture(fixture, {
+      buildLines: [
+        '    target: "es2020",',
+        '    rollupOptions: { output: { manualChunks: (id) => id.includes("property-regex") ? "dependency" : undefined } },',
+      ],
+    });
+    const outputs = await listFiles(path.join(fixture.projectRoot, "dist"));
+    expect(outputs.some((file) => /dependency.*\.js$/u.test(file))).toBe(true);
+
+    await expect(
+      buildViteFixture(fixture, {
+        buildLines: [
+          '    target: "es2015",',
+          '    rollupOptions: { output: { manualChunks: (id) => id.includes("property-regex") ? "dependency" : undefined } },',
+        ],
+      }),
+    ).rejects.toThrow(
+      /dependency\.linked\.js[\s\S]*RegExp unicode property escape[\s\S]*ECMASCRIPT_2018/u,
+    );
+  },
+);
+
 test("resolveViteLanguageOut derives compiler output from Vite build.target", () => {
   expect(
     resolveViteLanguageOut({
@@ -2822,7 +2867,22 @@ test("resolveViteLanguageOut derives compiler output from Vite build.target", ()
     resolveViteLanguageOut({
       build: { target: "baseline-widely-available" },
     }),
-  ).toBe("ECMASCRIPT6");
+  ).toBe("ECMASCRIPT_2021");
+  expect(
+    resolveViteLanguageOut({
+      build: { target: "es2020" },
+    }),
+  ).toBe("ECMASCRIPT_2020");
+  expect(
+    resolveViteLanguageOut({
+      build: { target: "chrome87" },
+    }),
+  ).toBe("ECMASCRIPT_2021");
+  expect(
+    resolveViteLanguageOut({
+      build: { target: ["es2020", "chrome64"] },
+    }),
+  ).toBe("ECMASCRIPT_2018");
   expect(
     resolveViteLanguageOut({
       build: { target: ["es2020", "es5"] },
@@ -2833,7 +2893,7 @@ test("resolveViteLanguageOut derives compiler output from Vite build.target", ()
 test("resolveViteLanguageOut rejects unsupported target strings", () => {
   expect(() =>
     resolveViteLanguageOut({
-      build: { target: "chrome120" },
+      build: { target: "last 2 versions" },
     }),
   ).toThrow(/could not derive a compiler output level/);
 });
