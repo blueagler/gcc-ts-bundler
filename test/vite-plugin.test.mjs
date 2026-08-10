@@ -162,6 +162,65 @@ test.serial(
 );
 
 test.serial(
+  "named exports preserve namespace import values across Vite chunks",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<script type="module" src="/src/main.js"></script>\n',
+    );
+    await fixture.write(
+      "src/util.js",
+      'export const answer = "namespace-ok";\n',
+    );
+    await fixture.write(
+      "src/api.js",
+      'import * as util from "./util.js"; export { util };\n',
+    );
+    await fixture.write(
+      "src/main.js",
+      [
+        'import * as directUtil from "./util.js";',
+        'globalThis["__loadNamespace"] = () => import("./api.js").then(({ util }) => [util === directUtil, util.answer]);',
+        "",
+      ].join("\n"),
+    );
+
+    await buildViteFixture(fixture);
+    const html = await fixture.read("dist/index.html");
+    const entryScript = readRewrittenEntryScript(html);
+    const previousDocument = globalThis.document;
+    const previousLocation = globalThis.location;
+    const previousRuntime = globalThis.__g;
+    try {
+      globalThis.document = {
+        createElement: () => ({}),
+        head: { appendChild() {} },
+        querySelectorAll: () => [],
+      };
+      globalThis.location = { href: "http://vite.test/index.html" };
+      delete globalThis.__g;
+      await import(
+        `${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?namespace-reexport=${Date.now()}`,
+      );
+      expect(await globalThis["__loadNamespace"]()).toEqual([
+        true,
+        "namespace-ok",
+      ]);
+    } finally {
+      delete globalThis["__loadNamespace"];
+      if (previousDocument === undefined) delete globalThis.document;
+      else globalThis.document = previousDocument;
+      if (previousLocation === undefined) delete globalThis.location;
+      else globalThis.location = previousLocation;
+      if (previousRuntime === undefined) delete globalThis.__g;
+      else globalThis.__g = previousRuntime;
+    }
+  },
+);
+
+test.serial(
   "gccTsBundler rejects dynamic computed module namespace calls with source context",
   { timeout: 30000 },
   async () => {

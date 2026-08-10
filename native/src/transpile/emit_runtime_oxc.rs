@@ -732,7 +732,12 @@ pub(crate) fn emit_bundler_runtime_module_text<'a>(
         ));
     }
 
-    if context.lazy_target_module_ids.contains(&module_id) {
+    if context.lazy_target_module_ids.contains(&module_id)
+        || context
+            .hoist_plan
+            .as_ref()
+            .is_some_and(|plan| plan.is_namespace_object_module(&module_id))
+    {
         let namespace_slots = current_slots
             .export_names()
             .filter(|export_name| export_name.as_str() != "__cjsExports")

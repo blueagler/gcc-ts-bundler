@@ -385,6 +385,14 @@ fn render_facade(
         let slot = slots.slot_for(export_name).ok_or_else(|| {
             format!("Missing bundler-runtime export slot for {export_name} in {module_id}")
         })?;
+        if let Some(target) = plan.resolve_namespace_reexport(module_id, export_name) {
+            let runtime_id = to_bundler_runtime_module_id(target);
+            lines.push(render_static_export_slot(
+                slot,
+                &format!("__require({runtime_id:?})"),
+            ));
+            continue;
+        }
         let binding = plan.resolve_export(module_id, export_name).ok_or_else(|| {
             format!("Missing hoisted export binding for {export_name} in {module_id}")
         })?;
@@ -448,7 +456,9 @@ fn render_facade(
         }
     }
 
-    if context.lazy_target_module_ids.contains(module_id) {
+    if context.lazy_target_module_ids.contains(module_id)
+        || plan.is_namespace_object_module(module_id)
+    {
         let namespace_slots = slots
             .export_names()
             .filter(|export_name| export_name.as_str() != "__cjsExports" && is_exposed(export_name))

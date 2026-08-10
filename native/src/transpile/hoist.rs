@@ -38,6 +38,8 @@ pub(super) struct HoistPlan {
     /// edges). Empty when the chunk graph carried no dependency edges.
     chunk_dependency_closure: Vec<HashSet<usize>>,
     pub(super) export_bindings: HashMap<String, BTreeMap<String, ResolvedExportBinding>>,
+    namespace_reexports: HashMap<String, BTreeMap<String, String>>,
+    namespace_object_modules: HashSet<String>,
     pub(super) facade_slots: HashMap<String, FacadeSlots>,
     pub(super) hoisted_modules: HashSet<String>,
     pub(super) module_chunks: HashMap<String, usize>,
@@ -64,6 +66,21 @@ impl HoistPlan {
         export_name: &str,
     ) -> Option<&ResolvedExportBinding> {
         self.export_bindings.get(module_id)?.get(export_name)
+    }
+
+    pub(super) fn resolve_namespace_reexport(
+        &self,
+        module_id: &str,
+        export_name: &str,
+    ) -> Option<&str> {
+        self.namespace_reexports
+            .get(module_id)?
+            .get(export_name)
+            .map(String::as_str)
+    }
+
+    pub(super) fn is_namespace_object_module(&self, module_id: &str) -> bool {
+        self.namespace_object_modules.contains(module_id)
     }
 
     /// A resolved binding can be referenced directly only when the loader has
@@ -150,6 +167,8 @@ struct ModuleScan {
     own_exports: BTreeMap<String, String>,
     /// export name -> (target module id, original export name on the target)
     reexports: BTreeMap<String, (String, String)>,
+    /// export name -> target module whose namespace object is the value
+    namespace_reexports: BTreeMap<String, String>,
     /// `export * from` targets, in source order
     stars: Vec<String>,
     import_edges: Vec<ImportEdge>,
@@ -302,10 +321,17 @@ pub(super) fn build_hoist_plan(
         .collect::<HashMap<_, _>>();
 
     let export_bindings = resolve_all_export_bindings(&scans);
+    let namespace_reexports = resolve_all_namespace_reexports(&scans);
+    let namespace_object_modules = namespace_reexports
+        .values()
+        .flat_map(|targets| targets.values().cloned())
+        .collect();
 
     let plan_without_facades = HoistPlan {
         chunk_dependency_closure,
         export_bindings,
+        namespace_reexports,
+        namespace_object_modules,
         facade_slots: HashMap::new(),
         hoisted_modules: hoistable,
         module_chunks,
@@ -402,6 +428,7 @@ fn scan_esm_program(
 ) -> ModuleScan {
     let mut scan = ModuleScan::default();
     let mut import_locals = HashMap::<String, Option<(String, String)>>::new();
+    let mut namespace_import_locals = HashMap::<String, String>::new();
     let namespace_usage = super::hoist_oxc::scan_namespace_usage(program, identity);
     let used_binding_ids = super::hoist_oxc::collect_used_binding_ids(program, identity);
 
@@ -448,7 +475,9 @@ fn scan_esm_program(
                             edge.named.push("default".to_string());
                         }
                         ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-                            import_locals.insert(specifier.local.name.to_string(), None);
+                            let local = specifier.local.name.to_string();
+                            import_locals.insert(local.clone(), None);
+                            namespace_import_locals.insert(local, target.clone());
                             edge.namespace = true;
                             edge.namespace_members = namespace_usage
                                 .member_only_usage(identity.key_of_binding(&specifier.local));
@@ -497,7 +526,13 @@ fn scan_esm_program(
                                 scan.reexports
                                     .insert(export_name, (target.clone(), imported.clone()));
                             }
-                            Some(None) => scan.scan_failed = true,
+                            Some(None) => {
+                                let Some(target) = namespace_import_locals.get(&local) else {
+                                    scan.scan_failed = true;
+                                    continue;
+                                };
+                                scan.namespace_reexports.insert(export_name, target.clone());
+                            }
                             None => {
                                 scan.own_exports.insert(export_name, local);
                             }
@@ -548,8 +583,9 @@ fn scan_esm_program(
                     continue;
                 };
                 scan.reexport_targets.push(target.clone());
-                if export.exported.is_some() {
-                    scan.scan_failed = true;
+                if let Some(exported) = &export.exported {
+                    scan.namespace_reexports
+                        .insert(module_export_name(exported), target);
                 } else {
                     scan.stars.push(target);
                 }
@@ -718,6 +754,59 @@ fn resolve_all_export_bindings(
     result
 }
 
+fn resolve_all_namespace_reexports(
+    scans: &HashMap<String, ModuleScan>,
+) -> HashMap<String, BTreeMap<String, String>> {
+    let mut result = HashMap::new();
+    for module_id in scans.keys() {
+        let mut export_names = BTreeSet::new();
+        collect_export_names(module_id, scans, &mut export_names, &mut BTreeSet::new());
+        let mut targets = BTreeMap::new();
+        for export_name in export_names {
+            if let Some(target) =
+                resolve_namespace_reexport(module_id, &export_name, scans, &mut BTreeSet::new())
+            {
+                targets.insert(export_name, target);
+            }
+        }
+        result.insert(module_id.clone(), targets);
+    }
+    result
+}
+
+fn resolve_namespace_reexport(
+    module_id: &str,
+    export_name: &str,
+    scans: &HashMap<String, ModuleScan>,
+    visiting: &mut BTreeSet<(String, String)>,
+) -> Option<String> {
+    let key = (module_id.to_string(), export_name.to_string());
+    if !visiting.insert(key.clone()) {
+        return None;
+    }
+    let resolved = (|| {
+        let scan = scans.get(module_id)?;
+        if let Some(target) = scan.namespace_reexports.get(export_name) {
+            return Some(target.clone());
+        }
+        if let Some((target, original)) = scan.reexports.get(export_name) {
+            return resolve_namespace_reexport(target, original, scans, visiting);
+        }
+        if export_name != "default" {
+            for target in &scan.stars {
+                if let Some(target) =
+                    resolve_namespace_reexport(target, export_name, scans, visiting)
+                {
+                    return Some(target);
+                }
+            }
+        }
+        None
+    })();
+    visiting.remove(&key);
+    resolved
+}
+
 fn collect_export_names(
     module_id: &str,
     scans: &HashMap<String, ModuleScan>,
@@ -732,6 +821,7 @@ fn collect_export_names(
     };
     names.extend(scan.own_exports.keys().cloned());
     names.extend(scan.reexports.keys().cloned());
+    names.extend(scan.namespace_reexports.keys().cloned());
     for star_target in &scan.stars {
         let mut star_names = BTreeSet::new();
         collect_export_names(star_target, scans, &mut star_names, visiting);
@@ -927,6 +1017,9 @@ fn compute_facade_slots(
             for (target, orig) in scan.reexports.values() {
                 needs.need(target, orig);
             }
+            for target in scan.namespace_reexports.values() {
+                needs.need_all(target);
+            }
             for star_target in &scan.stars {
                 needs.need_all(star_target);
             }
@@ -973,6 +1066,15 @@ fn compute_facade_slots(
 
     // Facade getters of re-exported names reach into their owners at runtime.
     while let Some((module_id, export_name)) = needs.worklist.pop() {
+        if let Some(name) = &export_name {
+            if let Some(target) = plan.resolve_namespace_reexport(&module_id, name) {
+                needs.need_all(target);
+            }
+        } else if let Some(targets) = plan.namespace_reexports.get(&module_id) {
+            for target in targets.values() {
+                needs.need_all(target);
+            }
+        }
         let Some(bindings) = plan.export_bindings.get(&module_id) else {
             continue;
         };
@@ -1008,4 +1110,59 @@ fn compute_facade_slots(
         }
     }
     needs.slots
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn namespace_import_named_export_is_hoistable() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("gcc-hoist-namespace-{unique}"));
+        let src = workspace.join("src");
+        fs::create_dir_all(&src).unwrap();
+        let util = src.join("util.js");
+        let api = src.join("api.js");
+        fs::write(
+            &util,
+            "export const answer = 42;
+",
+        )
+        .unwrap();
+        fs::write(
+            &api,
+            "import * as util from './util.js'; export { util };
+",
+        )
+        .unwrap();
+
+        let files = vec![
+            util.to_string_lossy().into_owned(),
+            api.to_string_lossy().into_owned(),
+        ];
+        let chunks = vec![TranspileChunkInput {
+            dependencies: Vec::new(),
+            files: vec!["src/util.js".to_string(), "src/api.js".to_string()],
+            name: "main".to_string(),
+        }];
+        let plan = build_hoist_plan(
+            &files,
+            &workspace,
+            &[],
+            &HashMap::new(),
+            &chunks,
+            &[],
+            &HashMap::new(),
+        )
+        .unwrap()
+        .unwrap();
+        let api_id = to_goog_module_id(&api, &workspace);
+        assert!(plan.is_hoisted(&api_id));
+        fs::remove_dir_all(workspace).unwrap();
+    }
 }
