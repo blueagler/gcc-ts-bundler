@@ -71,6 +71,7 @@
     "lint": "bun run typecheck && bun run format:rust && bun run lint:rust && bun --bun ./scripts/format.ts --check && node --require ./scripts/typescript6-register.cjs ./node_modules/eslint/bin/eslint.js -c eslint.config.mjs \"src/**/*.ts\"",
     "fix": "bun --bun ./scripts/format.ts && node --require ./scripts/typescript6-register.cjs ./node_modules/eslint/bin/eslint.js -c eslint.config.mjs \"src/**/*.ts\" --fix",
     "test": "cargo test --manifest-path native/Cargo.toml && bun run build && bun test ./test/*.test.mjs",
+    "test:fast": "bun test ./test/build-native.test.mjs ./test/cache-correctness.test.mjs ./test/cli-args.test.mjs ./test/closure-ir.test.mjs ./test/final-oxc-pass.test.mjs ./test/install-sanity.test.mjs ./test/native-packages-workflow.test.mjs ./test/target-boundaries.test.mjs ./test/type-translate.test.mjs ./test/validation.test.mjs ./test/vite-type-metadata.test.mjs ./test/workspace.test.mjs",
     "preview:examples": "node ./scripts/preview-example.mjs",
     "preview:react": "node ./scripts/preview-example.mjs react",
     "preview:svelte": "node ./scripts/preview-example.mjs svelte",

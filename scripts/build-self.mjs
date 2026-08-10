@@ -106,7 +106,7 @@ try {
 
 async function buildStage(compilerPath, stageRoot, label) {
   await prepareStageRoot(stageRoot);
-  await emitDeclarations(path.join(stageRoot, "dist"));
+  await copyBootstrapDeclarations(path.join(stageRoot, "dist"));
   const compiler = await import(
     `${pathToFileURL(compilerPath).href}?selfbuild=${encodeURIComponent(label)}`
   );
@@ -131,7 +131,7 @@ async function buildStage(compilerPath, stageRoot, label) {
   });
   await removePresetSharedImports(stageRoot);
   await relocateCliEntry(stageRoot);
-  await emitDeclarations(path.join(stageRoot, "dist"));
+  await copyBootstrapDeclarations(path.join(stageRoot, "dist"));
   await assertDeclaredPackageEntrypoints(stageRoot);
   await assertCliShebang(path.join(stageRoot, cliOutputRelative));
 }
@@ -332,10 +332,15 @@ function normalizePackagePath(packagePath) {
   return normalized;
 }
 
-async function emitDeclarations(outDir) {
-  await runCommand(process.execPath, ["./scripts/bundle-declarations.mjs", outDir], {
-    cwd: root,
-  });
+async function copyBootstrapDeclarations(outDir) {
+  await Promise.all(
+    libraryEntries.map(async ({ name }) => {
+      const relativePath = name.replace(/\.mjs$/u, ".d.ts");
+      const destination = path.join(outDir, relativePath);
+      await mkdir(path.dirname(destination), { recursive: true });
+      await cp(path.join(root, "dist", relativePath), destination);
+    }),
+  );
 }
 
 async function snapshotShippedTree(destination) {
