@@ -325,10 +325,16 @@ async function finalizeEsmChunkNames(input: {
     for (const other of chunks) {
       const token = tokenByChunkId.get(other.chunkId) ?? "";
       for (const alias of other.aliases) {
-        const replaced = replaceChunkSpecifier(tokenised, alias, token);
-        if (replaced !== tokenised) {
-          references.add(other.chunkId);
-          tokenised = replaced;
+        for (const specifier of [
+          alias,
+          alias.startsWith(".") ? alias : `./${alias}`,
+          relativeSpecifier(chunk.oldFileName, alias),
+        ]) {
+          const replaced = replaceChunkSpecifier(tokenised, specifier, token);
+          if (replaced !== tokenised) {
+            references.add(other.chunkId);
+            tokenised = replaced;
+          }
         }
       }
     }
@@ -395,18 +401,14 @@ async function finalizeEsmChunkNames(input: {
 
   for (const chunk of chunks) {
     let contents = tokenisedByChunkId.get(chunk.chunkId) ?? "";
-    const importerDir = path.posix.dirname(
-      renameMap.get(chunk.oldFileName) ?? chunk.oldFileName,
-    );
+    const importerFileName =
+      renameMap.get(chunk.oldFileName) ?? chunk.oldFileName;
     for (const other of chunks) {
-      // Specifiers are resolved against the importing module, so a chunk that
-      // moved into `assets/` must reference its sibling as `./sibling.js`, not
-      // `./assets/sibling.js`. The `./` prefix Closure emitted stays in the
-      // text, so only the path after it is substituted.
+      // Specifiers resolve from the importing module after both chunks move.
       const target = renameMap.get(other.oldFileName) ?? other.oldFileName;
       contents = contents
         .split(tokenByChunkId.get(other.chunkId) ?? "")
-        .join(path.posix.relative(importerDir, target) || target);
+        .join(relativeSpecifier(importerFileName, target));
     }
     await fs.writeFile(
       path.join(input.outDir, chunk.oldFileName),
@@ -443,25 +445,28 @@ function chunkNameToken(index: number) {
 }
 
 /**
- * Replaces `"./name.js"` / `"name.js"` (either quote style) with `"./token"` /
- * `"token"`. Matching only complete quoted strings keeps the substitution away
- * from arbitrary application text that happens to contain a chunk file name.
+ * Matches only complete quoted strings, not application text containing a
+ * chunk name. Closure can emit string literals with all three quote styles.
  */
 function replaceChunkSpecifier(
   sourceText: string,
   fileName: string,
   replacement: string,
 ) {
-  const pattern = new RegExp(`(["'])(\\./)?${escapeRegExp(fileName)}\\1`, "gu");
+  const pattern = new RegExp("([\"'`])" + escapeRegExp(fileName) + "\\1", "gu");
   return sourceText.replace(
     pattern,
-    (_match: string, quote: string, prefix: string | undefined) =>
-      `${quote}${prefix ?? ""}${replacement}${quote}`,
+    (_match: string, quote: string) => `${quote}${replacement}${quote}`,
   );
 }
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function relativeSpecifier(importer: string, target: string) {
+  const relative = path.posix.relative(path.posix.dirname(importer), target);
+  return relative.startsWith(".") ? relative : `./${relative}`;
 }
 
 function collectReferenceClosure(

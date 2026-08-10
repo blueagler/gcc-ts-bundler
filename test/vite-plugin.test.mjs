@@ -2715,6 +2715,16 @@ test.serial(
       true,
     );
     expect(jsFiles).not.toContain("main.js");
+    for (const filePath of jsFiles) {
+      const source = await fixture.read(path.join("dist", filePath));
+      for (const match of source.matchAll(/(["'`])(\.[^"'`]+\.js)\1/gu)) {
+        expect(files).toContain(
+          path.posix.normalize(
+            path.posix.join(path.posix.dirname(filePath), match[2]),
+          ),
+        );
+      }
+    }
   },
 );
 
