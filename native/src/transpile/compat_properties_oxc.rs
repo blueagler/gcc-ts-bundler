@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use oxc_allocator::{Allocator, FromIn};
 use oxc_ast::ast::*;
@@ -10,18 +10,25 @@ use oxc_str::Str;
 use super::identity_oxc::{BindingKey, BindingKeyMap, BindingKeySet, ModuleIdentity};
 use super::ClassMapCallInput;
 
+/// Quotes class-map literal keys and reports every name it pinned.
+///
+/// The quoted keys are only the *write* side of the contract. A runtime that
+/// reads the same prop with dot access (react-dom reads `props.precedence`)
+/// renames unless the name is pinned program-wide, so the caller feeds these
+/// names back into the preserved-property set that externs are rendered from.
 pub(crate) fn apply<'a>(
     allocator: &'a Allocator,
     program: &mut Program<'a>,
     identity: &ModuleIdentity,
     calls: &[ClassMapCallInput],
-) {
+) -> BTreeSet<String> {
     if calls.is_empty() {
-        return;
+        return BTreeSet::new();
     }
     let import_aliases = collect_import_aliases(program, identity);
     let mut visitor = ClassMapVisitor::new(allocator, calls, import_aliases, program, identity);
     visitor.visit_program(program);
+    visitor.quoted_property_names
 }
 
 pub(crate) fn collect_pair_array_class_map_property_names(
@@ -175,6 +182,7 @@ struct ClassMapVisitor<'a, 'i> {
     import_aliases: BindingKeyMap<String>,
     literal_contract_bindings: BindingKeySet,
     object_binding_rules: BindingKeyMap<Vec<Rule>>,
+    quoted_property_names: BTreeSet<String>,
 }
 
 impl<'a, 'i> ClassMapVisitor<'a, 'i> {
@@ -211,6 +219,7 @@ impl<'a, 'i> ClassMapVisitor<'a, 'i> {
             import_aliases,
             literal_contract_bindings: HashSet::new(),
             object_binding_rules: HashMap::new(),
+            quoted_property_names: BTreeSet::new(),
         };
         visitor.literal_contract_bindings = visitor.collect_literal_contract_bindings(program);
         visitor.object_binding_rules = visitor.collect_object_binding_rules(program);
@@ -309,7 +318,7 @@ impl<'a, 'i> ClassMapVisitor<'a, 'i> {
         collector.rules
     }
 
-    fn quote_object(&self, object: &mut ObjectExpression<'a>, rule: &Rule) {
+    fn quote_object(&mut self, object: &mut ObjectExpression<'a>, rule: &Rule) {
         for property in &mut object.properties {
             let ObjectPropertyKind::ObjectProperty(property) = property else {
                 continue;
@@ -335,9 +344,10 @@ impl<'a, 'i> ClassMapVisitor<'a, 'i> {
             {
                 continue;
             }
-            let value = match &property.key {
-                PropertyKey::StaticIdentifier(identifier) => identifier.name.to_string(),
-                PropertyKey::NumericLiteral(number) => number.value.to_string(),
+            // Numeric keys never rename, so only identifier keys need a pin.
+            let (value, pin) = match &property.key {
+                PropertyKey::StaticIdentifier(identifier) => (identifier.name.to_string(), true),
+                PropertyKey::NumericLiteral(number) => (number.value.to_string(), false),
                 _ => continue,
             };
             property.key = PropertyKey::new_string_literal(
@@ -346,6 +356,9 @@ impl<'a, 'i> ClassMapVisitor<'a, 'i> {
                 None,
                 &self.builder,
             );
+            if pin {
+                self.quoted_property_names.insert(value);
+            }
             property.computed = false;
             property.shorthand = false;
         }

@@ -118,13 +118,13 @@ pub(super) fn transform_source_with_oxc(
     super::js_compat_oxc::apply_program_transforms(&allocator, &mut program, &identity, source);
     rewrite_dynamic_imports(&allocator, &mut program, file_path, context);
     preserve_property_names(&allocator, &mut program, context);
-    super::compat_properties_oxc::apply(
+    let class_map_property_names = super::compat_properties_oxc::apply(
         &allocator,
         &mut program,
         &identity,
         &context.class_map_calls,
     );
-    emit_module_program_oxc(
+    let mut emitted = emit_module_program_oxc(
         &allocator,
         file_path,
         &mut program,
@@ -132,7 +132,13 @@ pub(super) fn transform_source_with_oxc(
         context,
         file_metadata,
         commonjs_export_name,
-    )
+    )?;
+    // Symmetry: a key pinned as a literal on the write side must also be
+    // pinned on every dot-access read side, or the two halves disagree.
+    emitted
+        .reflective_property_names
+        .extend(class_map_property_names);
+    Ok(emitted)
 }
 
 fn rewrite_ts_export_assignments<'a>(

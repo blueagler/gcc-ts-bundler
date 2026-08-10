@@ -80,7 +80,7 @@ interface NativeEmitMetadata {
   version: number;
 }
 
-const NATIVE_EMIT_METADATA_VERSION = 14;
+const NATIVE_EMIT_METADATA_VERSION = 15;
 
 /**
  * Hoisted bundler-runtime emission depends on chunk membership, so the native
