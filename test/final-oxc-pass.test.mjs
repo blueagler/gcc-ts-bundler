@@ -6,7 +6,7 @@ import { expect, test } from "bun:test";
 import { finalizeJavaScriptOutputs } from "../src/build/closure/final-minify.ts";
 import { createFixture } from "./helpers.mjs";
 
-test("final OXC pass keeps no-DCE/no-mangle contracts and skips preserved modules", async () => {
+test("final OXC pass keeps no-DCE/safe-mangle contracts and skips preserved modules", async () => {
   const fixture = await createFixture();
   const compiledPath = path.join(fixture.outDir, "entry.js");
   const preservedPath = path.join(
@@ -26,7 +26,7 @@ test("final OXC pass keeps no-DCE/no-mangle contracts and skips preserved module
       [
         'import { value as reinjectedValue } from "./__gcc_preserved/boundary.js";',
         "const unusedBinding = 1;",
-        "const namedBinding = () => 2;",
+        "const namedBinding = function keptFunctionName() { const localBinding = 2; return localBinding; };",
         "const pureBinding = /* @__PURE__ */ factory();",
         "const object = { preservedProperty: reinjectedValue };",
         "console.log(object.preservedProperty, namedBinding(), pureBinding);",
@@ -52,10 +52,22 @@ test("final OXC pass keeps no-DCE/no-mangle contracts and skips preserved module
     'import{value as reinjectedValue}from"./__gcc_preserved/boundary.js";',
   );
   expect(compiled).toContain("unusedBinding");
+  // Local mangling is scope-bounded, cannot rename cross-chunk identifiers,
+  // and keeps function/class names. Top-level bindings remain the safety lock.
   expect(compiled).toContain("namedBinding");
+  expect(compiled).not.toContain("localBinding");
   expect(compiled).toContain("pureBinding=factory()");
   expect(compiled).toContain("preservedProperty");
   expect(compiled).toContain("console.log");
   expect(compiled).toContain("debugger");
   expect(preserved).toBe(preservedSource);
+
+  const nativeSource = await fs.readFile(
+    path.join(import.meta.dir, "../native/src/minify.rs"),
+    "utf8",
+  );
+  expect(nativeSource).toContain("top_level: Some(false)");
+  expect(nativeSource).toContain(
+    "keep_names: MangleOptionsKeepNames::all_true()",
+  );
 });

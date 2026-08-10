@@ -2,14 +2,17 @@ use std::path::Path;
 
 use oxc_allocator::Allocator;
 use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
-use oxc_minifier::{CompressOptions, CompressOptionsUnused, Minifier, MinifierOptions};
+use oxc_minifier::{
+    CompressOptions, CompressOptionsUnused, MangleOptions, MangleOptionsKeepNames, Minifier,
+    MinifierOptions,
+};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 
 /// Final output-only compression. This deliberately mirrors the documented
-/// no-DCE/no-mangle OXC pass: syntax/golf transforms are allowed, but unused
-/// declarations, debugger statements, console calls, property names, and
-/// identifiers are not removed or renamed.
+/// no-DCE OXC pass: syntax/golf transforms and scope-local mangling are allowed,
+/// but unused declarations, debugger statements, console calls, property names,
+/// top-level identifiers, and function/class names are preserved.
 pub fn minify_javascript(file_path: String, source: String) -> Result<String, String> {
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(Path::new(&file_path))
@@ -33,7 +36,11 @@ pub fn minify_javascript(file_path: String, source: String) -> Result<String, St
     compress.unused = CompressOptionsUnused::Keep;
     let result = Minifier::new(MinifierOptions {
         compress: Some(compress),
-        mangle: None,
+        mangle: Some(MangleOptions {
+            top_level: Some(false),
+            keep_names: MangleOptionsKeepNames::all_true(),
+            ..MangleOptions::default()
+        }),
     })
     .minify(&allocator, &mut program);
 
@@ -53,12 +60,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keeps_mutation_visible_no_dce_no_mangle_contracts() {
+    fn keeps_mutation_visible_no_dce_safe_mangle_contracts() {
         let output = minify_javascript(
             "fixture.mjs".to_string(),
             [
                 "const unusedBinding = 1;",
-                "const namedFunction = function namedFunction() { return 2; };",
+                "const namedFunction = function namedFunction() { const localBinding = 2; return localBinding; };",
                 "const object = { preservedProperty: 3 };",
                 "console.log(object.preservedProperty);",
                 "debugger;",
@@ -70,6 +77,7 @@ mod tests {
         assert!(output.contains("unusedBinding"), "{output}");
         assert!(output.contains("namedFunction"), "{output}");
         assert!(output.contains("preservedProperty"), "{output}");
+        assert!(!output.contains("localBinding"), "{output}");
         assert!(output.contains("console.log"), "{output}");
         assert!(output.contains("debugger"), "{output}");
     }

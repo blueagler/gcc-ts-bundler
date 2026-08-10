@@ -1104,7 +1104,7 @@ test.serial(
     // The registry survives; the CSS coupling does not. Nothing in a
     // standalone build can ever fill a manifest CSS row, so the <link> loader
     // and the per-chunk CSS fan-out are gated out of the preamble.
-    expect(baseOutput).toContain("a.r=function(");
+    expect(baseOutput).toMatch(/[A-Za-z_$][\w$]*\.r=function\(/u);
     expect(baseOutput).not.toContain('createElement("link")');
     expect(baseOutput).not.toContain('link[rel="stylesheet"]');
   },
@@ -1184,7 +1184,7 @@ test.serial(
     expect(baseOutput).not.toContain("configurable:!0,enumerable:!0");
     // The dynamic-import entry point and the module registry stay.
     expect(baseOutput).toMatch(/import\(/);
-    expect(baseOutput).toContain("a.r=function(");
+    expect(baseOutput).toMatch(/[A-Za-z_$][\w$]*\.r=function\(/u);
 
     // Fail-closed the other way: a preamble is never smaller than the loader
     // it still has to run.
