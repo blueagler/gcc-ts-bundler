@@ -267,6 +267,33 @@ test.serial(
 );
 
 test.serial(
+  "intersections degrade instead of inventing a disjoint Object receiver",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/index.ts",
+      [
+        "interface Parser { score: number }",
+        "interface Matcher { record: { aliasOf?: object }; parent?: Matcher }",
+        "export function compare(built: Parser & Matcher, parent: Matcher) {",
+        "  return !built.record.aliasOf === !parent.record.aliasOf;",
+        "}",
+        "",
+      ].join("\\n"),
+    );
+    const fileName = path.join(fixture.srcDir, "index.ts");
+    const result = collect([fileName], fixture.projectRoot);
+    const rendered = renderTemplate(
+      result.files[0],
+      annotation(result.files[0], "compare"),
+    );
+
+    expect(rendered).toContain("@param {?} built");
+    expect(rendered).toContain("@param {?} parent");
+  },
+);
+
+test.serial(
   "metadata targets retarget authored files without collecting untargeted inputs",
   async () => {
     const fixture = await createFixture();

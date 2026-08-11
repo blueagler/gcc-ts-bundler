@@ -583,7 +583,13 @@ fn is_external_boundary_value(
             .key_of_reference(identifier)
             .is_some_and(|binding| candidates.contains(&binding)),
         Expression::StaticMemberExpression(member) => {
-            external_member_starts.contains(&member.property.span.start) || recurse(&member.object)
+            // Object.assign returns its first argument. Treating the method as
+            // an opaque boundary quotes result reads but not the copied writes.
+            !(member.property.name == "assign"
+                && matches!(&member.object, Expression::Identifier(object)
+                    if object.name == "Object" && identity.key_of_reference(object).is_none()))
+                && (external_member_starts.contains(&member.property.span.start)
+                    || recurse(&member.object))
         }
         Expression::ComputedMemberExpression(member) => {
             external_member_starts.contains(&member.expression.span().start)
@@ -1342,6 +1348,54 @@ mod tests {
         assert!(oxc.contains("exports.helper = helper;"));
         assert!(oxc.contains("exports.Box = Box;"));
 
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn object_assign_result_keeps_copied_properties_renameable() {
+        let root = std::env::temp_dir().join(format!(
+            "gcc-emit-goog-external-object-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let entry = root.join("entry.js");
+        let source = "const assign = Object.assign; const record = {}; const matcher = assign({}, { record }); matcher.record;";
+        std::fs::write(&entry, source).unwrap();
+        let allocator = Allocator::default();
+        let (mut program, identity) = parse(&allocator, source);
+        let metadata = ClosureFileMetadata {
+            ambient_globals: Vec::new(),
+            annotations: Vec::new(),
+            declarations: Vec::new(),
+            decorated_output_text: None,
+            diagnostics: Vec::new(),
+            enums: Vec::new(),
+            erased_const_enums: Vec::new(),
+            external_global_member_accesses: vec![source
+                .find("Object.assign")
+                .map(|start| start + "Object.".len())
+                .unwrap()
+                .try_into()
+                .unwrap()],
+            external_owned_member_accesses: Vec::new(),
+            file_path: entry.to_string_lossy().into_owned(),
+            runtime_module_id: None,
+            source_file_path: entry.to_string_lossy().into_owned(),
+            symbols: Vec::new(),
+        };
+        let oxc = emit_goog_module_program(
+            &allocator,
+            &entry,
+            &mut program,
+            &identity,
+            &context(&root),
+            Some(&metadata),
+            None,
+        )
+        .unwrap()
+        .code;
+        assert!(oxc.contains("{ record }"), "{oxc}");
+        assert!(oxc.contains("matcher.record"), "{oxc}");
         std::fs::remove_dir_all(root).unwrap();
     }
 

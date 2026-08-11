@@ -3783,3 +3783,74 @@ test("dependency hazards are read from the post-prebundle graph", async () => {
     "Object.prototype.loweredField;",
   );
 });
+
+test.serial(
+  "Vite keeps recursive matcher receiver properties linked across inferred and declared types",
+  { timeout: 60000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<script type="module" src="/src/main.ts"></script>\n',
+    );
+    await fixture.write(
+      "src/types.d.ts",
+      [
+        "export interface RouteRecord { aliasOf?: RouteRecord }",
+        "export interface Matcher { record: RouteRecord; children: Matcher[]; parent?: Matcher; matcherOnly: number }",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/matcher.ts",
+      [
+        'import type { Matcher, RouteRecord } from "./types";',
+        "interface Parser { parserOnly: number }",
+        "const assign = Object.assign;",
+        "export function link(parser: Parser, record: RouteRecord, parent: Matcher) {",
+        "  const matcher = assign(parser, { record, parent, children: [], matcherOnly: 1 });",
+        '  if (!matcher["record"].aliasOf === !parent.record.aliasOf) parent.children.push(matcher);',
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/main.ts",
+      [
+        'import { link } from "./matcher";',
+        'globalThis["__linkRecursiveMatchers"] = link;',
+        "",
+      ].join("\n"),
+    );
+
+    await buildViteFixture(fixture, { buildLines: ['    target: "es2020",'] });
+    const html = await fixture.read("dist/index.html");
+    const entryScript = readRewrittenEntryScript(html);
+    const previousLocation = globalThis.location;
+    const previousRuntime = globalThis.__g;
+    try {
+      globalThis.location = { href: "http://vite.test/index.html" };
+      delete globalThis.__g;
+      await import(
+        `${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?recursive-matcher=${Date.now()}`,
+      );
+      const record = {};
+      const shared = {
+        builtOnly: 1,
+        children: [],
+        matcherOnly: 1,
+        parserOnly: 1,
+        record,
+      };
+      globalThis["__linkRecursiveMatchers"](shared, record, shared);
+      expect(shared.children[0]).toBe(shared);
+      expect(shared.record).toBe(record);
+    } finally {
+      delete globalThis["__linkRecursiveMatchers"];
+      if (previousLocation === undefined) delete globalThis.location;
+      else globalThis.location = previousLocation;
+      if (previousRuntime === undefined) delete globalThis.__g;
+      else globalThis.__g = previousRuntime;
+    }
+  },
+);

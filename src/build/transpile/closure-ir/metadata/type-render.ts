@@ -304,9 +304,10 @@ function renderClosureType(
   }
 
   if (type.isIntersection()) {
-    // Intersections have no faithful Closure spelling; `!Object` keeps the
-    // atom nominal without inventing a structural shape.
-    return `!${referenceBuiltin("Object", context)}`;
+    // An intersection can be the same runtime object as any constituent.
+    // `!Object` makes Closure treat it as a disjoint receiver type and can
+    // rename shared properties apart. Unknown fails toward no split.
+    return "?";
   }
 
   if (checker.isArrayType(type) || isReadonlyArrayType(type)) {

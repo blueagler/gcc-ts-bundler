@@ -4,7 +4,8 @@ import type {
   TypeMetadataDiagnostic as ClosureTypeMetadataDiagnostic,
 } from "../../build/transpile/closure-ir";
 
-export const VITE_TYPE_METADATA_VERSION = 3 as const;
+// v4: intersection types render as `?` so aliased receivers cannot split.
+export const VITE_TYPE_METADATA_VERSION = 4 as const;
 
 export type ResolutionMode = "import" | "require";
 
