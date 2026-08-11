@@ -1,6 +1,10 @@
 {
   "name": "gcc-ts-bundler",
   "version": "0.2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blueagler/gcc-ts-bundler.git"
+  },
   "description": "A TypeScript bundler that uses a native Rust front-end with Google Closure Compiler for aggressive optimization.",
   "license": "Apache-2.0",
   "engines": {

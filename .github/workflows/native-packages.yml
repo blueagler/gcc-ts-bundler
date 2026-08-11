@@ -45,6 +45,9 @@ jobs:
 
   build-native-package:
     name: ${{ matrix.package_name }}
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ${{ matrix.runs_on }}
     strategy:
       fail-fast: false
@@ -144,6 +147,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
+          registry-url: https://registry.npmjs.org
 
       - shell: bash
         env:
@@ -179,9 +183,8 @@ jobs:
 
       - if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == true) }}
         shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ github.event_name == 'release' && secrets.NPM_TOKEN || '' }}
         run: |
+          npm install -g npm@^11.5.1
           args=(npm publish "./npm/${{ matrix.package_name }}" --access public)
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             args+=(--dry-run)
@@ -190,6 +193,9 @@ jobs:
 
   publish-root-package:
     if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == true) }}
+    permissions:
+      contents: read
+      id-token: write
     needs:
       - build-native-package
     runs-on: ubuntu-24.04
@@ -217,9 +223,8 @@ jobs:
       - run: bun run build:js
 
       - shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ github.event_name == 'release' && secrets.NPM_TOKEN || '' }}
         run: |
+          npm install -g npm@^11.5.1
           args=(npm publish --access public)
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             args+=(--dry-run)

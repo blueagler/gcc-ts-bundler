@@ -156,6 +156,7 @@ function writeNativePackage(target, builtLibraryPath) {
       {
         name: target.packageName,
         version: packageJson.version,
+        repository: packageJson.repository,
         license: packageJson.license,
         os: [target.platform],
         cpu: [target.arch],
