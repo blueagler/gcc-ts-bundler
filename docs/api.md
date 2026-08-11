@@ -48,7 +48,7 @@ if (!result.ok) {
 | `srcDir`           | `src`             | Source root used for entry resolution and output-relative module IDs.                                                        |
 | `outDir`           | `dist`            | Published output directory. It is replaced on a non-cached compile.                                                          |
 | `compilationLevel` | `ADVANCED`        | Closure level: `WHITESPACE_ONLY`, `SIMPLE`, or `ADVANCED`.                                                                   |
-| `languageOut`      | `ECMASCRIPT_NEXT` | Closure output syntax: `ECMASCRIPT3`, `ECMASCRIPT5`, `ECMASCRIPT6`, or `ECMASCRIPT_NEXT`.                                    |
+| `languageOut`      | `ECMASCRIPT_NEXT` | Closure output syntax: `ECMASCRIPT3`, `ECMASCRIPT5`, `ECMASCRIPT6`, `ECMASCRIPT_2015`, `ECMASCRIPT_2016`, `ECMASCRIPT_2017`, `ECMASCRIPT_2018`, `ECMASCRIPT_2019`, `ECMASCRIPT_2020`, `ECMASCRIPT_2021`, `STABLE`, or `ECMASCRIPT_NEXT`. |
 | `externals`        | `[]`              | Exact runtime-owned ESM specifiers preserved as real imports. Requires standalone ESM output.                               |
 | `preserveModules`  | `[]`              | Authored modules published with stable runtime/API semantics and no optimization or renaming; Oxc minifies comments/whitespace and erases TypeScript types. |
 | `externs`          | `[]`              | Explicit externs consumed by Closure and scanned by native as rename-barrier opt-in.                                         |
@@ -107,7 +107,7 @@ Both chunked modes are for browser applications:
 - lazy boundaries use native `import("./literal")` syntax;
 - `script` output loads chunks by injecting classic `<script>` elements;
 - `esm` output loads chunks with native dynamic `import()`;
-- standalone `auto` resolves to `script` (Vite selects ESM when its target allows it); basic builds may explicitly request `esm`;
+- chunked standalone `auto` resolves to `esm` unless a language or worker gate forces script; off-mode `auto` resolves to `script`;
 - `manifestFile`, when non-empty, is a safe relative path emitted inside `outDir`; absolute paths and `..` escapes are rejected.
 
 `vendorChunk: true` moves eager dependencies into a separate vendor chunk only for `bundler-runtime` with resolved ESM output. `"auto"` and the default `false` leave the entry unsplit. It is a no-op under the Vite plugin: there the chunk plan mirrors Rollup's own chunk graph, which already separates dependency code.
@@ -118,10 +118,10 @@ scope-hoisted, renamed, and moved across chunks by the compiler. Under script
 output, dynamic imports use a small loader prelude in the base chunk; under ESM
 output, they use native module imports.
 
-`bundler-runtime` wraps every module in a runtime registration closure so
-chunks can be compiled as separate Closure jobs (parallel, per-chunk
-incremental caching) at a size cost. Its runtime injects classic scripts for
-`script` output and calls dynamic `import()` for ESM output.
+`bundler-runtime` emits runtime registration for modules that cannot be
+scope-hoisted and compiles the planned chunk graph in one Closure job. Its
+runtime injects classic scripts for `script` output and calls dynamic `import()`
+for ESM output.
 
 Off mode emits importable entry bundles and can produce a shared chunk for common code.
 
@@ -221,13 +221,8 @@ program, including your own. Both surviving modes derive their barriers from
 evidence — application usage or emitted runtime code — for that reason.
 
 A mode that pinned every member of every reachable declaration
-(`candidates`) was removed after being measured against evidence-derived sets:
-
-| Example | barriers | raw | gzip | properties still renamed |
-| --- | --- | --- | --- | --- |
-| React SPA | 3 vs 2,964 | +16,599 | **+3,480** | 577 → 332 (−42%) |
-| Vue Vapor SPA | 13 vs 3,231 | +5,514 | **+1,157** | — |
-| jQuery demo | 31 vs 761 | +4,442 | **+748** | 244 → 102 (−58%) |
+(`candidates`) was removed. Evidence-derived sets keep ordinary application
+properties available to Closure while preserving proven boundary names.
 
 If a package's API is assembled from strings at runtime, that is a
 `runtime-aware` job: it sees constructed keys, including the

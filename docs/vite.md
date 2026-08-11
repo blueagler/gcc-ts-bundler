@@ -83,14 +83,29 @@ Apps without a preset (Lit, vanilla TS) use `gccTsBundler()` directly.
 
 ## How it integrates
 
-The plugin captures transformed modules during Vite's transform phase. At `generateBundle`, it uses Rollup's final chunk graph to keep only retained modules, materializes that graph, prebundles dependency regions, and invokes the core compiler with:
+The plugin captures transformed modules during Vite's transform phase. At `generateBundle`, it reads Rollup's final chunk graph and keeps only its retained module subgraph. It materializes that graph and classifies each dependency from its materialized text.
+
+Clean ESM dependency modules stay in the native pipeline. Unsafe dependency cores, such as CJS or mixed modules, become per-import-target esbuild atoms. Atom requests derive named exports for callable CJS facades when the captured graph proves them. Identical lazy atom outputs use one canonical instance. The plugin does not prebundle every dependency region.
+
+The plugin serializes Rollup's retained chunk graph. The native planner mirrors that graph as a Closure chunk DAG and adds synthetic edges when Closure needs one dependency-free root. It then invokes the core compiler with:
 
 - `chunks.mode = "bundler-runtime"`;
-- `packages = "off"` because dependencies are already materialized;
+- `packages = "off"` because the graph is already materialized;
 - entries derived from Vite entry facades;
 - `languageOut` derived from `build.target`.
 
 It then removes Rollup JavaScript chunks, emits the compiled files through Rollup, carries CSS ownership into lazy chunk loading, follows Rollup entry/chunk naming patterns, and rewrites HTML entry scripts by default.
+
+## Namespace access
+
+Bundler-runtime namespace imports use a small lattice:
+
+- A known member such as `namespace.ready` lowers to its export slot.
+- A computed member with a finite proven key set lowers to conditional selections. The proof follows literals, conditionals, and stable single-assignment locals.
+- An unprovable computed access reifies the namespace object. Reification uses live getters for its exports and emits one deduplicated warning per target module.
+- A write, delete, update, `Object.assign`, or `Reflect` mutation through a namespace remains an error because module namespaces are read-only.
+
+Passing a namespace value to another operation also reifies it when the compiler cannot prove member-only use. The warning reports the module and access that caused reification.
 
 ## Build speed
 
@@ -148,15 +163,22 @@ Accepts core `BuildOptions` except options owned by Vite: `entries`, `languageOu
 
 Do not set `compiler.languageOut`; use Vite `build.target`. The plugin maps:
 
-| Vite target                     | Closure output    |
-| ------------------------------- | ----------------- |
-| `false` or `esnext`             | `ECMASCRIPT_NEXT` |
-| `es3`                           | `ECMASCRIPT3`     |
-| `es5`                           | `ECMASCRIPT5`     |
-| `baseline-widely-available`     | `ECMASCRIPT6`     |
-| `es2015` and newer year targets | `ECMASCRIPT6`     |
+| Vite target | Closure output |
+| --- | --- |
+| omitted or `baseline-widely-available` | `ECMASCRIPT_2021` |
+| `false` or `esnext` | `ECMASCRIPT_NEXT` |
+| `es3` | `ECMASCRIPT3` |
+| `es5` | `ECMASCRIPT5` |
+| `es6` or `es2015` | `ECMASCRIPT_2015` |
+| `es2016` | `ECMASCRIPT_2016` |
+| `es2017` | `ECMASCRIPT_2017` |
+| `es2018` | `ECMASCRIPT_2018` |
+| `es2019` | `ECMASCRIPT_2019` |
+| `es2020` | `ECMASCRIPT_2020` |
+| `es2021` | `ECMASCRIPT_2021` |
+| `es2022` and newer year targets | `STABLE` |
 
-For a target array, the oldest mapped output level wins. Browser-specific targets such as `chrome120` are rejected because they do not map to a Closure language level.
+Versioned Chrome, Edge, Firefox, Safari, iOS, Node, and IE targets also use the native capability table. For example, `chrome120` maps to `ECMASCRIPT_2021`; an unknown form such as `last 2 versions` fails. For a target array, the oldest mapped output level wins. The plugin does not silently raise a declared target. If input syntax needs a newer level, the diagnostic names the minimum level.
 
 ### `compiler.chunks.outputType`
 
@@ -170,10 +192,9 @@ Selects the shape Closure gives the emitted chunks.
 
 Omitting `outputType` and setting it explicitly to `"auto"` are equivalent in the Vite integration.
 
-ES module output is roughly 7% smaller raw and 3% smaller gzipped on the
-reference app, and drops the renamed-namespace prefix, the per-chunk function
-wrapper, and the `document.currentScript` base-URL probe. The full measurement
-and risk analysis is in [`research/es-modules-output.md`](https://github.com/blueagler/gcc-ts-bundler/blob/main/docs/research/es-modules-output.md).
+ES module output drops the renamed-namespace prefix, the per-chunk function
+wrapper, and the `document.currentScript` base-URL probe. The risk analysis is in
+[`research/es-modules-output.md`](https://github.com/blueagler/gcc-ts-bundler/blob/main/docs/research/es-modules-output.md).
 
 Request counts and waterfall depth are unchanged: lazy chunks are still fetched
 through the runtime manifest, which issues a chunk and all of its dependencies
@@ -226,37 +247,21 @@ decided and there is nothing left for this flag to partition. It still applies
 to standalone (non-Vite) `bundler-runtime` builds, which have no host chunk
 graph to mirror; the rest of this section describes those.
 
-Moves eagerly reachable dependency modules (`node_modules`, prebundled
-dependency chunks, virtual modules) out of the entry chunk into a separate
+Moves eagerly reachable dependency modules (`node_modules`, virtual modules)
+out of the entry chunk into a separate
 `<baseChunkName>-vendor` chunk.
 
 Under module output the entry chunk's hashed file name is embedded in every
 sibling chunk's `import` statement, so editing app code re-hashes the entry and
 that new name propagates outward. Splitting the dependency half off gives it its
-own chunk with no reference to the entry, so its file name — and its browser
-cache entry — survives app edits. On a typical app dependencies are the large
-majority of the compiled input, so this is the bulk of the caching win.
+own chunk with no reference to the entry, so its file name and browser cache
+entry can survive app edits.
 
-**This is opt-in, and it is a real trade.** Splitting costs first-load bytes:
-the two halves no longer optimise against each other, so cross-chunk inlining,
-dead-property removal and property renaming all get less to work with.
-Measured on the Svelte example, gzipped total across every emitted chunk:
-
-| | raw | gzip |
-|---|---|---|
-| unsplit (default) | 68,145 | **27,570** |
-| `vendorChunk: true` | 71,078 | **29,796** |
-
-So a cold visitor downloads about **2.2 KB gzip more**. What they buy is that
-the roughly **12.5 KB gzip** vendor chunk keeps its file name across every
-deploy that only touches app code, so returning visitors re-download the entry
-chunk alone instead of the whole bundle.
-
-Opt in when your users come back more often than they arrive cold — an
-internal tool, a dashboard, anything behind a login, or any app you deploy
-several times a day. Leave it off for a landing page or anything whose traffic
-is mostly first-time visitors, where the 2.2 KB is paid by everyone and the
-cache entry is used by nobody.
+**This is opt-in, and it is a real trade.** Splitting can cost first-load bytes: the two halves no longer optimise against
+each other, so cross-chunk inlining, dead-property removal, and property renaming
+have less scope. It can keep dependency output stable across app-only deploys.
+Opt in when repeat visits make that cache stability useful. Leave it off when
+most visitors arrive only once.
 
 ```ts
 gccTsBundler({

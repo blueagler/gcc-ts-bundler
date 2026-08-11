@@ -10,7 +10,7 @@ The Vite plugin is an adapter around the same core build pipeline rather than a 
 
 ## Build boundary
 
-The standalone/native CLI and programmatic API support **BASIC** builds only: TypeScript to optimized JavaScript, chunks, and externs, with future Node/Bun target basics. They do not handle worker graphs, WebAssembly, or asset transforms. Advanced features such as workers, WebAssembly, assets, `import.meta.glob`, and CSS are Vite-owned: Vite performs those transforms, and the Vite plugin passes the resulting JavaScript to `gcc-ts-bundler` for optimization without breaking Vite behavior; [`test/vite-feature-matrix.test.mjs`](../test/vite-feature-matrix.test.mjs) is that contract. `?worker` and `?worker&inline` are a planned Vite-plugin milestone that will materialize Vite's wrapper module onto the existing URL-form worker-chunk path; they are not part of the standalone pipeline.
+The standalone/native CLI and programmatic API support **BASIC** builds: TypeScript to optimized JavaScript, chunks, and externs. Target policies include `browser`, `node`, `bun`, `workerd`, and `webworker`. They do not handle worker graphs, WebAssembly, or asset transforms. Vite owns workers, WebAssembly, assets, `import.meta.glob`, and CSS transforms. The Vite plugin passes supported transformed JavaScript to `gcc-ts-bundler`; worker entry graphs remain unsupported.
 
 Runtime data crossing filesystem, native-addon, compiler-package, or generated-manifest boundaries is parsed as `unknown` and narrowed with explicit validators. Internal TypeScript is compiled with exact optional properties and unchecked index protection; linting rejects `any`, type assertions, non-null assertions, and unsafe `any` propagation.
 
@@ -23,7 +23,7 @@ Runtime data crossing filesystem, native-addon, compiler-package, or generated-m
 | `src/build`           | Option normalization, graph resolution, cache keys, stage coordination                    |
 | `src/build/transpile` | TypeScript preflight, Closure IR metadata, native transpilation stage                     |
 | `src/build/closure`   | Closure job execution, job caching, postprocessing, output publication                    |
-| `src/vite`            | Vite graph capture, materialization, dependency prebundling, CSS/HTML integration         |
+| `src/vite`            | Vite graph capture, retained-graph materialization, directed dependency routing, CSS/HTML integration |
 | `src/native`          | Platform binding loader and typed JavaScript wrappers around N-API                        |
 | `native/src`          | Rust graph resolver, chunk planner, Oxc transforms, extern emission, Closure job planning |
 | `closure-externs`     | Extra browser, CommonJS, worker, Closure, and tslib externs                               |
@@ -33,11 +33,11 @@ Runtime data crossing filesystem, native-addon, compiler-package, or generated-m
 
 The self-hosted package compiles the five public ESM exports and the CLI in one multi-entry off-mode Closure job. Their common implementation is emitted once as `dist/shared.js`; `bin/gcc-ts-bundler.mjs` remains the declared shebang entry but is a thin module that imports that shared chunk, and all preserved runtime modules live in the single canonical `dist/__gcc_preserved` tree.
 
-The CLI was previously compiled as a separate closed-world job to maximize entry-specific dead-code elimination. A direct probe found that the standalone CLI retained only about 6.4 KB less code than the shared implementation, while separate CLI and Vite jobs duplicated roughly 65-97% of the core pipeline. The package build therefore accepts the small import hop and couples the CLI to the published `dist` layout in exchange for removing the much larger shipped duplication; package verification keeps the exports map, bin path, shebang, declarations, and runtime asset layout contractual.
+The CLI was previously compiled as a separate closed-world job. The package now shares the implementation across the public entries and the CLI. Package verification keeps the exports map, bin path, shebang, declarations, and runtime asset layout contractual.
 
 ## Closure envelope capabilities
 
-Closure is the middle-end inside an Oxc envelope: Oxc normalizes source syntax into Closure-ready inputs, Closure performs optimization and property renaming, then the Oxc finishing pass modernizes the delivered JavaScript's printing without DCE or mangling. The versioned table in [`native/src/closure_capabilities.rs`](../native/src/closure_capabilities.rs) is the single source of truth for the pinned `google-closure-compiler` parser contract, including the ES2021-equivalent dependency-prebundle target and the fact that final printer modernization belongs to the finishing pass.
+Closure is the middle-end inside an Oxc envelope: Oxc normalizes source syntax into Closure-ready inputs, Closure performs optimization and property renaming, then the Oxc finishing pass prints the delivered JavaScript. The finishing pass does not perform dead-code elimination or top-level renaming, but it can mangle function-local names. The versioned table in [`native/src/closure_capabilities.rs`](../native/src/closure_capabilities.rs) is the single source of truth for the pinned `google-closure-compiler` parser contract, including the ES2021 dependency-bundle target and the fact that final printer modernization belongs to the finishing pass.
 
 [`test/closure-capabilities.test.mjs`](../test/closure-capabilities.test.mjs) invokes the pinned compiler jar directly with `WHITESPACE_ONLY` fixtures for every declared syntax capability. A compiler bump must update the table only when the canary proves it: a newly supported construct makes an obsolete `false` entry fail, prompting removal of its Oxc envelope workaround rather than silently preserving it.
 
@@ -84,18 +84,11 @@ There are three output models:
 
 - **`chunks.mode = "off"`** creates Closure entry shims and emits importable entry bundles. Multiple entries may produce shared chunks.
 - **`chunks.mode = "split"`** compiles one Closure chunk graph, preserving cross-module optimization while supporting literal lazy imports.
-- **`chunks.mode = "bundler-runtime"`** treats entries as application bootstraps and compiles chunks as separate cacheable jobs. Entry exports are rejected because this mode does not produce library entry modules.
+- **`chunks.mode = "bundler-runtime"`** treats entries as application bootstraps and compiles the planned chunk graph in one Closure job. Entry exports are rejected because this mode does not produce library entry modules.
 
 Dynamic import specifiers must be string literals. Dynamic imports are rejected when chunk mode is off. Chunked builds can emit classic script chunks loaded through the runtime or ESM chunks loaded with native `import()`, according to `chunks.outputType`.
 
-`chunks.outputType: "auto"` (the default) resolves to **`"esm"`**. Measured on
-the Svelte example, module output is 120,762 -> 115,049 bytes raw and
-41,015 -> 40,262 gzipped, purely from dropping the per-chunk IIFE wrapper and
-the `$gcc.` prefix on every cross-chunk reference. The gates still outrank the
-default: `chunks.mode` other than `bundler-runtime`, `ECMASCRIPT3`/`ECMASCRIPT5`
-output, and worker bundles all force `"script"`. A standalone consumer of a
-module-output build must load the entry with `<script type="module">`; the Vite
-plugin emits the right tag itself.
+In chunked builds, `chunks.outputType: "auto"` (the default) resolves to **`"esm"`**. Off-mode `auto` resolves to `"script"`. The gates still outrank the chunked default: `ECMASCRIPT3`/`ECMASCRIPT5` output and worker bundles force `"script"`. A standalone consumer of a module-output build must load the entry with `<script type="module">`; the Vite plugin emits the right tag itself.
 
 #### Bundler-runtime hoisted linking
 
@@ -160,7 +153,7 @@ Rust prepares explicit Closure jobs and aggregates delivered metadata counts ove
 
 Configured preserved modules retain their runtime semantics and stable ESM API, not their authored bytes. Oxc parses and reprints them with comments and unnecessary whitespace removed; identifiers are not renamed, code is not optimized or dead-code eliminated, and the existing TypeScript-only path still performs type erasure plus relative extension rewriting.
 
-Off mode runs Closure serially, split mode compiles one Closure chunk graph, and bundler-runtime mode may compile independent jobs concurrently while caching each job separately. Postprocessing then:
+Off mode runs Closure serially, split mode compiles one Closure chunk graph, and bundler-runtime mode compiles its planned chunk graph in one Closure job. Postprocessing then:
 
 - converts Closure wrapper exports back into ESM exports in off mode;
 - wraps application chunks for the resolved script/ESM loading model and publishes the requested manifest when enabled;
@@ -185,8 +178,7 @@ Each answer is a fail-closed over-approximation: a call site anywhere in the
 plan keeps the block. Standalone builds never fill a CSS row, so the CSS half
 is always gated out there; the Vite plugin fills rows *after* the compile and
 passes its pre-compile CSS-ownership answer in, because that is the only point
-where the question can still be answered. A no-CSS ESM app drops from 2,126 to
-1,007 bytes of loader code.
+where the question can still be answered. A standalone build has no CSS ownership rows, so it does not emit the Vite CSS loader path.
 
 ### Empty-chunk pruning
 
@@ -228,17 +220,21 @@ During `vite build`, `gccTsBundler()` runs as a post plugin:
 ```text
 Vite transforms modules
   -> plugin captures transformed JS-like modules
-  -> Rollup creates its final retained graph
-  -> plugin keeps only retained modules
+  -> Rollup creates its final chunk graph
+  -> plugin keeps Rollup's retained module subgraph
   -> normalize and materialize the graph on disk
-  -> prebundle dependency regions with Vite's esbuild
-  -> collect unified source/declaration metadata with exact runtime provenance
+  -> classify dependency text into native-direct modules and unsafe atoms
+  -> build only the unsafe atoms with esbuild
+  -> derive CJS facade names and canonicalize duplicate atom outputs
+  -> collect unified source/declaration metadata with runtime provenance
+  -> serialize Rollup's chunk DAG
   -> call core build() in bundler-runtime mode with that sidecar
+  -> native planner mirrors the DAG and supplies one Closure root when needed
   -> merge Vite CSS ownership into the runtime manifest
   -> apply Vite output naming
   -> replace Rollup JS and rewrite HTML entry scripts
 ```
 
-Vite remains responsible for framework compilation, asset handling, CSS generation, and deciding which modules survive tree shaking. The core compiler receives the transformed, retained JavaScript graph with package resolution disabled because dependencies have already been materialized. Probe-backed matrix coverage shows that transform-stage, virtual-module, and CSS plugins compose with this boundary, while post-transform and `renderChunk` postprocessors cannot observe Closure-replaced output by design.
+Clean ESM dependencies compile from source through the native pipeline. Unsafe cores, including CJS and mixed modules, use per-import-target atom bundles. The core compiler receives the transformed, retained JavaScript graph with package resolution disabled because dependencies have already been materialized. Vite remains responsible for framework compilation, asset handling, CSS generation, and deciding which modules survive tree shaking. Transform-stage, virtual-module, and CSS plugins compose with this boundary; post-transform and `renderChunk` postprocessors cannot observe Closure-replaced output by design.
 
 See [Vite integration](vite.md) for supported configuration and limitations.

@@ -19,6 +19,7 @@ bun test ./test/*.test.mjs
 ```
 
 `bun run verify:package` performs a clean JavaScript/declaration build, packs the npm archive, verifies every `exports`, `types`, and `bin` target, type-checks a NodeNext consumer, and smoke-imports the packed package with Node and Bun.
+`bun run verify:selfbuild` checks the self-hosted package fixpoint. The bootstrap JavaScript build emits declarations once. Later self-build stages copy those declarations instead of running the declaration bundler again. The script still compares stage 1 and stage 2 for byte identity.
 
 `bun run build` builds JavaScript and the host native addon in parallel. The native build also creates a platform package under `npm/`.
 
@@ -33,6 +34,14 @@ This runs:
 1. Rust unit tests;
 2. native and JavaScript builds;
 3. the Bun integration test suite.
+
+Use the fast inner-loop lane while editing:
+
+```sh
+bun run test:fast
+```
+
+This lane runs 12 pure and native test files. It took about 14 seconds in the measured run. CI and pre-commit use the full `bun run test` suite.
 
 Run the repository's formatting, type, and ESLint pass with:
 
@@ -112,7 +121,7 @@ recursively into every example, exhausting inodes).
 - `test/chunks-runtime.test.mjs` covers literal dynamic imports, chunk manifests, runtime postprocessing, concurrency, and per-job cache behavior.
 - `test/closure-ir.test.mjs` covers type/JSDoc scanning and Closure metadata generation.
 - `test/externs.test.mjs` covers all extern modes and CLI output.
-- `test/vite-plugin.test.mjs` covers retained graph capture, dependency prebundling, CSS ownership, naming, target mapping, cache reuse, and plugin guards.
+- `test/vite-plugin.test.mjs` covers retained graph capture, directed dependency routing and atom bundles, CSS ownership, naming, target mapping, cache reuse, and plugin guards.
 - `test/cli-args.test.mjs` prevents deprecated option aliases from silently returning.
 - `test/validation.test.mjs` covers schema validation, including rejection of unknown chunk kinds and malformed cache records.
 - `scripts/verify-package.mjs` covers the packed exports/bin contract, NodeNext declarations, and Node/Bun import smoke tests.
@@ -143,6 +152,8 @@ The root package publishes:
 Platform addons are optional dependencies. At runtime, `src/native/index.ts` prefers a local `native/index.node` development build, then loads the matching optional package for the current OS, architecture, and Linux libc.
 
 `npm publish` and `bun run publish:npm` both run the same `prepublishOnly` package verification hook before publishing.
+
+GitHub releases use npm trusted publishing. Each publish job requests `id-token: write`, configures `https://registry.npmjs.org`, and installs npm `>= 11.5.1`; it does not use a stored token secret. Configure an exact repository trusted publisher for the root package and each platform package on npmjs.com. A new platform package needs one bootstrap publish before npm can attach its trusted publisher. The root manifest declares `repository`, and `scripts/build-native.mjs` copies that field into each platform manifest.
 
 ## Generated files
 
