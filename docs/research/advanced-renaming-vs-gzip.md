@@ -241,15 +241,20 @@ Recorded so they are not rediscovered:
 
 Ranked by evidence strength.
 
-1. **Target the 77 KB of pipeline overhead, not the renaming.** This is the
-   corrected priority and it is now the largest measured lever: at SIMPLE, with
-   renaming entirely absent, the plugin still ships 77.3 KB gzip more than
-   esbuild. That overhead is what makes the plugin unable to win on this class
-   of app. Attribution work is not done — the SIMPLE output carries 7,560
-   distinct long identifiers against ADVANCED's 3,804, plus 201 module-factory
-   registrations — so the next step is to decompose those 252 KB raw into
-   runtime preamble, module registration, and chunk-conversion costs before
-   choosing a fix.
+1. **Target the pipeline overhead, not the renaming.** This is the corrected
+   priority and the largest measured lever: at SIMPLE, with renaming entirely
+   absent, the plugin still ships 77.3 KB gzip more than esbuild. Partial
+   attribution is now done (see `prior-art-closure-frameworks.md` §4): the 1233
+   generated `Object.prototype.X` extern pins account for **10.7 KB gzip /
+   75.8 KB raw**, measured by building with the React preset removed. The
+   remaining ~20 KB gzip is runtime preamble, module-factory registration (201
+   sites), chunk conversion, and Closure's non-renaming minification being
+   weaker than esbuild's on this code. Two negative results worth keeping:
+   `externs.generate.includeDependencies: false` and `modules: []` are both
+   **no-ops** on this app — byte-identical output, still exactly 1233 pins —
+   because the pins come from the React host-element hazard rules, not the
+   module list. The warning at `src/externs/barriers.ts:194` recommends exactly
+   those two knobs and is therefore misleading.
 2. **Try `@closureUnaware` on vendor, but measure it; do not assume it wins.**
    It is the documented and now mechanized answer for untyped 3P, and it is
    reachable by emitting a `@fileoverview` annotation on materialized
