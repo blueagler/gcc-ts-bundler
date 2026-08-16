@@ -7,9 +7,31 @@ import {
   createCurrentWorkingDirectoryRequire,
   getPackageRootFromBundle,
 } from "../shared/bundle-location";
-import { getErrorMessage, isRecord } from "../shared/validation";
+import {
+  getErrorMessage,
+  isRecord,
+  isString,
+  type RuntimeValue,
+} from "../shared/validation";
+
+export interface NativeAddonCandidate {
+  [key: string]: RuntimeValue;
+}
+
+const NATIVE_ADDON_LOAD_FAILED = Symbol("native-addon-load-failed");
+const INVALID_NATIVE_ADDON_MESSAGE =
+  "Loaded native addon has an invalid API surface.";
 
 const require = createBundleRequire();
+
+function parseNativeAddonCandidate<Value>(
+  value: Value,
+): Value & NativeAddonCandidate {
+  if (!isRecord(value)) {
+    throw new TypeError(INVALID_NATIVE_ADDON_MESSAGE);
+  }
+  return value;
+}
 
 const SUPPORTED_TARGETS = new Map<string, string>([
   ["darwin-arm64", "gcc-ts-bundler-darwin-arm64"],
@@ -24,11 +46,8 @@ const SUPPORTED_TARGETS = new Map<string, string>([
 
 function detectLinuxLibc(): "gnu" | "musl" {
   const report = process.report?.getReport();
-  if (
-    isRecord(report) &&
-    isRecord(report.header) &&
-    typeof report.header.glibcVersionRuntime === "string"
-  ) {
+  const reportHeader = isRecord(report) ? report["header"] : undefined;
+  if (isRecord(reportHeader) && isString(reportHeader["glibcVersionRuntime"])) {
     return "gnu";
   }
 
@@ -55,11 +74,12 @@ function getTargetKey() {
   return `${process.platform}-${process.arch}`;
 }
 
-export function loadNativeBinding(): unknown {
+export function loadNativeBinding(): NativeAddonCandidate {
   const targetKey = getTargetKey();
   const packageName = SUPPORTED_TARGETS.get(targetKey);
   const loadErrors: string[] = [];
 
+  let localBinding: unknown = NATIVE_ADDON_LOAD_FAILED;
   try {
     const localFallbackPath = path.join(
       getPackageRootFromBundle(),
@@ -67,26 +87,33 @@ export function loadNativeBinding(): unknown {
       "index.node",
     );
     if (fs.existsSync(localFallbackPath)) {
-      const binding: unknown = require(localFallbackPath);
-      return binding;
+      localBinding = require(localFallbackPath);
     }
   } catch (error) {
     loadErrors.push(`local development addon: ${getErrorMessage(error)}`);
   }
+  if (localBinding !== NATIVE_ADDON_LOAD_FAILED) {
+    return parseNativeAddonCandidate(localBinding);
+  }
 
   if (packageName) {
-    const packageRequires: Array<[string, NodeRequire]> = [
+    const packageRequires: Array<
+      [string, (packageName: string) => RuntimeValue]
+    > = [
       ["bundle", require],
       ["current working directory", createCurrentWorkingDirectoryRequire()],
     ];
     for (const [anchor, packageRequire] of packageRequires) {
+      let packageBinding: unknown = NATIVE_ADDON_LOAD_FAILED;
       try {
-        const binding: unknown = packageRequire(packageName);
-        return binding;
+        packageBinding = packageRequire(packageName);
       } catch (error) {
         loadErrors.push(
           `${packageName} from ${anchor}: ${getErrorMessage(error)}`,
         );
+      }
+      if (packageBinding !== NATIVE_ADDON_LOAD_FAILED) {
+        return parseNativeAddonCandidate(packageBinding);
       }
     }
   }

@@ -1,4 +1,5 @@
 import ts from "@typescript/typescript6";
+import { isString } from "../shared/validation";
 
 import { readAssetText } from "./output";
 import {
@@ -624,5 +625,5 @@ function isBarePackageSpecifier(specifier: string) {
 function hasFacadeModuleId(
   chunk: OutputChunk,
 ): chunk is OutputChunk & { facadeModuleId: string } {
-  return typeof chunk.facadeModuleId === "string";
+  return isString(chunk.facadeModuleId);
 }

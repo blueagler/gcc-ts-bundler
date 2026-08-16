@@ -1,4 +1,4 @@
-import { defineValues } from "../shared/validation";
+import { defineValues, isRecord } from "../shared/validation";
 import type { TargetName } from "../targets";
 
 export { TARGET_NAMES } from "../targets";
@@ -250,11 +250,7 @@ export interface ResolvedBuildOptions {
 function deepFreeze<T extends object>(value: T): T {
   Object.freeze(value);
   for (const child of Object.values(value)) {
-    if (
-      child !== null &&
-      typeof child === "object" &&
-      !Object.isFrozen(child)
-    ) {
+    if ((Array.isArray(child) || isRecord(child)) && !Object.isFrozen(child)) {
       deepFreeze(child);
     }
   }

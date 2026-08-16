@@ -4,7 +4,8 @@ import path from "node:path";
 
 import { readJsonIfExists } from "../shared/cache-store";
 import { firstOrUndefined } from "../shared/arrays";
-import { isRecordOf, isString } from "../shared/validation";
+import type { Validator } from "../shared/validation";
+import { isString, recordOf } from "../shared/validation";
 import type {
   GccRuntimeManifest,
   MaterializedGraph,
@@ -48,6 +49,9 @@ interface RenamedNonBaseOutputs {
   manifest: GccRuntimeManifest;
   manifestFilePath: string;
 }
+
+const isRuntimeModuleSourceMap: Validator<Record<string, string>> =
+  recordOf<string>(isString);
 
 export async function renameCompiledNonBaseJsOutputs(input: {
   baseChunkName: string;
@@ -501,19 +505,20 @@ function deriveBaseOutputSeed(input: {
   }
 
   const entryFacadeModuleId = input.entryModuleIds[0];
+  const info: RenderableChunkInfo = {
+    exports: [],
+    isDynamicEntry: false,
+    isEntry: true,
+    moduleIds: [...input.entryModuleIds].sort((left, right) =>
+      left.localeCompare(right),
+    ),
+    name: sanitizeName(input.baseChunkName),
+  };
+  if (entryFacadeModuleId !== undefined) {
+    info.facadeModuleId = entryFacadeModuleId;
+  }
   return {
-    info: {
-      ...(entryFacadeModuleId === undefined
-        ? {}
-        : { facadeModuleId: entryFacadeModuleId }),
-      exports: [],
-      isDynamicEntry: false,
-      isEntry: true,
-      moduleIds: [...input.entryModuleIds].sort((left, right) =>
-        left.localeCompare(right),
-      ),
-      name: sanitizeName(input.baseChunkName),
-    },
+    info,
     preferredName: null,
   };
 }
@@ -576,8 +581,7 @@ function createFallbackChunkInfo(input: {
   const name = dynamicRoot
     ? sanitizeName(path.basename(dynamicRoot).replace(/\.[^/.]+$/u, ""))
     : sanitizeName(`shared-${input.chunkId.slice(0, 8)}`);
-  return {
-    ...(dynamicRoot === undefined ? {} : { facadeModuleId: dynamicRoot }),
+  const info: RenderableChunkInfo = {
     exports: [],
     isDynamicEntry: Boolean(dynamicRoot),
     isEntry: false,
@@ -586,13 +590,14 @@ function createFallbackChunkInfo(input: {
     ),
     name,
   };
+  if (dynamicRoot !== undefined) {
+    info.facadeModuleId = dynamicRoot;
+  }
+  return info;
 }
 
 function toRenderableChunkInfo(chunk: OutputChunk): RenderableChunkInfo {
-  return {
-    ...(chunk.facadeModuleId === undefined || chunk.facadeModuleId === null
-      ? {}
-      : { facadeModuleId: chunk.facadeModuleId }),
+  const info: RenderableChunkInfo = {
     exports: [...chunk.exports],
     isDynamicEntry: chunk.isDynamicEntry,
     isEntry: chunk.isEntry,
@@ -601,6 +606,10 @@ function toRenderableChunkInfo(chunk: OutputChunk): RenderableChunkInfo {
     ),
     name: sanitizeName(chunk.name),
   };
+  if (chunk.facadeModuleId !== undefined && chunk.facadeModuleId !== null) {
+    info.facadeModuleId = chunk.facadeModuleId;
+  }
+  return info;
 }
 
 function renderPatternFileName(
@@ -611,7 +620,7 @@ function renderPatternFileName(
   contentHash: string,
   format: NormalizedOutputOptions["format"],
 ) {
-  const rendered = typeof pattern === "function" ? pattern(chunkInfo) : pattern;
+  const rendered = isString(pattern) ? pattern : pattern(chunkInfo);
   return normalizeOutputFileName(
     rendered.replace(/\[(name|format|ext|extname|hash(?::\d+)?)\]/gu, (token) =>
       renderTokenReplacement(token, chunkInfo, contentHash, format),
@@ -691,7 +700,7 @@ function patchRuntimeChunkUrls(
     if (!Array.isArray(entry)) {
       continue;
     }
-    const relativeUrl = typeof entry[1] === "string" ? entry[1] : "";
+    const relativeUrl = isString(entry[1]) ? entry[1] : "";
     if (!relativeUrl) {
       continue;
     }
@@ -744,12 +753,6 @@ async function applyFileRenames(
 
 function sanitizeName(value: string) {
   return value.replace(/[^\w-]/gu, "-").replace(/^-+|-+$/gu, "") || "chunk";
-}
-
-function isRuntimeModuleSourceMap(
-  value: unknown,
-): value is Record<string, string> {
-  return isRecordOf(value, isString);
 }
 
 async function writeManifest(filePath: string, manifest: GccRuntimeManifest) {

@@ -92,22 +92,21 @@ export async function materializeCapturedGraph(
     const filePath = path.join(input.srcDir, relativePath);
     filePathByModuleId.set(moduleId, filePath);
     const record = input.capturedModules.get(moduleId);
-    modules.push({
-      ...(record?.normalizedAnalysis?.commonJsNamedExports.length
-        ? {
-            commonJsNamedExports:
-              record.normalizedAnalysis.commonJsNamedExports,
-          }
-        : {}),
+    const runtimeModule: CapturedRuntimeModule = {
       filePath,
       format: record?.format ?? record?.rawAnalysis?.moduleFormat ?? "unknown",
       id: moduleId,
       relativePath,
-      ...(record?.renderedLength === undefined
-        ? {}
-        : { renderedLength: record.renderedLength }),
       sourceModuleIds: [moduleId],
-    });
+    };
+    if (record?.normalizedAnalysis?.commonJsNamedExports.length) {
+      runtimeModule.commonJsNamedExports =
+        record.normalizedAnalysis.commonJsNamedExports;
+    }
+    if (record?.renderedLength !== undefined) {
+      runtimeModule.renderedLength = record.renderedLength;
+    }
+    modules.push(runtimeModule);
     if (isAuthoredModuleId(moduleId, input.config.root)) {
       authoredFiles.push(filePath);
     } else {

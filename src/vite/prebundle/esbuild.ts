@@ -6,13 +6,17 @@ import type {
   transform as esbuildTransform,
 } from "esbuild";
 
-import { isRecord } from "../../shared/validation";
+import { isRecord, type RuntimeValue } from "../../shared/validation";
 
 let cachedEsbuildModule: Promise<EsbuildModule> | null = null;
 
 export type EsbuildBuild = typeof esbuildBuild;
 export type EsbuildTransform = typeof esbuildTransform;
-
+type Callable = (...arguments_: never[]) => void;
+interface EsbuildModuleCandidate {
+  build?: RuntimeValue;
+  transform?: RuntimeValue;
+}
 interface EsbuildModule {
   build: EsbuildBuild;
   transform: EsbuildTransform;
@@ -29,7 +33,11 @@ async function loadEsbuildModule() {
     const esbuildPath = requireFromVite.resolve("esbuild", {
       paths: [path.dirname(vitePackagePath)],
     });
-    const esbuildModule: unknown = requireFromVite(esbuildPath);
+    const loadedEsbuildModule: unknown = requireFromVite(esbuildPath);
+    if (!isRecord(loadedEsbuildModule)) {
+      throw new TypeError(`Invalid esbuild module loaded from ${esbuildPath}.`);
+    }
+    const esbuildModule: EsbuildModuleCandidate = loadedEsbuildModule;
     if (!isEsbuildModule(esbuildModule)) {
       throw new TypeError(`Invalid esbuild module loaded from ${esbuildPath}.`);
     }
@@ -47,10 +55,27 @@ export async function loadEsbuildTransform() {
   return (await loadEsbuildModule()).transform;
 }
 
-function isEsbuildModule(value: unknown): value is EsbuildModule {
+function isEsbuildModule<Value extends EsbuildModuleCandidate>(
+  value: Value,
+): value is Value & EsbuildModule {
   return (
-    isRecord(value) &&
-    typeof value.build === "function" &&
-    typeof value.transform === "function"
+    isCallable(value.build) &&
+    isEsbuildBuild(value.build) &&
+    isCallable(value.transform) &&
+    isEsbuildTransform(value.transform)
   );
+}
+
+function isCallable<Value>(value: Value): value is Value & Callable {
+  return value instanceof Function;
+}
+
+function isEsbuildBuild(value: Callable): value is Callable & EsbuildBuild {
+  return value instanceof Function;
+}
+
+function isEsbuildTransform(
+  value: Callable,
+): value is Callable & EsbuildTransform {
+  return value instanceof Function;
 }

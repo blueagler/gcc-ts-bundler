@@ -1,5 +1,5 @@
-// TEMPORARY M0/M1 bridge for tools that still require the legacy `typescript` API.
-// Delete this register hook with @typescript/typescript6 once typescript-eslint supports TS7.
+// Isolate dts-bundle-generator on TypeScript 5.9 because its legacy compiler
+// API is incompatible with TypeScript 6.
 const Module = require("node:module");
 const { createRequire } = Module;
 
@@ -11,7 +11,7 @@ Module._resolveFilename = function (request, parent, isMain, options) {
     let target = redirected.get(request);
     if (!target) {
       const suffix = request.slice("typescript".length);
-      target = requireFromRoot.resolve(`@typescript/typescript6${suffix}`);
+      target = requireFromRoot.resolve(`typescript-dts${suffix}`);
       redirected.set(request, target);
     }
     return target;

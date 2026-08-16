@@ -196,10 +196,7 @@ export function resolveRuntimeExportGraph(input: {
     importerModuleId: string,
     specifier: string,
   ) => string | null;
-}): {
-  diagnostics: TypeMetadataDiagnostic[];
-  exports: Map<string, RuntimeExportTarget>;
-} {
+}) {
   const parsed = new Map<string, RuntimeExportFact[]>();
   const diagnostics: TypeMetadataDiagnostic[] = [];
   const resolveModuleId =
@@ -341,10 +338,7 @@ export function joinDeclarationAndRuntimeExports(input: {
   declarationExports: readonly DeclarationExportFact[];
   runtimeExports: ReadonlyMap<string, RuntimeExportTarget>;
   runtimeModuleId: string;
-}): {
-  diagnostics: TypeMetadataDiagnostic[];
-  facts: JoinedExportTypeFact[];
-} {
+}) {
   const diagnostics: TypeMetadataDiagnostic[] = [];
   const facts: JoinedExportTypeFact[] = [];
   for (const declaration of input.declarationExports) {

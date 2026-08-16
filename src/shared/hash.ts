@@ -1,14 +1,17 @@
 import crypto from "crypto";
+import { isFunction, isRecord, type RuntimePrimitive } from "./validation";
 
-function normalizeValue(value: unknown): unknown {
+type HashInput = RuntimePrimitive | object;
+
+function normalizeValue<Value extends HashInput>(value: Value): HashInput {
   if (Array.isArray(value)) {
-    return value.map(normalizeValue);
+    return value.map((item) => normalizeValue(item));
   }
 
-  if (value && typeof value === "object") {
+  if (isRecord(value)) {
     return Object.fromEntries(
       Object.entries(value)
-        .filter(([, nestedValue]) => typeof nestedValue !== "function")
+        .filter(([, nestedValue]) => !isFunction(nestedValue))
         .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))
         .map(([key, nestedValue]) => [key, normalizeValue(nestedValue)]),
     );
@@ -21,6 +24,6 @@ export function hashContent(content: string): string {
   return crypto.createHash("sha256").update(content).digest("hex");
 }
 
-export function hashJson(value: unknown): string {
+export function hashJson<Value extends HashInput>(value: Value): string {
   return hashContent(JSON.stringify(normalizeValue(value)));
 }

@@ -246,7 +246,7 @@ export function collectSelectorElementKeys(
   keyNames: Set<string>,
 ) {
   const selectorSyntax = /[&.:\s>[]/u;
-  const isStyleShaped = (candidate: ts.ObjectLiteralExpression) =>
+  const isSelectorStyleObject = (candidate: ts.ObjectLiteralExpression) =>
     candidate.properties.some((member) => {
       if (!ts.isPropertyAssignment(member)) return false;
       if (ts.isStringLiteralLike(member.name)) {
@@ -268,7 +268,7 @@ export function collectSelectorElementKeys(
           member.name.text === "_multi_value_"),
     );
   const visit = (node: ts.Node) => {
-    if (ts.isObjectLiteralExpression(node) && isStyleShaped(node)) {
+    if (ts.isObjectLiteralExpression(node) && isSelectorStyleObject(node)) {
       for (const member of node.properties) {
         if (
           ts.isPropertyAssignment(member) &&

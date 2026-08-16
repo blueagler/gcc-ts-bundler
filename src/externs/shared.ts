@@ -376,10 +376,20 @@ export function uniqueStrings(values: string[]) {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
 }
 
-export function isRecoverableExternConfigError(error: unknown) {
+interface ExternConfigFailure {
+  message: string;
+}
+
+function isExternConfigFailure(cause: unknown): cause is ExternConfigFailure {
+  return cause instanceof Error;
+}
+
+export function isRecoverableExternConfigError<ExternConfigCause>(
+  cause: ExternConfigCause,
+) {
   return (
-    error instanceof Error &&
-    (error.message.includes("TS18003") ||
-      error.message.includes("No inputs were found in config file"))
+    isExternConfigFailure(cause) &&
+    (cause.message.includes("TS18003") ||
+      cause.message.includes("No inputs were found in config file"))
   );
 }

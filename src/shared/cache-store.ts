@@ -6,7 +6,13 @@ import path from "path";
 import type { CacheMode } from "../api/types";
 import { ensureParentDirectory } from "./files";
 import type { Validator } from "./validation";
-import { hasErrorCode, parseJson } from "./validation";
+import {
+  hasErrorCode,
+  isNumber,
+  isRecord,
+  isString,
+  parseJson,
+} from "./validation";
 import { hashContent } from "./hash";
 
 export interface CacheStore {
@@ -94,12 +100,12 @@ export async function acquireProjectCacheLock(
       await fs.promises.mkdir(lockDir);
       await fs.promises.writeFile(
         ownerPath,
-        JSON.stringify({ pid: process.pid, token }),
+        JSON.stringify({ pid: process.pid, token: token }),
         { encoding: "utf8", flag: "wx" },
       );
       return async () => {
         const owner = await readLockOwner(ownerPath);
-        if (owner?.token === token) {
+        if (owner?.["token"] === token) {
           await fs.promises.rm(lockDir, { force: true, recursive: true });
         }
       };
@@ -138,7 +144,7 @@ export async function readJsonIfExists<T>(
   }
 }
 
-export async function writeJson(filePath: string, value: unknown) {
+export async function writeJson<Value>(filePath: string, value: Value) {
   await ensureParentDirectory(filePath);
   const tempPath = path.join(
     path.dirname(filePath),
@@ -161,30 +167,27 @@ interface LockOwner {
   token: string;
 }
 
+const validateLockOwner: Validator<LockOwner> = <Value>(
+  value: Value,
+): value is Value & LockOwner =>
+  isRecord(value) && isNumber(value["pid"]) && isString(value["token"]);
+
 async function readLockOwner(ownerPath: string): Promise<LockOwner | null> {
   try {
-    const value: unknown = JSON.parse(
+    return parseJson(
       await fs.promises.readFile(ownerPath, "utf8"),
+      validateLockOwner,
+      ownerPath,
     );
-    if (
-      typeof value === "object" &&
-      value !== null &&
-      "pid" in value &&
-      typeof value.pid === "number" &&
-      "token" in value &&
-      typeof value.token === "string"
-    ) {
-      return { pid: value.pid, token: value.token };
-    }
   } catch {
     // The creator may still be writing owner.json; wait and revalidate.
+    return null;
   }
-  return null;
 }
 
 async function removeAbandonedLock(lockDir: string, ownerPath: string) {
   const owner = await readLockOwner(ownerPath);
-  if (owner && processIsAlive(owner.pid)) {
+  if (owner && processIsAlive(owner["pid"])) {
     return false;
   }
 
@@ -204,7 +207,7 @@ async function removeAbandonedLock(lockDir: string, ownerPath: string) {
   }
 
   const movedOwner = await readLockOwner(path.join(staleDir, "owner.json"));
-  if (owner?.token !== movedOwner?.token) {
+  if (owner?.["token"] !== movedOwner?.["token"]) {
     await fs.promises.rename(staleDir, lockDir).catch(() => {});
     return false;
   }

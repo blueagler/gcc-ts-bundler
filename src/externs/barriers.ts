@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import { isString } from "../shared/validation";
+
 import type { ExternBarrierWarning } from "./types";
 
 /**
@@ -43,11 +45,15 @@ export interface BarrierName {
   property: string;
 }
 
+function isExternPropertyName<Value>(value: Value): value is Value & string {
+  return isString(value);
+}
+
 /** Unescapes a quoted extern key (`Object.prototype["a\\u0062"]`). */
 function decode(raw: string) {
   try {
     const value: unknown = JSON.parse(`"${raw}"`);
-    return typeof value === "string" ? value : raw;
+    return isExternPropertyName(value) ? value : raw;
   } catch {
     return raw;
   }
@@ -171,7 +177,7 @@ export function formatBarrierWarning(
   threshold = BARRIER_WARNING_THRESHOLD,
 ): string | null {
   if (accounting.total <= threshold) return null;
-  const shape = (["flat", "owner", "record"] as const)
+  const barrierKindSummary = (["flat", "owner", "record"] as const)
     .filter((kind) => (accounting.byKind.get(kind) ?? 0) > 0)
     .map((kind) => `${kind}=${accounting.byKind.get(kind) ?? 0}`)
     .join(" ");
@@ -181,7 +187,7 @@ export function formatBarrierWarning(
     .join(", ");
   return (
     `${accounting.label} pins ${accounting.total} property names program-wide ` +
-    `(${shape}). Every one is removed from Closure's renaming and ` +
+    `(${barrierKindSummary}). Every one is removed from Closure's renaming and ` +
     `disambiguation candidates for all owner types, not just the declaring ` +
     `package.` +
     (packages ? ` Top declaration packages: ${packages}.` : "") +

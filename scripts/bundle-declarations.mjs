@@ -27,7 +27,7 @@ try {
       process.execPath,
       [
         "--require",
-        "./scripts/typescript6-register.cjs",
+        "./scripts/typescript-dts-register.cjs",
         "./node_modules/dts-bundle-generator/dist/bin/dts-bundle-generator.js",
         "--project",
         "./tsconfig.dts-bundle.json",

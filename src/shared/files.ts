@@ -2,7 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 
 import { hashContent } from "./hash";
-import { hasErrorCode } from "./validation";
+import { hasErrorCode, isString } from "./validation";
 
 const fileInputHashCache = new Map<string, Promise<string>>();
 
@@ -118,13 +118,12 @@ export async function writeFileIfChanged(
   filePath: string,
   content: string | Uint8Array,
 ) {
-  const nextContent =
-    typeof content === "string" ? content : Buffer.from(content);
+  const nextContent = isString(content) ? content : Buffer.from(content);
   let currentContent: string | Buffer | null = null;
   try {
     currentContent = await fs.readFile(
       filePath,
-      typeof content === "string" ? "utf8" : undefined,
+      isString(content) ? "utf8" : undefined,
     );
   } catch (error) {
     if (!hasErrorCode(error, "ENOENT")) {
@@ -203,15 +202,15 @@ function fileContentsEqual(
   currentContent: string | Buffer,
   nextContent: string | Buffer,
 ) {
-  if (typeof currentContent === "string" && typeof nextContent === "string") {
+  if (isString(currentContent) && isString(nextContent)) {
     return currentContent === nextContent;
   }
-  const currentBuffer =
-    typeof currentContent === "string"
-      ? Buffer.from(currentContent)
-      : currentContent;
-  const nextBuffer =
-    typeof nextContent === "string" ? Buffer.from(nextContent) : nextContent;
+  const currentBuffer = isString(currentContent)
+    ? Buffer.from(currentContent)
+    : currentContent;
+  const nextBuffer = isString(nextContent)
+    ? Buffer.from(nextContent)
+    : nextContent;
   return currentBuffer.equals(nextBuffer);
 }
 

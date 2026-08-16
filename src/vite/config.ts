@@ -31,12 +31,13 @@ export function applyViteBuildGuards(userConfig: UserConfig): UserConfig {
   }
 
   const captureTarget = resolveViteCaptureTarget(userConfig.build?.target);
-  return {
-    build: {
-      modulePreload: false,
-      ...(captureTarget ? { target: captureTarget } : {}),
-    },
+  const build: NonNullable<UserConfig["build"]> = {
+    modulePreload: false,
   };
+  if (captureTarget !== undefined) {
+    build.target = captureTarget;
+  }
+  return { build };
 }
 
 export function resolveBaseChunkName(options: GccTsBundlerVitePluginOptions) {

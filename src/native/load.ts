@@ -1,8 +1,8 @@
 import type { PreservedImport } from "../build/types";
 import type { ClosureTypeMetadataFile } from "../build/transpile/closure-ir/types";
 import { toRecord } from "../shared/records";
-import { isRecord } from "../shared/validation";
-import { loadNativeBinding } from "./index";
+import { defineValues, isFunction } from "../shared/validation";
+import { loadNativeBinding, type NativeAddonCandidate } from "./index";
 
 interface NativeEntryExportMetadata {
   exportNames: string[];
@@ -188,6 +188,14 @@ interface NativeResolveGraphOutput {
   trackedFiles: string[];
 }
 
+type NativeResolvedGraphOutput = Omit<
+  NativeResolveGraphOutput,
+  "fileHashes" | "graph"
+> & {
+  fileHashes: Record<string, string>;
+  graph: Record<string, string[]>;
+};
+
 export interface NativeFileStateEntry {
   exists: boolean;
   filePath: string;
@@ -358,10 +366,8 @@ interface NativeBinding {
 
 let cachedBinding: NativeBinding | null = null;
 
-// Record<keyof NativeBinding, true> makes this exhaustive: adding a method
-// to NativeBinding without listing it here is a compile error, so a stale
-// addon can never validate as complete.
-const NATIVE_BINDING_METHOD_FLAGS: Record<keyof NativeBinding, true> = {
+// The explicit flags stay exhaustive while preserving a closed key domain.
+const NATIVE_BINDING_METHOD_FLAGS = {
   closureCompilerCapabilities: true,
   collectFileStates: true,
   collectPublishedOutputStats: true,
@@ -377,9 +383,25 @@ const NATIVE_BINDING_METHOD_FLAGS: Record<keyof NativeBinding, true> = {
   emitPreservedModule: true,
   transpileSources: true,
   writeEntryShims: true,
-};
+} satisfies { [MethodName in keyof NativeBinding]: true };
 
-const NATIVE_BINDING_METHODS = Object.keys(NATIVE_BINDING_METHOD_FLAGS);
+const NATIVE_BINDING_METHODS = defineValues(
+  "closureCompilerCapabilities",
+  "collectFileStates",
+  "collectPublishedOutputStats",
+  "matchFileStates",
+  "minifyJavaScript",
+  "planChunks",
+  "prepareClosureJobs",
+  "publishedOutputSnapshotMatches",
+  "publishedOutputsMatch",
+  "resolveGraph",
+  "resolveViteTargetLanguageOut",
+  "rewriteGccExports",
+  "emitPreservedModule",
+  "transpileSources",
+  "writeEntryShims",
+) satisfies ReadonlyArray<keyof NativeBinding>;
 
 function loadBinding(): NativeBinding {
   if (cachedBinding) {
@@ -394,12 +416,12 @@ function loadBinding(): NativeBinding {
   return cachedBinding;
 }
 
-function isNativeBinding(value: unknown): value is NativeBinding {
-  return (
-    isRecord(value) &&
-    NATIVE_BINDING_METHODS.every(
-      (methodName) => typeof value[methodName] === "function",
-    )
+function isNativeBinding<Value extends NativeAddonCandidate>(
+  value: Value,
+): value is Value & NativeBinding {
+  return NATIVE_BINDING_METHODS.every(
+    (methodName) =>
+      NATIVE_BINDING_METHOD_FLAGS[methodName] && isFunction(value[methodName]),
   );
 }
 
@@ -419,7 +441,7 @@ export function resolveGraph(input: {
   srcDir: string;
   target?: string | undefined;
   workspaceDir: string;
-}) {
+}): NativeResolvedGraphOutput {
   const result = loadBinding().resolveGraph(
     input.entries,
     input.srcDir,

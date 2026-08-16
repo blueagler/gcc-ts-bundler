@@ -217,10 +217,10 @@ writes to `dist-pure/` and never touches the plugin-built `dist/`.
 
 These measurements compare GCC output with stock Vite output.
 
-| App | Total raw | Total gzip | Initial load |
-| --- | ---: | ---: | ---: |
-| React app | -11.1% | -2.2% | -13.9% |
-| Vue app | -68.4% | -66.5% | gzip -40.5% |
+| App       | Total raw | Total gzip | Initial load |
+| --------- | --------: | ---------: | -----------: |
+| React app |    -11.1% |      -2.2% |       -13.9% |
+| Vue app   |    -68.4% |     -66.5% |  gzip -40.5% |
 
 The React app had zero page errors. The Vue app loaded three routes with zero page errors.
 

@@ -358,14 +358,17 @@ async function collectOverlayAttachments(input: {
     }
     seen.add(overlayKey);
 
+    const overlayInput: Parameters<typeof resolveDeclarationOverlay>[0] = {
+      resolution,
+      resolutionMode: resolution.resolutionMode,
+    };
     const containingFilePath = path.isAbsolute(resolution.importerModuleId)
       ? resolution.importerModuleId.replace(/[?#].*$/u, "")
       : undefined;
-    const overlay = await resolveDeclarationOverlay({
-      ...(containingFilePath ? { containingFilePath } : {}),
-      resolution,
-      resolutionMode: resolution.resolutionMode,
-    });
+    if (containingFilePath !== undefined) {
+      overlayInput.containingFilePath = containingFilePath;
+    }
+    const overlay = await resolveDeclarationOverlay(overlayInput);
     results.push(overlay);
     input.diagnostics.push(...overlay.diagnostics);
     if (!overlay.identity || overlay.exports.length === 0) {

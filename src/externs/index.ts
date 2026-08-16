@@ -3,7 +3,12 @@ import path from "node:path";
 import ts from "@typescript/typescript6";
 
 import { writeFileIfChanged } from "../shared/files";
-import { assertNever, defineValues, requireChoice } from "../shared/validation";
+import {
+  assertNever,
+  defineValues,
+  isString,
+  requireChoice,
+} from "../shared/validation";
 import {
   collectReachableTypeFiles,
   loadExternCompilerOptions,
@@ -115,6 +120,12 @@ type ResolvedExternOptions = {
   warnings: string[];
 };
 
+function isExternModuleSpecifier(
+  module: string | ExternModuleInput,
+): module is string {
+  return isString(module);
+}
+
 export async function generateExterns(
   options: GenerateExternsOptions,
 ): Promise<GenerateExternsResult> {
@@ -214,7 +225,7 @@ async function resolveExternOptions(
   const srcDir = path.resolve(projectRoot, options.srcDir ?? ".");
   const moduleInputs = options.modules.map(
     (module): ExternModuleInput =>
-      typeof module === "string"
+      isExternModuleSpecifier(module)
         ? { runtime: "compiled", specifier: module }
         : {
             ...module,

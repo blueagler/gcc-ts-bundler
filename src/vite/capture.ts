@@ -7,7 +7,7 @@ import { transformWithEsbuild, type ResolvedConfig } from "vite";
 
 import { hashJson } from "../shared/hash";
 import { applyTextEdits } from "../shared/text-edits";
-import { hasErrorCode } from "../shared/validation";
+import { hasErrorCode, isRecord } from "../shared/validation";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type {
   CapturedModule,
@@ -195,17 +195,12 @@ async function resolvePackageModuleFormat(
         "utf8",
       );
       const packageJson: unknown = JSON.parse(packageText);
-      if (
-        packageJson &&
-        typeof packageJson === "object" &&
-        "type" in packageJson &&
-        packageJson.type === "module"
-      ) {
-        return "esm";
+      if (!isRecord(packageJson)) {
+        return "cjs";
       }
-      return "cjs";
+      return packageJson.type === "module" ? "esm" : "cjs";
     } catch (error) {
-      if (!isMissingFileError(error)) {
+      if (!hasErrorCode(error, "ENOENT")) {
         return "unknown";
       }
     }
@@ -223,13 +218,16 @@ async function resolvePackageModuleFormat(
   return await pending;
 }
 
-function isMissingFileError(error: unknown) {
-  return hasErrorCode(error, "ENOENT");
+interface DemoteReassignedConstantsResult {
+  code: string;
+  names: string[];
 }
 
-export function demoteReassignedConstants(code: string) {
+export function demoteReassignedConstants(
+  code: string,
+): DemoteReassignedConstantsResult {
   if (!code.includes("const ")) {
-    return { code, names: [] as string[] };
+    return { code, names: [] };
   }
 
   const fileName = "/__gcc_ts_bundler_capture__.js";
@@ -249,7 +247,7 @@ export function demoteReassignedConstants(code: string) {
   const program = ts.createProgram([fileName], options, host);
   const sourceFile = program.getSourceFile(fileName);
   if (!sourceFile) {
-    return { code, names: [] as string[] };
+    return { code, names: [] };
   }
   const checker = program.getTypeChecker();
   const constLists = new Map<ts.Symbol, ts.VariableDeclarationList>();
@@ -555,13 +553,9 @@ async function getNormalizedCapturedModule(
   metrics?: ViteBuildMetrics,
 ): Promise<CapturedModule> {
   if (record.normalizedCode !== undefined) {
-    return {
+    const normalizedRecord: CapturedModule = {
       code: record.normalizedCode,
-      ...(record.format === undefined ? {} : { format: record.format }),
       id: record.id,
-      ...(record.renderedLength === undefined
-        ? {}
-        : { renderedLength: record.renderedLength }),
       normalizedAnalysis:
         record.normalizedAnalysis ??
         getCapturedModuleAnalysis(record, metrics, "normalized"),
@@ -569,6 +563,13 @@ async function getNormalizedCapturedModule(
       rawAnalysis:
         record.rawAnalysis ?? getCapturedModuleAnalysis(record, metrics),
     };
+    if (record.format !== undefined) {
+      normalizedRecord.format = record.format;
+    }
+    if (record.renderedLength !== undefined) {
+      normalizedRecord.renderedLength = record.renderedLength;
+    }
+    return normalizedRecord;
   }
 
   const analysis = getCapturedModuleAnalysis(record, metrics);
@@ -582,19 +583,22 @@ async function getNormalizedCapturedModule(
   if (normalizedCode === record.code) {
     record.normalizedAnalysis = record.rawAnalysis ?? analysis;
   }
-  return {
+  const normalizedRecord: CapturedModule = {
     code: normalizedCode,
-    ...(record.format === undefined ? {} : { format: record.format }),
     id: record.id,
-    ...(record.renderedLength === undefined
-      ? {}
-      : { renderedLength: record.renderedLength }),
     normalizedAnalysis:
       record.normalizedAnalysis ??
       getCapturedModuleAnalysis(record, metrics, "normalized"),
     normalizedCode,
     rawAnalysis: record.rawAnalysis ?? analysis,
   };
+  if (record.format !== undefined) {
+    normalizedRecord.format = record.format;
+  }
+  if (record.renderedLength !== undefined) {
+    normalizedRecord.renderedLength = record.renderedLength;
+  }
+  return normalizedRecord;
 }
 
 export async function resolveCapturedSpecifier(

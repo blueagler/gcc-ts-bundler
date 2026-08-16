@@ -9,7 +9,6 @@ import {
   stableSymbolName,
 } from "./module-identity";
 import type {
-  ExternDegradationStats,
   ExternTypeDiagnostic,
   GeneratedExternModule,
   GeneratedGlobalSurface,
@@ -70,14 +69,7 @@ export function renderTypedExternalDeclarations({
   modules: readonly ModuleSeed[];
   program: ts.Program;
   projectRoot?: string | undefined;
-}): {
-  degradations: ExternDegradationStats;
-  diagnostics: ExternTypeDiagnostic[];
-  globalSurfaces: GeneratedGlobalSurface[];
-  moduleExports: GeneratedExternModule[];
-  text: string;
-  warnings: string[];
-} {
+}) {
   const state: RenderState = {
     checker,
     degradationCounts: new Map(),

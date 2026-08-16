@@ -2,12 +2,13 @@ import syncFs from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import type { Validator } from "../shared/validation";
 import {
   isRecord,
-  isRecordOf,
   isString,
   isUnknownArray,
   parseJson,
+  recordOf,
 } from "../shared/validation";
 import type {
   GccRuntimeManifest,
@@ -22,6 +23,7 @@ import {
   extractRuntimeInitManifest,
   parseGccRuntimeManifest,
   replaceRuntimeInitManifest,
+  type RuntimeManifestValue,
 } from "./runtime-manifest";
 
 export function analyzeViteCssOwnership(
@@ -177,7 +179,7 @@ export async function augmentCompiledViteCss(input: {
   const needsRuntimeCssRows = [...runtimeCssByChunkId.values()].some(
     (cssFiles) => cssFiles.length > 0,
   );
-  let runtimeManifest: unknown;
+  let runtimeManifest: RuntimeManifestValue;
   try {
     runtimeManifest = applyRuntimeCssRows({
       baseChunkSource,
@@ -289,7 +291,7 @@ function applyRuntimeCssRows(input: {
   baseChunkSource: string;
   manifest: GccRuntimeManifest;
   runtimeCssByChunkId: Map<string, string[]>;
-}) {
+}): RuntimeManifestValue {
   const runtimeInitCall = extractRuntimeInitManifest(input.baseChunkSource);
   if (!isUnknownArray(runtimeInitCall.manifest)) {
     throw new Error(
@@ -315,8 +317,9 @@ function applyRuntimeCssRows(input: {
     if (!isUnknownArray(entry)) {
       return;
     }
-    const rawRelativeUrl =
-      typeof entry[1] === "string" ? entry[1] : String(entry[1] ?? "");
+    const rawRelativeUrl = isString(entry[1])
+      ? entry[1]
+      : String(entry[1] ?? "");
     // The esm loader manifest stores `./name.js` import specifiers; the
     // script loader stores bare names. Match both.
     const relativeUrl = rawRelativeUrl.startsWith("./")
@@ -374,11 +377,8 @@ function collectHtmlLinkedCss(bundle: OutputBundle) {
   return linkedCss;
 }
 
-function isRuntimeModuleSourceMap(
-  value: unknown,
-): value is Record<string, string> {
-  return isRecordOf(value, isString);
-}
+const isRuntimeModuleSourceMap: Validator<Record<string, string>> =
+  recordOf<string>(isString);
 
 function getImportedCss(chunk: OutputChunk) {
   if (!("viteMetadata" in chunk) || !isRecord(chunk.viteMetadata)) {
@@ -388,9 +388,7 @@ function getImportedCss(chunk: OutputChunk) {
   if (!(importedCss instanceof Set)) {
     return [];
   }
-  return [...importedCss].filter(
-    (fileName): fileName is string => typeof fileName === "string",
-  );
+  return [...importedCss].filter(isString);
 }
 
 function arraysEqual(left: string[], right: string[]) {

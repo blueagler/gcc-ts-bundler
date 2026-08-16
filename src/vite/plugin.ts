@@ -88,6 +88,9 @@ import type { ViteTypeMetadataSidecar } from "./type-metadata";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import { prepareViteWorkspace, stageCompiledCoreOutputs } from "./workspace";
 
+interface GccTsBundlerPlugin {
+  name: string;
+}
 interface ViteTimingTotals {
   cssAnalysisMs: number;
   cssAugmentMs: number;
@@ -139,9 +142,9 @@ function resolveViteChunkOutputType(
   });
 }
 
-export function gccTsBundler(options: GccTsBundlerVitePluginOptions = {}): {
-  name: string;
-} {
+export function gccTsBundler(
+  options: GccTsBundlerVitePluginOptions = {},
+): GccTsBundlerPlugin {
   const capturedModules = new Map<string, CapturedModule>();
   const resolutionCache: CapturedModuleResolutionCache = new Map();
   const buildMetrics = createBuildMetrics();

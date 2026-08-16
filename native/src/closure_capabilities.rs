@@ -18,7 +18,7 @@ pub(crate) struct ClosureCompilerCapabilities {
 
 pub(crate) const CLOSURE_COMPILER_CAPABILITIES: ClosureCompilerCapabilities =
     ClosureCompilerCapabilities {
-        compiler_version: "20260726.0.0",
+        compiler_version: "20260811.0.0",
         // Probed directly by test/closure-capabilities.test.mjs with
         // --compilation_level WHITESPACE_ONLY --language_in UNSTABLE.
         private_class_elements: false,

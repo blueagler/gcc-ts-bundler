@@ -88,25 +88,3 @@ function removeEventListener(type, listener, options) {}
  * @return {boolean}
  */
 function dispatchEvent(event) {}
-
-/**
- * @constructor
- * @param {(string|!Object)=} input
- * @param {(string|!Object)=} baseURL
- * @param {!Object=} options
- */
-function URLPattern(input, baseURL, options) {}
-
-/**
- * @param {(string|!Object)=} input
- * @param {string=} baseURL
- * @return {boolean}
- */
-URLPattern.prototype.test = function(input, baseURL) {};
-
-/**
- * @param {(string|!Object)=} input
- * @param {string=} baseURL
- * @return {?Object}
- */
-URLPattern.prototype.exec = function(input, baseURL) {};

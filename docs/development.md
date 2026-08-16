@@ -43,17 +43,17 @@ bun run test:fast
 
 This lane runs 12 pure and native test files. It took about 14 seconds in the measured run. CI and pre-commit use the full `bun run test` suite.
 
-Run the repository's formatting, type, and ESLint pass with:
+Run the repository's formatting, type, and Oxlint pass with:
 
 ```sh
 bun run lint
 ```
 
-The lint script checks Rust formatting and Clippy, then runs the TypeScript formatting and ESLint checks.
+The lint script checks Rust formatting and Clippy, then runs the TypeScript formatting and Oxlint checks.
 
 ## Type-safety rules
 
-The TypeScript configuration enables exact optional properties, unchecked index protection, unused-symbol checks, isolated modules, and verbatim module syntax. ESLint rejects explicit `any`, type assertions, non-null assertions, unsafe `any` flow, and value imports used only as types.
+The TypeScript configuration enables exact optional properties, unchecked index protection, unused-symbol checks, isolated modules, and verbatim module syntax. Oxlint rejects explicit `any`, type assertions, non-null assertions, unsafe `any` flow, and value imports used only as types.
 
 Treat filesystem caches, native addons, package configuration, and generated manifests as trust boundaries. Parse them as `unknown` and narrow them with validators from `src/shared/validation.ts`; do not add a generic cast-based JSON reader.
 

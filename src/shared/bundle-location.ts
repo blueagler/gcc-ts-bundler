@@ -2,16 +2,20 @@ import fs from "fs";
 import path from "path";
 import { createRequire } from "module";
 import { fileURLToPath } from "url";
+import { isString } from "./validation";
 
 declare const __gcc_current_module_url: string;
 
 let bundleRequire: NodeRequire | null = null;
 let packageRoot: string | null = null;
 
-function getCurrentModuleUrl() {
-  return typeof __gcc_current_module_url === "string"
-    ? __gcc_current_module_url
-    : import.meta.url;
+function getCurrentModuleUrl(): string {
+  try {
+    const candidate = __gcc_current_module_url;
+    return isString(candidate) ? candidate : import.meta.url;
+  } catch {
+    return import.meta.url;
+  }
 }
 
 function getBundleFilePath() {

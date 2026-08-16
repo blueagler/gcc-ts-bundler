@@ -147,7 +147,7 @@ export function createModuleParser(targets: ParseTargets) {
       // has a default binding: `module.exports`. Without this, a stock
       // `import $ from "jquery"` renders a region entry with no exports and
       // the bundler-runtime stage has no slot to bind the default to.
-      hasDefaultExport = hasCommonJsExportShape(sourceFile);
+      hasDefaultExport = assignsCommonJsExports(sourceFile);
     }
 
     const parsed = {
@@ -375,7 +375,7 @@ function parseDependencyReexport(
  * True when a module writes to a CommonJS export slot anywhere (including
  * inside a UMD factory IIFE), which makes `module.exports` its ESM default.
  */
-function hasCommonJsExportShape(sourceFile: ts.SourceFile): boolean {
+function assignsCommonJsExports(sourceFile: ts.SourceFile): boolean {
   let found = false;
   const visit = (node: ts.Node): void => {
     if (found) {

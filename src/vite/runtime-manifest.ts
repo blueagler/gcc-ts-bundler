@@ -13,6 +13,8 @@ import type {
   GccRuntimeManifestChunk,
 } from "./internal-types";
 
+export type RuntimeManifestValue = string | number | RuntimeManifestValue[];
+
 function findMatchingDelimiter(
   sourceText: string,
   openIndex: number,
@@ -120,8 +122,7 @@ const isGccRuntimeManifest = isObjectOf<GccRuntimeManifest>({
   modules: recordOf(isString),
   publicPath: isString,
 });
-
-function parseRuntimeManifestLiteral(text: string): unknown {
+function parseRuntimeManifestLiteral(text: string): RuntimeManifestValue {
   const sourceFile = ts.createSourceFile(
     "runtime-manifest.js",
     `(${text})`,
@@ -141,8 +142,9 @@ function parseRuntimeManifestLiteral(text: string): unknown {
       : statement.expression,
   );
 }
-
-function parseRuntimeManifestExpression(expression: ts.Expression): unknown {
+function parseRuntimeManifestExpression(
+  expression: ts.Expression,
+): RuntimeManifestValue {
   if (ts.isArrayLiteralExpression(expression)) {
     return expression.elements.map((element) => {
       if (ts.isSpreadElement(element) || ts.isOmittedExpression(element)) {
@@ -172,10 +174,9 @@ function isQuoteCharacter(
 ): character is '"' | "'" | "`" {
   return character === '"' || character === "'" || character === "`";
 }
-
 export function replaceRuntimeInitManifest(
   sourceText: string,
-  manifest: unknown,
+  manifest: RuntimeManifestValue,
 ) {
   const payload = extractRuntimeInitManifest(sourceText);
   return (

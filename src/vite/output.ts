@@ -6,7 +6,8 @@ import type { ChunkMetadata, ResolvedConfig } from "vite";
 
 import { applyTextEdits } from "../shared/text-edits";
 import { buildChunkModuleIdLookup } from "./chunk-modules";
-import { isRecordOf, isString } from "../shared/validation";
+import type { Validator } from "../shared/validation";
+import { isString, recordOf } from "../shared/validation";
 
 import type {
   GccRuntimeManifest,
@@ -18,6 +19,9 @@ import type {
   PluginContext,
   ViteChunkOutputType,
 } from "./internal-types";
+
+const isRuntimeModuleSourceMap: Validator<Record<string, string>> =
+  recordOf<string>(isString);
 
 export function listJavaScriptChunks(bundle: OutputBundle) {
   return Object.values(bundle).filter(
@@ -91,7 +95,7 @@ export async function preserveCompiledChunkIdentities(input: {
   const parsedRuntimeSourceMap: unknown = JSON.parse(
     await fs.readFile(input.runtimeModuleSourceMapFilePath, "utf8"),
   );
-  if (!isRecordOf(parsedRuntimeSourceMap, isString)) {
+  if (!isRuntimeModuleSourceMap(parsedRuntimeSourceMap)) {
     throw new Error("gccTsBundler() found an invalid runtime source map.");
   }
   const chunkModuleIds = buildChunkModuleIdLookup({
@@ -390,12 +394,18 @@ export async function resolveViteAssetUrls(input: {
         outputOptions,
         { chunks: {} },
       );
-      source =
-        typeof rendered === "string"
-          ? rendered
-          : rendered && typeof rendered === "object" && "code" in rendered
-            ? rendered.code.toString()
-            : source;
+      if (isString(rendered)) {
+        source = rendered;
+        continue;
+      }
+      if (rendered === null || rendered === undefined) {
+        continue;
+      }
+      if ("code" in rendered) {
+        source = rendered.code.toString();
+      } else {
+        source = rendered.toString();
+      }
     }
     if (hasViteAssetPlaceholder(source)) {
       throw new Error(
@@ -430,9 +440,9 @@ export async function collectOutputByteBreakdown(input: {
       continue;
     }
     const size =
-      typeof item.source === "string"
-        ? Buffer.byteLength(item.source)
-        : item.source.byteLength;
+      item.source instanceof Uint8Array
+        ? item.source.byteLength
+        : Buffer.byteLength(item.source);
     if (item.fileName.endsWith(".css")) {
       css += size;
       continue;
@@ -476,9 +486,9 @@ export function stripPublicPathPrefix(url: string, publicPath: string) {
 }
 
 export function readAssetText(asset: OutputAsset) {
-  return typeof asset.source === "string"
-    ? asset.source
-    : Buffer.from(asset.source).toString("utf8");
+  return asset.source instanceof Uint8Array
+    ? Buffer.from(asset.source).toString("utf8")
+    : asset.source;
 }
 
 function findViteAssetRenderHooks(config: ResolvedConfig) {
@@ -487,13 +497,13 @@ function findViteAssetRenderHooks(config: ResolvedConfig) {
       return [];
     }
     const hook = plugin.renderChunk;
-    if (typeof hook === "function") {
-      return [hook];
+    if (hook === undefined) {
+      return [];
     }
-    if (hook && typeof hook === "object") {
+    if ("handler" in hook) {
       return [hook.handler];
     }
-    return [];
+    return [hook];
   });
 }
 

@@ -1,5 +1,15 @@
+import { isString } from "../shared/validation";
 import { loadEsbuildTransform } from "./prebundle/esbuild";
 
+type DefineValue =
+  | string
+  | number
+  | boolean
+  | null
+  | DefineValue[]
+  | { [key: string]: DefineValue };
+
+type DefineValues = Record<string, DefineValue>;
 /**
  * Applies Vite's resolved `define` replacements to captured module code.
  *
@@ -11,8 +21,8 @@ import { loadEsbuildTransform } from "./prebundle/esbuild";
  * before rolldown, so the flags fold to constants and their dead branches drop.
  */
 export function createDefineApplier(
-  define: Record<string, unknown> | undefined,
-  env: Record<string, unknown> | undefined,
+  define: DefineValues | undefined,
+  env: DefineValues | undefined,
 ) {
   const entries = [
     ...(env ? [["import.meta.env", env] as const] : []),
@@ -24,7 +34,7 @@ export function createDefineApplier(
   const esbuildDefine = Object.fromEntries(
     entries.map(([key, value]) => [
       key,
-      typeof value === "string" ? value : JSON.stringify(value),
+      isString(value) ? value : JSON.stringify(value),
     ]),
   );
   // The first segment is what appears verbatim in source for dotted keys such
