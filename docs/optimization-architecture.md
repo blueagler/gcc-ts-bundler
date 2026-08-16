@@ -6,7 +6,9 @@ This is a design document, not a spike report. It takes the measurements in
 `research/prior-art-closure-frameworks.md` as given and asks what the
 architecture should be. Every number below is measured on the Ant Design Pro
 trial app (2,352 modules, 94.1% dependency bytes) with the pinned compiler
-`v20260811`, except where marked `[INFERENCE]`.
+`v20260811`, except where marked `[INFERENCE]`. That app is a **negative
+fixture** for an ultimate optimizer — a worst-case fact graph — not the
+product fitness function.
 
 ---
 
@@ -195,17 +197,14 @@ cannot optimize properties. Closure optimizes properties and knows nothing about
 modules. This plugin is the only place both facts coexist.
 
 Scope it honestly before building: vendor object literals that flow into React
-props are provably *not* disjoint, so the achievable set is bounded by C4-style
-reachability. **Measured, then killed.** oxc-parser 0.144.0 over the 2,484-file
-trial graph: 9,465 distinct property names; renaming-map union **4,478** (the
-"~8,400" figure was two overlapping maps summed); **823** already-renamed
-strict candidates (18.4%). The hot names (`length`, `key`, `current`, `value`,
-`children`, `className`, `style`) are all excluded. Hottest useful renamed
-candidates are a long tail (`getParser` 25 local refs). `[INFERENCE]` ~1.5 KB
-gzip from shortening unrenamed candidates, ~10 KB even with partial branding,
-against a 31.3 KB gap. M2 cannot move reuse 7.6 → 16.0 on this app. M3
-carries the type-path alone, and only for authored-dominant class-based
-TypeScript.
+props are provably *not* disjoint, so the achievable set on *this fixture* is
+bounded by C4-style reachability. **Measured on the fixture, not killed as a
+technique.** oxc-parser 0.144.0, 2,484 files: 9,465 names; map union 4,478;
+823 already-renamed strict candidates (18.4%); hot protocol names excluded;
+hottest useful candidate `getParser` at 25 local refs. `[INFERENCE]` ~1.5 KB
+gzip strict / ~10 KB partial against a 31.3 KB fixture gap. M2 will not close
+antd-pro. M2 is still how an ultimate optimizer *states* a proof. Judge it
+on a graph that has proofs.
 
 ### M3 — Make type lowering *optimizing* rather than *faithful*
 
@@ -241,31 +240,19 @@ our source. It converts a program-wide ban into a site-local invariant, and the
 
 **E1, ambiguation-capable:** nominal receivers exist; renaming and ambiguation
 both run. The C3 brand+cast experiment already produced that state at source
-level on untyped vendor-shaped literals (`g,h,i` / `j,l,m` → both `g,h,i`).
-M2's coverage count then showed the transform has nothing hot to apply to
-on this app (18% of names, long tail by refs, hot names excluded). E1 via
-graph-derived brands is therefore not a reachable end state for
-vendor-dominated React. `[INFERENCE]` The 754 KB gzip / 3.3%-below-esbuild
-figure assumed coverage we do not have; treat it as falsified on this
-workload, not as a target.
+level (`g,h,i` / `j,l,m` → both `g,h,i`). The fixture does not have the
+proofs to scale it. That falsifies "win antd-pro with brands," not E1.
 
-**E2, ambiguation-incapable:** accept C1/C3, and via M1 turn property renaming
-*off* while keeping ADVANCED's DCE and inlining. Stop destroying entropy for a
-prize we cannot collect. E2 still needs the driver. E1 via M2 is independently
-dead on this workload.
+**E2, ambiguation-incapable:** via M1, turn property renaming *off* on names
+and regions with no proof, while keeping ADVANCED DCE and inlining. The
+correct policy on the fixture's hot names. A global E2 is a hedge
+(`[INFERENCE]` ~782–830 KB gzip, raw between 2,314 and 2,645). A *per-name*
+E2 plus E1 where proofs exist is the ultimate optimizer.
 
-Now the derived conclusion, which is the most useful output of this document.
-`[INFERENCE]` E2 recovers ratio (≈3.07) but gives back renaming's raw savings, so
-raw lands somewhere between today's 2,314 KB and SIMPLE's 2,645 KB, and gzip
-between roughly 782 and 830 KB. **E2 therefore straddles parity with esbuild and
-cannot be relied on to win.** E1 would have been the only end state with real
-headroom; M2 cannot deliver it here. What remains is a smaller loss (E2, or
-Phase 5's 10.7 KB pin recovery) and an honest scope line: this project pays
-for authored-dominant class-based TypeScript, not vendor-dominated React.
-
-That means: **M1 buys E2 and incrementality, not the thesis.** M3 is the
-remaining type-path, ceiling bounded by class-only interfaces. Any roadmap
-that stops after M1 has still bought a smaller loss.
+Derived conclusion: **M1 is the foundation, not a consolation prize.**
+Per-name policy is unreachable from argv. M2 and M3 are how proofs get
+stated. M4 is how protocols stay correct. The fixture taught us not to
+run one policy on a 94%-vendor React graph. It did not teach us to stop.
 
 Today's configuration is the worst cell of the matrix: renaming on, ambiguation
 off. We pay the entropy cost of renaming and collect none of its compensating

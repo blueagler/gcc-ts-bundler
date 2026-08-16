@@ -144,9 +144,10 @@ distinct renamed properties are ambiguated
 Phase 2 proved that a synthesized `@constructor @struct` brand plus a `@type`
 cast is enough to make `AmbiguateProperties` fire on untyped object literals
 (`g,h,i` / `j,l,m` → both `g,h,i`). That result still stands. What entry 9
-closes is *applying* it to this workload: 18% of renamed names qualify, they
+closes is *applying* it to this fixture: 18% of renamed names qualify, they
 are a long tail, and the names that would move compression ratio (`value`,
-`children`, `className`, `key`, `current`) fail every safety test. Reopening
-requires a different app shape (authored-dominant, class-based TypeScript)
-or a measurement showing the hot names are newly brandable. A better
-delivery mechanism (`addCustomPass`) is not new evidence.
+`children`, `className`, `key`, `current`) fail every safety test. The
+technique stays. Reopening the *fixture* claim requires a different app
+shape (authored-dominant, class-based TypeScript) or a measurement showing
+the hot names are newly brandable. A better delivery mechanism
+(`addCustomPass`) is not new evidence; a second fixture is.
