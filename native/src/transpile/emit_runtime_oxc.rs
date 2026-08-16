@@ -640,12 +640,6 @@ pub(crate) fn emit_bundler_runtime_module_text<'a>(
                 if export.export_kind == ImportOrExportKind::Type {
                     continue;
                 }
-                if export.exported.is_some() {
-                    return Err(format!(
-                        "bundler-runtime does not support namespace re-exports in {}",
-                        file_path.display()
-                    ));
-                }
                 let require_name = fresh_names.fresh(&format!("__gcc_export_all_{export_counter}"));
                 export_counter += 1;
                 let export_module_id = resolve_module_id_for_specifier(
@@ -667,31 +661,51 @@ pub(crate) fn emit_bundler_runtime_module_text<'a>(
                             export_module_id
                         )
                     })?;
-                let mut slot_pairs = Vec::new();
-                for export_name in target_slots.export_names() {
-                    if export_name == "default" {
-                        continue;
+                if let Some(exported) = &export.exported {
+                    let exported_name = module_export_name(exported);
+                    let namespace_slot =
+                        current_slots.slot_for(&exported_name).ok_or_else(|| {
+                            format!(
+                                "Missing bundler-runtime export slot for {} in {}",
+                                exported_name, module_id
+                            )
+                        })?;
+                    output.push(render_static_export_slot_with(
+                        &runtime_names.exports,
+                        namespace_slot,
+                        &render_namespace_reexport_object(
+                            &require_name,
+                            target_slots,
+                            &export_module_id,
+                        )?,
+                    ));
+                } else {
+                    let mut slot_pairs = Vec::new();
+                    for export_name in target_slots.export_names() {
+                        if export_name == "default" {
+                            continue;
+                        }
+                        let source_slot = target_slots.slot_for(export_name).ok_or_else(|| {
+                            format!(
+                                "Missing bundler-runtime export slot for {} in {}",
+                                export_name, export_module_id
+                            )
+                        })?;
+                        let target_slot = current_slots.slot_for(export_name).ok_or_else(|| {
+                            format!(
+                                "Missing bundler-runtime export slot for {} in {}",
+                                export_name, module_id
+                            )
+                        })?;
+                        slot_pairs.push((target_slot, source_slot));
                     }
-                    let source_slot = target_slots.slot_for(export_name).ok_or_else(|| {
-                        format!(
-                            "Missing bundler-runtime export slot for {} in {}",
-                            export_name, export_module_id
-                        )
-                    })?;
-                    let target_slot = current_slots.slot_for(export_name).ok_or_else(|| {
-                        format!(
-                            "Missing bundler-runtime export slot for {} in {}",
-                            export_name, module_id
-                        )
-                    })?;
-                    slot_pairs.push((target_slot, source_slot));
+                    output.extend(render_grouped_live_slot_exports_with(
+                        &require_name,
+                        slot_pairs,
+                        &runtime_names.live,
+                        &runtime_names.exports,
+                    ));
                 }
-                output.extend(render_grouped_live_slot_exports_with(
-                    &require_name,
-                    slot_pairs,
-                    &runtime_names.live,
-                    &runtime_names.exports,
-                ));
             }
             statement if statement.is_typescript_syntax() => {}
             statement => output.push(type_metadata.render_statement_with_nocollapse(
@@ -1171,4 +1185,189 @@ fn indent_block(source: &str) -> String {
         .map(|line| format!("  {line}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn render_namespace_reexport_object(
+    require_name: &str,
+    target_slots: &BundlerModuleSlots,
+    export_module_id: &str,
+) -> std::result::Result<String, String> {
+    // Live getters, not a snapshot: the splat path installs `__live` accessors
+    // that reread the target slot on every get. A namespace object must do the
+    // same, or `ns.foo` would go stale while `export *` stayed live.
+    //
+    // Keys stay unquoted identifiers so Closure ADVANCED renames them together
+    // with every `ns.foo` read. A target export that is not an identifier
+    // (`export { x as "a-b" }`) cannot be emitted that way. Quoting would pin
+    // the name (stringDefined ∩ dotAccessed). Omitting would drop a name a
+    // program can read via `ns["a-b"]`. Error instead.
+    let mut properties = Vec::new();
+    for export_name in target_slots.export_names() {
+        if !is_valid_js_identifier(export_name) {
+            return Err(format!(
+                "bundler-runtime cannot emit an unquoted namespace key for export {export_name:?} from {export_module_id}"
+            ));
+        }
+        let source_slot = target_slots.slot_for(export_name).ok_or_else(|| {
+            format!("Missing bundler-runtime export slot for {export_name} in {export_module_id}")
+        })?;
+        properties.push(format!(
+            "get {export_name}(){{return {};}}",
+            stable_slot_access(require_name, source_slot)
+        ));
+    }
+    Ok(format!("{{{}}}", properties.join(",")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{BTreeSet, HashMap, HashSet};
+    use std::path::Path;
+
+    use oxc_parser::Parser;
+    use oxc_semantic::SemanticBuilder;
+    use oxc_span::SourceType;
+
+    use super::super::context::collect_raw_bundler_exports;
+    use super::super::ChunkMode;
+
+    fn parse<'a>(allocator: &'a Allocator, source: &'a str) -> (Program<'a>, ModuleIdentity) {
+        let parsed = Parser::new(allocator, source, SourceType::mjs()).parse();
+        assert!(
+            !parsed.panicked && parsed.diagnostics.is_empty(),
+            "{:?}",
+            parsed.diagnostics
+        );
+        let semantic = SemanticBuilder::new()
+            .with_build_nodes(true)
+            .with_enum_eval(true)
+            .build(&parsed.program);
+        let identity = ModuleIdentity::new(semantic.semantic.into_scoping());
+        (parsed.program, identity)
+    }
+
+    fn context(workspace_dir: &Path) -> TranspileContext {
+        TranspileContext {
+            bundler_module_slots: HashMap::new(),
+            bundler_runtime_logical_ids: HashMap::new(),
+            chunk_mode: ChunkMode::BundlerRuntime,
+            class_map_calls: Vec::new(),
+            pure_callees: HashSet::new(),
+            commonjs_specifiers: HashSet::new(),
+            opaque_commonjs: Default::default(),
+            boundary_identity_tokens: HashMap::new(),
+            external_specifiers: HashMap::new(),
+            opaque_external_specifiers: HashSet::new(),
+            file_metadata: HashMap::new(),
+            hoist_plan: None,
+            lazy_imports_by_file: HashMap::new(),
+            lazy_target_module_ids: HashSet::new(),
+            package_aliases: Vec::new(),
+            preserved_modules: HashMap::new(),
+            resolved_module_ids: HashMap::new(),
+            preserved_property_names: HashSet::new(),
+            static_property_names: HashSet::new(),
+            type_metadata_enabled: false,
+            assigner_pin_module_ids: HashSet::new(),
+            workspace_dir: workspace_dir.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn namespace_reexport_is_one_name_and_includes_default() {
+        let root = std::env::temp_dir().join(format!(
+            "gcc-ns-reexport-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let dep = root.join("dep.js");
+        let ns_entry = root.join("ns.js");
+        let star_entry = root.join("star.js");
+        std::fs::write(&dep, "export const named = 1; export default 2;\n").unwrap();
+        std::fs::write(&ns_entry, "export * as ns from \"./dep.js\";\n").unwrap();
+        std::fs::write(&star_entry, "export * from \"./dep.js\";\n").unwrap();
+
+        let allocator = Allocator::default();
+        let ns_source = std::fs::read_to_string(&ns_entry).unwrap();
+        let star_source = std::fs::read_to_string(&star_entry).unwrap();
+        let (ns_program, _) = parse(&allocator, &ns_source);
+        let (star_program, _) = parse(&allocator, &star_source);
+        let resolution = context(&root);
+
+        let ns_raw = collect_raw_bundler_exports(&ns_program, &ns_entry, &resolution).unwrap();
+        assert_eq!(ns_raw.explicit_exports, BTreeSet::from(["ns".to_string()]));
+        assert!(ns_raw.export_all_modules.is_empty());
+
+        let star_raw =
+            collect_raw_bundler_exports(&star_program, &star_entry, &resolution).unwrap();
+        assert!(star_raw.explicit_exports.is_empty());
+        assert_eq!(star_raw.export_all_modules.len(), 1);
+
+        let dep_id = to_goog_module_id(&dep, &root);
+        let ns_id = to_goog_module_id(&ns_entry, &root);
+        let star_id = to_goog_module_id(&star_entry, &root);
+        let dep_slots = BundlerModuleSlots::from_export_names(&BTreeSet::from([
+            "default".to_string(),
+            "named".to_string(),
+        ]));
+        let ns_slots = BundlerModuleSlots::from_export_names(&BTreeSet::from(["ns".to_string()]));
+        let star_slots =
+            BundlerModuleSlots::from_export_names(&BTreeSet::from(["named".to_string()]));
+
+        let mut ns_context = context(&root);
+        ns_context.bundler_module_slots =
+            HashMap::from([(dep_id.clone(), dep_slots.clone()), (ns_id, ns_slots)]);
+        let (mut ns_emit_program, ns_identity) = parse(&allocator, &ns_source);
+        let ns_emitted = emit_bundler_runtime_module_text(
+            &allocator,
+            &ns_entry,
+            &mut ns_emit_program,
+            &ns_identity,
+            &ns_context,
+            None,
+            None,
+        )
+        .unwrap()
+        .code;
+        assert!(
+            ns_emitted.contains("get default(){return ")
+                && ns_emitted.contains("get named(){return "),
+            "{ns_emitted}"
+        );
+        assert!(
+            !ns_emitted.contains("\"default\"") && !ns_emitted.contains("\"named\""),
+            "{ns_emitted}"
+        );
+
+        let mut star_context = context(&root);
+        star_context.bundler_module_slots =
+            HashMap::from([(dep_id, dep_slots), (star_id, star_slots)]);
+        let (mut star_emit_program, star_identity) = parse(&allocator, &star_source);
+        let star_emitted = emit_bundler_runtime_module_text(
+            &allocator,
+            &star_entry,
+            &mut star_emit_program,
+            &star_identity,
+            &star_context,
+            None,
+            None,
+        )
+        .unwrap()
+        .code;
+        assert!(
+            !star_emitted.contains("get default") && !star_emitted.contains("default()"),
+            "{star_emitted}"
+        );
+        assert!(
+            star_emitted.contains("__live") || star_emitted.contains("function(){return "),
+            "{star_emitted}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

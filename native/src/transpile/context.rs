@@ -45,7 +45,7 @@ pub(super) struct BundlerModuleSlots {
 }
 
 impl BundlerModuleSlots {
-    pub(super) fn from_export_names(export_names: &BTreeSet<String>) -> Self {
+    pub(crate) fn from_export_names(export_names: &BTreeSet<String>) -> Self {
         let mut export_slots = BTreeMap::new();
         let mut next_slot = 0usize;
         if export_names.contains("default") {
@@ -72,9 +72,9 @@ impl BundlerModuleSlots {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct RawBundlerExportInfo {
-    pub(super) explicit_exports: BTreeSet<String>,
-    pub(super) export_all_modules: Vec<String>,
+pub(crate) struct RawBundlerExportInfo {
+    pub(crate) explicit_exports: BTreeSet<String>,
+    pub(crate) export_all_modules: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,7 +197,7 @@ pub(super) fn collect_bundler_module_slots(
         .collect())
 }
 
-pub(super) fn collect_raw_bundler_exports(
+pub(crate) fn collect_raw_bundler_exports(
     program: &OxcProgram<'_>,
     file_path: &Path,
     context: &TranspileContext,
@@ -235,11 +235,14 @@ pub(super) fn collect_raw_bundler_exports(
                 if export.export_kind == ImportOrExportKind::Type {
                     continue;
                 }
-                if export.exported.is_some() {
-                    return Err(format!(
-                        "bundler-runtime does not support namespace re-exports in {}",
-                        file_path.display()
-                    ));
+                if let Some(exported) = &export.exported {
+                    // `export * as ns from "mod"` contributes exactly one name --
+                    // the namespace binding itself. Splat semantics do not apply,
+                    // so the target must stay out of `export_all_modules`.
+                    raw_exports
+                        .explicit_exports
+                        .insert(module_export_name(exported));
+                    continue;
                 }
                 raw_exports
                     .export_all_modules

@@ -979,6 +979,83 @@ test("retained bare package edges route to captured dependencies or fail with th
   );
 });
 
+test("dead dynamic package edges are dropped when Vite did not capture the target", async () => {
+  const entry = "/src/entry.js";
+  const dependency = "/node_modules/dev-only-tool/index.js";
+  const context = createCapturePluginContext();
+  context.resolve = async (specifier) => ({
+    external: false,
+    id: specifier === "dev-only-tool" ? dependency : specifier,
+  });
+  const capturedModules = new Map([
+    [entry, { code: 'if (import.meta.env.DEV) void import("dev-only-tool");', id: entry }],
+  ]);
+  const metrics = {
+    deadDynamicEdgeDropCount: 0,
+    normalizedRetainedModuleCount: 0,
+    parseCacheHits: 0,
+    parseCacheMisses: 0,
+    reassignedConstantDemotionCount: 0,
+    retainedEdgeResolutionCount: 0,
+  };
+  const routed = await resolveRetainedCapturedModuleIds.call(context, {
+    capturedModules,
+    metrics,
+    projectRoot: "/src",
+    resolutionCache: new Map(),
+    retainedModuleIds: [entry],
+    unshakenModuleIds: [entry],
+  });
+  expect(routed.materializedModuleIds).toContain(entry);
+  expect(routed.materializedModuleIds).not.toContain(dependency);
+  expect(metrics.deadDynamicEdgeDropCount).toBe(1);
+
+  context.resolve = async () => null;
+  const unresolvedMetrics = {
+    deadDynamicEdgeDropCount: 0,
+    normalizedRetainedModuleCount: 0,
+    parseCacheHits: 0,
+    parseCacheMisses: 0,
+    reassignedConstantDemotionCount: 0,
+    retainedEdgeResolutionCount: 0,
+  };
+  const unresolved = await resolveRetainedCapturedModuleIds.call(context, {
+    capturedModules,
+    metrics: unresolvedMetrics,
+    projectRoot: "/src",
+    resolutionCache: new Map(),
+    retainedModuleIds: [entry],
+    unshakenModuleIds: [entry],
+  });
+  expect(unresolved.materializedModuleIds).toContain(entry);
+  expect(unresolved.materializedModuleIds).not.toContain(dependency);
+  expect(unresolvedMetrics.deadDynamicEdgeDropCount).toBe(1);
+});
+
+test("static uncaptured package edges still fail with their chain", async () => {
+  const entry = "/src/entry.js";
+  const dependency = "/node_modules/react-is/index.js";
+  const context = createCapturePluginContext();
+  context.resolve = async (specifier) => ({
+    external: false,
+    id: specifier === "react-is" ? dependency : specifier,
+  });
+  await expect(
+    resolveRetainedCapturedModuleIds.call(context, {
+      capturedModules: new Map([
+        [entry, { code: 'import { isValidElementType } from "react-is"; console.log(isValidElementType);', id: entry }],
+      ]),
+      metrics: undefined,
+      projectRoot: "/src",
+      resolutionCache: new Map(),
+      retainedModuleIds: [entry],
+      unshakenModuleIds: [entry],
+    }),
+  ).rejects.toThrow(
+    `gccTsBundler() could not route package edge ${entry} -> "react-is" -> ${dependency}: the resolved module was not captured by Vite.`,
+  );
+});
+
 test("resolved Vite env values are removed before Closure chunk linking", async () => {
   const apply = createDefineApplier(
     { "import.meta.env.OVERRIDE": JSON.stringify("user") },

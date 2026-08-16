@@ -349,6 +349,77 @@ test.serial(
 );
 
 test.serial(
+  "bundler-runtime namespace re-export includes named exports and default",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/mod.ts",
+      [
+        'export const named = "named-ok";',
+        'export default "default-ok";',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/reexport.ts",
+      'export * as ns from "./mod.js";\n',
+    );
+    await fixture.write(
+      "src/main.ts",
+      [
+        'import { ns } from "./reexport.js";',
+        '(globalThis as any)["__nsNamed"] = ns.named;',
+        '(globalThis as any)["__nsDefault"] = ns.default;',
+        "",
+      ].join("\n"),
+    );
+
+    const result = await build({
+      cache: { mode: "off" },
+      chunks: { mode: "bundler-runtime", outputType: "esm" },
+      entries: ["./main.ts"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+    expect(result.ok).toBe(true);
+
+    const mainOutput = result.outputFiles.find((filePath) =>
+      filePath.endsWith("main.js"),
+    );
+    expect(mainOutput).toBeTruthy();
+    const previousNamed = globalThis["__nsNamed"];
+    const previousDefault = globalThis["__nsDefault"];
+    const previousDocument = globalThis.document;
+    const previousLocation = globalThis.location;
+    const previousRuntime = globalThis.__g;
+    try {
+      globalThis.document = {
+        createElement: () => ({}),
+        head: { appendChild() {} },
+        querySelectorAll: () => [],
+      };
+      globalThis.location = { href: pathToFileURL(mainOutput).href };
+      await import(`${pathToFileURL(mainOutput).href}?nsre=${Date.now()}`);
+      expect(globalThis["__nsNamed"]).toBe("named-ok");
+      expect(globalThis["__nsDefault"]).toBe("default-ok");
+    } finally {
+      if (previousNamed === undefined) delete globalThis["__nsNamed"];
+      else globalThis["__nsNamed"] = previousNamed;
+      if (previousDefault === undefined) delete globalThis["__nsDefault"];
+      else globalThis["__nsDefault"] = previousDefault;
+      if (previousDocument === undefined) delete globalThis.document;
+      else globalThis.document = previousDocument;
+      if (previousLocation === undefined) delete globalThis.location;
+      else globalThis.location = previousLocation;
+      if (previousRuntime === undefined) delete globalThis.__g;
+      else globalThis.__g = previousRuntime;
+    }
+  },
+);
+
+test.serial(
   "bundler-runtime preserves property names read reflectively through for-in",
   { timeout: 20000 },
   async () => {

@@ -305,6 +305,21 @@ async function rewriteModuleImports(
         });
         return;
       }
+      // A dynamic import Vite never captured cannot be reached from the built graph: Vite emitted
+      // no chunk for it, so the same call is equally unreachable in a stock Vite build. This is the
+      // shape a dev-only guard leaves behind — `if (import.meta.env.DEV) import("devtool")`, whose
+      // branch is already constant-folded dead by the time the module is materialized. Resolving it
+      // to an empty module reuses the non-materialized asset replacement above instead of failing a
+      // build Vite itself accepted. A *static* import that is missing stays fatal below, because a
+      // reachable static import is always captured.
+      if (ts.isCallExpression(node)) {
+        edits.push({
+          end: node.getEnd(),
+          start: node.getStart(sourceFile),
+          text: "Promise.resolve({})",
+        });
+        return;
+      }
       this.error(
         `gccTsBundler() resolved ${specifier} from ${input.importerId} to ${resolved.id}, ` +
           "but that transformed module was not captured in the final Vite JS graph.",

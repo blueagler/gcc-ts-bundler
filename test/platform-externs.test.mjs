@@ -398,3 +398,44 @@ test("bare-global names seed through property and element access", async () => {
     await fs.rm(directory, { force: true, recursive: true });
   }
 });
+
+/**
+ * TypeScript's JSDoc parser recurses per type token. `transpileModule` (the
+ * old path) overflowed the stack on a comment this deep and the whole
+ * platform-extern slice fell back to full browser externs. The seed scan
+ * only walks identifiers and property names, so JSDoc parsing is off; this
+ * input must still produce a slice.
+ */
+test("parses dense JSDoc comments that overflow transpileModule", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gcc-platform-"));
+  const input = path.join(directory, "input.js");
+  try {
+    const nested = `{${"{a:".repeat(5000)}number${"}".repeat(5000)}}`;
+    await fs.writeFile(
+      input,
+      `/** @type ${nested} */\nconst canvas = new HTMLCanvasElement();\ncanvas.captureStream();\n`,
+    );
+    const text = await generatePlatformExternsText([input], [], testCacheRoot);
+    expect(text).not.toBeNull();
+    expect(text).toContain("function HTMLCanvasElement()");
+    expect(text).toContain("HTMLCanvasElement.prototype.captureStream");
+  } finally {
+    await fs.rm(directory, { force: true, recursive: true });
+  }
+});
+
+test("unparseable program files still fail closed to a null slice", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gcc-platform-"));
+  const input = path.join(directory, "input.js");
+  try {
+    await fs.writeFile(
+      input,
+      `var x = ${"(".repeat(5000)}1${")".repeat(5000)};\n`,
+    );
+    expect(await generatePlatformExternsText([input], [], testCacheRoot)).toBe(
+      null,
+    );
+  } finally {
+    await fs.rm(directory, { force: true, recursive: true });
+  }
+});

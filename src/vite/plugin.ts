@@ -501,6 +501,12 @@ async function logCapturedGraph(input: {
       "vite:parse-cache",
       `hits=${input.buildMetrics.parseCacheHits} misses=${input.buildMetrics.parseCacheMisses}`,
     );
+    // Counted per visit, not per distinct edge: routing walks each module once
+    // per analysis pass, so one dead edge reports several events.
+    logInternalDetail(
+      "vite:dead-dynamic-edge-drops",
+      `events=${input.buildMetrics.deadDynamicEdgeDropCount}`,
+    );
     logInternalDetail(
       "vite:retained-edge-resolutions",
       `${input.buildMetrics.retainedEdgeResolutionCount}`,
@@ -795,6 +801,7 @@ function applyRenderedModuleEvidence(
 
 function createBuildMetrics(): ViteBuildMetrics {
   return {
+    deadDynamicEdgeDropCount: 0,
     normalizedRetainedModuleCount: 0,
     reassignedConstantDemotionCount: 0,
     parseCacheHits: 0,
@@ -804,6 +811,7 @@ function createBuildMetrics(): ViteBuildMetrics {
 }
 
 function resetBuildMetrics(metrics: ViteBuildMetrics) {
+  metrics.deadDynamicEdgeDropCount = 0;
   metrics.normalizedRetainedModuleCount = 0;
   metrics.reassignedConstantDemotionCount = 0;
   metrics.parseCacheHits = 0;

@@ -1,6 +1,7 @@
 import fs from "fs/promises";
 import * as ts from "@typescript/typescript6";
 
+import { logInternalDetail } from "../../../shared/timing";
 import { parseClosureTypeReferences } from "./closure-type-parser";
 import { parseJavaScriptSource } from "./typescript-parser";
 import type { PlatformExternIndex, PlatformExternSeeds } from "./types";
@@ -25,7 +26,10 @@ export async function collectPlatformExternSeeds(
       return null;
     }
     const sourceFile = parseJavaScriptSource(filePath, source);
-    if (!sourceFile) return null;
+    if (!sourceFile) {
+      logInternalDetail("closure:platform-externs", `unparseable: ${filePath}`);
+      return null;
+    }
 
     visit(sourceFile, (node) => {
       if (ts.isPropertyAccessExpression(node)) {
@@ -76,7 +80,10 @@ export async function collectPlatformExternSeeds(
       return null;
     }
     const sourceFile = parseJavaScriptSource(filePath, source);
-    if (!sourceFile) return null;
+    if (!sourceFile) {
+      logInternalDetail("closure:platform-externs", `unparseable: ${filePath}`);
+      return null;
+    }
     for (const statement of sourceFile.statements) {
       if (
         (ts.isFunctionDeclaration(statement) ||

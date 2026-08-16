@@ -577,6 +577,16 @@ async function collectBridgeModuleIds(
       bridgeSpecifiers.add(specifier);
     }
   }
+  // Capture records every source-level `import()` argument, including ones in
+  // branches the build later proves dead: `if (import.meta.env.DEV) import(x)`
+  // folds to `false` in a production build and the call is eliminated. Such an
+  // edge either resolves to nothing or resolves to a module Vite never
+  // captured, and in both cases Vite emits no chunk for it, so the built graph
+  // cannot reach that module no matter what this plugin does. Dropping the edge
+  // matches Vite's own decision instead of papering over a gap. A missing
+  // *static* edge stays fatal: a reachable static import is always captured, so
+  // its absence is a genuine routing gap.
+  const dynamicImportSpecifiers = new Set(analysis.dynamicImportSpecifiers);
   await Promise.all(
     [...bridgeSpecifiers].map(async (specifier) => {
       const resolved = await resolveCapturedSpecifier.call(this, {
@@ -587,6 +597,12 @@ async function collectBridgeModuleIds(
       });
       if (!resolved || resolved.external) {
         if (isBarePackageSpecifier(specifier)) {
+          if (dynamicImportSpecifiers.has(specifier)) {
+            if (input.metrics) {
+              input.metrics.deadDynamicEdgeDropCount += 1;
+            }
+            return;
+          }
           throw new Error(
             `gccTsBundler() could not route package edge ${JSON.stringify(specifier)} from ${input.importerId}: Vite did not resolve it to a captured module.`,
           );
@@ -601,6 +617,12 @@ async function collectBridgeModuleIds(
       }
       if (!input.capturedModules.has(resolved.id)) {
         if (isBarePackageSpecifier(specifier)) {
+          if (dynamicImportSpecifiers.has(specifier)) {
+            if (input.metrics) {
+              input.metrics.deadDynamicEdgeDropCount += 1;
+            }
+            return;
+          }
           throw new Error(
             `gccTsBundler() could not route package edge ${input.importerId} -> ${JSON.stringify(specifier)} -> ${resolved.id}: the resolved module was not captured by Vite.`,
           );

@@ -1,5 +1,7 @@
 import { getDefaultPersistentCacheRoot } from "../../shared/cache-store";
 import { hashContent } from "../../shared/hash";
+import { logInternalDetail } from "../../shared/timing";
+import { getErrorMessage } from "../../shared/validation";
 import { loadPlatformExternArchive } from "./platform-externs/archive";
 import {
   getPlatformExternIndex,
@@ -100,7 +102,11 @@ export async function generatePlatformExternsText(
       );
     }
     return text;
-  } catch {
+  } catch (error) {
+    logInternalDetail(
+      "closure:platform-externs",
+      `unavailable: ${getErrorMessage(error)}`,
+    );
     return null;
   }
 }
