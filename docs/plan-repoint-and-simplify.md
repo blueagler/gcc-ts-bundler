@@ -266,91 +266,163 @@ The product is an optimizer that:
 
 ## Part F — Best plan on a fully authored / typed graph
 
-Ignore the antd-pro negative fixture. The product question is: given a
-program whose types and module graph are mostly *ours*, what sequence
-actually produces E1 (ambiguation fires) without the known silent breaks.
+The previous F1–F5 sketch skipped the finding that makes every type
+pass measure **0** on a web component: our platform externs. This is
+the full sequence, every load-bearing result included.
 
-The official examples are the right *shape*, not one shape:
+### What "like examples" actually is
 
-| fixture | what it is | what it tests |
+| fixture | shape | what it can prove |
 |---|---|---|
-| `examples/lit-vite-official` | authored class + decorators (`MyElement extends LitElement`) | M3 / type-driven DCE and ambiguation |
-| `examples/jquery-vite-official` | authored TS + string-key protocol | M4 (`protocolHelpers.keyReadCallees`) |
-| `examples/react-vite-official` | authored TS whose types are JSX props | that "typed" ≠ nominal; keep `@record` |
-| a 200–500 KB class-heavy TS library (still missing) | the `typed-input.md` gate | whether types pay 3–10% raw / 1–5% gzip |
+| `examples/lit-vite-official` | `class MyElement extends LitElement` → `HTMLElement` | typed platform externs + M3 + ambiguation |
+| `examples/jquery-vite-official` | authored TS + `obj[k]` protocol | `goog.reflect.objectProperty` / `keyReadCallees` |
+| `examples/react-vite-official` | JSX prop types (structural) | "typed" ≠ nominal; keep `@record` |
+| `examples/svelte-vite-official` | compiled framework + small app | svelte-closure-sample sign: small graphs stay gzip-positive |
+| 200–500 KB class-heavy TS library | still missing | `typed-input.md` (ii) gate: 3–10% raw / 1–5% gzip |
 
-React/Svelte/Vue starters still ship a framework runtime. They are not
-"no vendor." They are "vendor is small and the authored surface is typed."
-Lit is the canary. A class-heavy library is the prize.
+Examples still ship a framework runtime. They are not zero-vendor. They
+are small enough that Closure ADVANCED has historically *won*
+(`svelte-closure-sample`: −25% raw / −11.7% gzip vs rollup+terser).
+antd-pro's +4% gzip is the other end of that curve, not the mean.
+Lit is the canary. The library is the prize.
+
+We already beat tsickle on a zero-dep TS fixture (1,748/820 vs
+1,756/825). Do not port tsickle. The emitter covers ~80% of its
+catalog. The gap is delivery, not emission (`typed-input.md` §5).
 
 ### Sequence
 
-**F1 — Optimizing type lowering (M3). First. No driver.**
-Per declaration, whole-program:
-- every satisfier is a class we also annotate → `@interface` + `@implements`
+**F0 — Typed platform externs. First. Two to four days. One file.**
+`src/build/closure/platform-externs.ts` today emits `var HTMLElement;`.
+An untyped global invalidates every subclass, which disables every
+type-based pass on it. Same dead-field program, `extends HTMLElement`:
+
+| externs | typed? | raw | gzip |
+|---|---|---|---|
+| `--env BROWSER` | yes | **3,861** | **748** |
+| `var HTMLElement;` (ours) | yes | 13,046 | 3,787 |
+| `/** @constructor */ function HTMLElement(){}` | yes | **3,861** | **743** |
+| any of the above | no | 13,046 | ~3,790 |
+
+Typed input under our current externs is **byte-identical to untyped**.
+Declaring platform classes as `@constructor` recovers the entire
+BROWSER win and keeps the file small. Lit's `MyElement` is on this
+chain. **Without F0, F4 measures 0.** This was parked as Phase 6
+("decide later"). On the authored path it is the prerequisite
+`typed-input.md` named item 0, "worth doing regardless."
+
+Hang referenced properties on `X.prototype`, not `Object.prototype`.
+externs-v3: **9.2% gzip** of a zero-dep TS fixture was pinned by
+`label`/`value`/`name`/`width`/… that the program never shares with
+the environment. The slice recovered 2 of those 76 bytes. Owner
+placement is the rest.
+
+**F1 — Stop quoting names we pinned ourselves.**
+On `examples/svelte-vite-spa`, 172 unrenamed names were extern
+declarations (unreachable by typing) and 30 were not — **1,148 B,
+1.58% raw**, almost all svelte-internal (`nodes`, `parent`, `next`,
+`teardown`) that *we quoted*. Type-informed hazard narrowing
+(`typed-input.md` item 1) is the lever that reaches those. Highest
+correctness risk; replacement before removal.
+
+**F2 — Do not swallow type errors on these fixtures.**
+`--hide_warnings_for=/` is why a blanket `@record`→`@interface`
+would ship a silent `JSC_TYPE_MISMATCH`. F4 is only sound if
+mismatches are visible. Keep the suppress on antd-pro; drop it on
+Lit / the library.
+
+**F3 — Cross-module types must not become `{?}`.**
+Five leftover `{?}` atoms vs tsickle's 0, all cross-module declared
+types or flattened enums (externs-v3 W2-2). Size ≤ 6 gzip. Value:
+without this, F4's whole-program satisfier set is lying at module
+boundaries. Fund as correctness.
+
+**F4 — Optimizing type lowering (M3).**
+Whole-program, per declaration:
+- every satisfier is a class we annotate → `@interface` + `@implements`
 - any object literal satisfies it → keep `@record`
-Lit's `MyElement` is already a class; `HTMLElementTagNameMap` and React
-`Props` stay `@record`. This is why `--use_types_for_optimization` measured
-0.08% on antd-pro: we emitted structural types. On a class graph it is the
-pass that enables per-type dead-field DCE (`typed-input.md` A2: −79% raw /
-−82% gzip on a constructed upper bound) and lets `AmbiguateProperties`
-see nominal receivers.
+- emit `@struct` on TS classes (audit `closure_metadata.rs` for
+  downgrades; ES classes already ambiguate)
+- emit casts `/** @type {T} */ (e)` — we do not today; brands need
+  this channel (`typed-input.md` catalog)
 
-*Kill:* if the authored types are mostly props-interfaces satisfied by
-object literals (the React example), M3's ceiling is still low. That kills
-M3 on *that* fixture, not on Lit. Do not blanket-rewrite `@record` →
-`@interface` (closed-directions #7, silent `JSC_TYPE_MISMATCH`).
+Lit's `MyElement` is a class. React `Props` and
+`HTMLElementTagNameMap` stay `@record`. Do not blanket-rewrite
+(closed-directions #7).
 
-*Gate metric:* property.map shows shared short names on the Lit build;
-two-axis delta vs `vite.pure.config.ts`. Also watch A1: type-driven
-inlining can *raise* gzip while cutting raw. Fail the change if gzip
-regresses.
+Dead same-named fields across classes already DCE on the tiny
+tsickle fixture *without* extra annotations. Do not fund "typed
+dead-field DCE" as if it were new (externs-v3 finding 2). What F4
+adds is *ambiguation* and A2-style per-type DCE when the same field
+name is live on one class and dead on another.
 
-**F2 — Brand leftover authored literals (M2). Same JSDoc channel.**
-After F1, remaining unambiguatable names are untyped / structural
-literals that do not escape and are not protocols. Stamp those with the
-proven `@constructor @struct` + `@type` cast. Coverage on an authored
-graph should not look like antd-pro's 18% long tail; if it does, stop.
+*Kill:* React-example types are props-interfaces. That kills F4 on
+*that* fixture, not on Lit.
+*Gate:* `--property_renaming_report`. Shared short names, or
+post-color `g:g` rows. Always include a brand+cast positive control
+in the same run (`structural-types` §5: QUIET and ctor-inlining
+have both faked negatives). Two-axis vs `vite.pure`. **Fail if gzip
+rises** — A1 inlined 320 methods, raw −5.4%, gzip **+54%**.
 
-*Kill:* coverage count on the *positive* fixture. Do not reuse the
-antd-pro count.
+**F5 — Brand leftover authored literals (M2).**
+`@constructor @struct` + `@type` cast, proven
+(`g,h,i` / `j,l,m` → both `g,h,i`). Needs F4's missing cast
+emission. Count coverage on *this* graph. antd-pro's 18% long tail
+is not this number.
 
-**F3 — Quote protocols, do not pin `Object.prototype` (M4).**
-The jquery example already has the pattern. React host props in the
-React example are a wire protocol: quote at the JSX boundary. On Lit /
-a TS library this set should be near-empty. Do not generate a 1,233-name
-pin file for a 400-line app.
+**F6 — Quote protocols at the site, never `Object.prototype`.**
+jquery `protocolHelpers.keyReadCallees` is the template.
+`goog.reflect.objectProperty` is the Closure form; neither we nor
+tsickle emit it today, and both miscompile `SETTINGS["retries"]`
+the same way `tsc` does not (externs-v3). React host props: quote
+at JSX. Lit / a TS library: this set should be near-empty. Do not
+emit a 1,233-name pin file for a 400-line app. Replacement before
+removal.
 
-*Hard constraint:* replacement before removal. Dead handlers, empty
-console.
+**F7 — `ES_MODULES` chunk output.** Independent of types. Spike on
+`examples/svelte-vite-spa`: **−7.6% raw / −3.3% gzip**, deletes
+`$gcc` prefix, IIFE wrapper, `currentScript` hack. GO, gated:
+`JSC_IMPORT_ASSIGN` is a hard fail if `CrossChunkCodeMotion` moves
+mutable state; keep `GLOBAL_NAMESPACE` as escape hatch. Do not sell
+as a bandwidth win on tiny lazy chunks (sometimes gzip-worse).
 
-**F4 — Resident driver (M1). After E1 is visible, not before.**
-argv + JSDoc is enough to *prove* F1/F2 on Lit. The driver is how you
-then (a) skip-rename the leftover `@record` names instead of minting
-unique shorts, (b) inject brands as a `CompilerPass` if JSDoc gets
-lossy, (c) cache `CHECKS` and stop paying 153 ms JVM/spawn. It is the
-foundation of the *optimizer product*. It is not the first experiment
-on a typed fixture.
+**F8 — Resident driver (M1), after E1 is visible.**
+argv + JSDoc proves F0–F5 on Lit. The driver then: skip-rename
+leftover `@record` names (`setPropertyRenaming` is Java-API only;
+CLI hard-errors under ADVANCED), `addCustomPass(BEFORE_CHECKS)` if
+JSDoc brands get lossy, cache `CHECKS` (multistage is
+byte-identical — closed for size, correct for incrementality),
+`--num_parallel_threads`, stop paying 153 ms JVM/spawn. Foundation
+of the product; not the first experiment on a typed fixture.
 
-**F5 — Consume the module graph, not the post-rollup bundle.**
-Only once authored module count is large enough that rollup has already
-destroyed the disjointness F2 needs. The five-file examples do not
-need this. A real TS library might.
+**F9 — Consume the module graph, not the post-rollup bundle.**
+Only once authored module count is large enough that rollup has
+already erased F5's proofs. Five-file starters do not need this.
 
-### What not to do on this path either
+**F10 — Catalog leftovers, measurement-driven, last.**
+`@abstract`, `@nocollapse`, `@const`, `@ExportDecoratedItems`.
+`typed-input.md` item 3, 3–5 days. Do not start here.
 
-SIMPLE, `@closureUnaware`, `AliasStrings`, multistage-for-size, a
-type-free reuse flag, gating on antd-pro, reporting one size axis.
-`typed-input.md` already closed "fix types on a vite-mode dep-dominated
-app" as a size project (0.3–2% raw). This path is (ii) in that
-document: all-TS, gated on the missing library spike.
+### What stays closed on this path too
+
+SIMPLE / `@closureUnaware` (forces the +9.9% mode). `AliasStrings`
+(gzip-hurts, no CLI). Multistage *for size*. A type-free reuse
+flag. Porting tsickle. Gating on antd-pro. One size axis. Inferred
+structural `@record` synthesis (we deleted it on purpose; a wrong
+type invalidates a whole type).
 
 ### Predicted outcome, stated so it can die
 
-On Lit + a class-heavy library: ambiguation count leaves 0; raw
-**3–10%**, gzip **1–5%** vs types-off, concentrated in shared field
-names across small classes. On the React example: near zero from F1,
-small win from F3 (fewer pins), F2 only on internal non-JSX objects.
-If the library spike lands at the A1 end (raw down, gzip up), gzip is
-still the ship metric and F1 must be narrowed to dead-field DCE
-without the inlining that blew entropy.
+- **Lit, after F0+F4:** ambiguation count leaves 0; types-on is no
+  longer byte-identical to types-off. Sign of svelte-closure-sample
+  (gzip-positive vs pure Vite), not antd-pro.
+- **Class-heavy library, after F0+F4:** raw **3–10%**, gzip **1–5%**
+  vs types-off, concentrated in shared field names. If the spike
+  lands at A1 (raw down, gzip up), narrow F4 to dead-field DCE and
+  drop the inlining that blows entropy.
+- **React example:** F4 ≈ 0, F6 (fewer pins) is the win, F5 only on
+  internal non-JSX objects.
+- **F0 alone on Lit:** the 4c delta (typed input starts working on
+  anything that extends a platform class). If F0 does not move Lit
+  vs types-off, stop — the rest of this path is standing on a
+  broken type graph.
