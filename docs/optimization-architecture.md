@@ -233,14 +233,109 @@ Structural simplification is part of the fix:
 
 - **Three overlapping optimizers.** rollup tree-shakes, Closure DCEs and renames,
   esbuild re-minifies. Each was chosen independently. Decide which owns which
-  invariant and remove the overlap; measuring `finalMinify: false` is the cheap
-  first probe.
+  invariant and remove the overlap. `finalMinify: false` measured byte-identical,
+  so the esbuild post-pass is currently either inert or overridden — one probe
+  separates those, and either answer means deleting something.
 - **Inert options** (§3). Honor or delete, and correct the `barriers.ts` advice.
 - **Raw-size reporting as a success signal.** The build reports raw sizes and
   every check stayed green through a 4.0% wire regression. Whatever else changes,
   the gate should be summed `gzip -9` against a no-plugin baseline.
 
-## 7. How to falsify this document
+## 7. The backdoor: Closure is a library and we are using it as a CLI
+
+Everything this research declared impossible was impossible **only through
+argv**. Verified by reading the pinned jar's class list and the `CompilerOptions`
+constant pool, not from docs:
+
+| extension point | status in the pinned jar | what it unlocks |
+|---|---|---|
+| `CompilerOptions.addCustomPass` | **present** | inject our own AST pass into the pipeline |
+| `CustomPassExecutionTime` | **present**: `BEFORE_CHECKS`, `BEFORE_OPTIMIZATIONS`, `BEFORE_OPTIMIZATION_LOOP`, `AFTER_OPTIMIZATION_LOOP` | a slot *before typechecking*, i.e. before colors exist |
+| `Compiler.setPassConfig` + `PassConfig` (`getChecks`/`getOptimizations`/`getFinalizations`/`getPassGraph`) | **present** | replace or reorder the entire pass pipeline |
+| `CompilerPass` interface (`process(externs, root)`) | **present** | trivial to implement |
+| `Compiler.initWithTypedAstFilesystem` | **present** | real per-library compilation; no `@Option` exists |
+| `setPropertyRenaming` / `setRenamingPolicy` | **present** | `OFF` *with* ADVANCED — the CLI hard-refuses this |
+| `setAmbiguateProperties` / `setDisambiguateProperties` | **present** | direct control, no CLI flag exists |
+| `setNameGenerator` | **present** | control the name alphabet and reuse |
+| `setAliasStringsMode` | **present** | no CLI flag exists |
+| `AmbiguateProperties.makePassForTesting` | **present** | run and inspect ambiguation out of band |
+
+`addCustomPass(BEFORE_CHECKS, …)` is the decisive one, and it dissolves the
+problem that §4's M2 and M3 were working around. Those moves tried to *persuade*
+Closure's type system to describe disjointness, by choosing between `@record` and
+`@interface` and by emitting JSDoc text. With a custom pass we do not have to
+persuade anything: we compute the disjointness facts ourselves from the module
+graph and write them onto the AST directly, before colors are built, in the
+representation the optimizer actually consumes.
+
+That reframes the thesis a third time. Not "TypeScript types make Closure
+optimize better" (false — TS types are structural). Not even "emit better JSDoc"
+(M3, still negotiating through a lossy channel). The real statement is:
+
+> **We can write the analysis Closure is missing and inject it.** The bundler
+> knows the module graph; Closure knows how to exploit disjointness. A custom
+> pass is the wire between them.
+
+And `setPassConfig` means we can stop paying for passes we cannot benefit from:
+drop `RenameProperties` while keeping DCE, inlining and cross-chunk motion, which
+is exactly the E2 end state that the CLI refuses to express.
+
+This does not come free. A driver couples us to compiler internals across
+versions, where argv is a stability contract. Mitigations: the compiler is
+already hard-pinned, `makePassForTesting` gives a cheap capability probe, and the
+blast radius is one process boundary we already own.
+
+## 8. Performance: we have been conflating two axes and gating on neither
+
+Every number in this corpus so far is **gzip**, which is transfer cost. That is
+not the only cost, and on this workload the two axes disagree:
+
+| axis | scales with | our result vs esbuild |
+|---|---|---|
+| network / transfer | **gzip** bytes | **+31.3 KB (+4.0%)** — we lose |
+| CPU: parse, compile, execute | **raw** bytes, plus work removed | **−79.4 KB (−3.3%)** — we win, before counting inlining and DCE |
+
+V8 parses and compiles the bytes it receives *after* decompression, so raw size
+drives main-thread cost while gzip drives the network. Today's verdict is
+therefore not "the plugin loses". It is: **we trade 31 KB of transfer for 79 KB
+of parse, plus whatever the inlining and dead-code removal save at runtime.** On
+a fast network and a slow phone that is a win; on a slow network it is a loss.
+
+Two consequences that change the roadmap:
+
+- **E2 (property renaming off) is worse than §5 implied.** It recovers
+  compression ratio but gives back the raw win, so it concedes the CPU axis to
+  buy near-parity on the network axis. It is a hedge, not a fix.
+- **E1 (ambiguation fires) is the only end state that wins both axes at once** —
+  fewer raw bytes *and* higher compressibility. That is a stronger argument for
+  it than the 57 KB gzip estimate alone, and it is the argument to lead with.
+
+The project currently reports raw sizes and gates on nothing. It should report
+both axes and gate on both, against a no-plugin baseline. `[INFERENCE]` Neither
+axis has been measured against a real device here; a parse/compile trace and a
+throttled-network TTI comparison are the missing experiments, and until they run
+the CPU-side claim is arithmetic, not evidence.
+
+### Build performance, and why it converges on the same move
+
+Measured on the pinned jar and the trial app:
+
+- **153 ms** JVM start + jar load, best of three, paid on **every spawn** because
+  the pipeline shells out to `java -jar` per job — and then hands a cold JIT a
+  ~17 s compile.
+- `--num_parallel_threads` is accepted and we do not pass it.
+- Multistage `save`/`restore` produces **byte-identical output**. We dismissed it
+  on the size axis, which was the wrong axis: byte-identical output is exactly
+  what makes it *correct* for incrementality. Cache the `CHECKS` segment and
+  rerun only `OPTIMIZATIONS`.
+
+All three want the same thing: a resident compiler process we control. Google
+ships a persistent worker for precisely this reason. So the driver move in §7 is
+not only the key to the optimization backdoors — it is also the build-time fix.
+**One architectural change, both axes, and it is the prerequisite for every other
+move in this document.**
+
+## 9. How to falsify this document
 
 - **§1's value inversion:** build any app where plugin overhead measured at
   SIMPLE is below the ADVANCED-minus-SIMPLE gzip delta. Then the model is
@@ -257,3 +352,12 @@ Structural simplification is part of the fix:
   level by name reuse alone. Ratio is not a pure function of name diversity.
   Treat 754 KB as an order of magnitude, and re-measure once any ambiguation
   actually fires.
+- **§7's backdoor:** implement the smallest possible `CompilerPass` that brands
+  two provably-disjoint object-literal shapes as nominal, inject it at
+  `BEFORE_CHECKS`, and check whether the two shapes' properties receive the same
+  short name. If ambiguation still refuses, the custom-pass route is dead and
+  only M3 remains.
+- **§8's CPU claim:** trace parse + compile time for both bundles on a throttled
+  mid-tier device. If the 79 KB raw difference does not move main-thread time
+  measurably, the two-axis argument collapses and gzip is the only metric that
+  matters — which would make E2 a real option again rather than a hedge.
