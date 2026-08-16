@@ -48,6 +48,19 @@ export async function collectJsGraphStats(input: {
   } satisfies JsGraphStats;
 }
 
+/**
+ * Measures both size axes, because they are not interchangeable and on real
+ * workloads they disagree in sign: the Ant Design Pro trial app (2,352
+ * modules, compiler v20260811) came out +31.3 KB gzip (+4.0%) while being
+ * -79.4 KB raw (-3.3%) against a no-plugin baseline.
+ *
+ * - `*GzipBytes` is transfer cost: the bytes that cross the wire.
+ * - `*RawBytes` is CPU cost: the bytes V8 parses and compiles after inflate.
+ *
+ * Reporting a single axis is how that 4.0% wire regression shipped with every
+ * check green, so both are load-bearing and callers must not collapse them
+ * into one number.
+ */
 export async function collectOutputChunkStats(input: {
   entryFilePath: string;
   lazyFilePaths: string[];

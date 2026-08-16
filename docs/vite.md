@@ -159,7 +159,11 @@ gccTsBundler({
 
 ### `compiler`
 
-Accepts core `BuildOptions` except options owned by Vite: `entries`, `languageOut`, `outDir`, `packages`, `projectRoot`, and `srcDir`.
+Accepts core `BuildOptions` except options owned by Vite: `entries`, `languageOut`, `outDir`, `packages`, `projectRoot`, `srcDir`, and `chunks.mode`.
+
+Do not set `compiler.chunks.mode`; the plugin always compiles with `"bundler-runtime"`. A caller-supplied value is a type error (`createCompilerOptions` overwrites it). Other `chunks` fields (`baseChunkName`, `outputType`, `publicPath`, `vendorChunk`, `manifestFile`) still apply.
+
+`compilationLevel` stays settable. Anything other than `"ADVANCED"` emits a one-time warning: `"SIMPLE"` measured +9.9% gzip against plain esbuild on a 2352-module React app, and the Vite path is tuned only for ADVANCED.
 
 Do not set `compiler.languageOut`; use Vite `build.target`. The plugin maps:
 

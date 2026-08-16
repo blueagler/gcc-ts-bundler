@@ -1,5 +1,5 @@
 import type { ExternsProtocolHelpers, GenerateExternsMode } from "../externs";
-import type { BuildOptions } from "../api/types";
+import type { BuildOptions, ChunkOptions } from "../api/types";
 
 export interface GccTsBundlerGeneratedExternsOptions {
   appendLines?: readonly string[] | undefined;
@@ -11,16 +11,39 @@ export interface GccTsBundlerGeneratedExternsOptions {
 }
 
 export interface GccTsBundlerVitePluginOptions {
+  /**
+   * Core `BuildOptions` minus the fields Vite owns.
+   *
+   * `compilationLevel` stays settable, but anything other than `"ADVANCED"`
+   * warns: `"SIMPLE"` measured +9.9% gzip against plain esbuild on a
+   * 2352-module React app, and `"WHITESPACE_ONLY"` is worse again.
+   *
+   * `externs` is deliberately still accepted. `createCompilerOptions` does
+   * replace the field, but with the `renameBarriers` list that
+   * `resolveCompilerExterns` builds *from* these paths — `src/vite/externs.ts`
+   * resolves each against `projectRoot` and unions it with the generated
+   * extern file — so they do reach Closure. This is a different field from the
+   * plugin-level `externs.generate` below.
+   */
   compiler?:
-    | Omit<
+    | (Omit<
         BuildOptions,
+        | "chunks"
         | "entries"
         | "languageOut"
         | "outDir"
         | "packages"
         | "projectRoot"
         | "srcDir"
-      >
+      > & {
+        /**
+         * Chunk options except `mode`, which the plugin owns:
+         * `createCompilerOptions` hardcodes `mode: "bundler-runtime"`, so a
+         * caller-supplied value was overwritten before any reader saw it and
+         * measured byte-identical. It is a type error rather than a no-op.
+         */
+        chunks?: Omit<ChunkOptions, "mode"> | undefined;
+      })
     | undefined;
   runtime?:
     | {

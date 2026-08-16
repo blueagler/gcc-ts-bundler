@@ -424,12 +424,17 @@ async function printSizeReport(stage0, stage1) {
   const stage0Entries = await shippedJavaScriptEntries(stage0);
   const stage1Entries = await shippedJavaScriptEntries(stage1);
   const names = [...new Set([...stage0Entries, ...stage1Entries])].sort();
-  console.log("Self-build size report (raw/gzip bytes):");
+  // Raw is parse/compile CPU; gzip -9 is transfer. On the trial app they
+  // disagree in sign (+4.0% gzip / -3.3% raw), so a raw-only win is not a
+  // wire win.
+  console.log(
+    "Self-build size report (raw = parse/compile CPU bytes; gzip -9 = transfer bytes):",
+  );
   for (const relativePath of names) {
     const before = await sizes(path.join(stage0, relativePath));
     const after = await sizes(path.join(stage1, relativePath));
     console.log(
-      `${relativePath}: ${before.raw}/${before.gzip} -> ${after.raw}/${after.gzip}`,
+      `${relativePath}: raw ${before.raw} / gzip ${before.gzip} -> raw ${after.raw} / gzip ${after.gzip}`,
     );
   }
 }

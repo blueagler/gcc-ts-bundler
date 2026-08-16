@@ -19,6 +19,23 @@ export const INTERNAL_VITE_AUTHORED_FILES_FILE =
 export const VITE_LANGUAGE_OUT_ERROR =
   "gccTsBundler() does not accept compiler.languageOut. Set Vite build.target instead.";
 
+let warnedNonAdvancedCompilationLevel = false;
+
+function warnIfNonAdvancedCompilationLevel(
+  compilationLevel: BuildOptions["compilationLevel"],
+) {
+  const resolved = compilationLevel ?? DEFAULT_BUILD_OPTIONS.compilationLevel;
+  if (resolved === "ADVANCED" || warnedNonAdvancedCompilationLevel) {
+    return;
+  }
+  warnedNonAdvancedCompilationLevel = true;
+  // SIMPLE measured +9.9% gzip vs esbuild on a 2352-module React app;
+  // WHITESPACE_ONLY is worse. The Vite path is tuned only for ADVANCED.
+  console.warn(
+    `gcc-ts-bundler: compiler.compilationLevel "${resolved}" is not "ADVANCED". SIMPLE measured +9.9% gzip on a 2352-module React app versus plain esbuild; WHITESPACE_ONLY is worse. ADVANCED is the only level the Vite path is tuned for.`,
+  );
+}
+
 export function applyViteBuildGuards(userConfig: UserConfig): UserConfig {
   if (userConfig.build?.ssr) {
     throw new Error("gccTsBundler() does not support Vite SSR builds.");
@@ -96,6 +113,8 @@ export function createCompilerOptions(input: {
 }): ViteCompilerOptions {
   assertNoViteLanguageOut(input.options);
   const compiler = { ...(input.options.compiler ?? {}) };
+  warnIfNonAdvancedCompilationLevel(compiler.compilationLevel);
+
   const compilerChunks = compiler.chunks ?? {};
 
   return {

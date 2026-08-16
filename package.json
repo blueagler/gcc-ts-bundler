@@ -88,6 +88,7 @@
     "verify:package": "node ./scripts/check-install-sanity.mjs && node ./scripts/verify-package.mjs",
     "verify:examples": "node ./scripts/verify-example-dists.mjs",
     "verify:selfbuild": "node ./scripts/build-self.mjs",
+    "size-gate": "bun ./scripts/size-gate.mjs",
     "prepublishOnly": "bun run verify:package",
     "publish:npm": "node ./scripts/publish-npm.mjs"
   },

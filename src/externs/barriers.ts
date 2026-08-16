@@ -191,8 +191,13 @@ export function formatBarrierWarning(
     `disambiguation candidates for all owner types, not just the declaring ` +
     `package.` +
     (packages ? ` Top declaration packages: ${packages}.` : "") +
-    ` Narrow the module list, set includeDependencies: false, or move to ` +
-    `mode: "runtime-aware".`
+    ` Measured cost on a 2352-module React app: 10.7 KB gzip and 75.8 KB raw ` +
+    `for 1233 pins, and zero of ~8400 properties were ambiguated. Narrowing the ` +
+    `module list or setting includeDependencies: false does not help — both were ` +
+    `byte-identical there, because pins come from proven hazard sites (runtime ` +
+    `string key reads), not from the module list. The lever is fewer hazard ` +
+    `sites: quote the key at the site that reads it dynamically so the name ` +
+    `stays renameable everywhere else.`
   );
 }
 
