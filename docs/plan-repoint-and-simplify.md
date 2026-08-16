@@ -263,3 +263,94 @@ The product is an optimizer that:
 - is judged on at least two fixtures: this negative one, and an
   authored-dominant class-based graph. One fixture is how we accidentally
   killed the thesis.
+
+## Part F — Best plan on a fully authored / typed graph
+
+Ignore the antd-pro negative fixture. The product question is: given a
+program whose types and module graph are mostly *ours*, what sequence
+actually produces E1 (ambiguation fires) without the known silent breaks.
+
+The official examples are the right *shape*, not one shape:
+
+| fixture | what it is | what it tests |
+|---|---|---|
+| `examples/lit-vite-official` | authored class + decorators (`MyElement extends LitElement`) | M3 / type-driven DCE and ambiguation |
+| `examples/jquery-vite-official` | authored TS + string-key protocol | M4 (`protocolHelpers.keyReadCallees`) |
+| `examples/react-vite-official` | authored TS whose types are JSX props | that "typed" ≠ nominal; keep `@record` |
+| a 200–500 KB class-heavy TS library (still missing) | the `typed-input.md` gate | whether types pay 3–10% raw / 1–5% gzip |
+
+React/Svelte/Vue starters still ship a framework runtime. They are not
+"no vendor." They are "vendor is small and the authored surface is typed."
+Lit is the canary. A class-heavy library is the prize.
+
+### Sequence
+
+**F1 — Optimizing type lowering (M3). First. No driver.**
+Per declaration, whole-program:
+- every satisfier is a class we also annotate → `@interface` + `@implements`
+- any object literal satisfies it → keep `@record`
+Lit's `MyElement` is already a class; `HTMLElementTagNameMap` and React
+`Props` stay `@record`. This is why `--use_types_for_optimization` measured
+0.08% on antd-pro: we emitted structural types. On a class graph it is the
+pass that enables per-type dead-field DCE (`typed-input.md` A2: −79% raw /
+−82% gzip on a constructed upper bound) and lets `AmbiguateProperties`
+see nominal receivers.
+
+*Kill:* if the authored types are mostly props-interfaces satisfied by
+object literals (the React example), M3's ceiling is still low. That kills
+M3 on *that* fixture, not on Lit. Do not blanket-rewrite `@record` →
+`@interface` (closed-directions #7, silent `JSC_TYPE_MISMATCH`).
+
+*Gate metric:* property.map shows shared short names on the Lit build;
+two-axis delta vs `vite.pure.config.ts`. Also watch A1: type-driven
+inlining can *raise* gzip while cutting raw. Fail the change if gzip
+regresses.
+
+**F2 — Brand leftover authored literals (M2). Same JSDoc channel.**
+After F1, remaining unambiguatable names are untyped / structural
+literals that do not escape and are not protocols. Stamp those with the
+proven `@constructor @struct` + `@type` cast. Coverage on an authored
+graph should not look like antd-pro's 18% long tail; if it does, stop.
+
+*Kill:* coverage count on the *positive* fixture. Do not reuse the
+antd-pro count.
+
+**F3 — Quote protocols, do not pin `Object.prototype` (M4).**
+The jquery example already has the pattern. React host props in the
+React example are a wire protocol: quote at the JSX boundary. On Lit /
+a TS library this set should be near-empty. Do not generate a 1,233-name
+pin file for a 400-line app.
+
+*Hard constraint:* replacement before removal. Dead handlers, empty
+console.
+
+**F4 — Resident driver (M1). After E1 is visible, not before.**
+argv + JSDoc is enough to *prove* F1/F2 on Lit. The driver is how you
+then (a) skip-rename the leftover `@record` names instead of minting
+unique shorts, (b) inject brands as a `CompilerPass` if JSDoc gets
+lossy, (c) cache `CHECKS` and stop paying 153 ms JVM/spawn. It is the
+foundation of the *optimizer product*. It is not the first experiment
+on a typed fixture.
+
+**F5 — Consume the module graph, not the post-rollup bundle.**
+Only once authored module count is large enough that rollup has already
+destroyed the disjointness F2 needs. The five-file examples do not
+need this. A real TS library might.
+
+### What not to do on this path either
+
+SIMPLE, `@closureUnaware`, `AliasStrings`, multistage-for-size, a
+type-free reuse flag, gating on antd-pro, reporting one size axis.
+`typed-input.md` already closed "fix types on a vite-mode dep-dominated
+app" as a size project (0.3–2% raw). This path is (ii) in that
+document: all-TS, gated on the missing library spike.
+
+### Predicted outcome, stated so it can die
+
+On Lit + a class-heavy library: ambiguation count leaves 0; raw
+**3–10%**, gzip **1–5%** vs types-off, concentrated in shared field
+names across small classes. On the React example: near zero from F1,
+small win from F3 (fewer pins), F2 only on internal non-JSX objects.
+If the library spike lands at the A1 end (raw down, gzip up), gzip is
+still the ship metric and F1 must be narrowed to dead-field DCE
+without the inlining that blew entropy.
