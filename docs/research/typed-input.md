@@ -25,6 +25,15 @@ output by 70% under real browser externs and by **0%** under our
 `--env CUSTOM` flat externs. Fixing that is cheap (four days, one file) and is
 a hard prerequisite for any tsickle work.
 
+A third headline fact, established later in
+`structural-types-defeat-renaming.md`: **we emit `@record` for TypeScript
+interfaces, and `@record` is structural, so it can never be ambiguated.** That
+is a second hard prerequisite alongside typed externs, and it is why the
+`--use_types_for_optimization` A/B stays flat (0.03% here, 0.08% on a
+2352-module app) even where type coverage is good. Scenario (ii) below is the
+gated-GO case partly for this reason: class-based, mostly-authored TypeScript is
+the only shape where the property optimizer can act on our annotations.
+
 ---
 
 ## 1. What tsickle emits, and what actually matters
