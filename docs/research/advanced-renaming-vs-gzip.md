@@ -3,201 +3,292 @@
 Research spike. No source changed by this document. Measured on a real
 production app, not a generator: an Ant Design Pro admin (antd 6 +
 `@ant-design/pro-components` + `@tanstack/react-start`), 2,352 modules,
-7.2 MB of JS reaching the plugin. Compiler is the pinned
-`google-closure-compiler-java@20260811.0.0` (`--version` → `v20260811`).
+7.1 MB of JS reaching the plugin, of which **94.1% is dependency code**
+(6,662 KB across 2,246 files) against 418 KB of authored source in 238 files.
+Compiler is the pinned `google-closure-compiler-java@20260811.0.0`
+(`--version` → `v20260811`; upstream tag `v20260811`, commit `c095b038`).
 `raw` = bytes of the emitted client chunks, `gzip` = `gzip -9`, both summed
-over all 52 chunks of `dist/client/assets`.
+over all 52 chunks of `client/assets`.
 
-This extends `typed-input.md`, which measured the same effect at 0.03% on a
-svelte SPA and predicted "gzip may *regress*". It does, and this is the
-mechanism and the number.
+> **Correction notice.** An earlier revision of this document concluded that
+> property renaming *caused* the gzip regression and recommended tiering
+> vendor code to SIMPLE. A subsequent SIMPLE build of the same app refuted
+> that: SIMPLE is **worse** than ADVANCED by 46 KB gzip. The renaming
+> mechanism described below is real, but it is not the cause of the loss
+> against pure Vite. The recommendation has been replaced.
 
 ---
 
 ## TL;DR verdict
 
-| Question | Answer |
-|---|---|
-| Does ADVANCED shrink raw bytes on a dependency-dominated app? | Yes, **−3.3%** |
-| Does it shrink what ships over the wire? | **No, gzip +4.0%** |
-| Do type-based passes contribute? | **0.08%.** Confirms `typed-input.md` at 30× scale |
-| Is a missing CLI flag responsible? | No. All the relevant passes are already on |
-| What would fix it? | Stop ADVANCED-renaming untyped vendor code — Google's own documented answer for this class of library |
-
-The headline: **property renaming trades token repetition for token length,
-and gzip charges more for the repetition than it refunds for the length.**
-
-| variant | raw | gzip | ratio | distinct ≤2ch names | avg reuse |
+| variant | raw | gzip | ratio | distinct ≤2ch | avg reuse |
 |---|---|---|---|---|---|
-| pure Vite | 2393.4 KB | **780.4 KB** | 3.07 | 349 | 16.0 |
-| ADVANCED, types on | 2314.0 KB | 811.7 KB | 2.85 | **2333** | **7.6** |
-| ADVANCED, types off | 2316.2 KB | 812.3 KB | 2.85 | 2333 | 7.5 |
+| pure Vite (esbuild) | 2393.4 KB | **780.4 KB** | 3.07 | 349 | 16.0 |
+| plugin, SIMPLE | 2645.4 KB | 857.7 KB | 3.08 | 307 | 19.8 |
+| plugin, ADVANCED | 2314.0 KB | 811.7 KB | 2.85 | **2333** | **7.6** |
+| plugin, ADVANCED, types off | 2316.2 KB | 812.3 KB | 2.85 | 2333 | 7.5 |
 
-Renaming minted ~2,000 additional one- and two-character property names at
-*half* the reuse rate. Compression ratio fell 3.07 → 2.85. The 79 KB of raw
-savings became a 31 KB gzip loss.
+Three facts, in the order that matters:
+
+1. **Pure Vite wins the wire.** Every plugin configuration ships more gzipped
+   bytes than esbuild alone on this app.
+2. **Renaming is not the culprit; it is the mitigation.** ADVANCED beats
+   SIMPLE by 12.5% raw and **5.4% gzip (−46.0 KB)**. Same plugin, same graph,
+   same externs, same DCE — the only difference is property renaming and the
+   type-based passes.
+3. **The loss is pipeline overhead.** At SIMPLE, i.e. with no property
+   renaming at all, the plugin emits **+252 KB raw / +77.3 KB gzip** more than
+   pure Vite. ADVANCED's renaming claws back 331 KB raw and 46 KB gzip of
+   that, but cannot close the remaining 31.3 KB.
+
+So the honest accounting against pure Vite's 780.4 KB gzip is:
+
+```
++77.3 KB   plugin pipeline overhead (measured at SIMPLE)
+-46.0 KB   recovered by ADVANCED renaming + type passes
+---------
++31.3 KB   net regression  (+4.01%)
+```
+
+Renaming does genuinely damage compressibility — compression ratio falls
+3.08 → 2.85 and average reuse per short name falls 19.8 → 7.6 while distinct
+≤2-character names rise 307 → 2333. It is simply that the raw bytes it
+removes outweigh the entropy it adds. **Both things are true at once, and the
+earlier revision reported only the first.**
+
+Type-based passes contribute nothing: `--use_types_for_optimization=false`
+moves gzip by **0.08%**, confirming `typed-input.md`'s 0.03% at 30× scale.
 
 ---
 
-## 1. The flags that look missing are implicit
-
-`--help` on the pinned jar lists none of `--disambiguate_properties`,
-`--ambiguate_properties`, `--cross_chunk_code_motion`,
-`--cross_chunk_method_motion`. Passing any of them is rejected outright:
-`"--ambiguate_properties" is not a valid option`. They are not absent
-features; they have no CLI surface.
-
-- `CompilationLevel.applyFullCompilationOptions` sets
-  `setCrossChunkCodeMotion(true)` and `setCrossChunkMethodMotion(true)`
-  for ADVANCED.
-- `CompilationLevel.setTypeBasedOptimizationOptions` sets
-  `setDisambiguateProperties(true)`, `setAmbiguateProperties(true)`,
-  `setInlineProperties(true)`, `setUseTypesForLocalOptimization(true)`.
-- `CommandLineRunner` reaches the latter through
-  `--use_types_for_optimization` — **singular**, `default: true`. The plural
-  `--use_types_for_optimizations` never existed.
-
-We never pass it, so we inherit the default `true`. **There is no flag fix
-available here, and no flag was being missed.** This is an implicit contract
-with the pinned compiler and is worth stating in the job builder.
-
-## 2. AmbiguateProperties is the gzip pass
+## 1. Why renaming cannot do better: ambiguation never fires
 
 `RenameProperties` and `AmbiguateProperties` pull in opposite directions:
 
-- `RenameProperties.generateNames` walks properties by frequency and assigns
-  each its **own** next name via `nameGenerator.generateNextName()`, then
-  reserves it so nothing else may take it. Minimal raw bytes, maximal
-  alphabet.
-- `AmbiguateProperties` deliberately does the reverse. Its class comment:
-  *"Renames unrelated properties to the same name … This allows better
-  compression as more properties can be given short names."* It colors a
-  property graph and gives every property of one color the same name.
+- `RenameProperties.generateNames` (`RenameProperties.java:307-320`) walks
+  properties by descending frequency, gives each `nameGenerator.generateNextName()`,
+  then `reservedNames.add(p.newName)`. Every property gets its **own** name.
+  `DefaultNameGenerator.generateNextName` is a sequential mint that never
+  re-emits a name.
+- `AmbiguateProperties` exists to undo exactly that. Class comment
+  (`AmbiguateProperties.java:62-66`): *"Renames unrelated properties to the
+  same name … This allows better compression as more properties can be given
+  short names."*
 
 Controlled probe on the pinned jar — identical source, one difference:
 
 | receivers | A's names | B's names | shared |
 |---|---|---|---|
 | `@constructor @struct` on both | `g,h,i` | `g,h,i` | **yes** |
-| no annotations | `g,h,i` | `j,l,m` | no |
+| unannotated | `g,h,i` | `j,l,m` | no |
 
-Closure's own source acknowledges the tension: `AliasStrings.java` notes that
-turning that pass on "usually hurts code size after gzip", for exactly this
-reason.
+Ambiguation is scheduled (`DefaultPassConfig.java:616-619`, gated on
+`shouldAmbiguateProperties() && propertyRenaming == ALL_UNQUOTED &&
+isTypecheckingEnabled()`), and ADVANCED plus the default
+`--use_types_for_optimization` already sets it. It does not fire because:
 
-**Consequence: ambiguation is the only mechanism in the compiler that trades
-raw bytes for compressibility. If it does not fire, renaming is a wire
-regression on any codebase whose names were already repetitive.**
-
-## 3. Why it does not fire here: the poison rule is structural
-
-`typed-input.md` records the rule — one unknown `x.prop` pins `prop`
-program-wide. The precise sites:
-
-- `AmbiguateProperties.Property.addRelatedColor`: if
-  `color.isInvalidating() || color.getPropertiesKeepOriginalName()`, it sets
-  `skipAmbiguating = true` for that **property name, globally**.
-- `DisambiguateProperties.invalidateBasedOnType`: an invalidating receiver
-  invalidates *every* property associated with it.
-- `InvalidatingTypes.isInvalidating` is true for `null`, unknown, empty, any
-  union containing an invalidating member, the OBJECT/FUNCTION natives — and
-  `isAmbiguousOrStructuralType`, whose fall-through is `return true`.
-
-That last one is the decisive detail for this workload, and it is stronger
-than "we lack annotations": **object literals are structurally typed, so they
-are invalidating.** Upstream test
-`testSimplePropInObjectLiteralPreventsPropertyRenaming` asserts
-`const obj = {m: 0}; class C {m() {}}` compiles unchanged.
+- `AmbiguateProperties.Property.addRelatedColor` sets `skipAmbiguating = true`
+  for that **property name, program-wide**, when any related color
+  `isInvalidating()` or `getPropertiesKeepOriginalName()`.
+- `InvalidatingTypes.isAmbiguousOrStructuralType` falls through to
+  `return true`, so **object literals are invalidating**. Upstream pins this:
+  `AmbiguatePropertiesTest.testSimplePropInObjectLiteralPreventsPropertyRenaming`
+  asserts `const obj = {m: 0}; class C {m() {}}` compiles unchanged.
 
 antd, `@ant-design/cssinjs` and pro-components are object-literal and
-theme-token soup. Every `{className, style, children, type, …}` is an
-invalidating structural type, and each key it mentions is then unambiguatable
-**on nominal classes too**. The candidate set is empty before type coverage
-is even considered.
+theme-token soup, so the candidate set is empty before type coverage is even
+considered. Raising app-side type coverage cannot fix this, and the 0.08% A/B
+proves it empirically.
 
-This is why raising app-side type coverage cannot fix it, and the A/B proves
-it: turning every type-based pass off changes gzip by **0.08%**.
+**There is no type-free path to property-name reuse anywhere in the
+compiler.** Searched the whole `jscomp` tree, the `@Option` list, and
+`CompilerOptions` setters. The only type-free reuse is for *variables*:
+`RenameVars` `LOCAL_VAR_PREFIX` (`RenameVars.java:188-191`) and
+`CoalesceVariableNames`, whose comment says "better gzip compression"
+(`CoalesceVariableNames.java:50-63`). Both are already on. Neither touches
+properties.
 
-## 4. What the numbers do and do not show
+## 2. The hidden CLI surface
 
-Measured with `--use_types_for_optimization=false` injected through
-`GCC_CLOSURE_EXTRA_FLAGS`, everything else identical:
+`--help` advertises 67 flags. Parsing `CONSTANT_Utf8` entries out of the 22
+`CommandLineRunner*` class constant pools in the pinned jar yields 105 flag
+literals. These 41 ship but are unadvertised:
 
 ```
-types OFF vs ON:  raw +0.10%   gzip +0.08%   (+0.6 KB of 812 KB)
+--allow_dynamic_import --apply_input_source_maps
+--assume_no_prototype_method_enumeration --assume_static_inheritance_is_not_used
+--browser_resolver_prefix_replacements --chrome_pass --continue_after_errors
+--create_renaming_reports --dev_mode --expected_diagnostics
+--filename_to_restore_from --filename_to_save_to --flagfile --help_markdown
+--ijs --incremental_check_mode --instrument_for_coverage_option
+--instrument_mapping_report --j2cl_pass --jscomp_dev_mode --jszip
+--logging_level --module --num_parallel_threads --parse_inline_source_maps
+--preserve_type_annotations --print_ast --print_source_after_each_pass
+--print_tree --print_tree_json --production_instrumentation_array_name
+--property_map_input_file --remove_j2cl_asserts --renaming
+--segment_of_compilation_to_run --source_map_format --summary_detail_level
+--tracer_mode --translations_file --translations_project
+--variable_map_input_file
 ```
 
-Two readings retracted during this spike, recorded so they are not repeated:
+Presence in the pool proves the literal ships; it does **not** prove the flag
+is wired. `--ijs` is the counter-example: the string exists only as
+`JsSourceType.IJS("ijs")` and in `IjsErrors`, and the jar rejects `--ijs` as
+not a valid option. Always probe acceptance separately.
 
-- **Per-chunk deltas are unsound here.** `provider` appears to grow 107 KB
-  raw, but chunk *composition* differs between the two builds — a marker
-  token check (`antCls` 18→17, `motionDurationSlow` 10→9, `colorPrimaryBg`
-  9→9) shows modules moved rather than duplicated. `CrossChunkCodeMotion`
-  moves declarations to the deepest common ancestor of their references, so
-  a shared vendor bucket is exactly where code accumulates. Only whole-app
-  totals are comparable.
-- **No downleveling is occurring.** `esnext` maps to `ECMASCRIPT_NEXT`
-  (`closure_capabilities.rs:197`), and `class` / `async` / `await` / spread
-  all survive. An early reading blamed private-field lowering; it was wrong.
+Two of these are already on our production argv when the persistent cache has
+prior maps: `--property_map_input_file` and `--variable_map_input_file`
+(`src/build/closure/run-closure.ts:559-588`).
 
-The 1,233 `Object.prototype.X` rename barriers we generate cost **73.8 KB
-raw** across 17,703 references (`current` ×1641, `value` ×658,
-`children` ×301). Note the direction carefully: those names are long *and*
-heavily repeated, which is gzip-friendly. Narrowing the barrier set is a raw
-win whose gzip effect is **not** obviously positive, because every un-pinned
-name becomes another unique short token unless ambiguation can color it.
+Probed and notable:
 
-## 5. What Google does with libraries like this
+- **`--renaming=false` cannot rescue ADVANCED.** `CommandLineRunner.java:1708-1713`
+  hard-errors: `renaming cannot be disabled when ADVANCED_OPTIMIZATIONS is
+  used`. Accepted under SIMPLE only. There is no ADVANCED-minus-renaming mode.
+- `--assume_static_inheritance_is_not_used` already defaults **true**, i.e. we
+  already inherit the aggressive setting. For React/antd, static inheritance
+  *is* used — this is a correctness risk, not a size lever.
+- `--assume_no_prototype_method_enumeration` (default false) maps to
+  `setCrossChunkCodeMotionNoStubMethods`. Worth one A/B; it was a no-op on toy
+  input because ADVANCED inlined the methods.
+- `--rename_prefix_namespace` is rejected outright with
+  `--chunk_output_type ES_MODULES`, so `RescopeGlobalSymbols` is unreachable
+  for us.
+- `AliasStrings` has no CLI at this tag (`--alias_all_strings` and
+  `--alias_strings` both rejected) and would hurt anyway: its own source says
+  *"gzip actually prefers that strings are not aliased"* and the class comment
+  says enabling it *"usually hurts code size after gzip"*.
 
-The FAQ entry *"I want to use Advanced Optimizations, but { jQuery, YUI,
-Underscore, Prototype, JS Library Foo } does not work"* prescribes splitting
-into three pieces: the library code, **an externs file that is the library's
-API contract**, and the application code — and not running ADVANCED renaming
-over the library. `rules_closure`'s ADVANCED warning is the same rule stated
-from the other side: dot access gets renamed, quoted access is the escape
-hatch.
+## 3. Multistage exists in this jar, and is a compile-time feature only
 
-Google's own JS is fully typed and nominal, which is what makes ADVANCED pay
-for them. `closure_js_binary` emits **one** binary; `--chunk` does not appear
-in the public Bazel rules at all. Accepting a bundler's 52-way vendor
-partition and asking ADVANCED to pay on untyped vendor code is not a
-configuration they run.
+The earlier spike reported that Google's TypedAST multistage pipeline is not
+exposed. That was half wrong. Hidden but fully wired:
+
+- `--filename_to_save_to`, `--filename_to_restore_from`,
+  `--segment_of_compilation_to_run` (`CommandLineRunner.java:262-279`) drive a
+  three-segment `CHECKS → OPTIMIZATIONS → FINALIZATIONS` dance via
+  `saveState`/`restoreState` (`Compiler.java:4279-4308`, `4317-4473`).
+- End-to-end probe: stage 1 saved 511,605 bytes, stage 2 saved 550,469 bytes,
+  and the final JS was **byte-identical to a one-shot ADVANCED run**. Gzip
+  delta: **0**. Restore requires identical `--js` paths; a new path fails with
+  `IllegalStateException: Missing …`.
+- `--typed_ast_output_file__INTENRNAL_USE_ONLY` (the typo is load-bearing)
+  emits a gzipped `TypedAst.List`. The **consume** side,
+  `setTypedAstListInputFilename` / `initWithTypedAstFilesystem`, has no
+  `@Option` at all — it is Java-API only, called by
+  `bazel/typedast.bzl` and `TypedAstIntegrationTest`. That is precisely why
+  Google's library-shard ADVANCED is unreachable from an argv pipeline.
+- `--incremental_check_mode=GENERATE_IJS` works and runs
+  `ConvertToTypedInterface`, which *"shrink[s] the AST, preserving only
+  typing, not behavior"* — function bodies become empty. It is a type-summary
+  generator, not a library, so it cannot replace a vendor implementation.
+
+Multistage is incrementality, not size. Correctly identified as a dead end for
+the wire number, now with the mechanism.
+
+## 4. What Google actually does with untyped third-party code
+
+The public FAQ answer — library + externs contract + app, don't ADVANCED-rename
+the library — is now mechanized in the compiler itself, and this is the single
+most relevant finding for this plugin:
+
+**`@closureUnaware`.** A `@fileoverview @closureUnaware` annotation marks a
+file whose AST is compiled in a *nested* compilation.
+`ClosureUnawareOptions.setSafeOptimizationAssumptions` forces
+`CompilationLevel.SIMPLE_OPTIMIZATIONS`, `setAssumePropertiesAreStaticallyAnalyzable(false)`,
+and the default (non-Closure) coding convention. Its stated purpose is *"to
+protect arbitrary 3P code from breaking under advanced JSCompiler
+optimizations."* `PerFileClosureUnawareMode` is `{UNSPECIFIED, SIMPLE,
+WHITESPACE}`, where `WHITESPACE` skips even the nested optimization and only
+strips whitespace and comments.
+
+Public `rules_closure` 0.15.0 has no equivalent. Its 3P doors — `lenient`,
+`suppress`, `no_closure_library`, `legacy=true` — only quiet *diagnostics*;
+sources still go through ADVANCED and their properties are still renamed. So
+"Google runs ADVANCED over everything" is stale relative to this compiler tag.
+
+Also confirmed, all dead ends for renaming quality: `closure_js_library`'s
+`.i.js` is consumed only by parent *library checks*, never by the binary
+(`closure_js_binary.bzl` lists `js.srcs` and `js.infos`, not `ijs_files`), so
+every ADVANCED binary re-parses every original source; the Bazel persistent
+worker is JVM warmth with an `InputCache` that no program wires up;
+`--conformance_configs`, `--isolation_mode=IIFE`, `--browser_featureset_year`,
+`--inject_libraries`, `--rewrite_polyfills`, `@closurePrimitive` and
+`goog.requireType` change nothing about renaming on a vendor-dominated ES-module
+app.
+
+## 5. Readings retracted during this work
+
+Recorded so they are not rediscovered:
+
+- **Renaming is not the cause of the wire regression.** Retracted on the
+  SIMPLE measurement. See the correction notice.
+- **Per-chunk deltas are unsound.** `provider` appears to grow 107 KB raw, but
+  marker tokens (`antCls` 18→17, `motionDurationSlow` 10→9) show modules
+  *moved*, not duplicated. `CrossChunkCodeMotion` relocates declarations to a
+  common ancestor. Only whole-app totals are comparable.
+- **No downleveling occurs.** `esnext` → `ECMASCRIPT_NEXT`
+  (`closure_capabilities.rs:197`); `class`/`async`/`await`/spread all survive.
+- **Vite content-hashed filenames are not a content oracle here.** The plugin
+  rewrites chunk bodies after Vite has hashed them, so two builds at different
+  compilation levels share all 52 filenames while sharing zero bytes. Compare
+  digests, not names.
+- **A "+133 KB of string literals" reading was a bad regex** pairing quotes
+  inside minified code. A state-machine scan gave literals +32 KB and
+  non-literal code +72 KB.
 
 ## 6. Recommendation
 
-Ranked by evidence strength, not by appeal:
+Ranked by evidence strength.
 
-1. **Tier the compilation.** App code (typed TS, nominal classes) through
-   ADVANCED; untyped vendor code minified without property renaming, with an
-   externs contract at the boundary. This is the only intervention whose
-   measured locus matches the regression, and it is the documented answer for
-   this library class. It is an architectural change to the plugin's central
-   premise and should be measured on this app before being generalized.
-2. **Guard the wire number.** Gzip is already computed
-   (`src/shared/lifecycle-size.ts`, `scripts/build-self.mjs`) and Vite prints
-   it per chunk, and `README.md` tabulates plugin-versus-pure gzip for the
+1. **Target the 77 KB of pipeline overhead, not the renaming.** This is the
+   corrected priority and it is now the largest measured lever: at SIMPLE, with
+   renaming entirely absent, the plugin still ships 77.3 KB gzip more than
+   esbuild. That overhead is what makes the plugin unable to win on this class
+   of app. Attribution work is not done — the SIMPLE output carries 7,560
+   distinct long identifiers against ADVANCED's 3,804, plus 201 module-factory
+   registrations — so the next step is to decompose those 252 KB raw into
+   runtime preamble, module registration, and chunk-conversion costs before
+   choosing a fix.
+2. **Try `@closureUnaware` on vendor, but measure it; do not assume it wins.**
+   It is the documented and now mechanized answer for untyped 3P, and it is
+   reachable by emitting a `@fileoverview` annotation on materialized
+   dependency files. But note the tension this spike created: nested
+   `SIMPLE` is the mode `@closureUnaware` forces, and SIMPLE measured *worse*
+   than ADVANCED here. `WHITESPACE` mode plus the existing esbuild
+   `finalMinify` pass is the more promising variant, because it lets esbuild —
+   which currently wins outright — do the minification of vendor while
+   ADVANCED still handles authored code. Expected value is genuinely unknown;
+   this is the one experiment worth running next.
+3. **Do not expect much from tiering by compilation level.** 94.1% of input is
+   dependency code, so ADVANCED can only ever apply to 5.9% of the graph. Any
+   scheme that keeps vendor out of ADVANCED is bounded above by roughly the
+   pure-Vite number, i.e. it removes a regression rather than delivering a win.
+4. **Stop looking for a flag.** No type-free property-name-reuse option exists;
+   `--renaming=false` is refused under ADVANCED; `AliasStrings` is unreachable
+   and would hurt; multistage is byte-identical; the gzip-aware machinery that
+   does exist (`CoalesceVariableNames`, `OptimizeLetAndConstPeephole`,
+   `RenameVars` same-length ordering, the `DefaultNameGenerator` alphabet,
+   `CompactCodePrinter` preferred newlines) is already on.
+5. **Guard the wire number.** Gzip is already computed
+   (`src/shared/lifecycle-size.ts`, `scripts/build-self.mjs`), Vite prints it
+   per chunk, and `README.md` tabulates plugin-versus-pure gzip for the
    examples. What is missing is a *gate*: nothing fails, or even warns, when
-   the plugin makes the shipped bytes larger than no plugin at all. On this
-   app it did, by 4.0%, and every automated check stayed green.
-3. **Keep the renaming maps.** `--property_map_input_file` /
-   `--variable_map_input_file` are for byte-stable names across deploys, so
-   unchanged chunks stay cache-valid. `RenameVars.reusePreviouslyUsedVariableMap`
-   pins prior assignments; that is repeat-visit value and is already wired
-   correctly. It is not a cold-load lever and should not be sold as one.
-4. **Do not pursue** TypedAST multistage or `--persistent_worker` for size;
-   neither exists in this jar and neither addresses the wire number. Type
-   coverage work (`typed-input.md` item 0, typed platform externs) remains
-   correct for *correctness* and for `Off`/`Split` mode, but this spike shows
-   it cannot recover the gzip regression on a vendor-dominated graph.
+   the plugin ships more bytes than no plugin at all. On this app it did, by
+   4.0%, and every automated check stayed green.
 
 ## 7. Measuring this in future
 
 - Type coverage: `--jscomp_warning=reportUnknownTypes` emits
-  `JSC_UNKNOWN_EXPR_TYPE`, and the compilation summary prints
-  `TypeCheck.getTypedPercent()` as `N% typed`.
-- Ambiguation success: a `--property_renaming_report` full of *original*
-  long names is evidence those names were skipped. After a successful
-  ambiguation the report shows post-color names (`g:g`).
-- Wire size: always compare summed `gzip -9` over all emitted chunks, and
-  never attribute a delta to a single named chunk without first checking that
-  chunk composition matches.
+  `JSC_UNKNOWN_EXPR_TYPE`; the summary prints `TypeCheck.getTypedPercent()`.
+- Did ambiguation run: `--tracer_mode` and `--print_source_after_each_pass` are
+  both accepted (unadvertised). A `--property_renaming_report` full of
+  *original* long names is evidence of skipping; after a successful ambiguation
+  the report shows post-color names, and unrelated originals map to the *same*
+  short name.
+- Wire size: always compare summed `gzip -9` over all emitted chunks, compare
+  file digests rather than Vite's filenames, and never attribute a delta to a
+  single named chunk without first checking that chunk composition matches.
+- Hidden-flag archaeology: parse `CONSTANT_Utf8` entries from the
+  `CommandLineRunner*` class constant pools in the jar and diff against
+  `--help`, then probe each candidate for acceptance on a throwaway input.
