@@ -33,6 +33,7 @@ which is why several entries below are closed on one axis only.
 | 6 | Narrowing generated externs by module list — `externs.generate.includeDependencies: false`, `externs.generate.modules: []` | The pins do not come from the module list, so narrowing it changes nothing | Both variants emit **byte-identical** output and **exactly 1233** pins (2314.0 KB raw / 811.7 KB gzip, unchanged), each in its own work directory. Pins originate in the React host-element hazard analysis (`compat.classMapCalls` in `reactPreset`) | `prior-art-closure-frameworks.md` §4 table + result 2; `optimization-architecture.md` §3 |
 | 7 | Blanket `@record` → `@interface` rewrite | `@interface` is nominal and rejects object literals a TS interface legally accepts — and production suppresses the diagnostic, so the break would be silent | `object literal -> @interface param` yields `WARNING - [JSC_TYPE_MISMATCH] actual parameter 1 of readA does not match formal parameter`; production passes `--hide_warnings_for=/`, which suppresses it | `structural-types-defeat-renaming.md` §3; `optimization-architecture.md` §M3 |
 | 8 | Searching for a compiler flag that reuses property names without type information | No such option exists anywhere in the compiler; the only type-free reuse is for variables and is already on | Searched the whole `jscomp` tree, the `@Option` list and `CompilerOptions` setters: *"There is no type-free path to property-name reuse anywhere in the compiler."* Type-free reuse is `RenameVars` `LOCAL_VAR_PREFIX` (`RenameVars.java:188-191`) and `CoalesceVariableNames` (`CoalesceVariableNames.java:50-63`, comment "better gzip compression") — both already enabled, neither touches properties | `advanced-renaming-vs-gzip.md` §1 + §6.4 |
+| 9 | Graph-derived branding of object-literal shapes (plan Phase 4 / architecture M2) on vendor-dominated React | The transform works; the candidate set is a long tail. Hot names that dominate gzip are pinned, escaping, or dynamically keyed | oxc-parser 0.144.0, 2,484 files, 0 parse failures. Graph names 9,465; renaming-map union **4,478** (the "~8,400" figure was 4,452 + 3,963 overlapping maps). Strict candidates 1,284 / 823 already renamed (18.4%). Hottest useful renamed candidates: `getParser` 25 local refs. Hot excluded: `length` 2,063, `key` 1,760, `current` 1,755, `value` 1,754, `children` 1,648, `className` 1,646. `[INFERENCE]` ~1.5 KB gzip (strict) / ~10 KB (partial brand) vs 31.3 KB gap | `plan-repoint-and-simplify.md` Phase 4; `optimization-architecture.md` §M2 + §9 |
 
 ---
 
@@ -132,7 +133,20 @@ that property name program-wide. Type information is the mechanism, not a
 convenience — a flag that skipped it would have to be a different pass.
 
 Production confirmation, so nobody re-runs the flag hunt hoping the toy probes
-were unrepresentative: the real build's persisted renaming maps show 3963 and
-4452 property entries mapping to 3963 and 4452 *distinct* short names, **0
-shared**. Zero of ~8,400 properties are ambiguated
+were unrepresentative: the real build's persisted renaming maps show 3,963 and
+4,452 property entries mapping to 3,963 and 4,452 *distinct* short names, **0
+shared**. Those two files overlap; the union is **4,478**. Zero of 4,478
+distinct renamed properties are ambiguated
 (`prior-art-closure-frameworks.md` §4).
+
+### 9 — the transform is not the constraint; the graph is
+
+Phase 2 proved that a synthesized `@constructor @struct` brand plus a `@type`
+cast is enough to make `AmbiguateProperties` fire on untyped object literals
+(`g,h,i` / `j,l,m` → both `g,h,i`). That result still stands. What entry 9
+closes is *applying* it to this workload: 18% of renamed names qualify, they
+are a long tail, and the names that would move compression ratio (`value`,
+`children`, `className`, `key`, `current`) fail every safety test. Reopening
+requires a different app shape (authored-dominant, class-based TypeScript)
+or a measurement showing the hot names are newly brandable. A better
+delivery mechanism (`addCustomPass`) is not new evidence.

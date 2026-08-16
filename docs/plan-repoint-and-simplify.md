@@ -9,13 +9,16 @@ repository. `[INFERENCE]` marks anything not measured.
 
 ## The thesis in one sentence
 
-**Own the compiler as a library, inject the analysis Closure is missing, and
-delete the two subsystems that have been trying to achieve that through lossy
-channels.**
+**The brand+cast transform works and has nothing hot to apply to on this
+class of app.** Own the compiler as a library for E2 and incrementality;
+collapse the extern barrier to a site-local data boundary; do not extend
+the type-metadata channel for brands.
 
-The channels are (1) JSDoc type emission, which cannot express disjointness
-because TypeScript is structural, and (2) generated `Object.prototype` externs,
-which express a site-local hazard as a program-wide ban. Together they are
+Phase 2 proved a synthesized `@constructor @struct` brand plus a `@type` cast
+is enough (`g,h,i` / `j,l,m` → both `g,h,i`). Phase 4 then measured the
+candidate set on the trial app: 18% of renamed names, a long tail by refs,
+every hot name excluded. The two subsystems that were going to *carry* that
+transform remain
 **~12,000 lines whose combined measured contribution to size is negative**:
 
 | subsystem | lines | measured size contribution |
@@ -31,70 +34,92 @@ then deleted. That ordering is the whole plan.
 
 ---
 
-## Part A — Delete now, no prerequisites
+## Part A — Delete now, no prerequisites — **landed in `1d5f29d`**
 
-These are safe today and cost nothing to give up.
+These shipped. The items below are the record of what landed, with A1's
+diagnosis corrected against source.
 
-**A1. The four inert options.** `externs.generate.includeDependencies`,
-`externs.generate.modules`, `chunks.mode`, `finalMinify` all produced
-byte-identical output through the Vite plugin. Cause is confirmed at
-`src/vite/config.ts:98-129`: the user's `compiler` object is spread and then the
-Vite-managed fields are overwritten (`mode: "bundler-runtime"` hardcoded at 118,
-`externs` replaced at 104).
-→ `Omit` the managed fields from `GccTsBundlerVitePluginOptions["compiler"]` so
-the type rejects them at compile time. A caller who writes one today gets
-silence; they should get a type error.
+**A1. Close the inert option surface.** Landed `1d5f29d`: `chunks.mode` is now
+a type error on the Vite plugin options. The original write-up bundled four
+names as "silently discarded"; that was wrong on three of them.
 
-**A2. The advice that names them.** `src/externs/barriers.ts:194` tells users to
-"set `includeDependencies: false`, or move to `mode: runtime-aware`" — the first
-is inert through the Vite path and the second is already the mode in use. Rewrite
-the warning to state the real cost (10.7 KB gzip, ambiguation blocked) and the
-real lever (fewer hazard sites, not fewer modules).
+- **`chunks.mode`** *was* overwritten (`createCompilerOptions` hardcodes
+  `mode: "bundler-runtime"` at `src/vite/config.ts:137`). Making it a type
+  error is the fix that landed.
+- **`compiler.externs` is live**, not discarded. `src/vite/externs.ts:66` reads
+  it, resolves paths, and unions them into `renameBarriers`, which
+  `createCompilerOptions` then writes. `test/vite-plugin.test.mjs` and
+  `docs/vite.md` treat this as the explicit-externs path.
+- **`externs.generate.includeDependencies` and `externs.generate.modules`**
+  are honored (`src/vite/externs.ts:98-100`) but ineffective: pins come from
+  proven hazard sites, not from the module list. Byte-identical output is that
+  design, not a dropped option.
+- **`finalMinify`** is overridden by design, not inert.
+  `src/vite/plugin.ts:568-573` hardcodes `finalMinify: false` on the Closure
+  stage so hashing and URL rewrite can finish first; `emitViteGraph` (~710-712)
+  then always runs `finalizeJavaScriptOutputs`. One post-pass. See Part C.
 
-**A3. `compilationLevel` on the Vite surface.** SIMPLE measured **+9.9%** gzip
-versus esbuild, worse than the ADVANCED default. WHITESPACE_ONLY is worse again.
-Exposing them on a Vite plugin invites a user to make their bundle worse while
-believing they are being conservative.
-→ Keep them in the core/CLI API, remove or hard-warn on the Vite path.
+**A2. The advice that names them.** Landed `1d5f29d`: the `barriers.ts` warning
+was rewritten to state the measured cost (10.7 KB gzip, ambiguation blocked)
+and the real lever (fewer hazard sites, not fewer modules). It no longer
+points at `includeDependencies: false` or `mode: runtime-aware`.
 
-**A4. Raw-size-only reporting.** The build reports raw bytes and gates on
-nothing; a 4.0% wire regression passed every check.
-→ Report **both** axes (raw for CPU, `gzip -9` for transfer) and fail against a
-no-plugin baseline. This is a prerequisite for judging every later phase, so it
-is also Phase 1 below.
+**A3. `compilationLevel` on the Vite surface.** Landed `1d5f29d`: a
+non-ADVANCED `compilationLevel` now warns once, naming the measured **+9.9%**
+gzip versus the ADVANCED default. Kept on the core/CLI API.
 
-**A5. Closed research directions**, recorded so nobody re-runs them: compilation-
-level tiering, `@closureUnaware`, `AliasStrings`, multistage-for-size,
-`--renaming=false` under ADVANCED, narrowing externs by module list, and blanket
-`@record` → `@interface`. Each is measured or source-proven dead in the spikes.
+**A4. Raw-size-only reporting.** Landed `1d5f29d` as `scripts/size-gate.mjs`
+plus two-axis reporting (raw for CPU, `gzip -9` for transfer) against a
+no-plugin baseline. This is also Phase 1 below.
+
+**A5. Closed research directions.** Landed `1d5f29d` as
+`docs/research/closed-directions.md` (entries 1–8). Entry 9 (graph-derived
+branding on vendor-dominated React) was added when Phase 4's coverage count
+killed M2. Each is measured or source-proven dead.
 
 ## Part B — Replace, then delete
 
-Ordered by dependency. Each phase has a kill criterion; if it trips, stop and the
-later phases do not happen.
+Ordered loosely by dependency. Phase 4 no longer waits on Phase 3 — and is
+now dead on its own coverage count. Each remaining phase has a kill
+criterion; if it trips, stop.
 
-### Phase 1 — Two-axis measurement and gate
+### Phase 1 — Two-axis measurement and gate — **landed in `1d5f29d`**
 
-Report summed `gzip -9` and summed raw against a no-plugin baseline, per build.
-Small, and everything downstream is unjudgeable without it.
+Report summed `gzip -9` and summed raw against a no-plugin baseline, per build
+(`scripts/size-gate.mjs`). Small, and everything downstream is unjudgeable
+without it.
 
-*Kill criterion:* none. This happens regardless.
+*Kill criterion:* none. This happened regardless.
 
-### Phase 2 — The 30-line probe that decides the rest
+### Phase 2 — The 30-line probe — **passed, at source level**
 
-Implement the smallest possible `CompilerPass` (`process(externs, root)`), brand
-two provably-disjoint object-literal shapes as nominal, inject at
-`addCustomPass(BEFORE_CHECKS, …)`, and check whether their properties receive the
-same short name. All of these ship in the pinned jar (verified in
-`optimization-architecture.md` §7).
+The probe that was going to decide the rest has been run against the pinned
+jar (`google-closure-compiler-java@20260811.0.0`) with the production flag
+set `--compilation_level ADVANCED --warning_level QUIET
+--jscomp_warning=checkTypes --hide_warnings_for=/`.
 
-*Kill criterion:* if ambiguation still refuses on hand-branded input, the custom
-pass route is dead. Phases 4 and 5 collapse, and the honest conclusion is that
-this project pays only for authored-dominant class-based TypeScript — which then
-becomes a documentation and scoping change, not an engineering one.
+Two unrelated **untyped** three-property object literals, each consumed
+through a plain function, rename to `g,h,i` and `j,l,m` — six distinct short
+names, **no ambiguation**. The same literals with a synthesized nominal brand
+— a `/** @constructor @struct */ function Brand$A(){}` per shape,
+`@type {number}` prototype members, readers annotated `@param {!Brand$A}`,
+and each literal wrapped in a `/** @type {!Brand$A} */ (…)` cast — both
+shapes rename to `g,h,i`. **Identical names. Ambiguation fires.**
 
-**This is the cheapest decisive experiment in the plan. Do it before writing any
-driver code.**
+*Kill criterion did not trip.* Untyped vendor-shaped literals can be
+ambiguated. Only a nominal brand plus a cast is required; no TypeScript types
+at all. Therefore the thesis is executable on untyped vendor code.
+
+What remains unproven is only the `addCustomPass` **delivery mechanism**, not
+the underlying transform. The plugin already emits JSDoc from
+`native/src/transpile/type_metadata{,_oxc}.rs`; emitting brands is the same
+channel. The resident driver (Phase 3) is still wanted for
+`setPropertyRenaming(OFF)`, multistage incrementality, and JVM warmth, but it
+is no longer a prerequisite. **Phase 4 does not depend on Phase 3.**
+
+All of the injection points still ship in the pinned jar (verified in
+`optimization-architecture.md` §7). They are now a delivery upgrade, not a
+feasibility gate.
 
 ### Phase 3 — Resident compiler driver replaces argv
 
@@ -113,24 +138,41 @@ the `GCC_CLOSURE_EXTRA_FLAGS` override guard, and the managed-flag collision
 checks that only exist because argv is a flat namespace.
 
 *Kill criterion:* if the driver cannot be made version-robust against the pinned
-jar behind a `makePassForTesting` capability probe, keep argv and accept the E2
-ceiling.
+jar behind a `makePassForTesting` capability probe, keep argv. E2 stays
+unreachable. E1 via brands is independently dead (Phase 4); the driver is no
+longer a prerequisite for anything that remains except E2 and incrementality.
 
-### Phase 4 — Graph-derived disjointness pass
+### Phase 4 — Graph-derived disjointness — **killed on this workload**
 
-Compute, from the module graph the bundler already owns, which object-literal
-shapes are single-subgraph, non-escaping, and never dynamically keyed. Brand
-those as nominal in the custom pass. This is the project's thesis stated
-correctly: not "TypeScript types help Closure" but "**the bundler knows the graph;
-Closure knows how to exploit disjointness; a custom pass is the wire.**"
+The transform is proven (Phase 2). The coverage count is not. Do not write
+the branding pass. `type_metadata{,_oxc}.rs` and `src/vite/type-metadata/**`
+stay only to gate `checkTypes`; they are not load-bearing for brands.
 
-*Deletes:* the `@record` emission path — `type_metadata.rs` + `type_metadata_oxc.rs`
-(1,253 lines) and `src/vite/type-metadata/**` (2,259 lines) — because the pass
-supersedes the channel. Keep whatever minimum still gates `checkTypes`.
+*Coverage, measured, then killed.* oxc-parser 0.144.0 over the 2,484-file
+`edb17e1ecb63` materialized graph (0 parse failures). Distinct property names
+in the graph: **9,465**. The "~8,400 renamed properties" figure was the *sum*
+of two overlapping maps (4,452 + 3,963 = 8,415, overlap 3,937); the union is
+**4,478** distinct originals, **0 shared short names**. Strict branding
+candidates (every object-literal shape single-subgraph, non-escaping, never
+dynamically keyed, not pinned, not a React host prop): **1,284** names, of
+which **823 are already renamed (18.4% of the union)**. Permissive range:
+858 renamed (19.2%). First-reason exclusions among renamed names: escaping
+1,589, no object-literal shape 1,116, dynamic-keyed 879, cross-subgraph 35,
+extern-pin 9, framework-protocol 0. The hot names that dominate gzip
+(`length` 2,063 refs, `key` 1,760, `current` 1,755, `value` 1,754,
+`children` 1,648, `className` 1,646, `style` 1,227) are all excluded. The
+hottest *renamed* candidates that branding could actually shorten are a long
+tail (`getParser` 25 local refs, `getParentRoute` 19, `inKeyframes` /
+`outKeyframes` 18). `[INFERENCE]` shortening the unrenamed ident-like
+candidates saves ~4.3 KB raw / ~1.5 KB gzip; even partial-branding every
+safe shape on mixed names is ~29 KB raw / ~10 KB gzip — against a **31.3 KB
+gzip gap**. Neither moves reuse 7.6 → 16.0 nor ratio 2.85 → 3.07.
 
-*Do first, before writing the pass:* count how many of the ~8,400 properties
-qualify. If the qualifying fraction is small, Phase 4 is dead on paper and the
-1,253 + 2,259 lines should be fixed (Phase 4b) rather than replaced.
+*Kill criterion tripped.* Phase 4 is dead on this workload. Do not write the
+branding pass. The 1,253 + 2,259 type-metadata lines should be fixed (Phase
+4b) rather than extended, and only if an authored-dominant class-based app
+is in scope. Part C's "give Closure the module graph" follow-on does not
+open.
 
 *Phase 4b, the fallback:* make type lowering *optimizing* instead of faithful —
 `@interface` + `@implements` where every satisfier in the program is a class,
@@ -159,25 +201,24 @@ today produces a silently broken app — clean build, empty console, dead handle
 
 1,509 lines whose slicing reported "unavailable, using full browser externs" on
 the trial build, and which `typed-input.md` names as the reason typed input pays
-nothing. After Phases 4–5 the question is answerable rather than speculative:
-either it becomes load-bearing for the disjointness pass, or it is 1,509 lines of
-cache machinery for an unused artifact.
+nothing. Phase 4 will not make them load-bearing. After Phase 5 the question is
+whether they are 1,509 lines of cache machinery for an unused artifact.
 
-## Part C — Collapse the three overlapping optimizers
+## Part C — Collapse the overlapping optimizers
 
-rollup tree-shakes, Closure DCEs and renames, esbuild re-minifies. Each was
-chosen independently and the composition is worse than the best single one:
-`finalMinify: false` measured byte-identical, so the esbuild post-pass is either
-inert or overridden — and either answer means deleting something.
+rollup tree-shakes, Closure DCEs and renames, OXC re-minifies
+(`native/src/minify.rs`, `oxc_minifier`, `CompressOptions::smallest()`). Each
+was chosen independently. The overlap worth investigating is rollup's
+tree-shaking versus Closure's DCE, not the minifier: `finalMinify` is
+overridden by design (`src/vite/plugin.ts:568-573` hardcodes `false` on the
+Closure stage; `emitViteGraph` ~710-712 always runs
+`finalizeJavaScriptOutputs`). There is exactly one post-pass, deliberately
+placed after hashing and URL rewrite — not a redundant pair, and not esbuild.
 
 More aggressively, and `[INFERENCE]`: giving Closure the **post-rollup bundle**
-destroys the module boundaries that Phase 4 needs. Rollup merges 2,352 modules
-into 52 chunks, and the disjointness evidence is gone before the optimizer sees
-it. Google's own pipeline is source-to-one-binary with no bundler in front. If
-Phase 2 succeeds, the follow-on question is whether Closure should consume the
-module graph rather than the bundle, with rollup reduced to resolution and plugin
-hosting. That is a larger change than Phases 3–5 combined and should only be
-opened if Phase 4's coverage count is high.
+destroys module boundaries. That follow-on was gated on Phase 4's coverage
+count being high. It was not. Do not open "Closure consumes the module graph,
+rollup is only a resolver."
 
 ## Part D — What not to do
 
@@ -188,6 +229,8 @@ opened if Phase 4's coverage count is high.
 - Do not switch `@record` → `@interface` wholesale. `@interface` rejects object
   literals that TS interfaces legally accept, and `--hide_warnings_for=/`
   swallows the mismatch, so the failure would be silent.
+- Do not write the branding pass on this class of app. Coverage is a long tail;
+  see Phase 4.
 - Do not delete the extern pins before Phase 5 lands.
 - Do not report raw-only or gzip-only. The axes disagree on this workload.
 
@@ -201,15 +244,20 @@ optimization value extracted      -46.0 KB gzip
                                   -----------
 net                               +31.3 KB        (+4.0%)
 ```
-
 and on the other axis, **−79.4 KB raw (−3.3%)**, which is what V8 parses.
 
-0 of ~8,400 properties are ambiguated on the real app, so the pass that would
-make renaming decisively profitable contributes exactly nothing today. Phases 2
-and 4 exist to change that number; everything else exists to stop paying for
-channels that cannot.
+0 of **4,478** distinct renamed properties are ambiguated on the real app
+(the older "~8,400" figure double-counted two overlapping maps). Phase 2
+proved the transform (`g,h,i` / `j,l,m` → both `g,h,i`); Phase 4's coverage
+count then showed the transform has nothing hot to apply to. The candidate
+set is 18% by name and a long tail by refs. That is the measured end of the
+brand path on vendor-dominated React.
 
-If Phase 2 fails, the correct outcome is not more engineering. It is to document
-that this project pays for authored-dominant, class-based TypeScript and not for
-vendor-dominated React applications, and to make the two-axis gate from Phase 1
-tell users which side of that line they are on.
+The correct outcome is not more engineering on brands. This project pays for
+authored-dominant, class-based TypeScript and not for vendor-dominated React
+applications. The two-axis gate from Phase 1 should tell users which side of
+that line they are on. What remains open is Phase 3 (driver: E2, incrementality,
+JVM warmth), Phase 4b (optimizing type lowering, ceiling bounded by
+class-only interfaces), Phase 5 (site-local quoted access, recovers the
+measured 10.7 KB pin cost without claiming ambiguation), and Phase 6
+(platform-externs: keep or delete).

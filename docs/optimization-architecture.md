@@ -65,6 +65,23 @@ program-wide. `@interface` + `@implements` and plain ES classes do ambiguate —
 but `@interface` is nominal and rejects the object literals a TS interface
 legally accepts, and our `--hide_warnings_for=/` would swallow that mismatch.
 
+**C3 is a property of what we emit, not a property of the input.** Measured on
+the pinned jar with the production flag set (`--compilation_level ADVANCED
+--warning_level QUIET --jscomp_warning=checkTypes --hide_warnings_for=/`): two
+unrelated **untyped** three-property object literals, each consumed through a
+plain function, rename to `g,h,i` and `j,l,m` — **six distinct short names, no
+ambiguation**. The same literals with a synthesized nominal brand — a
+`/** @constructor @struct */ function Brand$A(){}` declaration per shape,
+`@type {number}` prototype members, the reader functions annotated
+`@param {!Brand$A}`, and each literal wrapped in a `/** @type {!Brand$A} */ (…)`
+cast — both shapes rename to `g,h,i`: **identical names, ambiguation fires.**
+
+That is the decisive result in this corpus. Ambiguation needs a nominal
+*receiver*, not TypeScript. A brand plus a cast is sufficient, and it is
+sufficient on exactly the shape 94.1% of our bytes are: untyped vendor object
+literals. C3 therefore states a defect in our emitter, not a ceiling on the
+input, and §7 records what follows from that.
+
 **C4 — The correctness barrier is a global name ban, and it is an independent
 blocker.** Removing all 1233 pins recovers 10.7 KB gzip but does **not** enable
 ambiguation (reuse 7.6 → 7.9, distinct short names *up*). Pins and structural
@@ -91,31 +108,39 @@ negative:
 | `externs.generate.includeDependencies: false` | byte-identical |
 | `externs.generate.modules: []` | byte-identical |
 | `chunks.mode: "split"` | byte-identical |
-| `finalMinify: false` | byte-identical |
+| `finalMinify: false` | byte-identical (overridden by design; §6) |
 | multistage save/restore | byte-identical |
 | `@closureUnaware` (nested SIMPLE) | forces the mode that measured worse |
 
 They fail for one reason: they all operate *inside* the inverted value model of
 §1. None of them changes what the compiler is being asked to do.
 
-Four of those results are a separate defect, and the cause is confirmed in
-source rather than inferred. `src/vite/config.ts:98-129` spreads the user's
-`compiler` object and then **overwrites the fields the Vite path manages**:
-line 118 hardcodes `chunks.mode: "bundler-runtime"`, and line 104 replaces
-`externs` wholesale with the plugin's own generated set. So
-`externs.generate.includeDependencies`, `externs.generate.modules` and
-`chunks.mode` cannot take effect through the Vite plugin at all, while
-`compilationLevel` — which the Vite path does not manage — passes through and
-visibly changed the build. `finalMinify: false` is also byte-identical; it is
-not in the override list, so it is either honored and worthless on this input or
-overridden downstream, and that needs one probe to separate.
+Those four byte-identical rows are not one defect. They split:
 
-The type says these are settable; the behaviour says they are not.
-**An option that silently does nothing is worse than a missing option**, and
-`src/externs/barriers.ts:194` tells users to reach for two of the inert ones.
-Fix by making the managed set explicit: either `Omit` them from the Vite plugin's
-option type so the compiler rejects them, or honor them and delete the override.
-Silently discarding a caller's value is the one behaviour to stop.
+- **`chunks.mode`** was genuinely overwritten. `createCompilerOptions` still
+  hardcodes `mode: "bundler-runtime"` (`src/vite/config.ts:137`). Commit
+  `1d5f29d` made that field a type error on the Vite surface, so a caller who
+  writes it now fails at compile time instead of being silently ignored.
+- **`compiler.externs` is not discarded.** `src/vite/externs.ts:66` reads it,
+  resolves the paths, and unions them into `renameBarriers`, which
+  `createCompilerOptions` then writes through as `externs`. `test/vite-plugin.test.mjs`
+  and `docs/vite.md` treat this as the live explicit-externs path. The old
+  reading that line 104 of `config.ts` replaced the caller's list wholesale was
+  wrong: that line is the composed-input parameter, not a drop.
+- **`externs.generate.includeDependencies` and `externs.generate.modules`**
+  *are* honored (`src/vite/externs.ts:98-100`) but ineffective: pins come from
+  proven hazard sites, not from the module list. Byte-identical output is the
+  measured consequence of that design, not of a discarded option.
+- **`finalMinify`** is overridden by design, not inert. `src/vite/plugin.ts:568-573`
+  hardcodes `finalMinify: false` on the Closure stage so hashing and URL
+  rewrite can finish first; `emitViteGraph` (~710-712) then always runs
+  `finalizeJavaScriptOutputs`. There is exactly one post-pass. See §6.
+
+`compilationLevel` — which the Vite path does not manage — still passes through
+and visibly changed the build; `1d5f29d` now warns once on a non-ADVANCED
+value. The `barriers.ts` advice that named two of the ineffective generate
+options was rewritten in the same commit to state the measured cost and the
+real lever (fewer hazard sites, not fewer modules).
 
 ## 4. Four structural moves
 
@@ -141,8 +166,10 @@ What it unlocks immediately:
   and why, instead of inferring it from a renaming report.
 
 Cost and risk: coupling to compiler internals across versions. Mitigated by the
-existing hard pin plus a capability probe at startup. This is the enabling move
-for everything else; without it we are negotiating with a flag parser.
+existing hard pin plus a capability probe at startup. The driver is still wanted
+for `setPropertyRenaming(OFF)`, multistage incrementality, and JVM warmth. It is
+no longer a prerequisite for the thesis: the brand+cast transform in C3 / §7
+rides the existing JSDoc channel.
 
 ### M2 — Turn bundler graph facts into nominal types
 
@@ -169,8 +196,16 @@ modules. This plugin is the only place both facts coexist.
 
 Scope it honestly before building: vendor object literals that flow into React
 props are provably *not* disjoint, so the achievable set is bounded by C4-style
-reachability. Measure candidate coverage on the trial app first; if fewer than
-some threshold of the 8,400 properties qualify, M3 is the better investment.
+reachability. **Measured, then killed.** oxc-parser 0.144.0 over the 2,484-file
+trial graph: 9,465 distinct property names; renaming-map union **4,478** (the
+"~8,400" figure was two overlapping maps summed); **823** already-renamed
+strict candidates (18.4%). The hot names (`length`, `key`, `current`, `value`,
+`children`, `className`, `style`) are all excluded. Hottest useful renamed
+candidates are a long tail (`getParser` 25 local refs). `[INFERENCE]` ~1.5 KB
+gzip from shortening unrenamed candidates, ~10 KB even with partial branding,
+against a 31.3 KB gap. M2 cannot move reuse 7.6 → 16.0 on this app. M3
+carries the type-path alone, and only for authored-dominant class-based
+TypeScript.
 
 ### M3 — Make type lowering *optimizing* rather than *faithful*
 
@@ -204,24 +239,33 @@ our source. It converts a program-wide ban into a site-local invariant, and the
 
 ## 5. Two coherent end states, and the derived conclusion
 
-**E1, ambiguation-capable:** M2 and/or M3 make nominal receivers exist; renaming
-and ambiguation both run. `[INFERENCE]` At today's 2,314 KB raw with esbuild's
-3.07 ratio, that is ≈754 KB gzip — about 3.3% *below* esbuild, i.e. the first
-configuration in which this project would actually win.
+**E1, ambiguation-capable:** nominal receivers exist; renaming and ambiguation
+both run. The C3 brand+cast experiment already produced that state at source
+level on untyped vendor-shaped literals (`g,h,i` / `j,l,m` → both `g,h,i`).
+M2's coverage count then showed the transform has nothing hot to apply to
+on this app (18% of names, long tail by refs, hot names excluded). E1 via
+graph-derived brands is therefore not a reachable end state for
+vendor-dominated React. `[INFERENCE]` The 754 KB gzip / 3.3%-below-esbuild
+figure assumed coverage we do not have; treat it as falsified on this
+workload, not as a target.
 
 **E2, ambiguation-incapable:** accept C1/C3, and via M1 turn property renaming
 *off* while keeping ADVANCED's DCE and inlining. Stop destroying entropy for a
-prize we cannot collect.
+prize we cannot collect. E2 still needs the driver. E1 via M2 is independently
+dead on this workload.
 
 Now the derived conclusion, which is the most useful output of this document.
 `[INFERENCE]` E2 recovers ratio (≈3.07) but gives back renaming's raw savings, so
 raw lands somewhere between today's 2,314 KB and SIMPLE's 2,645 KB, and gzip
 between roughly 782 and 830 KB. **E2 therefore straddles parity with esbuild and
-cannot be relied on to win.** Only E1 has real headroom.
+cannot be relied on to win.** E1 would have been the only end state with real
+headroom; M2 cannot deliver it here. What remains is a smaller loss (E2, or
+Phase 5's 10.7 KB pin recovery) and an honest scope line: this project pays
+for authored-dominant class-based TypeScript, not vendor-dominated React.
 
-That means: **M1 is necessary but not sufficient.** It buys the ability to stop
-losing. Only making ambiguation fire — M2 or M3 — can make the project's premise
-pay. Any roadmap that stops after M1 has bought a smaller loss.
+That means: **M1 buys E2 and incrementality, not the thesis.** M3 is the
+remaining type-path, ceiling bounded by class-only interfaces. Any roadmap
+that stops after M1 has still bought a smaller loss.
 
 Today's configuration is the worst cell of the matrix: renaming on, ambiguation
 off. We pay the entropy cost of renaming and collect none of its compensating
@@ -231,15 +275,21 @@ prize.
 
 Structural simplification is part of the fix:
 
-- **Three overlapping optimizers.** rollup tree-shakes, Closure DCEs and renames,
-  esbuild re-minifies. Each was chosen independently. Decide which owns which
-  invariant and remove the overlap. `finalMinify: false` measured byte-identical,
-  so the esbuild post-pass is currently either inert or overridden — one probe
-  separates those, and either answer means deleting something.
-- **Inert options** (§3). Honor or delete, and correct the `barriers.ts` advice.
-- **Raw-size reporting as a success signal.** The build reports raw sizes and
-  every check stayed green through a 4.0% wire regression. Whatever else changes,
-  the gate should be summed `gzip -9` against a no-plugin baseline.
+- **Three overlapping optimizers.** rollup tree-shakes, Closure DCEs and
+  renames, OXC re-minifies (`native/src/minify.rs`, `oxc_minifier`,
+  `CompressOptions::smallest()`). Each was chosen independently. The overlap
+  worth investigating is rollup's tree-shaking versus Closure's DCE, not the
+  minifier: `src/vite/plugin.ts:568-573` hardcodes `finalMinify: false` for the
+  Closure stage, and `emitViteGraph` (~710-712) then always runs
+  `finalizeJavaScriptOutputs`. There is exactly one post-pass, deliberately
+  placed after hashing and URL rewrite — not a redundant pair.
+- **Ineffective generate options** (§3). `compiler.externs` is live;
+  `chunks.mode` is now a type error (`1d5f29d`); the generate include/module
+  knobs remain honored but do not change pins. The `barriers.ts` advice was
+  rewritten in the same commit.
+- **Raw-size reporting as a success signal.** Landed in `1d5f29d`
+  (`scripts/size-gate.mjs`): report both axes and gate against a no-plugin
+  baseline.
 
 ## 7. The backdoor: Closure is a library and we are using it as a CLI
 
@@ -260,21 +310,28 @@ constant pool, not from docs:
 | `setAliasStringsMode` | **present** | no CLI flag exists |
 | `AmbiguateProperties.makePassForTesting` | **present** | run and inspect ambiguation out of band |
 
-`addCustomPass(BEFORE_CHECKS, …)` is the decisive one, and it dissolves the
-problem that §4's M2 and M3 were working around. Those moves tried to *persuade*
-Closure's type system to describe disjointness, by choosing between `@record` and
-`@interface` and by emitting JSDoc text. With a custom pass we do not have to
-persuade anything: we compute the disjointness facts ourselves from the module
-graph and write them onto the AST directly, before colors are built, in the
-representation the optimizer actually consumes.
+`addCustomPass(BEFORE_CHECKS, …)` is still the cleanest injection slot, but the
+underlying transform no longer waits on it. The C3 experiment — two untyped
+three-property literals renaming to `g,h,i` and `j,l,m` (no ambiguation), then
+both to `g,h,i` once each shape carries a `/** @constructor @struct */`
+`Brand$A` plus a `@type` cast — was run as ordinary JSDoc against the pinned
+jar. What remains unproven is only the `addCustomPass` *delivery mechanism*,
+not the transform. The plugin already emits JSDoc from
+`native/src/transpile/type_metadata{,_oxc}.rs`; emitting brands is the same
+channel. M2 can therefore start without a resident driver. The driver is still
+wanted for `setPropertyRenaming(OFF)`, multistage incrementality, and JVM
+warmth, and it is still the only way to inject a `CompilerPass` — but it is no
+longer a prerequisite for the thesis.
 
 That reframes the thesis a third time. Not "TypeScript types make Closure
-optimize better" (false — TS types are structural). Not even "emit better JSDoc"
-(M3, still negotiating through a lossy channel). The real statement is:
+optimize better" (false — TS types are structural). Not even "emit better JSDoc
+of the TypeScript the user wrote" (M3, still negotiating through a lossy
+channel). The real statement is:
 
 > **We can write the analysis Closure is missing and inject it.** The bundler
-> knows the module graph; Closure knows how to exploit disjointness. A custom
-> pass is the wire between them.
+> knows the module graph; Closure knows how to exploit disjointness. A brand
+> plus a cast is the currency; a custom pass is one wire, and the existing
+> JSDoc emitter is another.
 
 And `setPassConfig` means we can stop paying for passes we cannot benefit from:
 drop `RenameProperties` while keeping DCE, inlining and cross-chunk motion, which
@@ -306,15 +363,16 @@ Two consequences that change the roadmap:
 - **E2 (property renaming off) is worse than §5 implied.** It recovers
   compression ratio but gives back the raw win, so it concedes the CPU axis to
   buy near-parity on the network axis. It is a hedge, not a fix.
-- **E1 (ambiguation fires) is the only end state that wins both axes at once** —
-  fewer raw bytes *and* higher compressibility. That is a stronger argument for
-  it than the 57 KB gzip estimate alone, and it is the argument to lead with.
+- **E1 (ambiguation fires) is the only end state that would win both axes** —
+  fewer raw bytes *and* higher compressibility — and M2 cannot reach it on
+  this app. Do not lead with the 57 KB / 754 KB estimates; they assumed
+  coverage we measured we do not have.
 
-The project currently reports raw sizes and gates on nothing. It should report
-both axes and gate on both, against a no-plugin baseline. `[INFERENCE]` Neither
-axis has been measured against a real device here; a parse/compile trace and a
-throttled-network TTI comparison are the missing experiments, and until they run
-the CPU-side claim is arithmetic, not evidence.
+Landed in `1d5f29d`: `scripts/size-gate.mjs` reports both axes and fails on
+gzip regression against a no-plugin baseline. `[INFERENCE]` Neither axis has
+been measured against a real device here; a parse/compile trace and a
+throttled-network TTI comparison are the missing experiments, and until they
+run the CPU-side claim is arithmetic, not evidence.
 
 ### Build performance, and why it converges on the same move
 
@@ -330,10 +388,9 @@ Measured on the pinned jar and the trial app:
   rerun only `OPTIMIZATIONS`.
 
 All three want the same thing: a resident compiler process we control. Google
-ships a persistent worker for precisely this reason. So the driver move in §7 is
-not only the key to the optimization backdoors — it is also the build-time fix.
-**One architectural change, both axes, and it is the prerequisite for every other
-move in this document.**
+ships a persistent worker for precisely this reason. The driver move in §7 is
+the build-time fix and the E2 unlock. It is not a path back to E1: the
+brand+cast transform works and has nothing hot to apply to.
 
 ## 9. How to falsify this document
 
@@ -341,22 +398,20 @@ move in this document.**
   SIMPLE is below the ADVANCED-minus-SIMPLE gzip delta. Then the model is
   workload-specific rather than structural, and the roadmap should be scoped per
   app shape instead.
-- **M2:** compute the fraction of the 8,400 properties that are single-subgraph,
-  non-escaping, and never dynamically keyed. If that fraction is small, M2 is
-  dead and M3 carries the thesis alone.
+- **M2:** tripped. 823 of 4,478 renamed names qualify (18.4%); they are a
+  long tail. M2 is dead on this workload and M3 carries the type-path alone.
 - **M3:** count TS interfaces in an authored codebase whose every satisfier is a
   class. If most interfaces are satisfied by object literals, M3's ceiling is low
   too — and then the honest conclusion is that this project pays only for
   class-based, authored-dominant TypeScript, and its documentation should say so.
-- **E1's estimate:** it assumes compression ratio is recoverable to esbuild's
-  level by name reuse alone. Ratio is not a pure function of name diversity.
-  Treat 754 KB as an order of magnitude, and re-measure once any ambiguation
-  actually fires.
-- **§7's backdoor:** implement the smallest possible `CompilerPass` that brands
-  two provably-disjoint object-literal shapes as nominal, inject it at
-  `BEFORE_CHECKS`, and check whether the two shapes' properties receive the same
-  short name. If ambiguation still refuses, the custom-pass route is dead and
-  only M3 remains.
+- **E1's estimate:** falsified on coverage, not just on the ratio model. 754 KB
+  assumed name reuse recoverable to esbuild's level. M2's long tail cannot
+  produce that reuse. Do not treat 754 KB as a target.
+- **§7's backdoor:** the source-level brand+cast already passed (`g,h,i` /
+  `j,l,m` → both `g,h,i`). What would still kill the *custom-pass* route is
+  `addCustomPass(BEFORE_CHECKS, …)` failing to reproduce that result. That
+  would not kill the thesis — the JSDoc channel already carries the transform
+  — only the injection mechanism.
 - **§8's CPU claim:** trace parse + compile time for both bundles on a throttled
   mid-tier device. If the 79 KB raw difference does not move main-thread time
   measurably, the two-axis argument collapses and gzip is the only metric that
