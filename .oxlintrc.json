@@ -39,8 +39,7 @@
     "build",
     ".vscode",
     "*.js",
-    "closure-*",
-    "src/tsickle"
+    "closure-*"
   ],
   "rules": {
     "anti-slop/no-chained-type-assertions": "error",
