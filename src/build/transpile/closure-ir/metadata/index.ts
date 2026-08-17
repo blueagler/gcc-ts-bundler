@@ -1,6 +1,9 @@
 import ts from "@typescript/typescript6";
 
-import { collectClosureIrFileMetadata } from "./collect";
+import {
+  collectClassOnlyInterfaceSymbolIds,
+  collectClosureIrFileMetadata,
+} from "./collect";
 import {
   collectExternalDeclarationOrigins,
   collectExternalOwnedMemberAccesses,
@@ -79,6 +82,11 @@ export function collectTypeMetadataFiles({
   }
 
   const checker = program.getTypeChecker();
+  const classOnlyInterfaceSymbolIds = files.some(
+    ({ features }) => features.hasTypeDeclarations,
+  )
+    ? collectClassOnlyInterfaceSymbolIds(program, checker)
+    : new Set<string>();
   const externalOrigins = collectExternalDeclarationOrigins({
     boundaryModuleFileNames,
     externalSpecifiers: new Set(externalSpecifiers),
@@ -113,6 +121,7 @@ export function collectTypeMetadataFiles({
     }
 
     const result = collectClosureIrFileMetadata({
+      classOnlyInterfaceSymbolIds,
       compilerOptions,
       checker,
       features,

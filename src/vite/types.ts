@@ -24,6 +24,10 @@ export interface GccTsBundlerVitePluginOptions {
    * resolves each against `projectRoot` and unions it with the generated
    * extern file — so they do reach Closure. This is a different field from the
    * plugin-level `externs.generate` below.
+   *
+   * `hideWarningsFor: []` keeps `jscomp_warning=checkTypes` but reports type
+   * diagnostics. The default (`undefined`) still hides them with
+   * `--hide_warnings_for=/`.
    */
   compiler?:
     | (Omit<

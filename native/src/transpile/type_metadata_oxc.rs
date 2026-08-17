@@ -185,11 +185,20 @@ impl PreparedTypeMetadata {
             );
         }
         for symbol in bound.symbols_by_id.values() {
-            if symbol.kind == "runtime" && !symbol_resolutions.contains_key(&symbol.id) {
+            if symbol_resolutions.contains_key(&symbol.id) {
+                continue;
+            }
+            if symbol.kind == "runtime" {
                 symbol_resolutions.insert(
                     symbol.id.clone(),
-                    RuntimeTypeName::Unresolved("runtime-binding-not-found"),
+                    in_graph_type_name(symbol)
+                        .map(RuntimeTypeName::Name)
+                        .unwrap_or(RuntimeTypeName::Unresolved("runtime-binding-not-found")),
                 );
+            } else if symbol.kind == "declared" {
+                if let Some(name) = in_graph_type_name(symbol) {
+                    symbol_resolutions.insert(symbol.id.clone(), RuntimeTypeName::Name(name));
+                }
             }
         }
 
@@ -473,6 +482,27 @@ struct RenderedMemberAnnotation {
     annotation: ClosureAnnotation,
     target: String,
     text: String,
+}
+
+fn in_graph_type_name(symbol: &crate::closure_metadata::ClosureTypeSymbol) -> Option<String> {
+    let path = symbol.declaration_file_path.as_deref()?;
+    if is_declaration_file_path(path) {
+        return None;
+    }
+    if let Some(name) = symbol.local_name.as_deref() {
+        if super::is_valid_js_identifier(name) {
+            return Some(name.to_string());
+        }
+    }
+    super::is_valid_js_identifier(&symbol.diagnostic_name).then(|| symbol.diagnostic_name.clone())
+}
+
+fn is_declaration_file_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".d.ts")
+        || lower.ends_with(".d.mts")
+        || lower.ends_with(".d.cts")
+        || lower.ends_with(".d.tsx")
 }
 
 pub(crate) fn runtime_type_names_from_program(

@@ -697,12 +697,15 @@ function renderNamedType(
         : undefined,
     ),
   );
-  const reference = referenceRuntimeSymbol(
+  const inGraph = referenceInGraphDeclaredType(
     symbol,
     resolvedSymbol,
     symbolName,
     context,
   );
+  const reference =
+    inGraph ??
+    referenceRuntimeSymbol(symbol, resolvedSymbol, symbolName, context);
   return applyTypeArguments(`!${reference}`, renderedArgs);
 }
 
@@ -1104,6 +1107,52 @@ function referenceBuiltin(name: string, context: ClosureDocRenderContext) {
     });
   }
   return referenceSymbolId(id, context);
+}
+
+function referenceInGraphDeclaredType(
+  sourceSymbol: ts.Symbol,
+  resolvedSymbol: ts.Symbol,
+  diagnosticName: string,
+  context: ClosureDocRenderContext,
+) {
+  const declaration = canonicalDeclaration(resolvedSymbol);
+  if (!declaration || !isInGraphEmittedTypeDeclaration(declaration)) {
+    return null;
+  }
+  const aliasDeclaration =
+    sourceSymbol.flags & ts.SymbolFlags.Alias
+      ? canonicalDeclaration(sourceSymbol)
+      : undefined;
+  const localName = getDeclarationName(aliasDeclaration) ?? diagnosticName;
+  const id = canonicalSymbolId(resolvedSymbol);
+  if (!context.symbolsById.has(id)) {
+    context.symbolsById.set(id, {
+      declarationFilePath: declaration.getSourceFile().fileName,
+      declarationId: `${id}:declaration`,
+      declarationStart: declaration.getStart(),
+      diagnosticName,
+      id,
+      kind: "declared",
+      localName,
+    });
+  }
+  return referenceSymbolId(id, context);
+}
+
+function isInGraphEmittedTypeDeclaration(declaration: ts.Declaration) {
+  const file = declaration.getSourceFile();
+  if (file.isDeclarationFile) {
+    return false;
+  }
+  if (ts.getCombinedModifierFlags(declaration) & ts.ModifierFlags.Ambient) {
+    return false;
+  }
+  // Classes and enums keep the runtime-binding path so hoist renames stick.
+  // Interfaces and aliases are type-only and have no JS binding to miss.
+  return (
+    ts.isInterfaceDeclaration(declaration) ||
+    ts.isTypeAliasDeclaration(declaration)
+  );
 }
 
 function referenceRuntimeSymbol(

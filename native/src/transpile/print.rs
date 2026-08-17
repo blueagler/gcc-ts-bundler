@@ -107,6 +107,7 @@ pub(super) fn transform_source_with_oxc(
         ),
         enum_values,
     )?;
+    super::quote_keys_oxc::quote_literal_computed_members(&allocator, &mut program);
     remove_unused_imported_enums(&mut program, &identity, &imported_enum_names);
     quote_runtime_enum_members(&allocator, &mut program, &identity, &local_enum_values);
     quote_opaque_commonjs_members(
@@ -133,6 +134,7 @@ pub(super) fn transform_source_with_oxc(
         file_metadata,
         commonjs_export_name,
     )?;
+    emitted.code = super::lowering_oxc::materialize_closure_casts(&emitted.code);
     // Symmetry: a key pinned as a literal on the write side must also be
     // pinned on every dot-access read side, or the two halves disagree.
     emitted

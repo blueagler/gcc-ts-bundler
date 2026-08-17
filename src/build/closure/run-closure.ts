@@ -14,12 +14,14 @@ import type {
 import { emitPreservedModule, prepareClosureJobs } from "../../native/load";
 import type { NativeEmittedTypeMetadata } from "../../native/load";
 import {
+  applyTypeInferenceOptions,
   configureClosureCompilerOptions,
   hasStrictCheckTypes,
+  omitEmptyHideWarningsFor,
   resolveClosureCompilerVersionTag,
   runClosureCompiler,
   shouldEnableTypeInference,
-  TYPE_INFERENCE_OPTIONS,
+  withExplicitHideWarningsFor,
   type ClosureCompilerEnvironment,
   type ClosureCompilerOptions,
 } from "./compiler";
@@ -126,7 +128,10 @@ export async function runClosureStage({
 
   const exitCodes = await withInternalTiming("closure:compile", () =>
     compilePreparedClosureJobs({
-      closureCompilerEnvironment,
+      closureCompilerEnvironment: withExplicitHideWarningsFor(
+        closureCompilerEnvironment,
+        options.hideWarningsFor,
+      ),
       chunkMode: options.chunks.mode,
       platformExterns: options.platformExterns,
       target: options.target,
@@ -831,9 +836,10 @@ async function runPreparedClosureJob({
     closureOptions["env"] = job.env;
   }
   if (job.typeInference && !strictCheckTypes) {
-    Object.assign(closureOptions, TYPE_INFERENCE_OPTIONS);
+    applyTypeInferenceOptions(closureOptions, compilerEnvironment.options);
   }
   configureClosureCompilerOptions(closureOptions, compilerEnvironment.options);
+  omitEmptyHideWarningsFor(closureOptions);
   let capturedStdErr = "";
   const exitCode = await runClosureCompiler(closureOptions, (stdErr) => {
     capturedStdErr += stdErr;

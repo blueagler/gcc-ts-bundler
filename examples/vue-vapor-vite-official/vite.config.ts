@@ -10,7 +10,7 @@ import { vuePreset } from 'gcc-ts-bundler/presets/vue'
 export default defineConfig({
   preview: { host: true, allowedHosts: true },
   build: { target: 'esnext' },
-  plugins: [vue(), vueDevTools(), gccTsBundler(vuePreset())],
+  plugins: [vue(), vueDevTools(), gccTsBundler(vuePreset({ compiler: { hideWarningsFor: [] } }))],
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

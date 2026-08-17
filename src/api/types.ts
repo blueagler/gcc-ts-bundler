@@ -166,6 +166,12 @@ export interface BuildOptions {
   compat?: CompatOptions | undefined;
   compilationLevel?: CompilationLevel | undefined;
   diagnostics?: DiagnosticsOptions | undefined;
+  /**
+   * Paths forwarded to Closure `--hide_warnings_for`. `undefined` keeps the
+   * silent-inference default (`["/"]`). `[]` keeps `jscomp_warning=checkTypes`
+   * but reports the diagnostics.
+   */
+  hideWarningsFor?: readonly string[] | undefined;
   entries: readonly BuildEntryOption[];
   /**
    * Explicit externs keep their historical dual meaning: Closure consumes
@@ -231,6 +237,7 @@ export interface ResolvedBuildOptions {
     preflight: DiagnosticsPreflight;
     verbose: boolean;
   };
+  hideWarningsFor: readonly string[] | undefined;
   /** Absolute entry file paths with explicit or `null` (derived) names. */
   entries: Array<{ file: string; name: string | null }>;
   externals: string[];
@@ -276,6 +283,7 @@ export const DEFAULT_BUILD_OPTIONS = deepFreeze({
     preflight: "errors-only",
     verbose: false,
   },
+  hideWarningsFor: undefined,
   entries: [],
   externals: [],
   externs: [],

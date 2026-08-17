@@ -58,6 +58,7 @@ export function getOptionsSignature(
     cssRuntime: options.cssRuntime,
     finalMinify: options.finalMinify,
     diagnostics: options.diagnostics,
+    hideWarningsFor: options.hideWarningsFor ?? null,
     entries: options.entries.map((entry) => ({
       name: entry.name,
       relativePath: path.relative(options.srcDir, entry.file),

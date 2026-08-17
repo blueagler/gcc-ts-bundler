@@ -6,5 +6,5 @@ import { gccTsBundler } from 'gcc-ts-bundler/vite'
 export default defineConfig({
   preview: { host: true, allowedHosts: true },
   build: { target: 'esnext' },
-  plugins: [gccTsBundler()],
+  plugins: [gccTsBundler({ compiler: { hideWarningsFor: [] } })],
 })

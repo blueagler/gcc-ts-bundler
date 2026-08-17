@@ -1,6 +1,12 @@
 import * as closureCompilerPackage from "google-closure-compiler";
 import { getNativeImagePath } from "google-closure-compiler/lib/utils.js";
 
+import {
+  isDriverForcedOff,
+  probeClosureDriver,
+  runResidentClosureJob,
+} from "./driver";
+
 export type ClosureCompilerOption = string | boolean;
 export type ClosureCompilerOptions = Record<
   string,
@@ -116,6 +122,62 @@ export const TYPE_INFERENCE_OPTIONS: ClosureCompilerOptions = {
   jscompWarning: ["checkTypes"],
 };
 
+const TYPE_INFERENCE_JSCOMP_WARNING = [
+  "checkTypes",
+] as const satisfies readonly string[];
+
+function hasHideWarningsFor(
+  value: ClosureCompilerOption | ClosureCompilerOption[] | undefined,
+): value is ClosureCompilerOption | ClosureCompilerOption[] {
+  if (Array.isArray(value)) {
+    return value.some((entry) => entry !== false && entry !== "");
+  }
+  return value !== undefined && value !== false && value !== "";
+}
+
+/**
+ * Restore `checkTypes` under QUIET. `--hide_warnings_for=/` is the default
+ * suppress; an explicit empty hide list (`hideWarningsFor: []`) keeps the
+ * warning on and reports diagnostics.
+ */
+export function applyTypeInferenceOptions(
+  closureOptions: ClosureCompilerOptions,
+  environmentOptions: ClosureCompilerOptions,
+): void {
+  const hideWarningsFor = Object.hasOwn(environmentOptions, "hideWarningsFor")
+    ? environmentOptions.hideWarningsFor
+    : TYPE_INFERENCE_OPTIONS.hideWarningsFor;
+  closureOptions.jscompWarning = [...TYPE_INFERENCE_JSCOMP_WARNING];
+  if (hasHideWarningsFor(hideWarningsFor)) {
+    closureOptions.hideWarningsFor = hideWarningsFor;
+  }
+}
+
+/** Drop an empty hide list so Closure does not receive `--hide_warnings_for`. */
+export function omitEmptyHideWarningsFor(
+  closureOptions: ClosureCompilerOptions,
+): void {
+  if (!hasHideWarningsFor(closureOptions.hideWarningsFor)) {
+    delete closureOptions.hideWarningsFor;
+  }
+}
+
+export function withExplicitHideWarningsFor(
+  environment: ClosureCompilerEnvironment,
+  hideWarningsFor: readonly string[] | undefined,
+): ClosureCompilerEnvironment {
+  if (hideWarningsFor === undefined) {
+    return environment;
+  }
+  return {
+    ...environment,
+    options: {
+      ...environment.options,
+      hideWarningsFor: [...hideWarningsFor],
+    },
+  };
+}
+
 export function hasStrictCheckTypes(options: ClosureCompilerOptions) {
   return Object.entries(options).some(
     ([name, value]) =>
@@ -158,7 +220,32 @@ export function annotateClosureDiagnostics(stdErr: string) {
  * with the full browser externs) apart from "the program is broken" (report
  * it), and the exit code alone cannot: both are non-zero.
  */
+export { probeClosureDriver };
+
 export async function runClosureCompiler(
+  options: ClosureCompilerOptions,
+  onStderr?: (stdErr: string) => void,
+): Promise<number> {
+  if (!isDriverForcedOff()) {
+    const resident = await runResidentClosureJob(
+      closureCompilerCliArgs(options),
+    );
+    if (resident) {
+      reportClosureCompilerOutput(resident.stdout, resident.stderr, onStderr);
+      return resident.exitCode;
+    }
+  }
+
+  return spawnClosureCompiler(options, onStderr);
+}
+
+function closureCompilerCliArgs(options: ClosureCompilerOptions) {
+  const instance = new closureCompilerPackage.compiler(options) as unknown as {
+    commandArguments: string[];
+  };
+  return [...instance.commandArguments];
+}
+function spawnClosureCompiler(
   options: ClosureCompilerOptions,
   onStderr?: (stdErr: string) => void,
 ): Promise<number> {
@@ -167,16 +254,24 @@ export async function runClosureCompiler(
       new closureCompilerPackage.compiler(options),
     );
     compilerProcess.run((exitCode, stdOut, stdErr) => {
-      if (stdOut) {
-        console.log(stdOut);
-      }
-      if (stdErr) {
-        onStderr?.(stdErr);
-        console.error(annotateClosureDiagnostics(stdErr));
-      }
+      reportClosureCompilerOutput(stdOut, stdErr, onStderr);
       resolve(exitCode);
     });
   });
+}
+
+function reportClosureCompilerOutput(
+  stdOut: string,
+  stdErr: string,
+  onStderr?: (stdErr: string) => void,
+) {
+  if (stdOut) {
+    console.log(stdOut);
+  }
+  if (stdErr) {
+    onStderr?.(stdErr);
+    console.error(annotateClosureDiagnostics(stdErr));
+  }
 }
 
 export function resolveClosureCompilerVersionTag() {

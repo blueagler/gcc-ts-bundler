@@ -7,5 +7,5 @@ import { sveltePreset } from 'gcc-ts-bundler/presets/svelte'
 export default defineConfig({
   preview: { host: true, allowedHosts: true },
   build: { target: 'esnext' },
-  plugins: [svelte(), gccTsBundler(sveltePreset())],
+  plugins: [svelte(), gccTsBundler(sveltePreset({ compiler: { hideWarningsFor: [] } }))],
 })

@@ -28,6 +28,7 @@ mod namespace;
 mod nocollapse_oxc;
 mod print;
 mod pure_calls;
+mod quote_keys_oxc;
 mod type_metadata;
 mod type_metadata_oxc;
 
@@ -316,7 +317,11 @@ pub fn transpile_sources(
         explicit_extern_property_names,
         mut preserved_property_names,
         static_property_names,
-    } = collect_extern_property_names_with_externs(&compiled_file_names, &explicit_extern_paths)?;
+    } = collect_extern_property_names_with_externs(
+        &compiled_file_names,
+        &explicit_extern_paths,
+        &file_metadata,
+    )?;
     // Decorator metadata carries property keys as string literals; preserving
     // those keys keeps the literals valid instead of rewriting Closure output.
     preserved_property_names.extend(collect_decorated_metadata_property_names(&file_metadata)?);

@@ -23,6 +23,7 @@ export default defineConfig({
   build: { target: 'esnext' },
   plugins: [
     gccTsBundler({
+      compiler: { hideWarningsFor: [] },
       externs: {
         generate: {
           mode: 'runtime-aware',

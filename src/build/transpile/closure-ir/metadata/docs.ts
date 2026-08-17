@@ -45,6 +45,7 @@ type ResolvedSignature = {
  * the set when `@const` emission landed.
  */
 const CONFLICTING_GENERATED_TAGS = new Set([
+  "abstract",
   "argument",
   "const",
   "constructor",
@@ -83,6 +84,61 @@ export function buildInterfaceDeclarationSnippet(
   return {
     declaredSymbolId,
     exported: hasModifier(statement, ts.SyntaxKind.ExportKeyword),
+    id: `${declaredSymbolId}:declaration`,
+    references: referencesForTemplate(template, context),
+    template,
+  };
+}
+
+export function buildObjectLiteralBrandDeclaration({
+  brandName,
+  checker,
+  context,
+  keys,
+  literal,
+}: {
+  brandName: string;
+  checker: ts.TypeChecker;
+  context: ClosureDocRenderContext;
+  keys: readonly string[];
+  literal: ts.ObjectLiteralExpression;
+}): ClosureTypeDeclaration {
+  const declaredSymbolId = registerDeclaredTypeSymbol(
+    undefined,
+    literal,
+    brandName,
+    context,
+  );
+  const lines: string[] = [
+    "/**",
+    " * @constructor",
+    " * @struct",
+    " */",
+    `function ${brandName}() {}`,
+  ];
+  const properties = new Map<string, ts.ObjectLiteralElementLike>();
+  for (const member of literal.properties) {
+    const memberName = getObjectPropertyName(member);
+    if (memberName) {
+      properties.set(memberName, member);
+    }
+  }
+  const memberLines: string[] = [];
+  for (const key of keys) {
+    const member = properties.get(key);
+    const memberType = member
+      ? toClosureType(checker.getTypeAtLocation(member), checker, context)
+      : "*";
+    memberLines.push(`/** @type {${memberType}} */`);
+    memberLines.push(renderPrototypeProperty(brandName, key));
+  }
+  if (memberLines.length > 0) {
+    lines.push("if (false) {", ...memberLines.map((line) => `  ${line}`), "}");
+  }
+  const template = `${lines.join("\n")}\n`;
+  return {
+    declaredSymbolId,
+    exported: false,
     id: `${declaredSymbolId}:declaration`,
     references: referencesForTemplate(template, context),
     template,
@@ -165,6 +221,9 @@ export function buildClassJsDoc(
     ...collectPreservedJsDocTags(statement),
     ...templateTags(typeParameters),
   ];
+  if (hasModifier(statement, ts.SyntaxKind.AbstractKeyword)) {
+    tags.push({ name: "abstract" });
+  }
   if (statement.heritageClauses) {
     for (const clause of statement.heritageClauses) {
       for (const typeNode of clause.types) {
@@ -188,7 +247,8 @@ export function buildFunctionLikeDoc(
   checker: ts.TypeChecker,
   context: ClosureDocRenderContext,
 ) {
-  if (isBodylessFunctionLikeDeclaration(declaration)) {
+  const abstract = hasModifier(declaration, ts.SyntaxKind.AbstractKeyword);
+  if (isBodylessFunctionLikeDeclaration(declaration) && !abstract) {
     return null;
   }
   const declarations = collectOverloadDeclarations(declaration);
@@ -404,6 +464,9 @@ function buildSignaturesJsDoc({
     ...collectPreservedJsDocTags(implementation),
     ...uniqueTemplateTags(declarations),
   ];
+  if (hasModifier(implementation, ts.SyntaxKind.AbstractKeyword)) {
+    tags.push({ name: "abstract" });
+  }
   const signatureParams = signatures.map(({ declaration }) =>
     collectSignatureParamInfos({
       checker,

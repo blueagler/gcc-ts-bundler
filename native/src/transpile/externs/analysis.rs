@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::closure_metadata::{closure_metadata_key, ClosureAnnotationTarget, ClosureFileMetadata};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_ast_visit::{walk, Visit};
@@ -40,17 +41,23 @@ pub(crate) struct ExternPropertyAnalysis {
 #[derive(Default)]
 struct ParsedExternFileAnalysis {
     accessed_hazard_names: HashSet<String>,
+    callback_record_names: HashSet<String>,
     constructor_read_names: HashSet<String>,
     defined_hazard_names: HashSet<String>,
     platform_callback_names: HashSet<String>,
+    proven_definition_names: HashSet<String>,
+    proven_monomorphic_access_names: HashSet<String>,
     reflective_property_names: HashSet<String>,
     static_assigned_names: HashSet<String>,
     static_property_names: HashSet<String>,
+    unproven_definition_names: HashSet<String>,
+    unproven_monomorphic_access_names: HashSet<String>,
 }
 
 pub(crate) fn collect_extern_property_names_with_externs(
     file_names: &[String],
     extern_file_names: &[String],
+    file_metadata: &HashMap<String, ClosureFileMetadata>,
 ) -> Result<ExternPropertyAnalysis, String> {
     let retained_sources = file_names
         .iter()
@@ -69,16 +76,31 @@ pub(crate) fn collect_extern_property_names_with_externs(
     for (path, source) in &retained_sources {
         match parse_program(&allocator, path, source) {
             Ok(program) => {
-                let mut collector = ExternPropertyCollector::default();
+                let metadata = file_metadata.get(&closure_metadata_key(path));
+                let mut collector = ExternPropertyCollector::new(metadata);
                 collector.visit_program(&program);
                 let analysis = collector.finish();
                 static_property_names.extend(analysis.static_property_names.iter().cloned());
                 preserved_property_names.extend(analysis.platform_callback_names);
                 preserved_property_names.extend(analysis.reflective_property_names);
+                let is_proven_monomorphic = |name: &String| {
+                    analysis.proven_definition_names.contains(name)
+                        && analysis.proven_monomorphic_access_names.contains(name)
+                        && !analysis.unproven_definition_names.contains(name)
+                        && !analysis.unproven_monomorphic_access_names.contains(name)
+                };
                 preserved_property_names.extend(
                     analysis
                         .defined_hazard_names
                         .intersection(&analysis.accessed_hazard_names)
+                        .filter(|name| !is_proven_monomorphic(name))
+                        .cloned(),
+                );
+                preserved_property_names.extend(
+                    analysis
+                        .callback_record_names
+                        .iter()
+                        .filter(|name| !is_proven_monomorphic(name))
                         .cloned(),
                 );
                 preserved_property_names.extend(
@@ -193,26 +215,64 @@ fn property_key_to_string(key: &PropertyKey<'_>, computed: bool) -> Option<Strin
 #[derive(Default)]
 struct ExternPropertyCollector {
     accessed_hazard_names: HashSet<String>,
+    callback_record_names: HashSet<String>,
     class_name_stack: Vec<Option<String>>,
     constructor_read_names: HashSet<String>,
     defined_hazard_names: HashSet<String>,
+    function_depth: usize,
+    instance_this_depth: Option<usize>,
+    nominal_member_names: HashMap<String, HashSet<String>>,
     platform_callback_names: HashSet<String>,
+    proven_definition_names: HashSet<String>,
+    proven_monomorphic_access_names: HashSet<String>,
     reflective_property_names: HashSet<String>,
     static_assigned_names: HashSet<String>,
     static_context_depth: usize,
     static_property_names: HashSet<String>,
+    unproven_definition_names: HashSet<String>,
+    unproven_monomorphic_access_names: HashSet<String>,
 }
 
 impl ExternPropertyCollector {
+    fn new(metadata: Option<&ClosureFileMetadata>) -> Self {
+        let mut nominal_member_names = HashMap::<String, HashSet<String>>::new();
+        if let Some(metadata) = metadata {
+            for annotation in &metadata.annotations {
+                let ClosureAnnotationTarget::Member {
+                    member_name,
+                    owner_binding_name,
+                    is_static: false,
+                    ..
+                } = &annotation.target
+                else {
+                    continue;
+                };
+                nominal_member_names
+                    .entry(owner_binding_name.clone())
+                    .or_default()
+                    .insert(member_name.clone());
+            }
+        }
+        Self {
+            nominal_member_names,
+            ..Self::default()
+        }
+    }
+
     fn finish(self) -> ParsedExternFileAnalysis {
         ParsedExternFileAnalysis {
             accessed_hazard_names: self.accessed_hazard_names,
+            callback_record_names: self.callback_record_names,
             constructor_read_names: self.constructor_read_names,
             defined_hazard_names: self.defined_hazard_names,
             platform_callback_names: self.platform_callback_names,
+            proven_definition_names: self.proven_definition_names,
+            proven_monomorphic_access_names: self.proven_monomorphic_access_names,
             reflective_property_names: self.reflective_property_names,
             static_assigned_names: self.static_assigned_names,
             static_property_names: self.static_property_names,
+            unproven_definition_names: self.unproven_definition_names,
+            unproven_monomorphic_access_names: self.unproven_monomorphic_access_names,
         }
     }
 
@@ -222,15 +282,44 @@ impl ExternPropertyCollector {
             .and_then(|name| name.as_deref())
     }
 
-    fn insert_accessed_hazard_name(&mut self, property_name: &str) {
-        if is_valid_js_identifier(property_name) {
-            self.accessed_hazard_names.insert(property_name.to_string());
+    fn is_proven_monomorphic_receiver(
+        &self,
+        receiver: &Expression<'_>,
+        property_name: &str,
+    ) -> bool {
+        matches!(
+            receiver.without_parentheses(),
+            Expression::ThisExpression(_)
+        ) && self.instance_this_depth == Some(self.function_depth)
+            && self
+                .current_class_name()
+                .and_then(|class_name| self.nominal_member_names.get(class_name))
+                .is_some_and(|names| names.contains(property_name))
+    }
+
+    fn insert_accessed_hazard_name(&mut self, property_name: &str, proven: bool) {
+        if !is_valid_js_identifier(property_name) {
+            return;
+        }
+        self.accessed_hazard_names.insert(property_name.to_string());
+        if proven {
+            self.proven_monomorphic_access_names
+                .insert(property_name.to_string());
+        } else {
+            self.unproven_monomorphic_access_names
+                .insert(property_name.to_string());
         }
     }
 
-    fn insert_defined_hazard_name(&mut self, property_name: Option<String>) {
-        if let Some(property_name) = property_name.filter(|name| is_valid_js_identifier(name)) {
-            self.defined_hazard_names.insert(property_name);
+    fn insert_defined_hazard_name(&mut self, property_name: Option<String>, proven: bool) {
+        let Some(property_name) = property_name.filter(|name| is_valid_js_identifier(name)) else {
+            return;
+        };
+        self.defined_hazard_names.insert(property_name.clone());
+        if proven {
+            self.proven_definition_names.insert(property_name);
+        } else {
+            self.unproven_definition_names.insert(property_name);
         }
     }
 
@@ -267,6 +356,12 @@ impl<'a> Visit<'a> for ExternPropertyCollector {
         );
         walk::walk_class(self, class);
         self.class_name_stack.pop();
+    }
+
+    fn visit_function(&mut self, function: &Function<'a>, flags: ScopeFlags) {
+        self.function_depth += 1;
+        walk::walk_function(self, function, flags);
+        self.function_depth -= 1;
     }
 
     fn visit_assignment_expression(&mut self, assignment: &AssignmentExpression<'a>) {
@@ -317,7 +412,10 @@ impl<'a> Visit<'a> for ExternPropertyCollector {
             self.visit_function(&method.value, ScopeFlags::Function);
             self.static_context_depth -= 1;
         } else {
+            let previous_instance_this_depth = self.instance_this_depth;
+            self.instance_this_depth = Some(self.function_depth + 1);
             walk::walk_method_definition(self, method);
+            self.instance_this_depth = previous_instance_this_depth;
         }
     }
 
@@ -345,7 +443,8 @@ impl<'a> Visit<'a> for ExternPropertyCollector {
             MemberExpression::StaticMemberExpression(member) => {
                 let property_name = member.property.name.as_str();
                 self.insert_platform_callback_name(Some(property_name.to_string()));
-                self.insert_accessed_hazard_name(property_name);
+                let proven = self.is_proven_monomorphic_receiver(&member.object, property_name);
+                self.insert_accessed_hazard_name(property_name, proven);
                 if let Some(object_member) = member.object.as_member_expression() {
                     if object_member.static_property_name() == Some("constructor")
                         && is_valid_js_identifier(property_name)
@@ -383,7 +482,11 @@ impl<'a> Visit<'a> for ExternPropertyCollector {
 
     fn visit_variable_declarator(&mut self, declarator: &VariableDeclarator<'a>) {
         if declarator.init.is_some() {
-            collect_pattern_property_reads(&declarator.id, &mut self.accessed_hazard_names);
+            let mut property_names = HashSet::new();
+            collect_pattern_property_reads(&declarator.id, &mut property_names);
+            for property_name in property_names {
+                self.insert_accessed_hazard_name(&property_name, false);
+            }
         }
         walk::walk_variable_declarator(self, declarator);
     }
@@ -394,7 +497,7 @@ impl<'a> Visit<'a> for ExternPropertyCollector {
                 continue;
             };
             let property_name = string_defined_prop_name(&property.key);
-            self.insert_defined_hazard_name(property_name.clone());
+            self.insert_defined_hazard_name(property_name.clone(), false);
             if let Some(property_name) = property_name {
                 self.insert_reflective_name(&property_name);
             }
@@ -419,7 +522,7 @@ impl<'a> Visit<'a> for ExternPropertyCollector {
     }
 
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
-        collect_call_record_contract_names(call, &mut self.reflective_property_names);
+        collect_call_record_contract_names(call, &mut self.callback_record_names);
         match call.callee.without_parentheses() {
             Expression::Identifier(identifier)
                 if identifier.name == "JSCompiler_renameProperty" =>
@@ -434,7 +537,16 @@ impl<'a> Visit<'a> for ExternPropertyCollector {
                 if identifier.name == "__publicField" && call.arguments.len() >= 2 =>
             {
                 if let Some(expression) = call.arguments.get(1).and_then(Argument::as_expression) {
-                    self.insert_defined_hazard_name(string_literal_expr_name(expression));
+                    let property_name = string_literal_expr_name(expression);
+                    let proven = property_name.as_deref().is_some_and(|property_name| {
+                        call.arguments
+                            .first()
+                            .and_then(Argument::as_expression)
+                            .is_some_and(|receiver| {
+                                self.is_proven_monomorphic_receiver(receiver, property_name)
+                            })
+                    });
+                    self.insert_defined_hazard_name(property_name, proven);
                 }
             }
             expression if expression.is_member_expression() => {
@@ -465,7 +577,7 @@ impl<'a> Visit<'a> for ExternPropertyCollector {
                             (Some("Object"), Some("defineProperty"))
                                 | (Some("Reflect"), Some("defineProperty"))
                         ) {
-                            self.insert_defined_hazard_name(string_name);
+                            self.insert_defined_hazard_name(string_name, false);
                         }
                     }
                 }
@@ -1165,4 +1277,111 @@ fn collect_program_declared_names(programs: &[Program<'_>]) -> HashSet<String> {
         }
     }
     names
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::closure_metadata::ClosureAnnotation;
+
+    use super::*;
+
+    static NEXT_FIXTURE_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn analyze_fixture(source: &str, typed_member: Option<(&str, &str)>) -> ExternPropertyAnalysis {
+        let fixture_id = NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "gcc-ts-bundler-extern-analysis-{}-{fixture_id}.js",
+            std::process::id()
+        ));
+        fs::write(&path, source).unwrap();
+        let file_name = path.to_string_lossy().to_string();
+        let mut metadata_by_file = HashMap::new();
+        if let Some((owner_binding_name, member_name)) = typed_member {
+            metadata_by_file.insert(
+                closure_metadata_key(&path),
+                ClosureFileMetadata {
+                    ambient_globals: Vec::new(),
+                    annotations: vec![ClosureAnnotation {
+                        references: Vec::new(),
+                        target: ClosureAnnotationTarget::Member {
+                            member_kind: "field".to_string(),
+                            member_name: member_name.to_string(),
+                            owner_binding_name: owner_binding_name.to_string(),
+                            is_static: false,
+                        },
+                        template: "/** @type {number} */\n".to_string(),
+                        type_bearing: true,
+                    }],
+                    declarations: Vec::new(),
+                    decorated_output_text: None,
+                    diagnostics: Vec::new(),
+                    enums: Vec::new(),
+                    external_global_member_accesses: Vec::new(),
+                    external_owned_member_accesses: Vec::new(),
+                    erased_const_enums: Vec::new(),
+                    file_path: file_name.clone(),
+                    runtime_module_id: None,
+                    source_file_path: file_name.clone(),
+                    symbols: Vec::new(),
+                },
+            );
+        }
+        let analysis =
+            collect_extern_property_names_with_externs(&[file_name], &[], &metadata_by_file)
+                .unwrap();
+        fs::remove_file(path).unwrap();
+        analysis
+    }
+
+    #[test]
+    fn untyped_class_member_hazard_remains_pinned() {
+        let analysis = analyze_fixture(
+            r#"class Box {
+                constructor() { __publicField(this, "value", 1); }
+                read() { return this.value; }
+            }"#,
+            None,
+        );
+
+        assert!(analysis.preserved_property_names.contains("value"));
+    }
+
+    #[test]
+    fn metadata_backed_monomorphic_class_member_is_not_pinned() {
+        let analysis = analyze_fixture(
+            r#"class Box {
+                constructor() { __publicField(this, "value", 1); }
+                read() { return this.value; }
+            }"#,
+            Some(("Box", "value")),
+        );
+
+        assert!(!analysis.preserved_property_names.contains("value"));
+    }
+
+    #[test]
+    fn structural_object_member_remains_pinned() {
+        let analysis = analyze_fixture(
+            r#"const box = { value: 1 };
+            consume(box.value);"#,
+            None,
+        );
+
+        assert!(analysis.preserved_property_names.contains("value"));
+    }
+
+    #[test]
+    fn one_unknown_receiver_keeps_a_typed_member_pinned() {
+        let analysis = analyze_fixture(
+            r#"class Box {
+                constructor() { __publicField(this, "value", 1); }
+                read(other) { return this.value + other.value; }
+            }"#,
+            Some(("Box", "value")),
+        );
+
+        assert!(analysis.preserved_property_names.contains("value"));
+    }
 }

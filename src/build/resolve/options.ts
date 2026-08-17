@@ -122,6 +122,10 @@ export function normalizeBuildOptions(
         options.diagnostics?.verbose ??
         DEFAULT_BUILD_OPTIONS.diagnostics.verbose,
     },
+    hideWarningsFor:
+      options.hideWarningsFor === undefined
+        ? DEFAULT_BUILD_OPTIONS.hideWarningsFor
+        : [...options.hideWarningsFor],
     entries: options.entries.map((entry) => normalizeEntry(entry, srcDir)),
     externals: normalizeExternalSpecifiers(options.externals ?? []),
     externs: [...(options.externs ?? [])].map((filePath) =>
