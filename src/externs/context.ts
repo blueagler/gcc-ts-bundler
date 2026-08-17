@@ -1,7 +1,7 @@
 import ts from "@typescript/typescript6";
 
 import { collectContracts } from "./contracts/registry";
-import { createEmptyContractRegistry } from "./shared";
+import { createEmptyContractRegistry, type ContractRegistry } from "./shared";
 import { uniqueSortedStrings } from "../shared/files";
 
 export interface ExternAnalysisContext {

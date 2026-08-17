@@ -15,7 +15,6 @@ import {
 import { logInternalDetail, withInternalTiming } from "../../shared/timing";
 import {
   arrayOf,
-  isBoolean,
   isNumber,
   isObjectOf,
   isString,
@@ -249,7 +248,7 @@ export async function emitNativeStage({
 
   await writeJson(
     paths.metadataPathForNative,
-    analysis.files.map(({ runtimeModuleId: _runtimeModuleId, ...file }) => file),
+    analysis.files.map(toNativeTypeMetadataFile),
   );
   const result = await withInternalTiming("native-emit:transpile", () =>
     Promise.resolve(
@@ -524,10 +523,12 @@ function analysisFromSidecar(
     dependencies: sidecar.dependencies,
     diagnostics,
     extractedCounts: sidecar.extractedCounts,
-    files: sidecar.files.map((file) => ({
-      ...file,
-      filePath: remapMetadataFilePath(file.filePath, srcDir, workspaceDir),
-    })),
+    files: sidecar.files.map((file) =>
+      toNativeTypeMetadataFile({
+        ...file,
+        filePath: remapMetadataFilePath(file.filePath, srcDir, workspaceDir),
+      }),
+    ),
     preflightDiagnostics,
     typeMetadataDiagnostics: sidecar.diagnostics,
   };
@@ -885,6 +886,27 @@ function canUseJsAnalysisFastPath(fileNames: string[]) {
     return false;
   }
   return fileNames.every((fileName) => /\.(?:[cm]?jsx?)$/u.test(fileName));
+}
+
+function toNativeTypeMetadataFile(
+  file: ClosureTypeMetadataFile,
+): ClosureTypeMetadataFile {
+  // Spelled out rather than rest-spread: these keys reach the native addon,
+  // and only a literal written against the boundary type keeps its property
+  // names through the self-build's renaming.
+  return {
+    ambientGlobals: file.ambientGlobals,
+    annotations: file.annotations,
+    declarations: file.declarations,
+    decoratedOutputText: file.decoratedOutputText,
+    diagnostics: file.diagnostics,
+    enums: file.enums,
+    externalGlobalMemberAccesses: file.externalGlobalMemberAccesses,
+    externalOwnedMemberAccesses: file.externalOwnedMemberAccesses,
+    filePath: file.filePath,
+    sourceFilePath: file.sourceFilePath,
+    symbols: file.symbols,
+  };
 }
 
 function createTrivialTypeMetadataFile(
