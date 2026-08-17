@@ -10,10 +10,7 @@ import { prebundleMaterializedDependencies } from "../src/vite/prebundle/index.t
 import { createCompilerOptions } from "../src/vite/config.ts";
 import {
   classifyTypeMetadataSource,
-  collectOneToOneSourceMappings,
   collectViteTypeMetadata,
-  createTypeMetadataCacheKey,
-  hashTypeMetadataFiles,
   joinDeclarationAndRuntimeExports,
   resolveDeclarationOverlay,
   resolveRuntimeResolutionIdentity,
@@ -84,12 +81,9 @@ function oneToOneModule({ filePath, id, sourceModuleId }) {
     relativePath: path.basename(filePath),
     sourceModuleIds: [sourceModuleId],
     typeMetadata: {
-      cacheKey: `one-to-one:${id}`,
       exportFacades: [],
       kind: "one-to-one",
-      sourceMappings: [
-        { materializedFilePath: filePath, runtimeModuleId: id, sourceModuleId },
-      ],
+      sourceMappings: [sourceModuleId],
     },
   };
 }
@@ -115,6 +109,10 @@ test("type metadata source eligibility includes dependency TS and explicit JS JS
   expect(classifyTypeMetadataSource("/app/node_modules/pkg/index.ts")).toBe(
     "ts-runtime",
   );
+  expect(classifyTypeMetadataSource("/app/src/App.vue")).toBe("ts-runtime");
+  expect(classifyTypeMetadataSource("/app/src/Widget.svelte")).toBe(
+    "ts-runtime",
+  );
   expect(
     classifyTypeMetadataSource("/app/pkg.js", "/** @param {string} x */\n"),
   ).toBe("js-jsdoc");
@@ -124,7 +122,7 @@ test("type metadata source eligibility includes dependency TS and explicit JS JS
   expect(classifyTypeMetadataSource("virtual:thing.ts")).toBe("untyped");
 });
 
-test("runtime resolution provenance preserves the selected browser subpath target", async () => {
+test("runtime resolution identity keeps package subpath and runtime path", async () => {
   const workspace = await createWorkspace();
   await workspace.write(
     "node_modules/pkg/package.json",
@@ -147,43 +145,15 @@ test("runtime resolution provenance preserves the selected browser subpath targe
 
   expect(resolution).toMatchObject({
     conditions: ["browser", "import"],
-    format: "esm",
     importerModuleId,
     packageName: "pkg",
     packageSubpath: "feature",
     resolutionMode: "import",
     runtimeModuleId: runtimePath,
-    selectedRuntimeTarget: "./browser/feature.js",
     specifier: "pkg/feature",
   });
 });
 
-test("one-to-one provenance never guesses across fused source ids", () => {
-  expect(
-    collectOneToOneSourceMappings({
-      modules: [
-        {
-          filePath: "/runtime/a.js",
-          id: "runtime:a",
-          relativePath: "a.js",
-          sourceModuleIds: ["/src/a.ts"],
-        },
-        {
-          filePath: "/runtime/fused.js",
-          id: "runtime:fused",
-          relativePath: "fused.js",
-          sourceModuleIds: ["/dep/a.js", "/dep/b.js"],
-        },
-      ],
-    }),
-  ).toEqual([
-    {
-      materializedFilePath: path.normalize("/runtime/a.js"),
-      runtimeModuleId: "runtime:a",
-      sourceModuleId: "/src/a.ts",
-    },
-  ]);
-});
 
 test("runtime export graph resolves default, named, reexport, star, and CJS identities", () => {
   const root = path.normalize("/runtime/index.js");
@@ -286,11 +256,8 @@ test("declaration overlays are subpath/mode aware and join only public runtime e
     resolutionMode: "import",
   });
 
-  expect(overlay.identity).toMatchObject({
+  expect(overlay.identity).toEqual({
     declarationEntryPath: path.join(packageRoot, "feature.d.mts"),
-    declarationSubpath: "feature",
-    resolutionMode: "import",
-    runtimeModuleId: "pkg/feature-runtime",
   });
   expect(overlay.exports.map((fact) => fact.exportName).sort()).toEqual([
     "Feature",
@@ -361,39 +328,6 @@ test("declaration overlays are subpath/mode aware and join only public runtime e
   expect(legacy.exports.map((fact) => fact.exportName)).toContain("default");
 });
 
-test("declaration, resolver, runtime graph, and prebundle inputs move cache identity", async () => {
-  const workspace = await createWorkspace();
-  const declaration = await workspace.write(
-    "index.d.ts",
-    "export type X = string;\n",
-  );
-  const input = {
-    compilerOptions: { moduleResolution: "nodenext" },
-    declarationFiles: [declaration],
-    prebundleProvenance: { output: "facade" },
-    resolution: {
-      conditions: ["browser", "import"],
-      selectedRuntimeTarget: "./browser.js",
-    },
-    runtimeExportGraph: [{ exportName: "X", localName: "X" }],
-  };
-  const first = await createTypeMetadataCacheKey(input);
-  expect(await createTypeMetadataCacheKey(input)).toBe(first);
-  expect(
-    await createTypeMetadataCacheKey({
-      ...input,
-      resolution: {
-        ...input.resolution,
-        selectedRuntimeTarget: "./node.js",
-      },
-    }),
-  ).not.toBe(first);
-  await workspace.write("index.d.ts", "export type X = number;\n");
-  expect(await createTypeMetadataCacheKey(input)).not.toBe(first);
-  expect(await hashTypeMetadataFiles([declaration])).toBe(
-    await hashTypeMetadataFiles([declaration]),
-  );
-});
 
 test("prebundles retain deterministic exported facade provenance", async () => {
   const workspace = await createWorkspace();
@@ -822,7 +756,6 @@ test("declaration overlays attach only proven browser-subpath exports to fused v
     relativePath: path.basename(filePath),
     sourceModuleIds: [publicRuntimeId, leafRuntimeId],
     typeMetadata: {
-      cacheKey: `fused:${id}`,
       exportFacades: [facade],
       kind: "fused",
       sourceMappings: [],
@@ -831,14 +764,12 @@ test("declaration overlays attach only proven browser-subpath exports to fused v
   const materialized = graph({
     modules: [
       fusedModule(vendorFile, "fused:vendor", {
-        facadeId: "feature-facade",
         originExportName: "Feature",
         originModuleId: publicRuntimeId,
         outputExportName: "Feature",
         outputLocalName: "Feature$1",
       }),
       fusedModule(lazyFile, "fused:lazy", {
-        facadeId: "create-facade",
         originExportName: "create",
         originModuleId: publicRuntimeId,
         outputExportName: "make",
@@ -874,26 +805,6 @@ test("declaration overlays attach only proven browser-subpath exports to fused v
       )
       .join("\n"),
   ).not.toContain("Hidden");
-  expect(first.provenance.attachments).toEqual(
-    expect.arrayContaining([
-      expect.objectContaining({
-        exportName: "Feature",
-        facadeId: "feature-facade",
-        runtimeModuleId: "fused:vendor",
-      }),
-      expect.objectContaining({
-        exportName: "make",
-        originExportName: "create",
-        originRuntimeModuleId: publicRuntimeId,
-        facadeId: "create-facade",
-        runtimeModuleId: "fused:lazy",
-      }),
-    ]),
-  );
-  expect(first.provenance.resolutions[0]).toMatchObject({
-    packageSubpath: "feature",
-    selectedRuntimeTarget: "./browser/feature.js",
-  });
   expect(first.dependencies).toContain(path.normalize(declarationModel));
 
   await workspace.write(
@@ -905,7 +816,7 @@ test("declaration overlays attach only proven browser-subpath exports to fused v
     projectRoot: workspace.root,
     sourceGraph,
   });
-  expect(second.cacheKey).not.toBe(first.cacheKey);
+  expect(JSON.stringify(second.files)).not.toBe(JSON.stringify(first.files));
 });
 
 test("CJS export-equals overlays attach to the normalized one-to-one runtime binding and config carries the sidecar", async () => {

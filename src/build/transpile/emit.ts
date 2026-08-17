@@ -51,15 +51,12 @@ import {
 } from "./closure-ir/preflight";
 
 export interface NativeEmitStageResult {
-  dependencyModules: string[];
-  dependencyRuntimeFiles: string[];
   diagnostics: ts.Diagnostic[];
   emitSkipped: boolean;
   emittedFiles: string[];
   externsPath: string;
   outDir: string;
   preservedImports: PreservedImport[];
-  reifiedNamespaceCount: number;
   supportFiles: string[];
   typeMetadata: NativeEmittedTypeMetadata[];
   typeMetadataDependencies: FileContentSnapshot;
@@ -69,14 +66,11 @@ export interface NativeEmitStageResult {
 interface NativeEmitMetadata {
   artifacts: FileContentSnapshot;
   chunkSignature: string;
-  dependencyModules: string[];
-  dependencyRuntimeFiles: string[];
   emittedFiles: string[];
   externsPath: string;
   metadataPath: string;
   optionsSignature: string;
   preservedImports: PreservedImport[];
-  reifiedNamespaceCount: number;
   supportFiles: string[];
   typeMetadata: NativeEmittedTypeMetadata[];
   typeMetadataDependencies: FileContentSnapshot;
@@ -84,7 +78,7 @@ interface NativeEmitMetadata {
   warnings: string[];
 }
 
-const NATIVE_EMIT_METADATA_VERSION = 16;
+const NATIVE_EMIT_METADATA_VERSION = 17;
 
 /**
  * Hoisted bundler-runtime emission depends on chunk membership, so the native
@@ -165,17 +159,9 @@ export async function emitNativeStage({
     ...fileNames,
     ...tsxRuntimeSourceFiles,
   ]);
-  const dependencyModules = collectDependencyModules(packageAliases);
-  const dependencyRuntimeFiles = collectDependencyRuntimeFiles({
-    outDir: paths.outDir,
-    sourceFiles: combinedFileNames,
-    workspaceDir,
-  });
 
   const cachedResult = await restoreCachedNativeEmitResult({
     chunkSignature,
-    dependencyModules,
-    dependencyRuntimeFiles,
     metadataPath,
     optionsSignature,
     outDir: paths.outDir,
@@ -198,15 +184,12 @@ export async function emitNativeStage({
   });
   if (missingInputDiagnostics.length > 0) {
     return {
-      dependencyModules,
-      dependencyRuntimeFiles,
       diagnostics: missingInputDiagnostics,
       emitSkipped: true,
       emittedFiles: [],
       externsPath: paths.externsPath,
       outDir: paths.outDir,
       preservedImports: [],
-      reifiedNamespaceCount: 0,
       supportFiles: [],
       typeMetadata: [],
       typeMetadataDependencies: {},
@@ -243,15 +226,12 @@ export async function emitNativeStage({
   ];
   if (analysisDiagnostics.length > 0) {
     return {
-      dependencyModules,
-      dependencyRuntimeFiles,
       diagnostics: analysisDiagnostics,
       emitSkipped: true,
       emittedFiles: [],
       externsPath: paths.externsPath,
       outDir: paths.outDir,
       preservedImports: [],
-      reifiedNamespaceCount: 0,
       supportFiles: [],
       typeMetadata: [],
       typeMetadataDependencies: {},
@@ -267,7 +247,10 @@ export async function emitNativeStage({
     analysis.typeMetadataDiagnostics.length,
   );
 
-  await writeJson(paths.metadataPathForNative, analysis.files);
+  await writeJson(
+    paths.metadataPathForNative,
+    analysis.files.map(({ runtimeModuleId: _runtimeModuleId, ...file }) => file),
+  );
   const result = await withInternalTiming("native-emit:transpile", () =>
     Promise.resolve(
       runNativeTranspile({
@@ -316,15 +299,12 @@ export async function emitNativeStage({
           : []),
       ]),
       chunkSignature,
-      dependencyModules,
-      dependencyRuntimeFiles,
       emittedFiles: result.emittedFiles,
       externsPath: result.externsPath,
       metadataPath,
       optionsSignature,
       metadataPathForNative: paths.metadataPathForNative,
       preservedImports: result.preservedImports,
-      reifiedNamespaceCount: result.reifiedNamespaceCount,
       supportFiles: finalSupportFiles,
       typeMetadata: result.typeMetadata,
       typeMetadataDependencies,
@@ -333,15 +313,12 @@ export async function emitNativeStage({
   }
 
   return {
-    dependencyModules,
-    dependencyRuntimeFiles,
     diagnostics: [],
     emitSkipped: false,
     emittedFiles: result.emittedFiles,
     externsPath: result.externsPath,
     outDir: paths.outDir,
     preservedImports: result.preservedImports,
-    reifiedNamespaceCount: result.reifiedNamespaceCount,
     supportFiles: finalSupportFiles,
     typeMetadata: result.typeMetadata,
     typeMetadataDependencies,
@@ -653,8 +630,6 @@ function createNativeEmitPaths({
 async function restoreCachedNativeEmitResult({
   optionsSignature,
   chunkSignature,
-  dependencyModules,
-  dependencyRuntimeFiles,
   metadataPath,
   outDir,
   runtimeModuleSourceMapFile,
@@ -662,8 +637,6 @@ async function restoreCachedNativeEmitResult({
 }: {
   optionsSignature: string;
   chunkSignature: string;
-  dependencyModules: string[];
-  dependencyRuntimeFiles: string[];
   metadataPath: string;
   outDir: string;
   runtimeModuleSourceMapFile: string | undefined;
@@ -693,21 +666,12 @@ async function restoreCachedNativeEmitResult({
   logDeliveredTypeMetadata(cachedMetadata.typeMetadata);
   logNamespaceWarnings(cachedMetadata.warnings);
   return {
-    dependencyModules:
-      cachedMetadata.dependencyModules.length > 0
-        ? cachedMetadata.dependencyModules
-        : dependencyModules,
-    dependencyRuntimeFiles:
-      cachedMetadata.dependencyRuntimeFiles.length > 0
-        ? cachedMetadata.dependencyRuntimeFiles
-        : dependencyRuntimeFiles,
     diagnostics: [],
     emitSkipped: false,
     emittedFiles: cachedMetadata.emittedFiles,
     externsPath: cachedMetadata.externsPath,
     outDir,
     preservedImports: cachedMetadata.preservedImports,
-    reifiedNamespaceCount: cachedMetadata.reifiedNamespaceCount,
     supportFiles: cachedMetadata.supportFiles,
     typeMetadata: cachedMetadata.typeMetadata,
     typeMetadataDependencies: cachedMetadata.typeMetadataDependencies,
@@ -793,15 +757,12 @@ function runNativeTranspile({
 async function persistNativeEmitMetadata({
   artifacts,
   chunkSignature,
-  dependencyModules,
-  dependencyRuntimeFiles,
   emittedFiles,
   externsPath,
   metadataPath,
   optionsSignature,
   metadataPathForNative,
   preservedImports,
-  reifiedNamespaceCount,
   supportFiles,
   typeMetadata,
   typeMetadataDependencies,
@@ -809,15 +770,12 @@ async function persistNativeEmitMetadata({
 }: {
   artifacts: FileContentSnapshot;
   chunkSignature: string;
-  dependencyModules: string[];
-  dependencyRuntimeFiles: string[];
   emittedFiles: string[];
   externsPath: string;
   metadataPath: string;
   optionsSignature: string;
   metadataPathForNative: string;
   preservedImports: PreservedImport[];
-  reifiedNamespaceCount: number;
   supportFiles: string[];
   typeMetadata: NativeEmittedTypeMetadata[];
   typeMetadataDependencies: FileContentSnapshot;
@@ -826,14 +784,11 @@ async function persistNativeEmitMetadata({
   await writeJson(metadataPath, {
     artifacts,
     chunkSignature,
-    dependencyModules,
-    dependencyRuntimeFiles,
     emittedFiles,
     externsPath,
     metadataPath: metadataPathForNative,
     optionsSignature,
     preservedImports,
-    reifiedNamespaceCount,
     supportFiles,
     typeMetadata,
     typeMetadataDependencies,
@@ -902,38 +857,6 @@ function toEmittedPath(
   return path
     .join(outDir, path.relative(workspaceDir, sourcePath))
     .replace(/\.[^/.]+$/, ".js");
-}
-
-function collectDependencyModules(packageAliases: PackageAlias[]) {
-  return uniqueSortedStrings(
-    packageAliases
-      .filter((alias) => isDependencyFile(alias.targetPath))
-      .map((alias) =>
-        alias.subpath === "."
-          ? alias.packageName
-          : `${alias.packageName}/${alias.subpath.replace(/^\.\//, "")}`,
-      ),
-  );
-}
-
-function collectDependencyRuntimeFiles({
-  outDir,
-  sourceFiles,
-  workspaceDir,
-}: {
-  outDir: string;
-  sourceFiles: string[];
-  workspaceDir: string;
-}) {
-  return uniqueSortedStrings(
-    sourceFiles
-      .filter((filePath) => isDependencyFile(filePath))
-      .map((filePath) => toEmittedPath(filePath, outDir, workspaceDir)),
-  );
-}
-
-function isDependencyFile(filePath: string) {
-  return path.resolve(filePath).includes(`${path.sep}node_modules${path.sep}`);
 }
 
 async function scanNativeFilesQuickly(fileNames: string[]) {
@@ -1017,7 +940,6 @@ const isNativeEmittedTypeMetadata = isObjectOf<NativeEmittedTypeMetadata>({
   counts: isNativeTypeMetadataCounts,
   diagnostics: arrayOf(isNativeTypeMetadataDiagnostic),
   emittedFile: isString,
-  hasTypeMetadata: isBoolean,
 });
 
 const isPreservedImport = isObjectOf<PreservedImport>({
@@ -1032,14 +954,11 @@ const isPreservedImport = isObjectOf<PreservedImport>({
 const isNativeEmitMetadata = isObjectOf<NativeEmitMetadata>({
   artifacts: recordOf(isContentIdentity),
   chunkSignature: isString,
-  dependencyModules: isStringArray,
-  dependencyRuntimeFiles: isStringArray,
   emittedFiles: isStringArray,
   externsPath: isString,
   metadataPath: isString,
   optionsSignature: isString,
   preservedImports: arrayOf(isPreservedImport),
-  reifiedNamespaceCount: isNumber,
   supportFiles: isStringArray,
   typeMetadata: arrayOf(isNativeEmittedTypeMetadata),
   typeMetadataDependencies: recordOf(isContentIdentity),

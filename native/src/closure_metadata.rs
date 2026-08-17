@@ -33,14 +33,7 @@ pub struct ClosureFileMetadata {
     /// a runtime external declaration module.
     #[serde(default)]
     pub external_owned_member_accesses: Vec<u32>,
-    /// Const enums TypeScript erases. Only the names travel: the declaration is
-    /// dropped and nothing is emitted in its place.
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub erased_const_enums: Vec<String>,
     pub file_path: String,
-    #[allow(dead_code)]
-    pub runtime_module_id: Option<String>,
     pub source_file_path: String,
     #[serde(default)]
     pub symbols: Vec<ClosureTypeSymbol>,
@@ -83,10 +76,6 @@ pub struct ClosureTypeReference {
 pub struct ClosureTypeSymbol {
     pub builtin_name: Option<String>,
     pub declaration_file_path: Option<String>,
-    #[allow(dead_code)]
-    pub declaration_id: Option<String>,
-    #[allow(dead_code)]
-    pub declaration_start: Option<u32>,
     pub diagnostic_name: String,
     pub id: String,
     pub kind: String,
@@ -97,8 +86,6 @@ pub struct ClosureTypeSymbol {
 #[serde(rename_all = "camelCase")]
 pub struct ClosureTypeDeclaration {
     pub declared_symbol_id: String,
-    #[allow(dead_code)]
-    pub exported: bool,
     pub id: String,
     #[serde(default)]
     pub references: Vec<ClosureTypeReference>,
@@ -203,7 +190,6 @@ pub struct EmittedTypeMetadata {
     pub counts: TypeMetadataCounts,
     pub diagnostics: Vec<TypeMetadataDiagnostic>,
     pub emittedFile: String,
-    pub hasTypeMetadata: bool,
 }
 
 impl EmittedTypeMetadata {
@@ -214,12 +200,10 @@ impl EmittedTypeMetadata {
     ) -> Self {
         diagnostics.sort_by(|left, right| left.stable_key().cmp(&right.stable_key()));
         diagnostics.dedup_by(|left, right| left.stable_key() == right.stable_key());
-        let has_type_metadata = counts.has_type_metadata();
         Self {
             counts,
             diagnostics,
             emittedFile: emitted_file,
-            hasTypeMetadata: has_type_metadata,
         }
     }
 }
@@ -260,7 +244,6 @@ mod tests {
                 }],
                 "declarations": [{
                   "declaredSymbolId":"record:config",
-                  "exported":false,
                   "id":"record:config:declaration",
                   "references":[],
                   "template":"/** @record */\nfunction Config() {}\n"
@@ -275,11 +258,10 @@ mod tests {
                   "valueType":"number"
                 }],
                 "filePath":"/tmp/input.ts",
-                "runtimeModuleId":"app:input",
                 "sourceFilePath":"/tmp/source.ts",
                 "symbols":[
                   {"diagnosticName":"Widget","id":"runtime:widget","kind":"runtime","localName":"Widget"},
-                  {"declarationId":"record:config:declaration","diagnosticName":"Config","id":"record:config","kind":"generated-record"}
+                  {"diagnosticName":"Config","id":"record:config","kind":"generated-record"}
                 ]
               }
             ]"#,
@@ -290,19 +272,5 @@ mod tests {
         assert_eq!(files[0].annotations.len(), 1);
         assert_eq!(files[0].declarations.len(), 1);
         assert_eq!(files[0].enums[0].binding_name, "Kind");
-        assert_eq!(files[0].runtime_module_id.as_deref(), Some("app:input"));
-    }
-
-    #[test]
-    fn derives_has_type_metadata_from_delivered_counts() {
-        let metadata = EmittedTypeMetadata::new(
-            "/tmp/out.js".to_string(),
-            TypeMetadataCounts {
-                enumDeclarationCount: 1,
-                ..Default::default()
-            },
-            Vec::new(),
-        );
-        assert!(metadata.hasTypeMetadata);
     }
 }

@@ -991,12 +991,4 @@ fn split_jobs_aggregate_only_native_emitted_chunk_inputs() {
     assert_eq!(job.typeMetadataCounts.typeDeclarationCount, 1);
     assert_eq!(job.typeMetadataCounts.enumDeclarationCount, 0);
     assert_eq!(job.typeMetadataCounts.unresolvedTypeReferenceCount, 3);
-
-    let mut invalid = input;
-    invalid.typeMetadata[0].hasTypeMetadata = false;
-    let error = prepare_closure_jobs(invalid).expect_err("derived boolean is authoritative");
-    assert!(
-        error.contains("Invalid emitted type metadata boolean"),
-        "{error}"
-    );
 }

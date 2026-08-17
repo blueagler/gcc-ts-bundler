@@ -1,16 +1,14 @@
 import path from "path";
 import ts from "@typescript/typescript6";
 
+import { hasModifier } from "../../shared/typescript";
 import {
   createEmptyContractRegistry,
   getPropertyNameText,
   hasNonPublicModifier,
-  hasStaticModifier,
-  isExportedDeclaration,
   isExternPropertyName,
   isScannedDeclarationSymbol,
   resolveAliasedSymbol,
-  symbolCacheKey,
 } from "../shared";
 import type { ContractRegistry } from "../shared";
 
@@ -69,7 +67,7 @@ function collectContract(
     return;
   }
   if (
-    !isExportedDeclaration(statement) &&
+    !hasModifier(statement, ts.SyntaxKind.ExportKeyword) &&
     !statement.getSourceFile().isDeclarationFile
   ) {
     return;
@@ -141,11 +139,6 @@ function collectClassContract(
     name: statement.name.text,
     staticMembers,
     symbol,
-    usedImplementedContracts: getClassImplementedContracts(
-      statement,
-      context.checker,
-      context.scannedFileSet,
-    ),
   });
 }
 
@@ -160,9 +153,10 @@ function collectClassMembers(statement: ts.ClassDeclaration) {
     if (!memberName || !isExternPropertyName(memberName)) {
       continue;
     }
-    (hasStaticModifier(member) ? staticMembers : instanceMembers).add(
-      memberName,
-    );
+    (hasModifier(member, ts.SyntaxKind.StaticKeyword)
+      ? staticMembers
+      : instanceMembers
+    ).add(memberName);
   }
   return { instanceMembers, staticMembers };
 }
@@ -302,64 +296,4 @@ function collectConstructorParamContracts(
       ? getContractSymbolsFromTypeNode(parameter.type, checker, scannedFiles)
       : new Set<ts.Symbol>(),
   );
-}
-
-function getClassImplementedContracts(
-  statement: ts.ClassDeclaration,
-  checker: ts.TypeChecker,
-  scannedFiles: Set<string>,
-  seen = new Set<string>(),
-) {
-  const contracts = new Set<ts.Symbol>();
-  const classSymbol =
-    statement.name && checker.getSymbolAtLocation(statement.name);
-  const classKey = classSymbol ? symbolCacheKey(classSymbol) : "";
-  if (classKey && seen.has(classKey)) {
-    return contracts;
-  }
-  if (classKey) {
-    seen.add(classKey);
-  }
-
-  for (const clause of statement.heritageClauses ?? []) {
-    if (clause.token === ts.SyntaxKind.ImplementsKeyword) {
-      for (const typeNode of clause.types) {
-        for (const symbol of getContractSymbolsFromTypeNode(
-          typeNode,
-          checker,
-          scannedFiles,
-        )) {
-          contracts.add(symbol);
-        }
-      }
-      continue;
-    }
-
-    if (clause.token === ts.SyntaxKind.ExtendsKeyword) {
-      for (const typeNode of clause.types) {
-        const baseSymbol = resolveAliasedSymbol(
-          checker.getSymbolAtLocation(typeNode.expression),
-          checker,
-        );
-        if (!baseSymbol) {
-          continue;
-        }
-        const declaration = baseSymbol.declarations?.find((item) =>
-          ts.isClassDeclaration(item),
-        );
-        if (declaration && ts.isClassDeclaration(declaration)) {
-          for (const symbol of getClassImplementedContracts(
-            declaration,
-            checker,
-            scannedFiles,
-            seen,
-          )) {
-            contracts.add(symbol);
-          }
-        }
-      }
-    }
-  }
-
-  return contracts;
 }

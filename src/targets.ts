@@ -11,15 +11,15 @@ export const TARGET_NAMES = defineValues(
 );
 export type TargetName = (typeof TARGET_NAMES)[number];
 
-export type BuiltinPolicy = "reject" | "external-boundary";
-export type TargetEnvelope = "browser" | "server" | "worker";
+type BuiltinPolicy = "reject" | "external-boundary";
+type TargetEnvelope = "browser" | "server" | "worker";
 
 /**
  * One target contract feeds declaration resolution and native package policy.
  * Browser remains the default row so callers that do not opt in keep byte-for-byte
  * historical resolution behavior.
  */
-export interface TargetDescriptor {
+interface TargetDescriptor {
   ambientDeclarationRoots: readonly string[];
   builtinPolicy: BuiltinPolicy;
   /** Release ranking. Debug inserts `development` after the first condition. */
@@ -28,7 +28,7 @@ export interface TargetDescriptor {
   name: TargetName;
 }
 
-export const TARGET_DESCRIPTORS: ReadonlyMap<TargetName, TargetDescriptor> =
+const TARGET_DESCRIPTORS: ReadonlyMap<TargetName, TargetDescriptor> =
   new Map([
     [
       "browser",

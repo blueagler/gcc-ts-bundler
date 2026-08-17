@@ -41,12 +41,17 @@ export interface GccTsBundlerVitePluginOptions {
         | "srcDir"
       > & {
         /**
-         * Chunk options except `mode`, which the plugin owns:
-         * `createCompilerOptions` hardcodes `mode: "bundler-runtime"`, so a
-         * caller-supplied value was overwritten before any reader saw it and
-         * measured byte-identical. It is a type error rather than a no-op.
+         * Chunk options except fields the plugin owns.
+         *
+         * `mode` is hardcoded to `"bundler-runtime"`.
+         * `publicPath` is overwritten from `runtime.publicPath ?? config.base`.
+         * `vendorChunk` is ignored: Vite mirrors Rollup's chunk graph, so
+         * there is nothing left for the standalone vendor split to partition.
+         * Caller-supplied values are type errors rather than no-ops.
          */
-        chunks?: Omit<ChunkOptions, "mode"> | undefined;
+        chunks?:
+          | Omit<ChunkOptions, "mode" | "publicPath" | "vendorChunk">
+          | undefined;
       })
     | undefined;
   runtime?:
@@ -58,11 +63,6 @@ export interface GccTsBundlerVitePluginOptions {
   externs?:
     | {
         generate?: GccTsBundlerGeneratedExternsOptions | undefined;
-      }
-    | undefined;
-  html?:
-    | {
-        rewriteEntryScripts?: boolean | undefined;
       }
     | undefined;
   debug?:

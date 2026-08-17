@@ -2,11 +2,7 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
 
-import {
-  collectFileStates,
-  matchFileStates,
-  publishedOutputsMatch as publishedOutputsMatchNative,
-} from "../native/load";
+import { collectFileStates, matchFileStates } from "../native/load";
 import { uniqueSortedStrings } from "./files";
 
 export interface ContentIdentity {
@@ -121,13 +117,6 @@ export async function filesExist(filePaths: string[]): Promise<boolean> {
   return collectFileStates(uniqueSortedStrings(filePaths)).every(
     (state) => state.exists,
   );
-}
-
-export async function publishedOutputsMatch(
-  outputFiles: string[],
-  outDir: string,
-): Promise<boolean> {
-  return publishedOutputsMatchNative(uniqueSortedStrings(outputFiles), outDir);
 }
 
 export async function publishedOutputsMatchSnapshot(

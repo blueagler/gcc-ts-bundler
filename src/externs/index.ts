@@ -34,7 +34,6 @@ import type {
 
 export type {
   ExternBarrierWarning,
-  ExternDegradationStats,
   ExternModuleInput,
   ExternRuntimePlacement,
   ExternTypeDiagnostic,
@@ -49,7 +48,6 @@ export {
   BARRIER_WARNING_THRESHOLD,
   accountBarriers,
   auditExternFiles,
-  collectBarrierNames,
   collectBarrierPropertyNames,
   formatBarrierWarning,
 } from "./barriers";
@@ -119,12 +117,6 @@ type ResolvedExternOptions = {
   unresolvedDeclarationDependencies: Map<string, number>;
   warnings: string[];
 };
-
-function isExternModuleSpecifier(
-  module: string | ExternModuleInput,
-): module is string {
-  return isString(module);
-}
 
 export async function generateExterns(
   options: GenerateExternsOptions,
@@ -225,7 +217,7 @@ async function resolveExternOptions(
   const srcDir = path.resolve(projectRoot, options.srcDir ?? ".");
   const moduleInputs = options.modules.map(
     (module): ExternModuleInput =>
-      isExternModuleSpecifier(module)
+      isString(module)
         ? { runtime: "compiled", specifier: module }
         : {
             ...module,

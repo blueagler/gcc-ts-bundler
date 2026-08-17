@@ -15,11 +15,6 @@ const JOB_TIMEOUT_MS = 10 * 60_000;
 let queue: Promise<unknown> = Promise.resolve();
 let session: ResidentSession | undefined;
 
-export function resetResidentClosureDriver() {
-  session?.kill();
-  session = undefined;
-  queue = Promise.resolve();
-}
 
 process.on("exit", () => {
   session?.kill();

@@ -46,7 +46,6 @@ type ModuleSeed = {
 type RenderState = {
   checker: ts.TypeChecker;
   currentSymbol?: ts.Symbol | undefined;
-  degradationCounts: Map<string, number>;
   degradedOccurrences: number;
   degradedSymbols: Set<ts.Symbol>;
   projectRoot?: string | undefined;
@@ -72,7 +71,6 @@ export function renderTypedExternalDeclarations({
 }) {
   const state: RenderState = {
     checker,
-    degradationCounts: new Map(),
     degradedOccurrences: 0,
     degradedSymbols: new Set(),
     projectRoot,
@@ -154,11 +152,6 @@ export function renderTypedExternalDeclarations({
   }
 
   const degradations = {
-    byConstruct: Object.fromEntries(
-      [...state.degradationCounts].sort(([left], [right]) =>
-        left.localeCompare(right),
-      ),
-    ),
     degradedOccurrences: state.degradedOccurrences,
     degradedSymbolCount: state.degradedSymbols.size,
     reachableSymbolCount: state.emitted.size,
@@ -783,10 +776,6 @@ function fallback(
 ) {
   state.degradedOccurrences += 1;
   if (state.currentSymbol) state.degradedSymbols.add(state.currentSymbol);
-  state.degradationCounts.set(
-    code,
-    (state.degradationCounts.get(code) ?? 0) + 1,
-  );
   diagnostic(
     state,
     module,

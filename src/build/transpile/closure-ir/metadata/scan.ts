@@ -2,14 +2,15 @@ import ts from "@typescript/typescript6";
 
 import { containsDecorators } from "../decorators";
 import { containsExplicitTypeSignal } from "../diagnostics";
-import { classifyClosureIrDocEligibility } from "./doc-eligibility";
+import {
+  classifyClosureIrDocEligibility,
+  type ClosureIrDocEligibility,
+} from "./doc-eligibility";
 
 export interface ClosureIrFileFeatures {
-  docEligibility: ReturnType<typeof classifyClosureIrDocEligibility>;
-  filePath: string;
+  docEligibility: ClosureIrDocEligibility;
   hasDecorators: boolean;
   hasEnumDeclarations: boolean;
-  hasTypeDrivenClosureDocs: boolean;
   needsSemanticPreflight: boolean;
   hasTopLevelDocs: boolean;
   hasTypeDeclarations: boolean;
@@ -43,7 +44,7 @@ export function scanClosureIrSourceFiles({
       continue;
     }
 
-    const features = classifyClosureIrFile(sourceFile);
+    const features = classifyClosureIrSourceFile(sourceFile);
     if (features.shouldAnalyze) {
       analyzedFileCount += 1;
     }
@@ -82,30 +83,31 @@ export function classifyClosureIrSourceFile(
     }
   }
 
-  const docEligibility = classifyClosureIrDocEligibility(sourceFile);
+  const classified = classifyClosureIrDocEligibility(sourceFile);
   const hasExplicitTypeSignals = sourceFile.statements.some(
     containsExplicitTypeSignal,
   );
   const hasTypeDrivenClosureDocs =
-    docEligibility.isTypeScriptLike && hasExplicitTypeSignals;
+    classified.isTypeScriptLike && hasExplicitTypeSignals;
   const hasDecorators =
     sourceFile.text.includes("@") && containsDecorators(sourceFile);
   const needsSemanticPreflight =
-    docEligibility.hasJsDocText ||
-    docEligibility.hasTsCheckText ||
+    classified.hasJsDocText ||
+    classified.hasTsCheckText ||
     hasDecorators ||
     hasEnumDeclarations ||
     hasTypeDeclarations ||
     hasExplicitTypeSignals;
   const hasTopLevelDocs =
-    docEligibility.hasTopLevelDocs || hasTypeDrivenClosureDocs;
+    classified.hasTopLevelDocs || hasTypeDrivenClosureDocs;
 
   return {
-    docEligibility,
-    filePath: sourceFile.fileName,
+    docEligibility: {
+      hasJsDocText: classified.hasJsDocText,
+      isTypeScriptLike: classified.isTypeScriptLike,
+    },
     hasDecorators,
     hasEnumDeclarations,
-    hasTypeDrivenClosureDocs,
     needsSemanticPreflight,
     hasTopLevelDocs,
     hasTypeDeclarations,
@@ -115,10 +117,4 @@ export function classifyClosureIrSourceFile(
       hasTopLevelDocs ||
       hasTypeDeclarations,
   };
-}
-
-function classifyClosureIrFile(
-  sourceFile: ts.SourceFile,
-): ClosureIrFileFeatures {
-  return classifyClosureIrSourceFile(sourceFile);
 }

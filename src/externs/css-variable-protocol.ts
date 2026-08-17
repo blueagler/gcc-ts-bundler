@@ -241,7 +241,7 @@ function isFunctionLikeNode(node: ts.Node): node is FunctionLikeNode {
  * element name — unless the value is the `_skip_check_`/`_multi_value_`
  * declaration wrapper, which parseStyle prints as a declaration.
  */
-export function collectSelectorElementKeys(
+function collectSelectorElementKeys(
   sourceFile: ts.SourceFile,
   keyNames: Set<string>,
 ) {

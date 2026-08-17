@@ -27,13 +27,6 @@ pub(super) fn aggregate_type_metadata(
         .collect::<HashSet<_>>();
     let mut metadata_by_file = HashMap::new();
     for metadata in &input.typeMetadata {
-        let derived = metadata.counts.has_type_metadata();
-        if metadata.hasTypeMetadata != derived {
-            return Err(format!(
-                "Invalid emitted type metadata boolean for {}: expected {}, got {}",
-                metadata.emittedFile, derived, metadata.hasTypeMetadata
-            ));
-        }
         let key = closure_metadata_key(Path::new(&metadata.emittedFile));
         if metadata_by_file.insert(key.clone(), metadata).is_some() {
             return Err(format!("Duplicate emitted type metadata for {key}"));

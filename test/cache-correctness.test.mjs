@@ -37,7 +37,6 @@ test.serial("output behavior participates in the options signature", () => {
     signature({ platformExterns: "full" }),
     signature({
       typeMetadata: {
-        cacheKey: "metadata-a",
         dependencies: ["/tmp/signature-project/types.d.ts"],
         diagnostics: [],
         extractedCounts: {
@@ -48,8 +47,6 @@ test.serial("output behavior participates in the options signature", () => {
           unresolvedTypeReferenceCount: 0,
         },
         files: [],
-        provenance: { declarationHash: "a" },
-        version: 2,
       },
     }),
   ]);

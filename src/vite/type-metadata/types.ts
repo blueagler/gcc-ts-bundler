@@ -12,7 +12,6 @@ export type ResolutionMode = "import" | "require";
 export interface RuntimeResolutionIdentity {
   importerModuleId: string;
   conditions: string[];
-  format: "cjs" | "esm";
   packageJsonPath?: string | undefined;
   packageName?: string | undefined;
   packageRoot?: string | undefined;
@@ -20,16 +19,11 @@ export interface RuntimeResolutionIdentity {
   runtimeModuleId: string;
   resolutionMode: ResolutionMode;
   runtimePath: string;
-  selectedRuntimeTarget?: string | undefined;
   specifier: string;
 }
 
 export interface DeclarationOverlayIdentity {
   declarationEntryPath: string;
-  declarationPackageRoot?: string | undefined;
-  declarationSubpath: string;
-  resolutionMode: ResolutionMode;
-  runtimeModuleId: string;
 }
 
 export interface TypeMetadataDiagnostic {
@@ -48,7 +42,6 @@ export interface DeclarationExportFact {
   declarationFilePath: string;
   declarationId: string;
   declarationName: string;
-  declarationStart: number;
   exportName: string;
   hasRuntimeValue: boolean;
   isTypeOnly: boolean;
@@ -74,33 +67,19 @@ export interface JoinedExportTypeFact {
   declaration: DeclarationExportFact;
   exportName: string;
   runtime: RuntimeExportTarget;
-  runtimeModuleId: string;
 }
 
 export interface PrebundleExportFacade {
-  facadeId: string;
   originExportName: string;
   originModuleId: string;
   outputExportName: string;
   outputLocalName?: string | undefined;
 }
 
-export interface PrebundleBindingMap {
-  exports: PrebundleExportFacade[];
-  outputModuleId: string;
-}
-
-export interface SourceToRuntimeMapping {
-  materializedFilePath: string;
-  runtimeModuleId: string;
-  sourceModuleId: string;
-}
-
 export interface RuntimeModuleTypeProvenance {
-  cacheKey: string;
   exportFacades: PrebundleExportFacade[];
   kind: "fused" | "one-to-one";
-  sourceMappings: SourceToRuntimeMapping[];
+  sourceMappings: string[];
 }
 
 export interface DeclarationOverlayResult {
@@ -144,30 +123,9 @@ export type ViteTypeMetadataDiagnostic =
   | ViteTypeMetadataSelectionDiagnostic
   | ViteTypeScriptDiagnostic;
 
-export interface ViteTypeMetadataAttachment {
-  declarationId?: string | undefined;
-  exportName?: string | undefined;
-  facadeId?: string | undefined;
-  kind: "declaration-overlay" | "source";
-  originExportName?: string | undefined;
-  originRuntimeModuleId?: string | undefined;
-  outputBindingName?: string | undefined;
-  runtimeModuleId: string;
-  sourceFilePath: string;
-}
-
-export interface ViteTypeMetadataProvenance {
-  attachments: ViteTypeMetadataAttachment[];
-  moduleCacheKeys: Array<{ cacheKey: string; runtimeModuleId: string }>;
-  resolutions: RuntimeResolutionIdentity[];
-}
-
 export interface ViteTypeMetadataSidecar {
-  cacheKey: string;
   dependencies: string[];
   diagnostics: ViteTypeMetadataDiagnostic[];
   extractedCounts: TypeMetadataCounts;
   files: ClosureTypeMetadataFile[];
-  provenance: ViteTypeMetadataProvenance;
-  version: typeof VITE_TYPE_METADATA_VERSION;
 }

@@ -13,7 +13,6 @@ import type {
   MaterializedGraph,
 } from "../internal-types";
 import {
-  hashTypeMetadataValue,
   parseRuntimeExportGraph,
   shouldBypassTypeMetadataFusion,
   withOneToOneTypeProvenance,
@@ -30,7 +29,7 @@ import {
   rewriteAuthoredModules,
   rewriteDirectDependencyModules,
 } from "./entry-outputs";
-import { loadEsbuildBuild } from "./esbuild";
+import { loadEsbuildModule } from "./esbuild";
 import type { EsbuildBuild } from "./esbuild";
 import { createModuleParser } from "./parse";
 import {
@@ -828,7 +827,7 @@ async function buildDependencyBundles(
   }
   await syncDirectoryEntries(inputDir, inputEntries);
 
-  const esbuildBuild = await loadEsbuildBuild();
+  const esbuildBuild = (await loadEsbuildModule()).build;
   const entryPoints = writtenRequests.map((request) =>
     path.relative(materialized.srcDir, request.entryPoint).replace(/\\/g, "/"),
   );
@@ -1129,11 +1128,6 @@ async function collectBundledModules(input: {
         .replace(/\\/g, "/"),
       sourceModuleIds: sourceModuleIdsSorted,
       typeMetadata: {
-        cacheKey: hashTypeMetadataValue({
-          exportFacades: resolvedFacades,
-          sourceHash: hashText(sourceText),
-          sourceModuleIds: sourceModuleIdsSorted,
-        }),
         exportFacades: resolvedFacades,
         kind: "fused",
         sourceMappings: [],
@@ -1149,10 +1143,6 @@ async function collectBundledModules(input: {
       return {
         ...module,
         typeMetadata: {
-          cacheKey: hashTypeMetadataValue({
-            exportFacades,
-            sourceModuleIds: module.sourceModuleIds,
-          }),
           exportFacades,
           kind: "fused" as const,
           sourceMappings: [],
@@ -1191,12 +1181,6 @@ function collectExportFacadesByOutputPath(bundles: DependencyBundleSet) {
       }
       for (const outputExportName of [...outputNames].sort()) {
         facades.push({
-          facadeId: hashTypeMetadataValue({
-            originExportName: outputExportName,
-            originModuleId: request.targetModule.id,
-            outputExportName,
-            requestKey: writtenRequest.requestKey,
-          }),
           originExportName: outputExportName,
           originModuleId: request.targetModule.id,
           outputExportName,

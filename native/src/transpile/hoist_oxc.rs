@@ -1,7 +1,5 @@
 //! Oxc counterparts of `hoist.rs`'s identity-based usage readers.
 
-#![allow(dead_code)]
-
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use oxc_ast::ast::*;

@@ -102,12 +102,14 @@ fn top_level_await_classifies_preserved_modules_without_nested_false_positives()
         "src/nested-for-await.js",
         "src/nested-await-using.js",
     ] {
-        let nested = result
-            .moduleKinds
+        assert!(result
+            .graph
             .iter()
-            .find(|entry| entry.filePath.ends_with(compiled_path))
-            .unwrap();
-        assert_eq!(nested.kind, "compiled");
+            .any(|entry| entry.filePath.ends_with(compiled_path)),);
+        assert!(!result
+            .preservedModules
+            .iter()
+            .any(|entry| entry.filePath.ends_with(compiled_path)),);
     }
 }
 

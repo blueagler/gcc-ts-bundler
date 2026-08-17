@@ -46,8 +46,8 @@ type CachedRuntimeHazards = {
 // v9: hyphenated keys also record their underscored identifier alias.
 // v10: runtime hazards gained `cssVariableKeyNames`.
 // v11: key reads resolve const-bound string literals (`const K = "x"; K in o`).
-// v12: element-name keys in selector position of a tainted style object.
-const VITE_EXTERN_PACKAGE_CACHE_VERSION = 12;
+// v13: includeDependencies is not an input to analyzeRuntimeUsage.
+const VITE_EXTERN_PACKAGE_CACHE_VERSION = 13;
 
 export async function resolveCompilerExterns(input: {
   captureRoot: string;
@@ -95,7 +95,6 @@ export async function resolveCompilerExterns(input: {
     await generateViteRuntimeAwareExterns({
       captureRoot: input.captureRoot,
       generatedExternFile,
-      includeDependencies: generateOptions.includeDependencies,
       materialized: input.materialized,
       modules: [...generateOptions.modules],
       options: input.options,
@@ -141,7 +140,6 @@ export async function resolveCompilerExterns(input: {
 async function generateViteRuntimeAwareExterns(input: {
   captureRoot: string;
   generatedExternFile: string;
-  includeDependencies: boolean | undefined;
   materialized: MaterializedGraph;
   modules: string[];
   options: GccTsBundlerVitePluginOptions;
@@ -187,7 +185,6 @@ async function generateViteRuntimeAwareExterns(input: {
         const hazards = await loadCachedPackageRuntimeHazards({
           cacheRoot,
           filePaths,
-          includeDependencies: input.includeDependencies ?? true,
           packageName,
           packageSignature,
           protocolHelpers: input.protocolHelpers,
@@ -247,7 +244,6 @@ async function generateViteRuntimeAwareExterns(input: {
 async function loadCachedPackageRuntimeHazards(input: {
   cacheRoot: string;
   filePaths: string[];
-  includeDependencies: boolean;
   packageName: string;
   packageSignature: string;
   protocolHelpers: {
@@ -263,7 +259,6 @@ async function loadCachedPackageRuntimeHazards(input: {
   const cacheKey = hashJson({
     cacheVersion: VITE_EXTERN_PACKAGE_CACHE_VERSION,
     fileHashes,
-    includeDependencies: input.includeDependencies,
     mode: "runtime-aware",
     packageName: input.packageName,
     packageSignature: input.packageSignature,

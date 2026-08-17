@@ -176,7 +176,6 @@ pub(super) fn apply_source_edits(
 pub(super) fn empty_metadata() -> ClosureFileMetadata {
     ClosureFileMetadata {
         ambient_globals: Vec::new(),
-        erased_const_enums: Vec::new(),
         annotations: Vec::new(),
         declarations: Vec::new(),
         decorated_output_text: None,
@@ -185,7 +184,6 @@ pub(super) fn empty_metadata() -> ClosureFileMetadata {
         external_global_member_accesses: Vec::new(),
         external_owned_member_accesses: Vec::new(),
         file_path: String::new(),
-        runtime_module_id: None,
         source_file_path: String::new(),
         symbols: Vec::new(),
     }
@@ -254,7 +252,12 @@ pub(crate) fn compose_annotations(tags: &[&str], typed: Option<&str>) -> String 
 }
 
 pub(super) fn is_class_declaration_text(code: &str) -> bool {
-    code.trim_start().starts_with("class ")
+    let trimmed = code.trim_start();
+    trimmed.starts_with("class ")
+        || trimmed.contains("= class ")
+        || trimmed.contains("=class ")
+        || trimmed.contains("= class{")
+        || trimmed.contains("=class{")
 }
 
 pub(super) fn render_class_field_declaration(
@@ -470,8 +473,6 @@ mod tests {
             ClosureTypeSymbol {
                 builtin_name: None,
                 declaration_file_path: None,
-                declaration_id: None,
-                declaration_start: None,
                 diagnostic_name: "Missing".to_string(),
                 id: "missing".to_string(),
                 kind: "runtime".to_string(),

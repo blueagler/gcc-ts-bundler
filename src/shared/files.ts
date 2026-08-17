@@ -33,48 +33,11 @@ export async function hashFileInput(filePath: string) {
   return pending;
 }
 
-export async function hashFilesInOrder(filePaths: string[]) {
-  return Promise.all(filePaths.map((filePath) => hashFileInput(filePath)));
-}
-
-export type PublishFilesMode = "copy" | "link-or-copy";
-
 export interface DirectoryEntry {
   content: string | Uint8Array;
   relativePath: string;
 }
 
-export async function publishFilesToDirectory(
-  sourceFiles: string[],
-  outDir: string,
-  mode: PublishFilesMode,
-) {
-  await fs.rm(outDir, { force: true, recursive: true });
-  await ensureDirectory(outDir);
-
-  await Promise.all(
-    sourceFiles.map(async (sourceFile) => {
-      const destinationFile = path.join(outDir, path.basename(sourceFile));
-      if (mode === "copy") {
-        await fs.copyFile(sourceFile, destinationFile);
-        return;
-      }
-      try {
-        await fs.link(sourceFile, destinationFile);
-      } catch (error) {
-        if (
-          !hasErrorCode(error, "EXDEV") &&
-          !hasErrorCode(error, "EEXIST") &&
-          !hasErrorCode(error, "EPERM")
-        ) {
-          throw error;
-        }
-
-        await fs.copyFile(sourceFile, destinationFile);
-      }
-    }),
-  );
-}
 
 export async function syncDirectoryEntries(
   rootDir: string,

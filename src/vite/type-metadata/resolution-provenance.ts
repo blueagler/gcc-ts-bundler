@@ -25,16 +25,11 @@ export async function resolveRuntimeResolutionIdentity(input: {
     return null;
   }
   const packageRoot = path.dirname(packageJsonPath);
-  const packageJson = await readPackageJson(packageJsonPath);
-  const selectedRuntimeTarget = `./${path
-    .relative(packageRoot, runtimePath)
-    .replace(/\\/g, "/")}`;
 
   return {
     conditions: [...new Set(input.conditions)].sort((left, right) =>
       left.localeCompare(right),
     ),
-    format: resolveRuntimeFormat(runtimePath, packageJson?.type),
     importerModuleId: input.importerModuleId,
     packageJsonPath: path.normalize(packageJsonPath),
     packageName: packageIdentity.packageName,
@@ -43,7 +38,6 @@ export async function resolveRuntimeResolutionIdentity(input: {
     resolutionMode: "import",
     runtimeModuleId: input.resolvedModuleId,
     runtimePath: path.normalize(runtimePath),
-    selectedRuntimeTarget,
     specifier: input.specifier,
   };
 }
@@ -90,26 +84,4 @@ async function findNearestPackageJson(filePath: string) {
     }
   }
   return null;
-}
-
-async function readPackageJson(
-  filePath: string,
-): Promise<{ type?: string | undefined } | null> {
-  try {
-    const packageJsonText = await fs.readFile(filePath, "utf8");
-    const type = /"type"\s*:\s*"([^"]+)"/u.exec(packageJsonText)?.[1];
-    return type ? { type } : {};
-  } catch {
-    return null;
-  }
-}
-
-function resolveRuntimeFormat(runtimePath: string, packageType?: string) {
-  if (/\.(?:cjs|cts)$/u.test(runtimePath)) {
-    return "cjs" as const;
-  }
-  if (/\.(?:mjs|mts)$/u.test(runtimePath) || packageType === "module") {
-    return "esm" as const;
-  }
-  return "cjs" as const;
 }

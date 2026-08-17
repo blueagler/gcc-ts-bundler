@@ -13,7 +13,7 @@ import type { GccTsBundlerVitePluginOptions } from "../vite/types";
  *   reflectively, so listed names must not be renamed.
  */
 
-export const SVELTE_CLASS_MAP_CALLS: readonly CompatClassMapCall[] = [
+const SVELTE_CLASS_MAP_CALLS: readonly CompatClassMapCall[] = [
   { argIndex: 5, callee: "set_class" },
 ];
 
@@ -24,7 +24,7 @@ export const SVELTE_CLASS_MAP_CALLS: readonly CompatClassMapCall[] = [
  * immovable unless told otherwise, which pins a component's templates to
  * whichever chunk first referenced them.
  */
-export const SVELTE_PURE_CALLEES: readonly string[] = [
+const SVELTE_PURE_CALLEES: readonly string[] = [
   "from_html",
   "from_mathml",
   "from_svg",
@@ -34,7 +34,7 @@ export const SVELTE_PURE_CALLEES: readonly string[] = [
   "template_with_script",
 ];
 
-export const SVELTE_PROTOCOL_HELPERS: ExternsProtocolHelpers = {
+const SVELTE_PROTOCOL_HELPERS: ExternsProtocolHelpers = {
   keyExclusionListCallees: ["legacy_rest_props", "rest_props"],
   keyReadCallees: ["prop"],
 };

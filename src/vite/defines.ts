@@ -1,5 +1,5 @@
 import { isString } from "../shared/validation";
-import { loadEsbuildTransform } from "./prebundle/esbuild";
+import { loadEsbuildModule } from "./prebundle/esbuild";
 
 type DefineValue =
   | string
@@ -48,7 +48,7 @@ export function createDefineApplier(
     if (!probes.some((probe) => code.includes(probe))) {
       return code;
     }
-    const transform = await loadEsbuildTransform();
+    const transform = (await loadEsbuildModule()).transform;
     const result = await transform(code, {
       define: esbuildDefine,
       format,

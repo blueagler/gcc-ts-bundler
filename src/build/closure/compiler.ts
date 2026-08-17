@@ -1,11 +1,8 @@
 import * as closureCompilerPackage from "google-closure-compiler";
 import { getNativeImagePath } from "google-closure-compiler/lib/utils.js";
 
-import {
-  isDriverForcedOff,
-  probeClosureDriver,
-  runResidentClosureJob,
-} from "./driver";
+import { isDriverForcedOff, runResidentClosureJob } from "./driver";
+
 
 export type ClosureCompilerOption = string | boolean;
 export type ClosureCompilerOptions = Record<
@@ -201,7 +198,7 @@ export function configureClosureCompilerOptions(
  * and `CrossChunkCodeMotion` can create the situation from input that had no
  * cross-chunk assignment (google/closure-compiler#4264).
  */
-export function annotateClosureDiagnostics(stdErr: string) {
+function annotateClosureDiagnostics(stdErr: string) {
   if (!stdErr.includes("JSC_IMPORT_ASSIGN")) {
     return stdErr;
   }
@@ -220,7 +217,7 @@ export function annotateClosureDiagnostics(stdErr: string) {
  * with the full browser externs) apart from "the program is broken" (report
  * it), and the exit code alone cannot: both are non-zero.
  */
-export { probeClosureDriver };
+
 
 export async function runClosureCompiler(
   options: ClosureCompilerOptions,

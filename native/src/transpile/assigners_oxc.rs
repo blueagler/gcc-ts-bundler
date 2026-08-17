@@ -1,7 +1,5 @@
 //! Oxc counterpart of `assigners.rs`'s read-only declaration and write scans.
 
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 
 use oxc_allocator::Allocator;

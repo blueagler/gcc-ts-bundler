@@ -26,11 +26,9 @@ export async function hashExternalInputs(filePaths: string[]): Promise<string> {
   return hashJson(entries);
 }
 
-export function getPackageRoot() {
-  return getPackageRootFromBundle();
-}
-
-export async function getPackageSignature(packageRoot = getPackageRoot()) {
+export async function getPackageSignature(
+  packageRoot = getPackageRootFromBundle(),
+) {
   const [packageJsonSignature, runtimeSignature, nativeSignature] =
     await Promise.all([
       hashFile(path.join(packageRoot, "package.json")),

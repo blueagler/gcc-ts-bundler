@@ -1,5 +1,4 @@
 import type { PreservedImport } from "../build/types";
-import type { ClosureTypeMetadataFile } from "../build/transpile/closure-ir/types";
 import { toRecord } from "../shared/records";
 import { defineValues, isFunction } from "../shared/validation";
 import { loadNativeBinding, type NativeAddonCandidate } from "./index";
@@ -23,11 +22,6 @@ interface NativeExternalBoundaryEntry {
 interface NativeDependencyGraphEntry {
   dependencies: string[];
   filePath: string;
-}
-
-interface NativeModuleKindEntry {
-  filePath: string;
-  kind: "compiled" | "preserved";
 }
 
 interface NativeChunkPlanEntryInput {
@@ -179,7 +173,6 @@ interface NativeResolveGraphOutput {
   fileHashes: NativeFileHashEntry[];
   graph: NativeDependencyGraphEntry[];
   lazyImports: NativeLazyImportEntry[];
-  moduleKinds: NativeModuleKindEntry[];
   packageAliases: NativePackageAliasEntry[];
   resolvedImports: NativeResolvedImportEntry[];
   packageJsonFiles: string[];
@@ -200,11 +193,6 @@ export interface NativeFileStateEntry {
   exists: boolean;
   filePath: string;
   mtimeMs: number;
-  size: number;
-}
-
-export interface NativePublishedOutputEntry {
-  name: string;
   size: number;
 }
 
@@ -237,7 +225,6 @@ export interface NativeEmittedTypeMetadata {
   counts: NativeTypeMetadataCounts;
   diagnostics: NativeTypeMetadataDiagnostic[];
   emittedFile: string;
-  hasTypeMetadata: boolean;
 }
 
 type NativePreservedImportOutput = PreservedImport;
@@ -247,8 +234,6 @@ interface NativeTranspileOutput {
   explicitExternPropertyCount: number;
   externsPath: string;
   preservedImports: NativePreservedImportOutput[];
-  preservedPropertyCount: number;
-  reifiedNamespaceCount: number;
   supportFiles: string[];
   typeMetadata: NativeEmittedTypeMetadata[];
   warnings: string[];
@@ -297,7 +282,6 @@ export interface ClosureCompilerCapabilities {
   compilerVersion: string;
   prebundleTarget: string;
   privateClassElements: boolean;
-  printerModernization: string;
   topLevelAwait: boolean;
 }
 
@@ -305,15 +289,7 @@ interface NativeBinding {
   closureCompilerCapabilities(): ClosureCompilerCapabilities;
   resolveViteTargetLanguageOut(target: string): string | null;
   collectFileStates(filePaths: string[]): NativeFileStateEntry[];
-  collectPublishedOutputStats(
-    filePaths: string[],
-  ): NativePublishedOutputEntry[];
   matchFileStates(expected: NativeFileStateEntry[]): boolean;
-  publishedOutputSnapshotMatches(
-    publishedOutputs: NativePublishedOutputEntry[],
-    outDir: string,
-  ): boolean;
-  publishedOutputsMatch(outputFiles: string[], outDir: string): boolean;
   prepareClosureJobs(
     input: NativePrepareClosureJobsInput,
   ): NativePrepareClosureJobsOutput;
@@ -370,13 +346,10 @@ let cachedBinding: NativeBinding | null = null;
 const NATIVE_BINDING_METHOD_FLAGS = {
   closureCompilerCapabilities: true,
   collectFileStates: true,
-  collectPublishedOutputStats: true,
   matchFileStates: true,
   minifyJavaScript: true,
   planChunks: true,
   prepareClosureJobs: true,
-  publishedOutputSnapshotMatches: true,
-  publishedOutputsMatch: true,
   resolveGraph: true,
   resolveViteTargetLanguageOut: true,
   rewriteGccExports: true,
@@ -388,13 +361,10 @@ const NATIVE_BINDING_METHOD_FLAGS = {
 const NATIVE_BINDING_METHODS = defineValues(
   "closureCompilerCapabilities",
   "collectFileStates",
-  "collectPublishedOutputStats",
   "matchFileStates",
   "minifyJavaScript",
   "planChunks",
   "prepareClosureJobs",
-  "publishedOutputSnapshotMatches",
-  "publishedOutputsMatch",
   "resolveGraph",
   "resolveViteTargetLanguageOut",
   "rewriteGccExports",
@@ -468,7 +438,6 @@ export function resolveGraph(input: {
       ]),
     ),
     lazyImports: result.lazyImports,
-    moduleKinds: result.moduleKinds,
     packageAliases: result.packageAliases,
     resolvedImports: result.resolvedImports,
     packageJsonFiles: result.packageJsonFiles,
@@ -525,8 +494,6 @@ export function transpileSources(input: {
   explicitExternPaths: string[];
   externsPath: string;
   fileNames: string[];
-  /** Type-only declaration of the JSON sidecar schema consumed by native serde. */
-  metadataFiles?: readonly ClosureTypeMetadataFile[] | undefined;
   metadataPath: string;
   outDir: string;
   target: string;
@@ -583,21 +550,6 @@ export function collectFileStates(filePaths: string[]) {
   return loadBinding().collectFileStates(filePaths);
 }
 
-export function collectPublishedOutputStats(filePaths: string[]) {
-  return loadBinding().collectPublishedOutputStats(filePaths);
-}
-
 export function matchFileStates(expected: NativeFileStateEntry[]) {
   return loadBinding().matchFileStates(expected);
-}
-
-export function publishedOutputSnapshotMatches(
-  publishedOutputs: NativePublishedOutputEntry[],
-  outDir: string,
-) {
-  return loadBinding().publishedOutputSnapshotMatches(publishedOutputs, outDir);
-}
-
-export function publishedOutputsMatch(outputFiles: string[], outDir: string) {
-  return loadBinding().publishedOutputsMatch(outputFiles, outDir);
 }

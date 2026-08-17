@@ -75,7 +75,11 @@ pub(crate) fn collect_extern_property_names_with_externs(
 
     for (path, source) in &retained_sources {
         match parse_program(&allocator, path, source) {
-            Ok(program) => {
+            Ok(mut program) => {
+                crate::transpile::emit_helpers_oxc::rewrite_this_field_helper_assignments(
+                    &allocator,
+                    &mut program,
+                );
                 let metadata = file_metadata.get(&closure_metadata_key(path));
                 let mut collector = ExternPropertyCollector::new(metadata);
                 collector.visit_program(&program);
@@ -1320,9 +1324,7 @@ mod tests {
                     enums: Vec::new(),
                     external_global_member_accesses: Vec::new(),
                     external_owned_member_accesses: Vec::new(),
-                    erased_const_enums: Vec::new(),
                     file_path: file_name.clone(),
-                    runtime_module_id: None,
                     source_file_path: file_name.clone(),
                     symbols: Vec::new(),
                 },
@@ -1336,7 +1338,7 @@ mod tests {
     }
 
     #[test]
-    fn untyped_class_member_hazard_remains_pinned() {
+    fn identifier_this_field_helper_is_not_pinned() {
         let analysis = analyze_fixture(
             r#"class Box {
                 constructor() { __publicField(this, "value", 1); }
@@ -1345,7 +1347,7 @@ mod tests {
             None,
         );
 
-        assert!(analysis.preserved_property_names.contains("value"));
+        assert!(!analysis.preserved_property_names.contains("value"));
     }
 
     #[test]
@@ -1364,7 +1366,7 @@ mod tests {
     #[test]
     fn structural_object_member_remains_pinned() {
         let analysis = analyze_fixture(
-            r#"const box = { value: 1 };
+            r#"const box = { "value": 1 };
             consume(box.value);"#,
             None,
         );
@@ -1373,13 +1375,26 @@ mod tests {
     }
 
     #[test]
-    fn one_unknown_receiver_keeps_a_typed_member_pinned() {
+    fn unknown_receiver_does_not_pin_rewritten_this_field() {
         let analysis = analyze_fixture(
             r#"class Box {
                 constructor() { __publicField(this, "value", 1); }
                 read(other) { return this.value + other.value; }
             }"#,
             Some(("Box", "value")),
+        );
+
+        assert!(!analysis.preserved_property_names.contains("value"));
+    }
+
+    #[test]
+    fn object_define_property_descriptor_remains_pinned() {
+        let analysis = analyze_fixture(
+            r#"class Box {
+                constructor() { Object.defineProperty(this, "value", { value: 1 }); }
+                read() { return this.value; }
+            }"#,
+            None,
         );
 
         assert!(analysis.preserved_property_names.contains("value"));

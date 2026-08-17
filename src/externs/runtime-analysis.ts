@@ -157,8 +157,8 @@ export interface RuntimeRenameHazards {
  * `suffix:<text>`. Kept as a plain string so the hazard sets stay homogeneous
  * and `mergeRuntimeHazards` can loop over them generically.
  */
-export const KEY_FRAGMENT_PREFIX = "prefix:";
-export const KEY_FRAGMENT_SUFFIX = "suffix:";
+const KEY_FRAGMENT_PREFIX = "prefix:";
+const KEY_FRAGMENT_SUFFIX = "suffix:";
 
 export interface RuntimeProtocolHelpers {
   keyExclusionListCallees: string[];
@@ -1119,11 +1119,15 @@ function collectRuntimeCallMembers(
   }
 
   if (isFieldHelperCall(callee, provenFieldHelpers)) {
-    if (isRelevantRuntimeTarget(target, knownConstructors)) {
-      addMember(
-        hazards.stringDefined,
-        getStringLiteralMemberName(memberExpression),
-      );
+    const memberName = getStringLiteralMemberName(memberExpression);
+    if (
+      target.kind === ts.SyntaxKind.ThisKeyword &&
+      isJsIdentifierMemberName(memberName) &&
+      isNamedFieldHelperCall(callee)
+    ) {
+      addMember(hazards.dotDefined, memberName);
+    } else if (isRelevantRuntimeTarget(target, knownConstructors)) {
+      addMember(hazards.stringDefined, memberName);
     }
     return;
   }
@@ -1174,12 +1178,11 @@ function collectClassDescriptorMembers(
 /**
  * Callees that define a field under a *string* key.
  *
- * Two toolchains, one hazard. esbuild lowers class fields to
- * `__publicField(this, "x", v)`; Babel lowers them to
- * `_defineProperty(this, "x", v)`, and bundler interop spells the same helper
- * `_defineProperty2.default(...)`. Either way the key survives renaming
- * verbatim while every `this.x` read of it renames, which is the
- * `stringDefined ∩ dotAccessed` hazard.
+ * esbuild lowers class fields to `__publicField(this, "x", v)`; Babel lowers
+ * them to `_defineProperty(this, "x", v)` / `babelHelpers.defineProperty`.
+ * Identifier keys on `this` are rewritten to `this.x = v` before Closure, so
+ * those are `dotDefined`. Non-identifier keys and minified proven helpers
+ * stay string-defined.
  *
  * Trailing digits are accepted because bundlers suffix duplicate helper
  * bindings (`__publicField2`, `_defineProperty3`) when they merge modules.
@@ -1189,6 +1192,27 @@ function isFieldHelperName(name: string) {
     name.startsWith("__publicField") || /^_+defineProperty\d*$/u.test(name)
   );
 }
+
+function isNamedFieldHelperCall(expression: ts.Expression): boolean {
+  if (isFieldHelperCall(expression, new Set())) {
+    return true;
+  }
+  if (ts.isParenthesizedExpression(expression)) {
+    return isNamedFieldHelperCall(expression.expression);
+  }
+  return (
+    ts.isPropertyAccessExpression(expression) &&
+    expression.name.text === "defineProperty" &&
+    ts.isIdentifier(expression.expression) &&
+    (expression.expression.text === "babelHelpers" ||
+      expression.expression.text.startsWith("babelHelpers$$"))
+  );
+}
+
+function isJsIdentifierMemberName(name: string | null): name is string {
+  return name !== null && /^[A-Za-z_$][\w$]*$/u.test(name);
+}
+
 
 function isFieldHelperCall(
   expression: ts.Expression,

@@ -3,7 +3,7 @@ import type { ResolvedConfig, UserConfig } from "vite";
 import { DEFAULT_BUILD_OPTIONS } from "../api/types";
 import type { BuildOptions, LanguageOut } from "../api/types";
 import {
-  languageOutRank,
+  CLOSURE_LANGUAGE_LEVELS,
   mapViteTargetToLanguageOut,
 } from "../build/closure/capabilities";
 import { isRecord } from "../shared/validation";
@@ -144,6 +144,7 @@ export function createCompilerOptions(input: {
           ? "esm"
           : compilerChunks.outputType,
       publicPath: input.publicPath,
+      vendorChunk: false,
     },
   };
 }
@@ -184,7 +185,8 @@ export function resolveViteLanguageOutTarget(
     }
     if (
       !resolvedLanguageOut ||
-      languageOutRank(mapped) < languageOutRank(resolvedLanguageOut)
+      CLOSURE_LANGUAGE_LEVELS.indexOf(mapped) <
+        CLOSURE_LANGUAGE_LEVELS.indexOf(resolvedLanguageOut)
     ) {
       resolvedLanguageOut = mapped;
     }

@@ -15,8 +15,8 @@ import {
   isRecoverableExternConfigError,
   isTypeSourceFile,
   isTypescriptLibFile,
-  uniqueStrings,
 } from "./shared";
+import { uniqueSortedStrings } from "../shared/files";
 
 export async function loadExternCompilerOptions({
   projectRoot,
@@ -90,7 +90,7 @@ export async function resolveModuleTypeEntries({
       }
     }
   }
-  return uniqueStrings(resolvedEntries);
+  return uniqueSortedStrings(resolvedEntries);
 }
 
 export function resolveAnalysisEntryFiles({

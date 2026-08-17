@@ -25,30 +25,22 @@ import type {
   CapturedRuntimeModule,
   MaterializedGraph,
 } from "../internal-types";
-import { hashTypeMetadataFiles, hashTypeMetadataValue } from "./cache";
 import { resolveDeclarationOverlay } from "./declaration-overlay";
 import {
   joinDeclarationAndRuntimeExports,
   resolveRuntimeExportGraph,
 } from "./export-graphs";
 import { classifyTypeMetadataSource } from "./source-provenance";
-import {
-  VITE_TYPE_METADATA_VERSION,
-  type DeclarationExportFact,
-  type JoinedExportTypeFact,
-  type RuntimeResolutionIdentity,
-  type ViteTypeMetadataAttachment,
-  type ViteTypeMetadataDiagnostic,
-  type ViteTypeMetadataSidecar,
-  type ViteTypeScriptDiagnostic,
+import type {
+  DeclarationExportFact,
+  JoinedExportTypeFact,
+  ViteTypeMetadataDiagnostic,
+  ViteTypeMetadataSidecar,
+  ViteTypeScriptDiagnostic,
 } from "./types";
 
 interface OverlayAttachmentPlan {
   declaration: DeclarationExportFact;
-  exportName: string;
-  facadeId?: string | undefined;
-  originExportName: string;
-  originRuntimeModuleId: string;
   outputBindingName: string;
   target: TypeMetadataTarget;
 }
@@ -66,7 +58,6 @@ export async function collectViteTypeMetadata(input: {
   for (const filePath of externalGlobalProtocol.filePaths) {
     dependencies.add(filePath);
   }
-  const attachments: ViteTypeMetadataAttachment[] = [];
   const directTargets: TypeMetadataTarget[] = [];
   const directTargetKeys = new Set<string>();
 
@@ -126,11 +117,6 @@ export async function collectViteTypeMetadata(input: {
     if (!directTargetKeys.has(targetKey)) {
       directTargetKeys.add(targetKey);
       directTargets.push(target);
-      attachments.push({
-        kind: "source",
-        runtimeModuleId: module.id,
-        sourceFilePath: target.sourceFilePath,
-      });
     }
   }
 
@@ -163,33 +149,12 @@ export async function collectViteTypeMetadata(input: {
     ts.sys.fileExists,
     "tsconfig.json",
   );
-  const provenance = {
-    attachments,
-    moduleCacheKeys: input.materialized.modules
-      .flatMap((module) =>
-        module.typeMetadata
-          ? [
-              {
-                cacheKey: module.typeMetadata.cacheKey,
-                runtimeModuleId: module.id,
-              },
-            ]
-          : [],
-      )
-      .sort((left, right) =>
-        left.runtimeModuleId.localeCompare(right.runtimeModuleId),
-      ),
-    resolutions: [...(sourceGraph.runtimeResolutions ?? [])].sort(
-      (left, right) => resolutionKey(left).localeCompare(resolutionKey(right)),
-    ),
-  };
 
   if (directTargets.length === 0 && overlaySourceFiles.length === 0) {
     return finalizeSidecar({
       dependencies,
       diagnostics,
       files: externalGlobalProtocol.files,
-      provenance,
     });
   }
   if (!tsConfigPath) {
@@ -202,7 +167,6 @@ export async function collectViteTypeMetadata(input: {
       dependencies,
       diagnostics,
       files: externalGlobalProtocol.files,
-      provenance,
     });
   }
   dependencies.add(path.normalize(tsConfigPath));
@@ -234,7 +198,6 @@ export async function collectViteTypeMetadata(input: {
       dependencies,
       diagnostics,
       files: externalGlobalProtocol.files,
-      provenance,
     });
   }
 
@@ -306,25 +269,12 @@ export async function collectViteTypeMetadata(input: {
       continue;
     }
     files.push(file);
-    const attachment = {
-      declarationId: plan.declaration.declarationId,
-      exportName: plan.exportName,
-      facadeId: plan.facadeId,
-      kind: "declaration-overlay",
-      originExportName: plan.originExportName,
-      originRuntimeModuleId: plan.originRuntimeModuleId,
-      outputBindingName: plan.outputBindingName,
-      runtimeModuleId: plan.target.runtimeModuleId ?? plan.target.emitFilePath,
-      sourceFilePath: plan.declaration.declarationFilePath,
-    } satisfies ViteTypeMetadataAttachment;
-    attachments.push(attachment);
   }
 
   return finalizeSidecar({
     dependencies,
     diagnostics,
     files: files.concat(externalGlobalProtocol.files),
-    provenance,
   });
 }
 
@@ -425,9 +375,6 @@ function materializeJoinedExports(input: {
     if (directModule && outputBindingName) {
       plans.push({
         declaration: fact.declaration,
-        exportName: fact.exportName,
-        originExportName: fact.exportName,
-        originRuntimeModuleId: input.publicRuntimeModuleId,
         outputBindingName,
         target: {
           emitFilePath: directModule.filePath,
@@ -463,10 +410,6 @@ function materializeJoinedExports(input: {
       }
       plans.push({
         declaration: fact.declaration,
-        exportName: facade.outputExportName,
-        facadeId: facade.facadeId,
-        originExportName: facade.originExportName,
-        originRuntimeModuleId: facade.originModuleId,
         outputBindingName: facade.outputLocalName,
         target: {
           emitFilePath: module.filePath,
@@ -825,7 +768,6 @@ async function collectMaterializedExternalGlobalProtocol(
         decoratedOutputText: undefined,
         diagnostics: [],
         enums: [],
-        erasedConstEnums: [],
         externalGlobalMemberAccesses: [...offsets],
         externalOwnedMemberAccesses: [],
         filePath,
@@ -861,9 +803,6 @@ function mergeMetadataFiles(files: ClosureTypeMetadataFile[]) {
       decoratedOutputText: undefined,
       diagnostics: dedupe(existing.diagnostics.concat(file.diagnostics)),
       enums: dedupe(existing.enums.concat(file.enums)),
-      erasedConstEnums: dedupe(
-        (existing.erasedConstEnums ?? []).concat(file.erasedConstEnums ?? []),
-      ),
       externalGlobalMemberAccesses: [
         ...new Set(
           (existing.externalGlobalMemberAccesses ?? []).concat(
@@ -926,12 +865,11 @@ function dedupeById<T extends { id: string }>(values: T[]) {
   );
 }
 
-async function finalizeSidecar(input: {
+function finalizeSidecar(input: {
   dependencies: Set<string>;
   diagnostics: ViteTypeMetadataDiagnostic[];
   files: ClosureTypeMetadataFile[];
-  provenance: ViteTypeMetadataSidecar["provenance"];
-}): Promise<ViteTypeMetadataSidecar> {
+}): ViteTypeMetadataSidecar {
   const dependencies = [
     ...new Set(
       [...input.dependencies]
@@ -943,24 +881,13 @@ async function finalizeSidecar(input: {
     .sort((left, right) => left.localeCompare(right));
   const files = mergeMetadataFiles(input.files);
   const diagnostics = dedupe(input.diagnostics).sort((left, right) =>
-    diagnosticKey(left).localeCompare(diagnosticKey(right)),
+    JSON.stringify(left).localeCompare(JSON.stringify(right)),
   );
-  const dependencyContentHash =
-    dependencies.length > 0
-      ? await hashTypeMetadataFiles(dependencies)
-      : hashTypeMetadataValue([]);
   return {
-    cacheKey: hashTypeMetadataValue({
-      dependencyContentHash,
-      files,
-      provenance: input.provenance,
-    }),
     dependencies,
     diagnostics,
     extractedCounts: countTypeMetadata(files),
     files,
-    provenance: input.provenance,
-    version: VITE_TYPE_METADATA_VERSION,
   };
 }
 
@@ -1001,7 +928,7 @@ function oneToOneSourceModuleId(module: CapturedRuntimeModule) {
     return null;
   }
   if (mapping) {
-    return mapping.sourceModuleId;
+    return mapping;
   }
   return module.sourceModuleIds.length === 1
     ? (module.sourceModuleIds[0] ?? null)
@@ -1014,16 +941,4 @@ function metadataTargetKey(target: TypeMetadataTarget) {
     target.emitFilePath,
     target.runtimeModuleId ?? "",
   ].join("\0");
-}
-
-function resolutionKey(resolution: RuntimeResolutionIdentity) {
-  return [
-    resolution.importerModuleId,
-    resolution.specifier,
-    resolution.runtimeModuleId,
-  ].join("\0");
-}
-
-function diagnosticKey(diagnostic: ViteTypeMetadataDiagnostic) {
-  return JSON.stringify(diagnostic);
 }

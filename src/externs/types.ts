@@ -29,7 +29,6 @@ export interface GeneratedExternModule {
 }
 
 export interface ExternDegradationStats {
-  byConstruct: Readonly<Record<string, number>>;
   degradedOccurrences: number;
   degradedSymbolCount: number;
   reachableSymbolCount: number;

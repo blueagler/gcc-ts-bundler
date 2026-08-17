@@ -28,7 +28,7 @@ use self::exports::*;
 pub(crate) use self::package_resolver::select_package_export_target;
 use self::package_resolver::*;
 use self::path_utils::*;
-use self::resolve::resolve_graph_impl;
+pub(crate) use self::resolve::resolve_graph_impl;
 
 #[allow(non_snake_case)]
 #[napi(object)]
@@ -117,14 +117,6 @@ pub struct ExternalBoundaryEntry {
 #[allow(non_snake_case)]
 #[napi(object)]
 #[derive(Clone, Debug)]
-pub struct ModuleKindEntry {
-    pub filePath: String,
-    pub kind: String,
-}
-
-#[allow(non_snake_case)]
-#[napi(object)]
-#[derive(Clone, Debug)]
 pub struct PreservedModuleEntry {
     pub exportNames: Vec<String>,
     pub filePath: String,
@@ -141,7 +133,6 @@ pub struct ResolveGraphOutput {
     pub fileHashes: Vec<FileHashEntry>,
     pub graph: Vec<DependencyGraphEntry>,
     pub lazyImports: Vec<LazyImportEntry>,
-    pub moduleKinds: Vec<ModuleKindEntry>,
     pub packageAliases: Vec<PackageAliasEntry>,
     pub resolvedImports: Vec<ResolvedImportEntry>,
     pub packageJsonFiles: Vec<String>,
@@ -248,31 +239,13 @@ pub fn resolve_graph(
     workspace_dir: String,
     package_mode: String,
 ) -> std::result::Result<ResolveGraphOutput, String> {
-    resolve_graph_with_options(
-        entries,
-        src_dir,
-        workspace_dir,
-        package_mode,
-        Vec::new(),
-        Vec::new(),
-    )
-}
-
-pub fn resolve_graph_with_options(
-    entries: Vec<String>,
-    src_dir: String,
-    workspace_dir: String,
-    package_mode: String,
-    external_specifiers: Vec<String>,
-    preserved_file_paths: Vec<String>,
-) -> std::result::Result<ResolveGraphOutput, String> {
     resolve_graph_impl(
         entries,
         src_dir,
         workspace_dir,
         package_mode,
-        external_specifiers,
-        preserved_file_paths,
+        Vec::new(),
+        Vec::new(),
     )
 }
 

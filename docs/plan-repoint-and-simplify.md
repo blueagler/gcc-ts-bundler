@@ -61,10 +61,10 @@ names as "silently discarded"; that was wrong on three of them.
   it, resolves paths, and unions them into `renameBarriers`, which
   `createCompilerOptions` then writes. `test/vite-plugin.test.mjs` and
   `docs/vite.md` treat this as the explicit-externs path.
-- **`externs.generate.includeDependencies` and `externs.generate.modules`**
-  are honored (`src/vite/externs.ts:98-100`) but ineffective: pins come from
-  proven hazard sites, not from the module list. Byte-identical output is that
-  design, not a dropped option.
+- **`externs.generate.includeDependencies`** is live only on the
+  boundary-aware `generateExterns` path. The default Vite runtime-aware path
+  does not read it. **`externs.generate.modules`** is written into the
+  generated comment and is otherwise unused for pins.
 - **`finalMinify`** is overridden by design, not inert.
   `src/vite/plugin.ts:568-573` hardcodes `finalMinify: false` on the Closure
   stage so hashing and URL rewrite can finish first; `emitViteGraph` (~710-712)

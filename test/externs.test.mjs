@@ -173,11 +173,11 @@ test.serial(
     });
 
     expect(runtimeResult.mode).toBe("runtime-aware");
-    expect(runtimeResult.text).toContain("Object.prototype.counts;");
-    expect(runtimeResult.text).toContain("Object.prototype.current;");
-    expect(runtimeResult.text).toContain("Object.prototype.previous;");
-    expect(runtimeResult.text).toContain("Object.prototype.is_fork;");
-    expect(runtimeResult.text).toContain("Object.prototype.id;");
+    expect(runtimeResult.text).not.toContain("Object.prototype.counts;");
+    expect(runtimeResult.text).not.toContain("Object.prototype.current;");
+    expect(runtimeResult.text).not.toContain("Object.prototype.previous;");
+    expect(runtimeResult.text).not.toContain("Object.prototype.is_fork;");
+    expect(runtimeResult.text).not.toContain("Object.prototype.id;");
     expect(runtimeResult.text).toContain("Object.prototype.label;");
     expect(runtimeResult.text).toContain("Object.prototype.reset;");
     expect(runtimeResult.text).toContain("Object.prototype.from;");
@@ -239,8 +239,7 @@ test.serial(
         "const __publicField = (obj, key, value) => (obj[key] = value);",
         "export class Widget {",
         "  constructor() {",
-        // string-keyed definition, read back through a dot: Closure renames the
-        // read and leaves the string, so this one needs an extern.
+        // Identifier this-field helpers become dotted assigns before Closure.
         '    __publicField(this, "loweredField", 1);',
         '    Object.defineProperty(this, "definedField", { value: 2 });',
         '    this["bracketField"] = 3;',
@@ -272,8 +271,8 @@ test.serial(
       srcDir: fixture.srcDir,
     });
 
-    // string-defined + dot-accessed -> externed.
-    expect(result.text).toContain("Object.prototype.loweredField;");
+    // Identifier this-field helpers rename with their dotted reads.
+    expect(result.text).not.toContain("Object.prototype.loweredField;");
     expect(result.text).toContain("Object.prototype.definedField;");
     expect(result.text).toContain("Object.prototype.bracketField;");
     // dot-defined + literal string read -> externed.
@@ -409,7 +408,7 @@ test.serial(
     ]);
 
     const runtimeOutput = await fs.readFile(runtimeOutputFile, "utf8");
-    expect(runtimeOutput).toContain("Object.prototype.counts;");
+    expect(runtimeOutput).not.toContain("Object.prototype.counts;");
     expect(runtimeOutput).toContain("Object.prototype.label;");
     expect(runtimeOutput).not.toContain("Object.prototype.addEventListener;");
   },
@@ -713,14 +712,9 @@ test("literal arguments indexed into object-key probes are rename evidence", asy
   expect([...lines]).not.toContain("Object.prototype.z;");
 });
 
-// esbuild lowers class fields to `__publicField(this, "x", v)`; Babel lowers
-// the same fields to `_defineProperty(this, "x", v)`, and published bundles
-// often ship that helper already minified, so its name carries no signal.
-// Every form defines the key as a string that survives renaming while the
-// `this.x` reads of it rename — `TypeError: Cannot read properties of
-// undefined (reading 'set')` on the real login page, from
-// `_defineProperty(this, "map", new Map())` beside `this.map.set(…)`.
-test("Babel and minified field helpers are string-defined rename evidence", async () => {
+// Identifier `this` field helpers become dotted assigns. Minified proven
+// helpers (`J`) still write a string key and stay string-defined.
+test("identifier this field helpers are not string-defined rename evidence", async () => {
   const { analyzeRuntimeUsage } = await import(
     "../src/externs/runtime-analysis.ts"
   );
@@ -756,14 +750,17 @@ test("Babel and minified field helpers are string-defined rename evidence", asyn
     [path.join(fixture.projectRoot, "runtime.js")],
     { keyExclusionListCallees: [], keyReadCallees: [] },
   );
-  expect([...hazards.stringDefined].sort()).toEqual(["interop", "map", "url"]);
+  expect([...hazards.stringDefined].sort()).toEqual(["url"]);
+  expect([...hazards.dotDefined].sort()).toEqual(
+    expect.arrayContaining(["interop", "map"]),
+  );
 
   const lines = collectRuntimeUsageExternLines(hazards, {
     dotAccessed: new Set(),
     stringLiteralRead: new Set(),
   });
-  expect([...lines]).toContain("Object.prototype.map;");
-  expect([...lines]).toContain("Object.prototype.interop;");
+  expect([...lines]).not.toContain("Object.prototype.map;");
+  expect([...lines]).not.toContain("Object.prototype.interop;");
   expect([...lines]).toContain("Object.prototype.url;");
   // Shape alone is not evidence: three arguments led by `this` also describe
   // `fn.call(this, name, value)` and `store.set(this, key, value)`.

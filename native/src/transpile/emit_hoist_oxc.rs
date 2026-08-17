@@ -1,7 +1,5 @@
 //! Oxc hoisted bundler-runtime emitter.
 
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 

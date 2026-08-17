@@ -32,7 +32,6 @@ function resolveMetadata(chunk) {
     optionsSignature: "test",
     chunkPlan: [{ dependencies: [], files: ["a.js"], name: "main", ...chunk }],
     entryFiles: [],
-    lazyImports: [],
   };
 }
 
@@ -50,14 +49,12 @@ test("cached resolve metadata rejects a malformed chunk plan", () => {
       optionsSignature: "test",
       chunkPlan: [],
       entryFiles: [],
-      lazyImports: [],
     }),
   ).toBe(true);
   expect(
     isResolveMetadata({
       optionsSignature: "test",
       chunkPlan: [],
-      entryFiles: [],
     }),
   ).toBe(false);
   expect(isResolveMetadata(resolveMetadata({ files: "a.js" }))).toBe(false);

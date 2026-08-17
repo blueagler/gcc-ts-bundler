@@ -4,10 +4,10 @@ import { firstOrUndefined } from "../../../../shared/arrays";
 import { uniqueSortedStrings } from "../../../../shared/files";
 import { hasModifier } from "../../../../shared/typescript";
 import {
-  mergeClosureTypes,
   renderPrototypeProperty,
   sanitizeClosureName,
   stripUndefinedFromClosureType,
+  unionClosureTypes,
 } from "./closure-type-strings";
 import { getPropertyNameText } from "./modifiers";
 import {
@@ -83,7 +83,6 @@ export function buildInterfaceDeclarationSnippet(
   const template = `${lines.join("\n")}\n`;
   return {
     declaredSymbolId,
-    exported: hasModifier(statement, ts.SyntaxKind.ExportKeyword),
     id: `${declaredSymbolId}:declaration`,
     references: referencesForTemplate(template, context),
     template,
@@ -138,7 +137,6 @@ export function buildObjectLiteralBrandDeclaration({
   const template = `${lines.join("\n")}\n`;
   return {
     declaredSymbolId,
-    exported: false,
     id: `${declaredSymbolId}:declaration`,
     references: referencesForTemplate(template, context),
     template,
@@ -188,7 +186,6 @@ export function buildTypeAliasDeclarationSnippet(
   const template = `${lines.join("\n")}\n`;
   return {
     declaredSymbolId,
-    exported: hasModifier(statement, ts.SyntaxKind.ExportKeyword),
     id: `${declaredSymbolId}:declaration`,
     references: referencesForTemplate(template, context),
     template,
@@ -510,7 +507,7 @@ function appendThisTag(
       .map((param) => param.type),
   );
   if (thisTypes.length > 0) {
-    tags.push({ name: "this", type: mergeClosureTypes(thisTypes) });
+    tags.push({ name: "this", type: unionClosureTypes(thisTypes.filter(Boolean)) });
   }
 }
 
@@ -566,10 +563,12 @@ function buildParameterTag(input: {
     (input.foundOptional ||
       input.index >= input.minParamCount ||
       candidates.some((param) => param.optional));
-  const mergedType = mergeClosureTypes(
-    candidates.map((param) =>
-      optional ? stripUndefinedFromClosureType(param.type) : param.type,
-    ),
+  const mergedType = unionClosureTypes(
+    candidates
+      .map((param) =>
+        optional ? stripUndefinedFromClosureType(param.type) : param.type,
+      )
+      .filter(Boolean),
   );
   return {
     optional,
@@ -593,24 +592,26 @@ function appendReturnTag(input: {
     input.signatures.some(({ declaration }) =>
       ts.isConstructorDeclaration(declaration),
     ) ||
-    isSetterDeclaration(input.implementation)
+    ts.isSetAccessorDeclaration(input.implementation)
   ) {
     return;
   }
   input.tags.push({
     name: "return",
-    type: mergeClosureTypes(
-      input.signatures.map(({ signature }) =>
-        toClosureType(
-          input.checker.getReturnTypeOfSignature(signature),
-          input.checker,
-          input.context,
-          new Set(),
-          signature.declaration && "type" in signature.declaration
-            ? signature.declaration.type
-            : undefined,
-        ),
-      ),
+    type: unionClosureTypes(
+      input.signatures
+        .map(({ signature }) =>
+          toClosureType(
+            input.checker.getReturnTypeOfSignature(signature),
+            input.checker,
+            input.context,
+            new Set(),
+            signature.declaration && "type" in signature.declaration
+              ? signature.declaration.type
+              : undefined,
+          ),
+        )
+        .filter(Boolean),
     ),
   });
 }
@@ -845,17 +846,4 @@ export function getObjectPropertyName(member: ts.ObjectLiteralElementLike) {
     return getPropertyNameText(member.name);
   }
   return null;
-}
-
-export function hasStaticModifier(node: ts.Node) {
-  return Boolean(
-    ts.canHaveModifiers(node) &&
-    ts
-      .getModifiers(node)
-      ?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword),
-  );
-}
-
-function isSetterDeclaration(declaration: FunctionLikeDeclaration) {
-  return ts.isSetAccessorDeclaration(declaration);
 }

@@ -396,9 +396,8 @@ test.serial(
           expect(counts.unresolvedTypeReferenceCount).toBeGreaterThan(0);
           expect(
             metadata.typeMetadata.some((file) =>
-              file.diagnostics.some(
-                (diagnostic) =>
-                  diagnostic.reason === "ambient-nominal-without-binding",
+              file.declarations.some((declaration) =>
+                declaration.template.includes("function AmbientClient()"),
               ),
             ),
           ).toBe(true);
@@ -424,15 +423,6 @@ test.serial(
                 file.counts.annotationCount > 0,
             ),
           ).toBe(true);
-
-          const nativeMain = await fs.readFile(
-            metadata.typeMetadata.find((file) =>
-              file.emittedFile.endsWith("src/main.js"),
-            ).emittedFile,
-            "utf8",
-          );
-          expect(nativeMain).toContain("@param {?} _client");
-          expect(nativeMain).not.toContain("AmbientClient");
           const barrier = await readLatestNamedCacheFile(
             fixture,
             cacheDir,

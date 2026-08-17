@@ -10,7 +10,7 @@ mod context;
 mod emit;
 mod emit_goog_oxc;
 mod emit_helpers;
-mod emit_helpers_oxc;
+pub(crate) mod emit_helpers_oxc;
 mod emit_hoist_oxc;
 mod emit_reflective_oxc;
 mod emit_runtime_oxc;
@@ -65,8 +65,6 @@ pub struct TranspileOutput {
     pub explicitExternPropertyCount: u32,
     pub externsPath: String,
     pub preservedImports: Vec<PreservedImportOutput>,
-    pub preservedPropertyCount: u32,
-    pub reifiedNamespaceCount: u32,
     pub supportFiles: Vec<String>,
     pub typeMetadata: Vec<EmittedTypeMetadata>,
     pub warnings: Vec<String>,
@@ -534,8 +532,6 @@ pub fn transpile_sources(
         explicitExternPropertyCount: explicit_extern_property_names.len() as u32,
         externsPath: externs_path,
         preservedImports: preserved_imports,
-        preservedPropertyCount: preserved_property_names.len() as u32,
-        reifiedNamespaceCount: reification_warnings.len() as u32,
         supportFiles: support_files,
         typeMetadata: emitted_type_metadata,
         warnings: reification_warnings.into_values().collect(),

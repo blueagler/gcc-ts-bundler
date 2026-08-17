@@ -94,7 +94,7 @@ The plugin serializes Rollup's retained chunk graph. The native planner mirrors 
 - entries derived from Vite entry facades;
 - `languageOut` derived from `build.target`.
 
-It then removes Rollup JavaScript chunks, emits the compiled files through Rollup, carries CSS ownership into lazy chunk loading, follows Rollup entry/chunk naming patterns, and rewrites HTML entry scripts by default.
+It then removes Rollup JavaScript chunks, emits the compiled files through Rollup, carries CSS ownership into lazy chunk loading, and follows Rollup entry/chunk naming patterns.
 
 ## Namespace access
 
@@ -148,9 +148,6 @@ gccTsBundler({
       appendLines: ["Object.prototype.customProtocol;"],
     },
   },
-  html: {
-    rewriteEntryScripts: true,
-  },
   debug: {
     dumpCapturedGraphDir: ".gcc-debug",
   },
@@ -159,9 +156,9 @@ gccTsBundler({
 
 ### `compiler`
 
-Accepts core `BuildOptions` except options owned by Vite: `entries`, `languageOut`, `outDir`, `packages`, `projectRoot`, `srcDir`, and `chunks.mode`.
+Accepts core `BuildOptions` except options owned by Vite: `entries`, `languageOut`, `outDir`, `packages`, `projectRoot`, `srcDir`, `chunks.mode`, `chunks.publicPath`, and `chunks.vendorChunk`.
 
-Do not set `compiler.chunks.mode`; the plugin always compiles with `"bundler-runtime"`. A caller-supplied value is a type error (`createCompilerOptions` overwrites it). Other `chunks` fields (`baseChunkName`, `outputType`, `publicPath`, `vendorChunk`, `manifestFile`) still apply.
+Do not set `compiler.chunks.mode`, `compiler.chunks.publicPath`, or `compiler.chunks.vendorChunk`. The plugin always compiles with `"bundler-runtime"`, takes the public path from `runtime.publicPath ?? config.base`, and mirrors Rollup's chunk graph instead of the standalone vendor split. Caller-supplied values are type errors (`createCompilerOptions` overwrites them). Other `chunks` fields (`baseChunkName`, `outputType`, `manifestFile`) still apply.
 
 `compilationLevel` stays settable. Anything other than `"ADVANCED"` emits a one-time warning: `"SIMPLE"` measured +9.9% gzip against plain esbuild on a 2352-module React app, and the Vite path is tuned only for ADVANCED.
 
@@ -245,44 +242,9 @@ targets and for output loaded by anything other than a module script.
 
 ### `compiler.chunks.vendorChunk`
 
-**No-op under this plugin.** A Vite build plans its chunks by mirroring
-Rollup's own chunk graph, so the dependency split is whatever Rollup already
-decided and there is nothing left for this flag to partition. It still applies
-to standalone (non-Vite) `bundler-runtime` builds, which have no host chunk
-graph to mirror; the rest of this section describes those.
-
-Moves eagerly reachable dependency modules (`node_modules`, virtual modules)
-out of the entry chunk into a separate
-`<baseChunkName>-vendor` chunk.
-
-Under module output the entry chunk's hashed file name is embedded in every
-sibling chunk's `import` statement, so editing app code re-hashes the entry and
-that new name propagates outward. Splitting the dependency half off gives it its
-own chunk with no reference to the entry, so its file name and browser cache
-entry can survive app edits.
-
-**This is opt-in, and it is a real trade.** Splitting can cost first-load bytes: the two halves no longer optimise against
-each other, so cross-chunk inlining, dead-property removal, and property renaming
-have less scope. It can keep dependency output stable across app-only deploys.
-Opt in when repeat visits make that cache stability useful. Leave it off when
-most visitors arrive only once.
-
-```ts
-gccTsBundler({
-  compiler: { chunks: { vendorChunk: true } },
-});
-```
-
-`false` is the default, and `"auto"` also resolves to `false`. An explicit `true` is gated to
-where the split can work at all: `bundler-runtime` chunks whose resolved
-`outputType` is `"esm"`. Script output addresses chunks through the runtime
-manifest rather than by embedded name, so there is nothing to stabilise and the
-extra chunk would only cost a request; `off` and `split` have no chunk graph.
-
-Lazy chunks are not stabilised by this: they import symbols directly from the
-entry, so their bytes contain its hashed name and they necessarily re-hash with
-it — making them stable too would require import-map indirection, which is not
-implemented.
+A type error on this plugin. Vite mirrors Rollup's chunk graph, so the
+standalone vendor split has nothing left to partition. Use
+`chunks.vendorChunk` on a non-Vite `bundler-runtime` build instead.
 
 ### `runtime`
 
@@ -342,9 +304,7 @@ than relying on incidental preservation. Hand-written `compiler.externs` keeps
 the historical dual semantics; use `compiler.typedExterns` when declarations
 must reach Closure without becoming native rename barriers.
 
-### HTML and debug options
-
-`html.rewriteEntryScripts` defaults to `true`. Set it to `false` only if another plugin or deployment step owns final entry-script injection.
+### Debug options
 
 `debug.dumpCapturedGraphDir` writes the materialized workspace to a stable project-relative directory and clears that directory before each build. Without it, workspaces live under `.gcc-ts-bundler-vite/<build-id>` so identical persistent builds can reuse the same capture root.
 

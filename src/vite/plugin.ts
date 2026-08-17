@@ -97,7 +97,6 @@ interface ViteTimingTotals {
   dependencyPrebundleMs: number;
   emitOutputsMs: number;
   externsMs: number;
-  htmlRewriteMs: number;
   materializeMs: number;
   normalizeRetainedMs: number;
   retainedResolutionMs: number;
@@ -826,7 +825,6 @@ function createTimingTotals(): ViteTimingTotals {
     dependencyPrebundleMs: 0,
     emitOutputsMs: 0,
     externsMs: 0,
-    htmlRewriteMs: 0,
     materializeMs: 0,
     normalizeRetainedMs: 0,
     retainedResolutionMs: 0,
@@ -868,7 +866,6 @@ function logViteTimings(timings: ViteTimingTotals) {
     ["dependencyPrebundleMs", "vite:dependency-prebundle"],
     ["emitOutputsMs", "vite:emit-outputs"],
     ["externsMs", "vite:externs"],
-    ["htmlRewriteMs", "vite:html-rewrite"],
     ["materializeMs", "vite:materialize"],
     ["normalizeRetainedMs", "vite:normalize-retained"],
     ["retainedResolutionMs", "vite:retained-resolution"],

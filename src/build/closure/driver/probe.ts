@@ -28,9 +28,6 @@ export function isDriverForcedOff() {
   return process.env["GCC_CLOSURE_DRIVER"] === "0";
 }
 
-export function resetClosureDriverProbe() {
-  cachedProbe = undefined;
-}
 
 export function probeClosureDriver(): Promise<ClosureDriverProbe> {
   cachedProbe ??= runProbe();

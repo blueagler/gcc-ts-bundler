@@ -2,10 +2,8 @@ import path from "node:path";
 import ts from "@typescript/typescript6";
 import { expect, test } from "bun:test";
 
-import {
-  collectTypeMetadataFiles,
-  scanTypeMetadataFiles,
-} from "../src/build/transpile/closure-ir/metadata/index.ts";
+import { collectTypeMetadataFiles } from "../src/build/transpile/closure-ir/metadata/index.ts";
+import { scanClosureIrSourceFiles } from "../src/build/transpile/closure-ir/metadata/scan.ts";
 import { createFixture } from "./helpers.mjs";
 
 function createProgram(fileNames, rootDir) {
@@ -71,7 +69,7 @@ test.serial(
       path.join(fixture.srcDir, name),
     );
     const { program } = createProgram(fileNames, fixture.projectRoot);
-    const scan = scanTypeMetadataFiles({ fileNames, program });
+    const scan = scanClosureIrSourceFiles({ fileNames, program });
 
     expect(scan.scannedFileCount).toBe(3);
     expect(scan.analyzedFileCount).toBe(2);
@@ -121,7 +119,7 @@ test.serial(
 );
 
 test.serial(
-  "ambient nominals and declaration-file structures both degrade to one `?` atom",
+  "named declaration-file types are copied onto the referencing file",
   async () => {
     const fixture = await createFixture();
     await fixture.write(
@@ -148,34 +146,31 @@ test.serial(
     const doc = annotation(file, "run");
     const rendered = renderTemplate(file, doc);
 
-    expect(rendered).toContain("@param {?} client");
-    // Structural shapes are never synthesized: a `.d.ts` interface that this
-    // file does not declare itself degrades to `?` like any other
-    // unrepresentable atom.
-    expect(rendered).toContain("@param {?} config");
+    expect(rendered).toContain("@param {!Client} client");
+    expect(rendered).toContain("@param {!Config} config");
     expect(rendered).toContain("@param {number} retries");
     expect(rendered).toContain("@return {string}");
-    expect(file.declarations).toHaveLength(0);
+    expect(file.declarations.length).toBeGreaterThanOrEqual(2);
     expect(
-      file.symbols.some((symbol) => symbol.kind === "generated-record"),
-    ).toBe(false);
+      file.declarations.some((declaration) =>
+        declaration.template.includes("@constructor"),
+      ),
+    ).toBe(true);
+    expect(
+      file.declarations.some((declaration) =>
+        declaration.template.includes("@record"),
+      ),
+    ).toBe(true);
+    expect(
+      file.symbols.some((symbol) => symbol.kind === "declared"),
+    ).toBe(true);
     expect(
       file.diagnostics.some(
         (item) =>
           item.reason === "ambient-nominal-without-binding" &&
           item.symbolName === "Client",
       ),
-    ).toBe(true);
-    expect(
-      file.diagnostics.some(
-        (item) =>
-          item.reason === "unsupported-type-atom" &&
-          item.symbolName === "Config",
-      ),
-    ).toBe(true);
-    expect(result.extractedCounts.unresolvedTypeReferenceCount).toBeGreaterThan(
-      0,
-    );
+    ).toBe(false);
   },
 );
 

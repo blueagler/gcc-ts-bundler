@@ -27,7 +27,7 @@ interface ClosureJobCacheMetadata {
   version: number;
 }
 
-const CLOSURE_JOB_CACHE_VERSION = 5;
+const CLOSURE_JOB_CACHE_VERSION = 6;
 
 export interface ClosureCompileJobConfig {
   assumeFunctionWrapper: boolean;
@@ -217,7 +217,6 @@ async function getClosureJobCacheDir(
       entryPoint: job.entryPoint ?? null,
       env: job.env ?? null,
       hasPropertyRenamingReport: Boolean(job.propertyRenamingReportPath),
-      hasTypeMetadata: job.hasTypeMetadata,
       hasRenamingMapInputs: [
         Boolean(job.propertyMapInputFile),
         Boolean(job.variableMapInputFile),

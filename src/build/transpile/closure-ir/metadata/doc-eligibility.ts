@@ -2,17 +2,17 @@ import ts from "@typescript/typescript6";
 
 import { hasModifier } from "../../../../shared/typescript";
 
-interface ClosureIrDocEligibility {
-  exportedDeclarationNames: Set<string>;
+export interface ClosureIrDocEligibility {
+  hasJsDocText: boolean;
+  isTypeScriptLike: boolean;
+}
+
+export function classifyClosureIrDocEligibility(sourceFile: ts.SourceFile): {
   hasJsDocText: boolean;
   hasTsCheckText: boolean;
   hasTopLevelDocs: boolean;
   isTypeScriptLike: boolean;
-}
-
-export function classifyClosureIrDocEligibility(
-  sourceFile: ts.SourceFile,
-): ClosureIrDocEligibility {
+} {
   const exportedDeclarationNames =
     collectExportedTopLevelDeclarationNames(sourceFile);
   const hasJsDocText = sourceFile.text.includes("/**");
@@ -34,7 +34,6 @@ export function classifyClosureIrDocEligibility(
   }
 
   return {
-    exportedDeclarationNames,
     hasJsDocText,
     hasTsCheckText,
     hasTopLevelDocs,
@@ -44,10 +43,11 @@ export function classifyClosureIrDocEligibility(
 
 function isDocRelevantTopLevelDeclaration(
   statement: ts.Statement,
-  eligibility: Pick<
-    ClosureIrDocEligibility,
-    "exportedDeclarationNames" | "hasJsDocText" | "isTypeScriptLike"
-  >,
+  eligibility: {
+    exportedDeclarationNames: ReadonlySet<string>;
+    hasJsDocText: boolean;
+    isTypeScriptLike: boolean;
+  },
 ): statement is ts.FunctionDeclaration | ts.ClassDeclaration {
   if (
     !(

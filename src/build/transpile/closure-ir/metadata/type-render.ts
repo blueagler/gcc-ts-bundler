@@ -18,13 +18,13 @@ import {
   unionClosureTypes,
   unionWithSuffix,
 } from "./closure-type-strings";
+import { getPropertyNameText } from "./modifiers";
 
 export interface ClosureDocRenderContext {
   diagnostics: TypeMetadataDiagnostic[];
   nextReferenceId: number;
   referencesByToken: Map<string, ClosureTypeReference>;
   sourceFilePath: string;
-  sourceFileStem: string;
   symbolIdByDeclaredName: Map<string, string>;
   symbolsById: Map<string, ClosureTypeSymbol>;
   typeDeclarations: ClosureTypeDeclaration[];
@@ -58,6 +58,8 @@ const MAX_TYPE_DEPTH = 28;
 const MAX_SYMBOL_CHAIN_DEPTH = 64;
 
 const MAX_UNION_MEMBERS = 16;
+const MAX_SYNTHESIZED_DTS_DECLARATIONS = 48;
+const MAX_SYNTHESIZED_DTS_MEMBERS = 24;
 
 const BUILTIN_TYPE_NAMES = new Set([
   "AbortController",
@@ -149,9 +151,6 @@ export function createClosureDocRenderContext(
     nextReferenceId: 0,
     referencesByToken: new Map(),
     sourceFilePath: sourceFile.fileName,
-    sourceFileStem: sanitizeClosureName(
-      path.basename(sourceFile.fileName).replace(/\.[cm]?[jt]sx?$/u, ""),
-    ),
     symbolIdByDeclaredName: new Map(),
     symbolsById: new Map(),
     typeDeclarations: [],
@@ -182,11 +181,10 @@ export function registerDeclaredTypeSymbol(
   context.symbolIdByDeclaredName.set(name, id);
   context.symbolsById.set(id, {
     declarationFilePath: declaration.getSourceFile().fileName,
-    declarationId: `${id}:declaration`,
-    declarationStart: declaration.getStart(),
     diagnosticName: name,
     id,
     kind: "declared",
+    localName: name,
   });
   return id;
 }
@@ -663,13 +661,17 @@ function renderNamedType(
         : undefined,
     )}>`;
   }
-  if (
-    isDeclarationFileSymbol(resolvedSymbol) &&
-    !(resolvedSymbol.flags & (ts.SymbolFlags.Class | ts.SymbolFlags.Enum)) &&
-    type.getProperties().length > 0
-  ) {
-    // Structural shapes declared in `.d.ts` files are not representable as a
-    // named Closure type here; the caller degrades the atom to `?`.
+  const synthesizedDtsType = synthesizeReferencedDtsType(
+    resolvedSymbol,
+    type,
+    checker,
+    context,
+    seen,
+  );
+  if (synthesizedDtsType) {
+    return synthesizedDtsType;
+  }
+  if (isDeclarationFileSymbol(resolvedSymbol)) {
     return null;
   }
   if (isGlobalObjectType(type)) {
@@ -718,14 +720,7 @@ function renderNamedType(
  * failure is reported far from the cause. A degraded target takes its arguments
  * with it.
  */
-export function applyTypeArgumentsForTest(
-  target: string,
-  renderedArgs: readonly string[],
-) {
-  return applyTypeArguments(target, renderedArgs);
-}
-
-function applyTypeArguments(target: string, renderedArgs: readonly string[]) {
+export function applyTypeArguments(target: string, renderedArgs: readonly string[]) {
   if (renderedArgs.length === 0) {
     return target;
   }
@@ -780,9 +775,207 @@ function isTypeLikeSymbol(symbol: ts.Symbol) {
   );
 }
 
+function synthesizeReferencedDtsType(
+  resolvedSymbol: ts.Symbol,
+  type: ts.Type,
+  checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
+  seen: Set<ts.Type>,
+): string | null {
+  if (!isDeclarationFileSymbol(resolvedSymbol)) {
+    return null;
+  }
+  const declaration = canonicalDeclaration(resolvedSymbol);
+  if (!declaration) {
+    return null;
+  }
+  if (isTypescriptDefaultLibPath(declaration.getSourceFile().fileName)) {
+    return null;
+  }
+  const isInterface = ts.isInterfaceDeclaration(declaration);
+  const isAlias = ts.isTypeAliasDeclaration(declaration);
+  const isClass = ts.isClassDeclaration(declaration);
+  const isEnum = ts.isEnumDeclaration(declaration);
+  if (!isInterface && !isAlias && !isClass && !isEnum) {
+    return null;
+  }
+  const existing = context.symbolsById.get(canonicalSymbolId(resolvedSymbol));
+  if (existing?.kind === "declared") {
+    return `!${referenceSymbolId(existing.id, context)}`;
+  }
+  if (context.typeDeclarations.length >= MAX_SYNTHESIZED_DTS_DECLARATIONS) {
+    return null;
+  }
+  const rawName =
+    getDeclarationName(declaration) ??
+    sanitizeClosureName(resolvedSymbol.getName()) ??
+    "DtsType";
+  const simpleName = rawName.includes(".")
+    ? (rawName.split(".").at(-1) ?? rawName)
+    : rawName;
+  if (!isClosureQualifiedName(simpleName)) {
+    return null;
+  }
+  const name = uniqueDeclaredName(simpleName, context);
+  const declaredSymbolId = registerDeclaredTypeSymbol(
+    resolvedSymbol,
+    declaration,
+    name,
+    context,
+  );
+  const lines: string[] = [];
+  if (isAlias) {
+    const body = toClosureType(type, checker, context, new Set(seen));
+    lines.push("/**", ` * @typedef {${body}}`, " */", `let ${name};`);
+  } else if (isEnum) {
+    lines.push("/**", " * @enum {number}", " */", `const ${name} = {};`);
+  } else if (isClass) {
+    lines.push("/**", " * @constructor", " * @struct");
+    appendSynthesizedDtsHeritage(lines, declaration, checker, context, seen);
+    lines.push(" */", `function ${name}() {}`);
+    appendSynthesizedDtsMembers(
+      lines,
+      name,
+      declaration.members,
+      declaration.typeParameters,
+      checker,
+      context,
+      seen,
+    );
+  } else {
+    lines.push("/**", " * @record", " */", `function ${name}() {}`);
+    appendSynthesizedDtsMembers(
+      lines,
+      name,
+      declaration.members,
+      declaration.typeParameters,
+      checker,
+      context,
+      seen,
+    );
+  }
+  const template = `${lines.join("\n")}\n`;
+  context.typeDeclarations.push({
+    declaredSymbolId,
+    id: `${declaredSymbolId}:declaration`,
+    references: referencesForTemplate(template, context),
+    template,
+  });
+  return `!${referenceSymbolId(declaredSymbolId, context)}`;
+}
+
+function uniqueDeclaredName(base: string, context: ClosureDocRenderContext) {
+  if (!context.symbolIdByDeclaredName.has(base)) {
+    return base;
+  }
+  let index = 0;
+  let candidate = `${base}$$type$$${index}`;
+  while (context.symbolIdByDeclaredName.has(candidate)) {
+    index += 1;
+    candidate = `${base}$$type$$${index}`;
+  }
+  return candidate;
+}
+
+function appendSynthesizedDtsHeritage(
+  lines: string[],
+  declaration: ts.ClassDeclaration,
+  checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
+  seen: Set<ts.Type>,
+) {
+  for (const clause of declaration.heritageClauses ?? []) {
+    if (clause.token !== ts.SyntaxKind.ExtendsKeyword) {
+      continue;
+    }
+    for (const typeNode of clause.types) {
+      const heritage = toClosureType(
+        checker.getTypeFromTypeNode(typeNode),
+        checker,
+        context,
+        new Set(seen),
+        typeNode,
+      );
+      if (heritage === "?" || heritage === "*") {
+        continue;
+      }
+      lines.push(
+        ` * @extends {${heritage.startsWith("!") ? heritage : `!${heritage.replace(/^[?]/u, "")}`}}`,
+      );
+    }
+  }
+}
+
+function appendSynthesizedDtsMembers(
+  lines: string[],
+  typeName: string,
+  members: readonly ts.ClassElement[] | readonly ts.TypeElement[],
+  typeParameters: ts.NodeArray<ts.TypeParameterDeclaration> | undefined,
+  checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
+  seen: Set<ts.Type>,
+) {
+  const typeParameterNames = (typeParameters ?? []).map(
+    (parameter) => parameter.name.text,
+  );
+  const memberLines: string[] = [];
+  for (const member of members) {
+    if (memberLines.length / 2 >= MAX_SYNTHESIZED_DTS_MEMBERS) {
+      break;
+    }
+    const memberName = getPropertyNameText(member.name);
+    if (!memberName || !isClosureQualifiedName(memberName)) {
+      continue;
+    }
+    if (ts.isPropertySignature(member) || ts.isPropertyDeclaration(member)) {
+      memberLines.push(
+        `/** @type {${scrubDtsTypeParameters(getTypedDeclarationClosureType(member, checker, context), typeParameterNames)}} */`,
+      );
+      memberLines.push(`${typeName}.prototype.${memberName};`);
+      continue;
+    }
+    if (ts.isMethodSignature(member) || ts.isMethodDeclaration(member)) {
+      const signature = checker.getSignatureFromDeclaration(member);
+      if (!signature) {
+        continue;
+      }
+      memberLines.push(
+        `/** @type {${scrubDtsTypeParameters(signatureToClosureFunctionType(signature, checker, context, new Set(seen)), typeParameterNames)}} */`,
+      );
+      memberLines.push(`${typeName}.prototype.${memberName};`);
+    }
+  }
+  if (memberLines.length > 0) {
+    lines.push("if (false) {", ...memberLines.map((line) => `  ${line}`), "}");
+  }
+}
+
+function scrubDtsTypeParameters(
+  closureType: string,
+  typeParameterNames: readonly string[],
+) {
+  let scrubbed = closureType;
+  for (const name of typeParameterNames) {
+    if (!isClosureQualifiedName(name)) {
+      continue;
+    }
+    scrubbed = scrubbed.replaceAll(
+      new RegExp(`(?<![A-Za-z0-9_$])${name}(?![A-Za-z0-9_$])`, "gu"),
+      "?",
+    );
+  }
+  return scrubbed;
+}
+
 function isDeclarationFileSymbol(symbol: ts.Symbol) {
   return (symbol.declarations ?? []).some(
     (declaration) => declaration.getSourceFile().isDeclarationFile,
+  );
+}
+
+function isTypescriptDefaultLibPath(filePath: string) {
+  return /(?:^|[/\\])typescript[/\\]lib[/\\]lib\.[^/\\]+\.d\.ts$/iu.test(
+    filePath,
   );
 }
 
@@ -1128,8 +1321,6 @@ function referenceInGraphDeclaredType(
   if (!context.symbolsById.has(id)) {
     context.symbolsById.set(id, {
       declarationFilePath: declaration.getSourceFile().fileName,
-      declarationId: `${id}:declaration`,
-      declarationStart: declaration.getStart(),
       diagnosticName,
       id,
       kind: "declared",
@@ -1172,7 +1363,6 @@ function referenceRuntimeSymbol(
     const declaration = canonicalDeclaration(resolvedSymbol);
     context.symbolsById.set(id, {
       declarationFilePath: declaration?.getSourceFile().fileName,
-      declarationStart: declaration?.getStart(),
       diagnosticName,
       id,
       kind: "runtime",

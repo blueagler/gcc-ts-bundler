@@ -1,10 +1,6 @@
 import { firstOrUndefined } from "../../../../shared/arrays";
 import { uniqueSortedStrings } from "../../../../shared/files";
 
-export function mergeClosureTypes(types: string[]) {
-  return unionClosureTypes(types.filter(Boolean));
-}
-
 export function unionClosureTypes(types: string[]) {
   const unique = uniqueSortedStrings(types.flatMap(expandClosureUnionType));
   const onlyType = firstOrUndefined(unique);

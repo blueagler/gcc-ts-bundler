@@ -50,7 +50,6 @@ import {
   removeProjectCacheDir,
   toBuildDiagnostics,
   toImportPath,
-  toPublishedOutputPaths,
 } from "./helpers";
 import {
   createBuildContext,
@@ -473,9 +472,8 @@ async function restoreFastSnapshot(
   logInternalDetail("cache:final-fast", cacheHit ? "hit" : "miss");
   return snapshot && cacheHit
     ? successfulBuild(
-        toPublishedOutputPaths(
-          snapshot.publishedOutputs,
-          context.options.outDir,
+        snapshot.publishedOutputs.map(({ name }) =>
+          path.join(context.options.outDir, name),
         ),
         true,
       )

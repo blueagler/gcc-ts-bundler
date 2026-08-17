@@ -121,10 +121,6 @@ export async function resolveDeclarationOverlay(input: {
     exports: collectDeclarationExportGraph(program, declarationEntryPath),
     identity: {
       declarationEntryPath: path.normalize(declarationEntryPath),
-      declarationPackageRoot,
-      declarationSubpath: resolution.packageSubpath ?? ".",
-      resolutionMode: input.resolutionMode,
-      runtimeModuleId: resolution.runtimeModuleId,
     },
   };
 }

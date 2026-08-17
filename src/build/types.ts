@@ -10,13 +10,10 @@ import type { FileStateSnapshot } from "../shared/file-state";
 import { defineValues } from "../shared/validation";
 
 export interface BuildTypeMetadataSidecar {
-  cacheKey: string;
   dependencies: string[];
   diagnostics: readonly unknown[];
   extractedCounts: TypeMetadataCounts;
   files: ClosureTypeMetadataFile[];
-  provenance: unknown;
-  version: number;
 }
 
 /**

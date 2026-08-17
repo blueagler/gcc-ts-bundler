@@ -26,7 +26,6 @@ import {
 export interface ResolveMetadata {
   optionsSignature: string;
   chunkPlan: ChunkPlanChunk[];
-  externalBoundaries?: ExternalBoundary[];
   entryFiles: Array<{
     chunkName: string;
     exportNames: string[];
@@ -34,11 +33,6 @@ export interface ResolveMetadata {
     outputName: string;
     sourceRelativePath: string;
   }>;
-  lazyImports: LazyImport[];
-  packageAliases?: PackageAlias[];
-  packageJsonFiles?: string[];
-  preservedModules?: PreservedModule[];
-  resolvedImports?: ResolvedImport[];
   tsxRuntimeSourceFiles?: string[];
 }
 
@@ -141,14 +135,8 @@ const isFileStateSnapshot = isObjectOf<ResolveSnapshot["trackedFiles"][string]>(
 
 export const isResolveMetadata = isObjectOf<ResolveMetadata>({
   optionsSignature: isString,
-  externalBoundaries: optional(arrayOf(isExternalBoundary)),
   chunkPlan: arrayOf(isChunkPlanChunk),
   entryFiles: arrayOf(isResolveEntry),
-  lazyImports: arrayOf(isLazyImport),
-  packageAliases: optional(arrayOf(isPackageAlias)),
-  packageJsonFiles: optional(isStringArray),
-  preservedModules: optional(arrayOf(isPreservedModule)),
-  resolvedImports: optional(arrayOf(isResolvedImport)),
   tsxRuntimeSourceFiles: optional(isStringArray),
 });
 

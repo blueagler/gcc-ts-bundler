@@ -179,7 +179,7 @@ export function normalizeBuildOptions(
  * the `$gcc.` namespace prefix on every cross-chunk reference. Chunk file
  * names are derived from the chunk name, not from content, so the `import`
  * specifiers a sibling chunk embeds are stable across app edits and need no
- * placeholder pass; the Vite plugin owns its own hashing and HTML rewrite,
+ * placeholder pass; the Vite plugin owns HTML emission and chunk naming,
  * and standalone consumers load the entry with `<script type="module">`.
  */
 const AUTO_CHUNK_OUTPUT_TYPE: ResolvedChunkOutputType = "esm";
@@ -280,7 +280,7 @@ export function resolveChunkOutputType({
  * in every sibling's `import` statement and an app edit therefore cascades
  * new names through the whole graph. Script-mode chunks reference each other
  * through the manifest instead, so there is nothing to stabilise and an extra
- * chunk is pure overhead; `off`/`split` have no chunk graph at all.
+ * chunk is pure overhead; `off` has no vendor split.
  */
 export function resolveVendorChunk({
   chunkMode,

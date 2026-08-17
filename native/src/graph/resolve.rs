@@ -3,7 +3,7 @@ use super::*;
 use crate::closure_capabilities::CLOSURE_COMPILER_CAPABILITIES;
 use oxc_allocator::Allocator;
 
-pub(super) fn resolve_graph_impl(
+pub(crate) fn resolve_graph_impl(
     entries: Vec<String>,
     src_dir: String,
     workspace_dir: String,
@@ -263,17 +263,6 @@ pub(super) fn resolve_graph_impl(
             })
             .collect(),
         lazyImports: lazy_imports.into_values().collect(),
-        moduleKinds: graph
-            .keys()
-            .map(|file_path| ModuleKindEntry {
-                filePath: file_path.clone(),
-                kind: if preserved_file_paths.contains(file_path) {
-                    "preserved".to_string()
-                } else {
-                    "compiled".to_string()
-                },
-            })
-            .collect(),
         packageAliases: package_aliases.into_values().collect(),
         resolvedImports: resolved_imports.into_values().collect(),
         packageJsonFiles: package_json_files,

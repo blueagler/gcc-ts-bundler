@@ -21,20 +21,6 @@ pub(super) struct EmittedProgram {
     pub(super) type_metadata: TypeMetadataDelivery,
 }
 
-impl std::ops::Deref for EmittedProgram {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.code
-    }
-}
-
-impl std::fmt::Display for EmittedProgram {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.code.fmt(formatter)
-    }
-}
-
 pub(super) fn emit_module_program_oxc<'a>(
     allocator: &'a oxc_allocator::Allocator,
     file_path: &Path,

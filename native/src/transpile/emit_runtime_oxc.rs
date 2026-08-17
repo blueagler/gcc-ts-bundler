@@ -1,7 +1,5 @@
 //! Oxc bundler-runtime emitter and identity-based export readers.
 
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 

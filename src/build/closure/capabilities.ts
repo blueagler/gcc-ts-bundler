@@ -1,7 +1,7 @@
 import type { LanguageOut } from "../../api/types";
 import { resolveViteTargetLanguageOut as resolveNativeViteTargetLanguageOut } from "../../native/load";
 
-const CLOSURE_LANGUAGE_LEVELS: readonly LanguageOut[] = [
+export const CLOSURE_LANGUAGE_LEVELS: readonly LanguageOut[] = [
   "ECMASCRIPT3",
   "ECMASCRIPT5",
   "ECMASCRIPT6",
@@ -19,8 +19,4 @@ const CLOSURE_LANGUAGE_LEVELS: readonly LanguageOut[] = [
 export function mapViteTargetToLanguageOut(target: string): LanguageOut | null {
   const languageOut = resolveNativeViteTargetLanguageOut(target);
   return CLOSURE_LANGUAGE_LEVELS.find((level) => level === languageOut) ?? null;
-}
-
-export function languageOutRank(languageOut: LanguageOut) {
-  return CLOSURE_LANGUAGE_LEVELS.indexOf(languageOut);
 }

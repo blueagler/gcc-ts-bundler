@@ -1,6 +1,4 @@
-//! Oxc counterpart of `namespace/wrappers.rs`'s read-only wrapper-flow analysis.
-
-#![allow(dead_code)]
+//! Oxc read-only wrapper-flow analysis for dynamic-import carriers.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 

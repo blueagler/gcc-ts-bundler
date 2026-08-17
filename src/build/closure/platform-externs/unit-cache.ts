@@ -114,13 +114,10 @@ function isParsedUnits(value: unknown): value is ParsedPlatformExternUnits {
       ? Reflect.get(value, key)
       : undefined;
   const units = has("allUnits");
-  const sources = has("languageSources");
   if (
     typeof has("jarHash") !== "string" ||
     !Array.isArray(units) ||
-    units.length === 0 ||
-    !Array.isArray(sources) ||
-    sources.length === 0
+    units.length === 0
   ) {
     return false;
   }

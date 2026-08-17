@@ -13,7 +13,7 @@ export const DECLARATION_EXTENSIONS = [
   ".cts",
 ];
 
-export const BUILTIN_CONTAINER_NAMES = new Set([
+const BUILTIN_CONTAINER_NAMES = new Set([
   "Array",
   "AsyncIterable",
   "AsyncIterator",
@@ -30,7 +30,7 @@ export const BUILTIN_CONTAINER_NAMES = new Set([
   "WeakSet",
 ]);
 
-export const BUILTIN_RUNTIME_MEMBER_NAMES = new Set([
+const BUILTIN_RUNTIME_MEMBER_NAMES = new Set([
   "addEventListener",
   "apply",
   "attachShadow",
@@ -56,7 +56,6 @@ export interface ClassContract {
   name: string;
   staticMembers: Set<string>;
   symbol: ts.Symbol;
-  usedImplementedContracts: Set<ts.Symbol>;
 }
 
 export interface TypeAliasContract {
@@ -178,14 +177,6 @@ export function isProjectAppSourceFile(filePath: string, projectRoot: string) {
   );
 }
 
-export function isExportedDeclaration(node: ts.Node) {
-  return hasModifier(node, ts.SyntaxKind.ExportKeyword);
-}
-
-export function hasStaticModifier(node: ts.Node) {
-  return hasModifier(node, ts.SyntaxKind.StaticKeyword);
-}
-
 export function hasNonPublicModifier(node: ts.Node) {
   return (
     hasModifier(node, ts.SyntaxKind.PrivateKeyword) ||
@@ -223,8 +214,8 @@ export function getStringLiteralMemberName(
  * Which evidence source a candidate member name came from. The two sources
  * genuinely need different filters, and the difference is not arbitrary:
  *
- * - `"contract"` — names read off *declaration* files (boundary-aware and
- *   candidates modes). A `_`/`$`-leading member in a `.d.ts` is by convention
+ * - `"contract"` — names read off *declaration* files (boundary-aware mode).
+ *   A `_`/`$`-leading member in a `.d.ts` is by convention
  *   private API the application is not supposed to reach, so pinning it is
  *   pure cost. Excluded.
  * - `"runtime"` — names read off *emitted runtime* files (runtime-aware mode).
@@ -365,30 +356,11 @@ export function isTypescriptLibFile(filePath: string) {
   );
 }
 
-export function symbolCacheKey(symbol: ts.Symbol) {
-  const declaration = symbol.declarations?.[0];
-  return declaration
-    ? `${path.resolve(declaration.getSourceFile().fileName)}:${symbol.getName()}`
-    : symbol.getName();
-}
-
-export function uniqueStrings(values: string[]) {
-  return [...new Set(values)].sort((left, right) => left.localeCompare(right));
-}
-
-interface ExternConfigFailure {
-  message: string;
-}
-
-function isExternConfigFailure(cause: unknown): cause is ExternConfigFailure {
-  return cause instanceof Error;
-}
-
 export function isRecoverableExternConfigError<ExternConfigCause>(
   cause: ExternConfigCause,
 ) {
   return (
-    isExternConfigFailure(cause) &&
+    cause instanceof Error &&
     (cause.message.includes("TS18003") ||
       cause.message.includes("No inputs were found in config file"))
   );

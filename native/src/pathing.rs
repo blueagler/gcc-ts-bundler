@@ -51,7 +51,7 @@ pub fn to_bundler_runtime_module_id(logical_module_id: &str) -> String {
     if bundler_runtime_ids_are_readable() {
         logical_module_id.to_string()
     } else {
-        short_runtime_id('m', logical_module_id)
+        short_stable_id('m', logical_module_id)
     }
 }
 
@@ -59,10 +59,6 @@ pub fn to_bundler_runtime_chunk_id(logical_chunk_id: &str) -> String {
     if bundler_runtime_ids_are_readable() {
         logical_chunk_id.to_string()
     } else {
-        short_runtime_id('c', logical_chunk_id)
+        short_stable_id('c', logical_chunk_id)
     }
-}
-
-fn short_runtime_id(prefix: char, value: &str) -> String {
-    short_stable_id(prefix, value)
 }

@@ -44,7 +44,6 @@ export function collectDeclarationExportGraph(
         start: declaration.getStart(),
       }),
       declarationName: target.getName(),
-      declarationStart: declaration.getStart(),
       exportName,
       hasRuntimeValue: (target.flags & ts.SymbolFlags.Value) !== 0,
       isTypeOnly: (target.flags & ts.SymbolFlags.Value) === 0,
@@ -69,7 +68,6 @@ export function collectDeclarationExportGraph(
         start: declaration.getStart(),
       }),
       declarationName: symbol?.getName() ?? "export=",
-      declarationStart: declaration.getStart(),
       exportName: "default",
       hasRuntimeValue: true,
       isTypeOnly: false,
@@ -358,7 +356,6 @@ export function joinDeclarationAndRuntimeExports(input: {
       declaration,
       exportName: declaration.exportName,
       runtime,
-      runtimeModuleId: input.runtimeModuleId,
     });
   }
   return { diagnostics, facts };

@@ -220,16 +220,16 @@ test("declaration-file structural shapes still degrade to one `?` atom", () => {
 });
 
 test("a degraded generic target drops its type arguments (`?<...>` is a syntax error)", async () => {
-  const { applyTypeArgumentsForTest } = await import(
+  const { applyTypeArguments } = await import(
     "../src/build/transpile/closure-ir/metadata/type-render.ts"
   );
   // `?<A, B>` does not parse. A degraded target has to take its arguments with
   // it, or one bad atom poisons the whole annotation with a parse error
   // reported far from the cause.
-  expect(applyTypeArgumentsForTest("?", ["string"])).toBe("?");
-  expect(applyTypeArgumentsForTest("*", ["string"])).toBe("?");
-  expect(applyTypeArgumentsForTest("!Foo", ["?"])).toBe("!Foo<?>");
-  expect(applyTypeArgumentsForTest("!Foo", [])).toBe("!Foo");
+  expect(applyTypeArguments("?", ["string"])).toBe("?");
+  expect(applyTypeArguments("*", ["string"])).toBe("?");
+  expect(applyTypeArguments("!Foo", ["?"])).toBe("!Foo<?>");
+  expect(applyTypeArguments("!Foo", [])).toBe("!Foo");
 });
 
 /** Builds a program over one file and returns {checker, sourceFile, context}. */

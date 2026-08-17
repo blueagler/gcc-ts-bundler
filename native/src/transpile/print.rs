@@ -117,6 +117,8 @@ pub(super) fn transform_source_with_oxc(
         &opaque_commonjs_bindings,
     );
     super::js_compat_oxc::apply_program_transforms(&allocator, &mut program, &identity, source);
+    super::emit_helpers_oxc::rewrite_this_field_helper_assignments(&allocator, &mut program);
+
     rewrite_dynamic_imports(&allocator, &mut program, file_path, context);
     preserve_property_names(&allocator, &mut program, context);
     let class_map_property_names = super::compat_properties_oxc::apply(

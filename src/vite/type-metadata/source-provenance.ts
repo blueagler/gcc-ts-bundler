@@ -1,16 +1,7 @@
-import path from "node:path";
+import type { CapturedRuntimeModule } from "../internal-types";
+import type { RuntimeModuleTypeProvenance } from "./types";
 
-import type {
-  CapturedRuntimeModule,
-  MaterializedGraph,
-} from "../internal-types";
-import { hashTypeMetadataValue } from "./cache";
-import type {
-  RuntimeModuleTypeProvenance,
-  SourceToRuntimeMapping,
-} from "./types";
-
-const TYPESCRIPT_RUNTIME_EXTENSION = /\.(?:cts|mts|tsx?)$/u;
+const TYPESCRIPT_RUNTIME_EXTENSION = /\.(?:cts|mts|tsx?|svelte|vue)$/u;
 const JAVASCRIPT_RUNTIME_EXTENSION = /\.(?:cjs|js|jsx|mjs)$/u;
 const EXPLICIT_JSDOC_TYPE_SIGNAL =
   /(?:\/\/\s*@ts-check\b|\/\*\*[\s\S]*?@(type|param|returns?|template|typedef|implements|extends|satisfies)\b)/u;
@@ -41,30 +32,6 @@ export function classifyTypeMetadataSource(
   return "untyped";
 }
 
-export function collectOneToOneSourceMappings(
-  graph: Pick<MaterializedGraph, "modules">,
-): SourceToRuntimeMapping[] {
-  return graph.modules
-    .flatMap((module) => {
-      const sourceModuleId = module.sourceModuleIds[0];
-      if (module.sourceModuleIds.length !== 1 || sourceModuleId === undefined) {
-        return [];
-      }
-      return [
-        {
-          materializedFilePath: path.normalize(module.filePath),
-          runtimeModuleId: module.id,
-          sourceModuleId,
-        },
-      ];
-    })
-    .sort((left, right) =>
-      `${left.runtimeModuleId}\0${left.sourceModuleId}`.localeCompare(
-        `${right.runtimeModuleId}\0${right.sourceModuleId}`,
-      ),
-    );
-}
-
 export function shouldBypassTypeMetadataFusion(
   module: Pick<CapturedRuntimeModule, "sourceModuleIds">,
 ) {
@@ -83,15 +50,8 @@ export function withOneToOneTypeProvenance(
   if (module.sourceModuleIds.length !== 1 || sourceModuleId === undefined) {
     return module;
   }
-  const sourceMappings = [
-    {
-      materializedFilePath: path.normalize(module.filePath),
-      runtimeModuleId: module.id,
-      sourceModuleId,
-    },
-  ];
+  const sourceMappings = [sourceModuleId];
   const typeMetadata = {
-    cacheKey: hashTypeMetadataValue(sourceMappings),
     exportFacades: [],
     kind: "one-to-one",
     sourceMappings,

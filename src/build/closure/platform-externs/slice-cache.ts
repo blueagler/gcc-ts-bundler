@@ -20,8 +20,7 @@ const gunzip = promisify(zlib.gunzip);
  * seeds are the *output* of the 330 ms scan, so keying on them would mean
  * paying the thing the cache exists to avoid. The key is therefore the input
  * the scan is a pure function of — the content of the program files and the
- * type-dependency files — and the seed digest travels in the payload as a
- * witness, so a hit can still be checked against what it claims to be.
+ * type-dependency files.
  *
  * Content hashes, not `(path, size, mtime)`: emitted program files are
  * rewritten on every build, so an mtime key would miss every time. Hashing
@@ -41,8 +40,6 @@ export interface SliceCacheKey {
 }
 
 interface SlicePayload {
-  /** Sorted seed names, hashed — the determinism witness described above. */
-  seedDigest: string;
   text: string;
   version: number;
 }
@@ -108,12 +105,6 @@ async function digestGroup(files: readonly string[]): Promise<string> {
   return createHash("sha256").update(digests.join("\u0000")).digest("hex");
 }
 
-export function digestSeedNames(names: readonly string[]): string {
-  return createHash("sha256")
-    .update([...names].sort().join("\u0000"))
-    .digest("hex");
-}
-
 /**
  * Fail-closed on every anomaly, per the `isParsedUnits` precedent: a truncated,
  * foreign or version-drifted payload degrades to regenerating the slice, never
@@ -133,7 +124,6 @@ export async function readCachedSlice(
     if (
       payload["version"] !== PAYLOAD_VERSION ||
       typeof payload["text"] !== "string" ||
-      typeof payload["seedDigest"] !== "string" ||
       payload["text"].length === 0
     ) {
       return null;
@@ -150,12 +140,11 @@ export async function readCachedSlice(
 export async function writeCachedSlice(
   key: SliceCacheKey,
   text: string,
-  seedDigest: string,
 ): Promise<void> {
   const directory = cacheDirectory(key.cacheRoot);
   const target = cacheFilePath(key);
   const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
-  const payload: SlicePayload = { seedDigest, text, version: PAYLOAD_VERSION };
+  const payload: SlicePayload = { text, version: PAYLOAD_VERSION };
   try {
     await fs.mkdir(directory, { recursive: true });
     await fs.writeFile(temporary, await gzip(JSON.stringify(payload)));
@@ -220,9 +209,4 @@ export async function collectExpiredEntries(
     /* no cache directory yet, or unreadable — nothing to collect */
   }
   return removed;
-}
-
-/** Test seam: the once-per-process guard would otherwise hide later sweeps. */
-export function resetExpiredEntryCollectionForTests() {
-  collected = false;
 }

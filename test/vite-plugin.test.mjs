@@ -2444,7 +2444,7 @@ test.serial(
 
     await buildViteFixture(fixture, {
       compilerLines: [
-        '        chunks: { outputType: "esm", vendorChunk: true },',
+        '        chunks: { outputType: "esm" },',
       ],
       pluginEntries: ["    virtualBridge,"],
       preambleLines: [
@@ -3013,13 +3013,13 @@ test("Vite separates legacy capture targets and treats explicit auto as omission
         options: { compiler: { chunks } },
       }),
     ).chunks;
-  const omitted = resolve({ vendorChunk: true });
-  const explicitAuto = resolve({ outputType: "auto", vendorChunk: true });
+  const omitted = resolve({});
+  const explicitAuto = resolve({ outputType: "auto" });
 
   expect(omitted.outputType).toBe("esm");
   expect(explicitAuto.outputType).toBe("esm");
-  expect(omitted.vendorChunk).toBe(true);
-  expect(explicitAuto.vendorChunk).toBe(true);
+  expect(omitted.vendorChunk).toBe(false);
+  expect(explicitAuto.vendorChunk).toBe(false);
 });
 
 test("resolveViteCaptureRootPath is deterministic for identical inputs", () => {
@@ -3735,9 +3735,9 @@ test("script chunk naming leaves chunk sources untouched", async () => {
 
 /**
  * Builds the two graphs the externs stage sees. The dependency module differs
- * between them exactly as esbuild's class-field lowering makes it differ: the
- * authored source assigns `this.loweredField`, the prebundled output writes it
- * through `__publicField(this, "loweredField", ...)`.
+ * between them as a remaining string-define hazard: authored source assigns
+ * `this.loweredField`, the prebundled output writes it through
+ * `Object.defineProperty(this, "loweredField", ...)`.
  */
 async function writeExternsGraphFixture(fixture) {
   const preDepFile = path.join(fixture.srcDir, "pre-dep.js");
@@ -3768,10 +3768,9 @@ async function writeExternsGraphFixture(fixture) {
   await fs.writeFile(
     postDepFile,
     [
-      "const __publicField = (obj, key, value) => (obj[key] = value);",
       "export class Widget {",
       "  constructor() {",
-      '    __publicField(this, "loweredField", 1);',
+      '    Object.defineProperty(this, "loweredField", { value: 1 });',
       "  }",
       "  read(other) {",
       "    return other.loweredField;",

@@ -4,8 +4,6 @@
 //! `type_metadata` slice; this module ports the module/import/export assembly,
 //! live-binding rewrite, and every direct statement/expression print to oxc.
 
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
@@ -1370,7 +1368,6 @@ mod tests {
             decorated_output_text: None,
             diagnostics: Vec::new(),
             enums: Vec::new(),
-            erased_const_enums: Vec::new(),
             external_global_member_accesses: vec![source
                 .find("Object.assign")
                 .map(|start| start + "Object.".len())
@@ -1379,7 +1376,6 @@ mod tests {
                 .unwrap()],
             external_owned_member_accesses: Vec::new(),
             file_path: entry.to_string_lossy().into_owned(),
-            runtime_module_id: None,
             source_file_path: entry.to_string_lossy().into_owned(),
             symbols: Vec::new(),
         };
@@ -1418,7 +1414,6 @@ mod tests {
             decorated_output_text: None,
             diagnostics: Vec::new(),
             enums: Vec::new(),
-            erased_const_enums: Vec::new(),
             external_global_member_accesses: Vec::new(),
             external_owned_member_accesses: vec![source
                 .find("resolvedFileName")
@@ -1426,7 +1421,6 @@ mod tests {
                 .try_into()
                 .unwrap()],
             file_path: entry.to_string_lossy().into_owned(),
-            runtime_module_id: None,
             source_file_path: entry.to_string_lossy().into_owned(),
             symbols: Vec::new(),
         };
@@ -1529,7 +1523,6 @@ mod tests {
             decorated_output_text: None,
             diagnostics: Vec::new(),
             enums: Vec::new(),
-            erased_const_enums: Vec::new(),
             external_global_member_accesses: Vec::new(),
             external_owned_member_accesses: vec![source
                 .rfind("value")
@@ -1537,7 +1530,6 @@ mod tests {
                 .try_into()
                 .unwrap()],
             file_path: entry.to_string_lossy().into_owned(),
-            runtime_module_id: None,
             source_file_path: entry.to_string_lossy().into_owned(),
             symbols: Vec::new(),
         };

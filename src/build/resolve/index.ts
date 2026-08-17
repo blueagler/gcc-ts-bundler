@@ -14,6 +14,7 @@ import {
   collectTrackedFiles,
   trackedFilesMatch,
 } from "../../shared/file-state";
+import { uniqueSortedStrings } from "../../shared/files";
 import { hashJson } from "../../shared/hash";
 import { logInternalDetail } from "../../shared/timing";
 import type {
@@ -40,12 +41,10 @@ import {
   collectTsxRuntimeSupport,
   mergePackageAliases,
   mergeResolvedImports,
-  mergeRuntimePackageJsonFiles,
-  mergeTsxRuntimeTrackedFiles,
 } from "./jsx-runtime";
+import { getPackageRootFromBundle } from "../../shared/bundle-location";
 import {
   getOptionsSignature,
-  getPackageRoot,
   getPackageSignature,
   hashExternalInputs,
   hashTsConfig,
@@ -88,7 +87,7 @@ export async function createBuildContext(
     >;
   }
 > {
-  const packageRoot = getPackageRoot();
+  const packageRoot = getPackageRootFromBundle();
   const usesPersistentCache = options.cache.mode === "persistent";
   const closureCompilerEnvironment = resolveClosureCompilerEnvironment();
   const projectCacheDir = getProjectCacheDir(
@@ -257,10 +256,10 @@ async function resolveFreshGraph(
       ...graphResult.packageAliases,
       ...tsxRuntimeSupport.packageAliases,
     ]),
-    packageJsonFiles: mergeRuntimePackageJsonFiles(
-      graphResult.packageJsonFiles,
-      tsxRuntimeSupport.packageJsonFiles,
-    ),
+    packageJsonFiles: uniqueSortedStrings([
+      ...graphResult.packageJsonFiles,
+      ...tsxRuntimeSupport.packageJsonFiles,
+    ]),
     preservedModules,
     resolvedImports: mergeResolvedImports([
       ...graphResult.resolvedImports,
@@ -294,20 +293,9 @@ async function loadOrCreateResolveMetadata(
     ? await readJsonIfExists(resolveMetadataPath, isResolveMetadata)
     : null;
   if (cached?.optionsSignature === context.optionsSignature) {
-    const needsUpgrade =
-      !Array.isArray(cached.externalBoundaries) ||
-      !Array.isArray(cached.packageAliases) ||
-      !Array.isArray(cached.packageJsonFiles) ||
-      !Array.isArray(cached.preservedModules) ||
-      !Array.isArray(cached.resolvedImports) ||
-      !Array.isArray(cached.tsxRuntimeSourceFiles);
+    const needsUpgrade = !Array.isArray(cached.tsxRuntimeSourceFiles);
     const metadata = {
       ...cached,
-      externalBoundaries: cached.externalBoundaries ?? fresh.externalBoundaries,
-      packageAliases: cached.packageAliases ?? fresh.packageAliases,
-      packageJsonFiles: cached.packageJsonFiles ?? fresh.packageJsonFiles,
-      preservedModules: cached.preservedModules ?? fresh.preservedModules,
-      resolvedImports: cached.resolvedImports ?? fresh.resolvedImports,
       tsxRuntimeSourceFiles:
         cached.tsxRuntimeSourceFiles ?? fresh.tsxRuntimeSupport.sourceFiles,
     };
@@ -399,7 +387,6 @@ function createResolveMetadata(
   return {
     optionsSignature: context.optionsSignature,
     chunkPlan,
-    externalBoundaries: fresh.externalBoundaries,
     entryFiles: entryFiles.map(
       (entry): ResolveMetadata["entryFiles"][number] => ({
         chunkName: entry.chunkName,
@@ -409,11 +396,6 @@ function createResolveMetadata(
         sourceRelativePath: entry.sourceRelativePath,
       }),
     ),
-    lazyImports: fresh.graphResult.lazyImports,
-    packageAliases: fresh.packageAliases,
-    packageJsonFiles: fresh.packageJsonFiles,
-    preservedModules: fresh.preservedModules,
-    resolvedImports: fresh.resolvedImports,
     tsxRuntimeSourceFiles: fresh.tsxRuntimeSupport.sourceFiles,
   };
 }
@@ -454,10 +436,10 @@ async function finalizeResolvedBuild(
     : "active";
   const trackedFiles = env.usesPersistentCache
     ? await collectTrackedFiles([
-        ...mergeTsxRuntimeTrackedFiles(
-          fresh.graphResult.trackedFiles,
-          fresh.tsxRuntimeSupport.trackedFiles,
-        ),
+        ...uniqueSortedStrings([
+          ...fresh.graphResult.trackedFiles,
+          ...fresh.tsxRuntimeSupport.trackedFiles,
+        ]),
         env.tsConfigPath,
         ...options.externs,
         ...options.js,

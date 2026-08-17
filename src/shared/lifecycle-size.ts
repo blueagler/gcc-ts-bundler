@@ -16,9 +16,6 @@ interface OutputChunkStats {
   lazyFactoryCount: number;
   lazyGzipBytes: number;
   lazyRawBytes: number;
-  totalFactoryCount: number;
-  totalGzipBytes: number;
-  totalRawBytes: number;
 }
 
 export async function collectJsGraphStats(input: {
@@ -93,9 +90,6 @@ export async function collectOutputChunkStats(input: {
     lazyFactoryCount,
     lazyGzipBytes,
     lazyRawBytes,
-    totalFactoryCount: entryFactoryCount + lazyFactoryCount,
-    totalGzipBytes: entryGzipBytes + lazyGzipBytes,
-    totalRawBytes: entryRawBytes + lazyRawBytes,
   } satisfies OutputChunkStats;
 }
 

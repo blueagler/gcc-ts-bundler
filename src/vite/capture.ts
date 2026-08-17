@@ -50,9 +50,7 @@ function resolveViteCaptureRootId(input: {
 }) {
   return hashJson({
     plugin: {
-      compiler: input.options.compiler ?? {},
       externs: input.options.externs ?? {},
-      html: input.options.html ?? {},
       runtime: input.options.runtime ?? {},
     },
     projectRoot: path.resolve(input.projectRoot),
@@ -365,7 +363,6 @@ async function normalizeCapturedCode(
     moduleAnalysis.needsClosureCompatibilityDownlevel &&
     !isDependencyModuleId(id)
   ) {
-    const transformWithEsbuild = await loadViteEsbuildTransform();
     const result = await transformWithEsbuild(nextCode, stripQuery(id), {
       format: "esm",
       loader: resolveEsbuildLoader(id),
@@ -744,7 +741,7 @@ export function toMaterializedRelativePath(
  * manifest, so hashing the raw absolute id makes output bytes and chunk names
  * differ when the same project is built from two directories.
  */
-export function toCanonicalModuleId(projectRoot: string, moduleId: string) {
+function toCanonicalModuleId(projectRoot: string, moduleId: string) {
   if (moduleId.startsWith("\0") || moduleId.startsWith("virtual:")) {
     return moduleId;
   }
@@ -1119,8 +1116,4 @@ function isModuleExportsAccess(node: ts.Node): boolean {
 
 function isClassStaticBlockNode(node: ts.Node) {
   return node.kind === ts.SyntaxKind.ClassStaticBlockDeclaration;
-}
-
-async function loadViteEsbuildTransform() {
-  return transformWithEsbuild;
 }

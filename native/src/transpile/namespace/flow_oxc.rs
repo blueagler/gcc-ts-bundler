@@ -1,7 +1,5 @@
 //! Oxc namespace-slot rewriting for bundler-runtime emission.
 
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 

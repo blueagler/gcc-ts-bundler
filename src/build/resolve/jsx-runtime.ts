@@ -4,7 +4,6 @@ import ts from "@typescript/typescript6";
 import { resolveGraph } from "../../native/load";
 import { loadCompilerOptions } from "../transpile/compiler-options";
 import type { PackageAlias, ResolvedImport } from "../types";
-import { uniqueSortedStrings } from "../../shared/files";
 import { createBundleRequire } from "../../shared/bundle-location";
 
 const require = createBundleRequire();
@@ -86,20 +85,6 @@ export function mergeResolvedImports(imports: ResolvedImport[]) {
     const rightKey = `${right.importerFilePath}\0${right.specifier}`;
     return leftKey.localeCompare(rightKey);
   });
-}
-
-export function mergeTsxRuntimeTrackedFiles(
-  baseTrackedFiles: string[],
-  runtimeTrackedFiles: string[],
-) {
-  return uniqueSortedStrings([...baseTrackedFiles, ...runtimeTrackedFiles]);
-}
-
-export function mergeRuntimePackageJsonFiles(
-  packageJsonFiles: string[],
-  runtimePackageJsonFiles: string[],
-) {
-  return uniqueSortedStrings([...packageJsonFiles, ...runtimePackageJsonFiles]);
 }
 
 function emptyTsxRuntimeSupport(): TsxRuntimeSupport {

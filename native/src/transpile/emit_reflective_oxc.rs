@@ -1,6 +1,4 @@
-//! Oxc counterpart of `emit_reflective.rs`'s read-only property-flow analysis.
-
-#![allow(dead_code)]
+//! Oxc read-only property-flow analysis for reflective property names.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 

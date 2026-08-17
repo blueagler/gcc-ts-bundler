@@ -46,7 +46,7 @@ pub fn resolve_graph(
     preserved_file_paths: Vec<String>,
 ) -> Result<graph::ResolveGraphOutput> {
     with_globals(|| {
-        graph::resolve_graph_with_options(
+        graph::resolve_graph_impl(
             entries,
             src_dir,
             workspace_dir,
@@ -172,27 +172,4 @@ pub fn collect_file_states(file_paths: Vec<String>) -> Result<Vec<fs_state::File
 #[napi(js_name = "matchFileStates")]
 pub fn match_file_states(expected: Vec<fs_state::FileStateEntry>) -> Result<bool> {
     Ok(fs_state::match_file_states(expected))
-}
-
-#[napi(js_name = "collectPublishedOutputStats")]
-pub fn collect_published_output_stats(
-    file_paths: Vec<String>,
-) -> Result<Vec<fs_state::PublishedOutputEntry>> {
-    Ok(fs_state::collect_published_output_stats(file_paths))
-}
-
-#[napi(js_name = "publishedOutputsMatch")]
-pub fn published_outputs_match(output_files: Vec<String>, out_dir: String) -> Result<bool> {
-    Ok(fs_state::published_outputs_match(output_files, out_dir))
-}
-
-#[napi(js_name = "publishedOutputSnapshotMatches")]
-pub fn published_output_snapshot_matches(
-    published_outputs: Vec<fs_state::PublishedOutputEntry>,
-    out_dir: String,
-) -> Result<bool> {
-    Ok(fs_state::published_output_snapshot_matches(
-        published_outputs,
-        out_dir,
-    ))
 }

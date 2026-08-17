@@ -113,38 +113,32 @@ async function loadPlatformExternIndex(
   return indexPlatformExternUnits(parsed);
 }
 
-export async function buildPlatformExternIndex(
-  archive: PlatformExternArchive,
-): Promise<PlatformExternIndex> {
-  return indexPlatformExternUnits(await parsePlatformExternUnits(archive));
-}
 
 /** The expensive half: TypeScript-parse every archive entry into units. */
-export async function parsePlatformExternUnits(
+async function parsePlatformExternUnits(
   archive: PlatformExternArchive,
 ): Promise<ParsedPlatformExternUnits> {
-  const languageSources: PlatformExternSource[] = [];
   const allUnits: PlatformDeclarationUnit[] = [];
 
   const archiveEntries = await archive.entries();
   for (const [fileOrder, entry] of archiveEntries.entries()) {
-    const units = parseDeclarationUnits(entry, fileOrder);
-    if (!entry.name.startsWith("browser/")) languageSources.push(entry);
-    allUnits.push(...units);
+    allUnits.push(...parseDeclarationUnits(entry, fileOrder));
   }
-  return { allUnits, jarHash: archive.jarHash, languageSources };
+  return { allUnits, jarHash: archive.jarHash };
 }
 
 /** The cheap half: group parsed units into lookup maps. */
-export function indexPlatformExternUnits({
+function indexPlatformExternUnits({
   allUnits,
   jarHash,
-  languageSources,
 }: ParsedPlatformExternUnits): PlatformExternIndex {
   const browserUnits = allUnits.filter((unit) =>
     unit.fileName.startsWith("browser/"),
   );
-  if (languageSources.length === 0 || browserUnits.length === 0) {
+  const hasLanguageUnits = allUnits.some(
+    (unit) => !unit.fileName.startsWith("browser/"),
+  );
+  if (!hasLanguageUnits || browserUnits.length === 0) {
     throw new Error(
       "Closure extern archive is missing language or browser sources",
     );
@@ -173,7 +167,6 @@ export function indexPlatformExternUnits({
 
   return {
     jarHash,
-    languageSources,
     browserUnits,
     unitsByName: mutableByName,
     unitsByProperty: mutableByProperty,

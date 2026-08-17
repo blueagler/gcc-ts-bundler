@@ -6,8 +6,11 @@ import {
   loadCompilerOptions,
   loadTsConfigDeclarationFiles,
 } from "../compiler-options";
-import { collectTypeMetadataFiles, scanTypeMetadataFiles } from "./metadata";
-import type { ClosureIrScanResult } from "./metadata/scan";
+import { collectTypeMetadataFiles } from "./metadata";
+import {
+  scanClosureIrSourceFiles,
+  type ClosureIrScanResult,
+} from "./metadata/scan";
 import type { TypeMetadataTarget } from "./types";
 export type {
   ClosureAnnotation,
@@ -28,8 +31,6 @@ interface NativeTypeAnalysisContext {
   fileNames: string[];
   program: ts.Program;
 }
-
-type NativeTypeAnalysisScanResult = ClosureIrScanResult;
 
 export async function createNativeTypeAnalysisContext({
   fileNames,
@@ -84,9 +85,9 @@ export function scanNativeTypeAnalysisContext({
   context,
 }: {
   context: NativeTypeAnalysisContext;
-}): NativeTypeAnalysisScanResult {
+}): ClosureIrScanResult {
   const { fileNames, program } = context;
-  return scanTypeMetadataFiles({ fileNames, program });
+  return scanClosureIrSourceFiles({ fileNames, program });
 }
 
 export function collectNativeTypeMetadataFromContext({
@@ -99,7 +100,7 @@ export function collectNativeTypeMetadataFromContext({
   boundaryModuleFileNames?: string[] | undefined;
   context: NativeTypeAnalysisContext;
   externalSpecifiers?: string[] | undefined;
-  scan: NativeTypeAnalysisScanResult | undefined;
+  scan: ClosureIrScanResult | undefined;
   targets?: TypeMetadataTarget[] | undefined;
 }) {
   const { compilerOptions, fileNames, program } = context;

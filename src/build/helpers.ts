@@ -4,27 +4,10 @@ import path from "path";
 import ts from "@typescript/typescript6";
 
 import type { BuildDiagnostic } from "../api/types";
-import { publishFilesToDirectory } from "../shared/files";
-import { publishedOutputsMatch } from "../shared/file-state";
-
-export async function publishOutputs(outputFiles: string[], outDir: string) {
-  if (await publishedOutputsMatch(outputFiles, outDir)) {
-    return;
-  }
-
-  await publishFilesToDirectory(outputFiles, outDir, "copy");
-}
 
 export function toImportPath(relativePath: string): string {
   const normalized = relativePath.replace(/\\/g, "/").replace(/\.[^/.]+$/, "");
   return normalized.startsWith(".") ? normalized : `./${normalized}`;
-}
-
-export function toPublishedOutputPaths(
-  publishedOutputs: Array<{ name: string }>,
-  outDir: string,
-) {
-  return publishedOutputs.map(({ name }) => path.join(outDir, name));
 }
 
 export function createBuildDiagnostic(error: unknown): BuildDiagnostic {

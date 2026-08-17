@@ -119,20 +119,23 @@ They fail for one reason: they all operate *inside* the inverted value model of
 
 Those four byte-identical rows are not one defect. They split:
 
-- **`chunks.mode`** was genuinely overwritten. `createCompilerOptions` still
-  hardcodes `mode: "bundler-runtime"` (`src/vite/config.ts:137`). Commit
-  `1d5f29d` made that field a type error on the Vite surface, so a caller who
-  writes it now fails at compile time instead of being silently ignored.
+- **`chunks.mode`**, **`chunks.publicPath`**, and **`chunks.vendorChunk`**
+  are overwritten. `createCompilerOptions` hardcodes `mode: "bundler-runtime"`,
+  `publicPath` from `runtime.publicPath ?? config.base`, and `vendorChunk:
+  false` because the planner mirrors Rollup. Those fields are type errors on
+  the Vite surface, so a caller who writes them fails at compile time instead
+  of being silently ignored.
 - **`compiler.externs` is not discarded.** `src/vite/externs.ts:66` reads it,
   resolves the paths, and unions them into `renameBarriers`, which
   `createCompilerOptions` then writes through as `externs`. `test/vite-plugin.test.mjs`
   and `docs/vite.md` treat this as the live explicit-externs path. The old
   reading that line 104 of `config.ts` replaced the caller's list wholesale was
   wrong: that line is the composed-input parameter, not a drop.
-- **`externs.generate.includeDependencies` and `externs.generate.modules`**
-  *are* honored (`src/vite/externs.ts:98-100`) but ineffective: pins come from
-  proven hazard sites, not from the module list. Byte-identical output is the
-  measured consequence of that design, not of a discarded option.
+- **`externs.generate.includeDependencies`** is live only on the
+  boundary-aware `generateExterns` path. The default Vite runtime-aware path
+  does not read it. **`externs.generate.modules`** is written into the
+  generated comment and is otherwise unused for pins: pins come from proven
+  hazard sites, not the module list. Byte-identical output is that design.
 - **`finalMinify`** is overridden by design, not inert. `src/vite/plugin.ts:568-573`
   hardcodes `finalMinify: false` on the Closure stage so hashing and URL
   rewrite can finish first; `emitViteGraph` (~710-712) then always runs

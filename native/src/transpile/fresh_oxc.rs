@@ -1,6 +1,4 @@
-//! Oxc counterpart of `fresh.rs`'s read-only identifier collectors.
-
-#![allow(dead_code)]
+//! Oxc read-only identifier collectors for fresh-name allocation.
 
 use std::collections::HashSet;
 

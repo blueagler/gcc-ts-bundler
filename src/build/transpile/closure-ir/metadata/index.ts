@@ -17,18 +17,6 @@ import type {
   TypeMetadataTarget,
 } from "../types";
 
-export type TypeMetadataCollectionResult = NativeTypeAnalysisResult;
-
-export function scanTypeMetadataFiles({
-  fileNames,
-  program,
-}: {
-  fileNames: string[];
-  program: ts.Program;
-}) {
-  return scanClosureIrSourceFiles({ fileNames, program });
-}
-
 export function collectTypeMetadataFiles({
   boundaryModuleFileNames = [],
   compilerOptions,
@@ -45,7 +33,7 @@ export function collectTypeMetadataFiles({
   program: ts.Program;
   scan?: ClosureIrScanResult;
   targets?: TypeMetadataTarget[] | undefined;
-}): TypeMetadataCollectionResult {
+}): NativeTypeAnalysisResult {
   const effectiveTargets: TypeMetadataTarget[] =
     targets ??
     fileNames.map((filePath) => ({
@@ -57,7 +45,7 @@ export function collectTypeMetadataFiles({
   ];
   const effectiveScan = scan
     ? filterScanToSources(scan, new Set(sourceFileNames))
-    : scanTypeMetadataFiles({ fileNames: sourceFileNames, program });
+    : scanClosureIrSourceFiles({ fileNames: sourceFileNames, program });
   const files = effectiveScan.files.map(({ features, sourceFile }) => ({
     features,
     sourceFile,
@@ -78,7 +66,7 @@ export function collectTypeMetadataFiles({
       ...createEmptyMetadataFile(target),
       ambientGlobals,
     }));
-    return buildCollectionResult([], collectedFiles, effectiveScan);
+    return buildCollectionResult([], collectedFiles);
   }
 
   const checker = program.getTypeChecker();
@@ -148,7 +136,7 @@ export function collectTypeMetadataFiles({
       sourceFilePath: target.sourceFilePath,
     };
   });
-  return buildCollectionResult(diagnostics, collectedFiles, effectiveScan);
+  return buildCollectionResult(diagnostics, collectedFiles);
 }
 
 function createEmptyMetadataFile(
@@ -171,14 +159,12 @@ function createEmptyMetadataFile(
 function buildCollectionResult(
   diagnostics: ts.Diagnostic[],
   files: ClosureTypeMetadataFile[],
-  scan: ClosureIrScanResult,
-): TypeMetadataCollectionResult {
+): NativeTypeAnalysisResult {
   const extractedCounts = countTypeMetadata(files);
   return {
     diagnostics,
     extractedCounts,
     files,
-    scan,
     typeMetadataDiagnostics: files.flatMap((file) => file.diagnostics),
   };
 }

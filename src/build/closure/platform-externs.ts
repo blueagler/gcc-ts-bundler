@@ -14,7 +14,6 @@ import {
 import {
   collectExpiredEntries,
   digestSliceInputs,
-  digestSeedNames,
   readCachedSlice,
   writeCachedSlice,
 } from "./platform-externs/slice-cache";
@@ -91,15 +90,7 @@ export async function generatePlatformExternsText(
     if (!seeds) return null;
     const text = slicePlatformExterns(index, seeds);
     if (text !== null && cacheKey) {
-      await writeCachedSlice(
-        cacheKey,
-        text,
-        digestSeedNames([
-          ...seeds.globals,
-          ...seeds.properties,
-          ...seeds.typeNames,
-        ]),
-      );
+      await writeCachedSlice(cacheKey, text);
     }
     return text;
   } catch (error) {
@@ -141,6 +132,3 @@ const MISSING_EXTERN_DIAGNOSTICS = [
 export function isMissingPlatformExternFailure(stdErr: string): boolean {
   return MISSING_EXTERN_DIAGNOSTICS.some((code) => stdErr.includes(code));
 }
-
-export const MISSING_PLATFORM_EXTERN_DIAGNOSTICS: readonly string[] =
-  MISSING_EXTERN_DIAGNOSTICS;

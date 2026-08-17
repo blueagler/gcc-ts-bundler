@@ -1,7 +1,5 @@
 //! Oxc binding and statement-delivery half of `type_metadata.rs`.
 
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
 
 use oxc_allocator::Allocator;
@@ -485,6 +483,15 @@ struct RenderedMemberAnnotation {
 }
 
 fn in_graph_type_name(symbol: &crate::closure_metadata::ClosureTypeSymbol) -> Option<String> {
+    if symbol.kind == "declared" {
+        if let Some(name) = symbol.local_name.as_deref() {
+            if super::is_valid_js_identifier(name) {
+                return Some(name.to_string());
+            }
+        }
+        return super::is_valid_js_identifier(&symbol.diagnostic_name)
+            .then(|| symbol.diagnostic_name.clone());
+    }
     let path = symbol.declaration_file_path.as_deref()?;
     if is_declaration_file_path(path) {
         return None;

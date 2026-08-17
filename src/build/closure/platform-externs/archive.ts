@@ -170,7 +170,7 @@ export function resolvePlatformExternCompilerJarPath(): string | null {
 }
 
 /** ZIP reader for the stored/deflated entries used by compiler.jar. */
-export function readZipEntries(archive: Buffer): Map<string, Buffer> {
+function readZipEntries(archive: Buffer): Map<string, Buffer> {
   const entries = new Map<string, Buffer>();
   const eocdOffset = findEndOfCentralDirectory(archive);
   if (eocdOffset < 0 || eocdOffset + 22 > archive.length) return entries;

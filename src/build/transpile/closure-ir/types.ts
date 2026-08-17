@@ -1,7 +1,5 @@
 import type ts from "@typescript/typescript6";
 
-import type { ClosureIrScanResult } from "./metadata/scan";
-
 export interface ClosureTypeMetadataFile {
   /** Environment globals from ambient `.d.ts` files; routed to externs. */
   ambientGlobals?: string[] | undefined;
@@ -14,8 +12,6 @@ export interface ClosureTypeMetadataFile {
   externalGlobalMemberAccesses?: number[] | undefined;
   /** UTF-8 byte offsets of property names whose receiver type comes from a runtime external. */
   externalOwnedMemberAccesses?: number[] | undefined;
-  /** Const enums TypeScript erases; the declaration is dropped, nothing emitted. */
-  erasedConstEnums?: string[] | undefined;
   filePath: string;
   runtimeModuleId?: string | undefined;
   sourceFilePath: string;
@@ -45,8 +41,6 @@ export interface ClosureTypeReference {
 export interface ClosureTypeSymbol {
   builtinName?: string | undefined;
   declarationFilePath?: string | undefined;
-  declarationId?: string | undefined;
-  declarationStart?: number | undefined;
   diagnosticName: string;
   id: string;
   kind: "builtin" | "declared" | "runtime";
@@ -55,7 +49,6 @@ export interface ClosureTypeSymbol {
 
 export interface ClosureTypeDeclaration {
   declaredSymbolId: string;
-  exported: boolean;
   id: string;
   references: ClosureTypeReference[];
   template: string;
@@ -137,6 +130,5 @@ export interface NativeTypeAnalysisResult {
   diagnostics: ts.Diagnostic[];
   extractedCounts: TypeMetadataCounts;
   files: ClosureTypeMetadataFile[];
-  scan: ClosureIrScanResult;
   typeMetadataDiagnostics: TypeMetadataDiagnostic[];
 }

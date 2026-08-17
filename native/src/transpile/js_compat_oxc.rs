@@ -1,7 +1,5 @@
 //! Oxc counterpart of the JavaScript pass-through compatibility emitter.
 
-#![allow(dead_code)]
-
 use oxc_allocator::{Allocator, FromIn, TakeIn};
 use oxc_ast::ast::*;
 use oxc_ast::builder::AstBuilder;

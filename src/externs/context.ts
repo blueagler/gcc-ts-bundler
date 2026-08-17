@@ -1,8 +1,8 @@
 import ts from "@typescript/typescript6";
 
 import { collectContracts } from "./contracts/registry";
-import { createEmptyContractRegistry, uniqueStrings } from "./shared";
-import type { ContractRegistry } from "./shared";
+import { createEmptyContractRegistry } from "./shared";
+import { uniqueSortedStrings } from "../shared/files";
 
 export interface ExternAnalysisContext {
   appEntryFiles: string[];
@@ -25,7 +25,7 @@ export function createExternAnalysisContext({
   projectRoot: string;
   scannedFiles: string[];
 }): ExternAnalysisContext {
-  const rootNames = uniqueStrings([...scannedFiles, ...appEntryFiles]);
+  const rootNames = uniqueSortedStrings([...scannedFiles, ...appEntryFiles]);
   const program = ts.createProgram(rootNames, {
     ...compilerOptions,
     noEmit: true,

@@ -1,5 +1,6 @@
 import ts from "@typescript/typescript6";
 
+import { hasModifier } from "../../../../shared/typescript";
 import { transpileDecoratedSource } from "../decorators";
 import {
   buildClassMemberDoc,
@@ -13,7 +14,6 @@ import {
   buildVariableJsDoc,
   getClassMemberName,
   getObjectPropertyName,
-  hasStaticModifier,
 } from "./docs";
 import {
   canonicalSymbolId,
@@ -76,14 +76,14 @@ export function collectClosureIrFileMetadata({
     ...renderContext.typeDeclarations,
     ...brandMetadata.declarations,
   ];
-  const { enumDeclarations, erasedConstEnums } = features.hasEnumDeclarations
+  const enumDeclarations = features.hasEnumDeclarations
     ? collectEnumDeclarationsForSourceFile(
         sourceFile,
         checker,
         unsafeEnumSymbols,
         compilerOptions,
       )
-    : { enumDeclarations: [], erasedConstEnums: [] };
+    : [];
   for (const enumDeclaration of enumDeclarations) {
     if (!renderContext.symbolsById.has(enumDeclaration.symbolId)) {
       renderContext.symbolsById.set(enumDeclaration.symbolId, {
@@ -111,7 +111,6 @@ export function collectClosureIrFileMetadata({
       decoratedOutputText,
       diagnostics: renderContext.diagnostics,
       enums: enumDeclarations,
-      erasedConstEnums,
       filePath: sourceFile.fileName,
       sourceFilePath: sourceFile.fileName,
       symbols: [...renderContext.symbolsById.values()].sort((left, right) =>
@@ -933,7 +932,7 @@ function collectClosureDocsForSourceFile(
             memberKind: classMemberKind(member),
             memberName,
             ownerBindingName: className,
-            static: hasStaticModifier(member),
+            static: hasModifier(member, ts.SyntaxKind.StaticKeyword),
           });
         }
       }
@@ -1133,7 +1132,6 @@ function collectEnumDeclarationsForSourceFile(
   compilerOptions: ts.CompilerOptions,
 ) {
   const enumDeclarations: ClosureEnumDeclaration[] = [];
-  const erasedConstEnums: string[] = [];
 
   for (const statement of sourceFile.statements) {
     if (!ts.isEnumDeclaration(statement)) {
@@ -1141,9 +1139,6 @@ function collectEnumDeclarationsForSourceFile(
     }
 
     if (isErasableConstEnum(statement, compilerOptions)) {
-      // Name only: there is nothing to emit. The declaration is dropped from
-      // the module and every read was already inlined from the TypeScript AST.
-      erasedConstEnums.push(statement.name.text);
       continue;
     }
 
@@ -1158,7 +1153,7 @@ function collectEnumDeclarationsForSourceFile(
     }
   }
 
-  return { enumDeclarations, erasedConstEnums };
+  return enumDeclarations;
 }
 
 function collectDecoratedOutputText({

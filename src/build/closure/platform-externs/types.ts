@@ -29,7 +29,6 @@ export interface PlatformDeclarationUnit {
 
 export interface PlatformExternIndex {
   jarHash: string;
-  languageSources: readonly PlatformExternSource[];
   browserUnits: readonly PlatformDeclarationUnit[];
   unitsByName: ReadonlyMap<string, readonly PlatformDeclarationUnit[]>;
   unitsByProperty: ReadonlyMap<string, readonly PlatformDeclarationUnit[]>;
@@ -53,5 +52,4 @@ export interface PlatformExternSeeds {
 export interface ParsedPlatformExternUnits {
   allUnits: readonly PlatformDeclarationUnit[];
   jarHash: string;
-  languageSources: readonly PlatformExternSource[];
 }

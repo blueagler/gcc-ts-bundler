@@ -232,7 +232,7 @@ Vite transforms modules
   -> native planner mirrors the DAG and supplies one Closure root when needed
   -> merge Vite CSS ownership into the runtime manifest
   -> apply Vite output naming
-  -> replace Rollup JS and rewrite HTML entry scripts
+  -> replace Rollup JS; Vite HTML keeps Rollup chunk identities
 ```
 
 Clean ESM dependencies compile from source through the native pipeline. Unsafe cores, including CJS and mixed modules, use per-import-target atom bundles. The core compiler receives the transformed, retained JavaScript graph with package resolution disabled because dependencies have already been materialized. Vite remains responsible for framework compilation, asset handling, CSS generation, and deciding which modules survive tree shaking. Transform-stage, virtual-module, and CSS plugins compose with this boundary; post-transform and `renderChunk` postprocessors cannot observe Closure-replaced output by design.

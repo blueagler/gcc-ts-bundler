@@ -631,11 +631,6 @@ function typeOwnerSymbols(type: ts.Type) {
   return [...symbols];
 }
 
-export function hasPotentialExternalGlobalProtocol(
-  sourceFile: ts.SourceFile,
-): boolean {
-  return /\b(?:globalThis|self|window)\b/u.test(sourceFile.text);
-}
 
 export function collectExternalGlobalProtocolEvidence({
   checker,

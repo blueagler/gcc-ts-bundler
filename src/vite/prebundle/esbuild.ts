@@ -11,7 +11,7 @@ import { isRecord, type RuntimeValue } from "../../shared/validation";
 let cachedEsbuildModule: Promise<EsbuildModule> | null = null;
 
 export type EsbuildBuild = typeof esbuildBuild;
-export type EsbuildTransform = typeof esbuildTransform;
+type EsbuildTransform = typeof esbuildTransform;
 type Callable = (...arguments_: never[]) => void;
 interface EsbuildModuleCandidate {
   build?: RuntimeValue;
@@ -22,7 +22,7 @@ interface EsbuildModule {
   transform: EsbuildTransform;
 }
 
-async function loadEsbuildModule() {
+export async function loadEsbuildModule() {
   if (cachedEsbuildModule) {
     return await cachedEsbuildModule;
   }
@@ -45,14 +45,6 @@ async function loadEsbuildModule() {
   })();
 
   return await cachedEsbuildModule;
-}
-
-export async function loadEsbuildBuild() {
-  return (await loadEsbuildModule()).build;
-}
-
-export async function loadEsbuildTransform() {
-  return (await loadEsbuildModule()).transform;
 }
 
 function isEsbuildModule<Value extends EsbuildModuleCandidate>(
