@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "skills": {
+    "fallow": {
+      "source": "fallow-rs/fallow-skills",
+      "sourceType": "github",
+      "skillPath": "fallow/skills/fallow/SKILL.md",
+      "computedHash": "8741958fc89245c6ff26823cc1ed9d81b92073dc51cb5690340136686d7263db"
+    },
+    "fallow-review": {
+      "source": "fallow-rs/fallow-skills",
+      "sourceType": "github",
+      "skillPath": "fallow/skills/fallow-review/SKILL.md",
+      "computedHash": "a8b4074fa14e7ac3900640867932e85d6b973f573d929d0c56de475347322731"
+    },
+    "reclaim-code-entropy": {
+      "source": "Yevanchen/reclaim-code-entropy",
+      "sourceType": "github",
+      "skillPath": "skills/reclaim-code-entropy/SKILL.md",
+      "computedHash": "ce2cf63c58752379da4f9bde30d9f6869c1397e79034edcb560b1e7945e46fe9"
+    },
+    "thermo-nuclear-code-quality-review": {
+      "source": "cursor/plugins",
+      "sourceType": "github",
+      "skillPath": "cursor-team-kit/skills/thermo-nuclear-code-quality-review/SKILL.md",
+      "computedHash": "9052b01b46b1d8dbf94c45f9313ec1983443f9a460e83d49cdc7fe0f640ca476"
+    }
+  }
+}
