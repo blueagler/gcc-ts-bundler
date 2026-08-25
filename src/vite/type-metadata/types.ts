@@ -2,7 +2,7 @@ import type {
   ClosureTypeMetadataFile,
   TypeMetadataCounts,
   TypeMetadataDiagnostic as ClosureTypeMetadataDiagnostic,
-} from "../../build/transpile/closure-ir";
+} from "../../build/transpile/type-metadata";
 
 // v4: intersection types render as `?` so aliased receivers cannot split.
 export const VITE_TYPE_METADATA_VERSION = 4 as const;

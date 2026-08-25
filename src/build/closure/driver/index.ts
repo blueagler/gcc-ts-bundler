@@ -1,6 +1,2 @@
-export {
-  isDriverForcedOff,
-  probeClosureDriver,
-  type ClosureDriverProbe,
-} from "./probe";
+export { isDriverForcedOff } from "./probe";
 export { runResidentClosureJob } from "./resident";

@@ -19,13 +19,6 @@ fn into_napi<T>(result: std::result::Result<T, String>) -> Result<T> {
     result.map_err(Error::from_reason)
 }
 
-fn with_globals<T, F>(callback: F) -> Result<T>
-where
-    F: FnOnce() -> std::result::Result<T, String>,
-{
-    into_napi(callback())
-}
-
 #[napi(js_name = "closureCompilerCapabilities")]
 pub fn closure_compiler_capabilities() -> closure_capabilities::ClosureCompilerCapabilitiesOutput {
     closure_capabilities::closure_compiler_capabilities()
@@ -45,16 +38,14 @@ pub fn resolve_graph(
     external_specifiers: Vec<String>,
     preserved_file_paths: Vec<String>,
 ) -> Result<graph::ResolveGraphOutput> {
-    with_globals(|| {
-        graph::resolve_graph_impl(
-            entries,
-            src_dir,
-            workspace_dir,
-            package_mode,
-            external_specifiers,
-            preserved_file_paths,
-        )
-    })
+    into_napi(graph::resolve_graph_impl(
+        entries,
+        src_dir,
+        workspace_dir,
+        package_mode,
+        external_specifiers,
+        preserved_file_paths,
+    ))
 }
 
 #[napi(js_name = "planChunks")]
@@ -72,26 +63,24 @@ pub fn plan_chunks(
     shim_files: Vec<String>,
     vendor_chunk: bool,
 ) -> Result<Vec<graph::ChunkPlanChunkOutput>> {
-    with_globals(|| {
-        graph::plan_chunks(
-            chunk_mode,
-            base_chunk_name,
-            workspace_dir,
-            entry_files,
-            graph_entries,
-            lazy_imports,
-            rollup_chunks,
-            shim_files,
-            vendor_chunk,
-        )
-    })
+    into_napi(graph::plan_chunks(
+        chunk_mode,
+        base_chunk_name,
+        workspace_dir,
+        entry_files,
+        graph_entries,
+        lazy_imports,
+        rollup_chunks,
+        shim_files,
+        vendor_chunk,
+    ))
 }
 
 #[napi(js_name = "prepareClosureJobs")]
 pub fn prepare_closure_jobs(
     input: closure_jobs::PrepareClosureJobsInput,
 ) -> Result<closure_jobs::PrepareClosureJobsOutput> {
-    with_globals(|| closure_jobs::prepare_closure_jobs(input))
+    into_napi(closure_jobs::prepare_closure_jobs(input))
 }
 
 #[napi(js_name = "writeEntryShims")]
@@ -161,7 +150,7 @@ pub fn minify_javascript(file_path: String, source: String) -> Result<String> {
 
 #[napi(js_name = "rewriteGccExports")]
 pub fn rewrite_gcc_exports(code: String) -> Result<exports::GccExportsRewrite> {
-    with_globals(|| exports::rewrite_gcc_exports(code))
+    into_napi(exports::rewrite_gcc_exports(code))
 }
 
 #[napi(js_name = "collectFileStates")]

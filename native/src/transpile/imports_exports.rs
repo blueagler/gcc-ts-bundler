@@ -1,7 +1,7 @@
 //! Shared import/export naming and bundler-runtime rendering.
 
 mod resolve;
-pub(super) use resolve::*;
+pub(crate) use resolve::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BundlerExportSlotMode {

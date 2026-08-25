@@ -772,6 +772,42 @@ fn rejects_node_builtin_imports() {
 }
 
 #[test]
+fn external_boundary_specifiers_match_package_subpaths_not_unrelated_prefixes() {
+    let externals = BTreeSet::from([
+        "google-closure-compiler".to_string(),
+        "@foo/bar".to_string(),
+    ]);
+    let preserved = BTreeSet::new();
+    let src_dir = PathBuf::from("src");
+    let workspace_dir = PathBuf::from(".");
+    let context = ResolveContext {
+        external_specifiers: &externals,
+        package_mode: PackageMode::EsmOnly,
+        preserved_file_paths: &preserved,
+        target: BROWSER_TARGET,
+        src_dir: &src_dir,
+        workspace_dir: &workspace_dir,
+    };
+
+    assert!(is_external_boundary_specifier(
+        "google-closure-compiler",
+        &context
+    ));
+    assert!(is_external_boundary_specifier(
+        "google-closure-compiler/lib/utils.js",
+        &context
+    ));
+    assert!(!is_external_boundary_specifier("google", &context));
+    assert!(!is_external_boundary_specifier(
+        "google-closure-compiler-js",
+        &context
+    ));
+    assert!(is_external_boundary_specifier("@foo/bar", &context));
+    assert!(is_external_boundary_specifier("@foo/bar/baz", &context));
+    assert!(!is_external_boundary_specifier("@foo/baz", &context));
+}
+
+#[test]
 fn target_matrix_selects_conditional_exports_and_external_boundaries() {
     let temp_dir = TestDir::new();
     temp_dir.write(
@@ -1076,6 +1112,134 @@ fn plans_off_mode_chunks_in_native_graph_layer() {
     assert_eq!(result[1].dependencies, vec!["shared"]);
     assert_eq!(result[2].name, "second");
     assert_eq!(result[2].dependencies, vec!["shared"]);
+}
+
+#[test]
+fn off_mode_chunk_plan_partitions_disjoint_share_groups() {
+    let result = plan_chunks(
+        "off".to_string(),
+        "ignored".to_string(),
+        "/workspace".to_string(),
+        vec![
+            ChunkPlanEntryInput {
+                chunkName: "a".to_string(),
+                outputName: "a.js".to_string(),
+                sourcePath: "/workspace/src/a.ts".to_string(),
+            },
+            ChunkPlanEntryInput {
+                chunkName: "b".to_string(),
+                outputName: "b.js".to_string(),
+                sourcePath: "/workspace/src/b.ts".to_string(),
+            },
+            ChunkPlanEntryInput {
+                chunkName: "c".to_string(),
+                outputName: "c.js".to_string(),
+                sourcePath: "/workspace/src/c.ts".to_string(),
+            },
+            ChunkPlanEntryInput {
+                chunkName: "d".to_string(),
+                outputName: "d.js".to_string(),
+                sourcePath: "/workspace/src/d.ts".to_string(),
+            },
+        ],
+        vec![
+            DependencyGraphEntry {
+                filePath: "/workspace/entries/a.ts".to_string(),
+                dependencies: vec![
+                    "/workspace/src/a.ts".to_string(),
+                    "/workspace/src/shared-ab.ts".to_string(),
+                ],
+            },
+            DependencyGraphEntry {
+                filePath: "/workspace/entries/b.ts".to_string(),
+                dependencies: vec![
+                    "/workspace/src/b.ts".to_string(),
+                    "/workspace/src/shared-ab.ts".to_string(),
+                ],
+            },
+            DependencyGraphEntry {
+                filePath: "/workspace/entries/c.ts".to_string(),
+                dependencies: vec![
+                    "/workspace/src/c.ts".to_string(),
+                    "/workspace/src/shared-cd.ts".to_string(),
+                ],
+            },
+            DependencyGraphEntry {
+                filePath: "/workspace/entries/d.ts".to_string(),
+                dependencies: vec![
+                    "/workspace/src/d.ts".to_string(),
+                    "/workspace/src/shared-cd.ts".to_string(),
+                ],
+            },
+            DependencyGraphEntry {
+                filePath: "/workspace/src/a.ts".to_string(),
+                dependencies: vec![],
+            },
+            DependencyGraphEntry {
+                filePath: "/workspace/src/b.ts".to_string(),
+                dependencies: vec![],
+            },
+            DependencyGraphEntry {
+                filePath: "/workspace/src/c.ts".to_string(),
+                dependencies: vec![],
+            },
+            DependencyGraphEntry {
+                filePath: "/workspace/src/d.ts".to_string(),
+                dependencies: vec![],
+            },
+            DependencyGraphEntry {
+                filePath: "/workspace/src/shared-ab.ts".to_string(),
+                dependencies: vec![],
+            },
+            DependencyGraphEntry {
+                filePath: "/workspace/src/shared-cd.ts".to_string(),
+                dependencies: vec![],
+            },
+        ],
+        vec![],
+        vec![],
+        vec![
+            "/workspace/entries/a.ts".to_string(),
+            "/workspace/entries/b.ts".to_string(),
+            "/workspace/entries/c.ts".to_string(),
+            "/workspace/entries/d.ts".to_string(),
+        ],
+        false,
+    )
+    .unwrap();
+
+    let names = result
+        .iter()
+        .map(|chunk| chunk.name.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(names.len(), names.iter().collect::<BTreeSet<_>>().len());
+    assert_eq!(result.len(), 6);
+    assert_eq!(result[0].name, "shared");
+    assert_eq!(result[1].name, "a");
+    assert_eq!(result[1].dependencies, vec!["shared"]);
+    assert_eq!(result[2].name, "b");
+    assert_eq!(result[2].dependencies, vec!["shared"]);
+    assert_eq!(result[3].name, "shared2");
+    assert_eq!(result[4].name, "c");
+    assert_eq!(result[4].dependencies, vec!["shared2"]);
+    assert_eq!(result[5].name, "d");
+    assert_eq!(result[5].dependencies, vec!["shared2"]);
+    assert!(result[0]
+        .files
+        .iter()
+        .any(|file| file.contains("shared-ab")));
+    assert!(!result[0]
+        .files
+        .iter()
+        .any(|file| file.contains("shared-cd")));
+    assert!(result[3]
+        .files
+        .iter()
+        .any(|file| file.contains("shared-cd")));
+    assert!(!result[3]
+        .files
+        .iter()
+        .any(|file| file.contains("shared-ab")));
 }
 
 // --- vendor chunk partition ---------------------------------------------

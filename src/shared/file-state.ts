@@ -3,7 +3,11 @@ import fs from "fs/promises";
 import path from "path";
 
 import { collectFileStates, matchFileStates } from "../native/load";
-import { uniqueSortedStrings } from "./files";
+import {
+  listRelativeFiles,
+  normalizeRelativePath,
+  uniqueSortedStrings,
+} from "./files";
 
 export interface ContentIdentity {
   digest: string;
@@ -126,7 +130,7 @@ export async function publishedOutputsMatchSnapshot(
   const expectedNames = publishedOutputs
     .map((output) => output.name)
     .sort((left, right) => left.localeCompare(right));
-  const actualNames = await listRelativeFiles(outDir);
+  const actualNames = await listRelativeFiles(outDir, { onError: "empty" });
   if (
     actualNames.length !== expectedNames.length ||
     actualNames.some((name, index) => name !== expectedNames[index])
@@ -178,29 +182,6 @@ export async function collectPublishedOutputStats(
     throw new Error("Published output file names must be unique.");
   }
   return outputs.sort((left, right) => left.name.localeCompare(right.name));
-}
-
-async function listRelativeFiles(rootDir: string, currentDir = rootDir) {
-  let entries;
-  try {
-    entries = await fs.readdir(currentDir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const files: string[] = [];
-  for (const entry of entries) {
-    const entryPath = path.join(currentDir, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...(await listRelativeFiles(rootDir, entryPath)));
-    } else {
-      files.push(normalizeRelativePath(path.relative(rootDir, entryPath)));
-    }
-  }
-  return files.sort((left, right) => left.localeCompare(right));
-}
-
-function normalizeRelativePath(relativePath: string) {
-  return relativePath.replace(/\\/gu, "/");
 }
 
 async function hashFile(filePath: string) {

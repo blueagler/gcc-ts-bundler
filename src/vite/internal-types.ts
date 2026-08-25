@@ -80,20 +80,10 @@ export interface CompiledCoreOutputSet {
   outputFiles: string[];
 }
 
-export interface GccRuntimeManifestChunk {
-  css?: string[];
-  deps: string[];
-  modules: string[];
-  url: string;
-}
-
-export interface GccRuntimeManifest {
-  baseChunk: string;
-  chunks: Record<string, GccRuntimeManifestChunk>;
-  loader: string;
-  modules: Record<string, string>;
-  publicPath: string;
-}
+export type {
+  GccRuntimeManifest,
+  GccRuntimeManifestChunk,
+} from "../build/closure/runtime-manifest";
 
 /**
  * Resolved shape of `chunks.outputType`, after gating. `"script"` keeps the

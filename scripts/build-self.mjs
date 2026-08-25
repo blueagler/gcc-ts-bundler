@@ -7,10 +7,8 @@ import {
   mkdtemp,
   readFile,
   readdir,
-  rename,
   rm,
   symlink,
-  writeFile,
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -35,7 +33,6 @@ const publicSpecifiers = Object.keys(packageManifest.exports).map((specifier) =>
 const runtimeExternals = [
   "@typescript/typescript6",
   "google-closure-compiler",
-  "google-closure-compiler/lib/utils.js",
   "vite",
 ];
 const preservedModules = ["src/native/load.ts"];
@@ -56,17 +53,14 @@ const cliOutputRelative = Object.values(packageManifest.bin)[0];
 if (typeof cliOutputRelative !== "string" || !cliOutputRelative.startsWith("bin/")) {
   throw new Error("Unsupported package bin output");
 }
-const stagedCliOutputName = path.posix.join(
-  "__bin__",
-  path.basename(cliOutputRelative),
-);
-const packageEntries = [
+const packageEntries = (stageRoot) => [
   ...libraryEntries,
-  { file: "cli/main.ts", name: stagedCliOutputName },
+  {
+    file: "cli/main.ts",
+    name: "gcc-ts-bundler.mjs",
+    outFile: path.join(stageRoot, cliOutputRelative),
+  },
 ];
-const presetEntryOutputs = libraryEntries
-  .filter(({ file }) => file.startsWith("presets/"))
-  .map(({ name }) => name);
 const generatedPackageRoots = new Set(
   [
     packageManifest.types,
@@ -125,12 +119,10 @@ async function buildStage(compilerPath, stageRoot, label) {
   assertCompletePublicExterns(externResult);
 
   await runCompilerBuild(compiler.build, {
-    entries: packageEntries,
+    entries: packageEntries(stageRoot),
     outDir: path.join(stageRoot, "dist"),
     typedExternPath,
   });
-  await removePresetSharedImports(stageRoot);
-  await relocateCliEntry(stageRoot);
   await copyBootstrapDeclarations(path.join(stageRoot, "dist"));
   await assertDeclaredPackageEntrypoints(stageRoot);
   await assertCliShebang(path.join(stageRoot, cliOutputRelative));
@@ -160,44 +152,6 @@ async function runCompilerBuild(build, { entries, outDir, typedExternPath }) {
         .join("\n")}`,
     );
   }
-}
-
-async function removePresetSharedImports(stageRoot) {
-  for (const outputName of presetEntryOutputs) {
-    const outputPath = path.join(stageRoot, "dist", outputName);
-    const source = await readFile(outputPath, "utf8");
-    const leafSource = source.replace(/^import["']\.\.\/shared\.js["'];/u, "");
-    if (leafSource.includes("../shared.js")) {
-      throw new Error(`Preset entry still depends on shared.js: ${outputName}`);
-    }
-    await writeFile(outputPath, leafSource, "utf8");
-  }
-}
-
-async function relocateCliEntry(stageRoot) {
-  const stagedPath = path.join(stageRoot, "dist", stagedCliOutputName);
-  const finalPath = path.join(stageRoot, cliOutputRelative);
-  const distRoot = path.join(stageRoot, "dist");
-  const source = await readFile(stagedPath, "utf8");
-  const relocatedSource = source.replace(
-    /(\b(?:from|import)\s*)(["'])([^"']+)\2/gu,
-    (full, prefix, quote, specifier) => {
-      if (!specifier.startsWith(".")) return full;
-      const target = path.resolve(path.dirname(stagedPath), specifier);
-      if (!target.startsWith(`${distRoot}${path.sep}`)) return full;
-      const relative = path
-        .relative(path.dirname(finalPath), target)
-        .replace(/\\/gu, "/");
-      const relocatedSpecifier = relative.startsWith(".")
-        ? relative
-        : `./${relative}`;
-      return `${prefix}${quote}${relocatedSpecifier}${quote}`;
-    },
-  );
-  await mkdir(path.dirname(finalPath), { recursive: true });
-  await writeFile(stagedPath, relocatedSource, "utf8");
-  await rename(stagedPath, finalPath);
-  await rm(path.dirname(stagedPath), { force: true, recursive: true });
 }
 
 async function assertDeclaredPackageEntrypoints(stageRoot) {

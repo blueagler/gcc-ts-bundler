@@ -2,8 +2,8 @@ import fs from "fs/promises";
 import * as ts from "@typescript/typescript6";
 
 import { logInternalDetail } from "../../../shared/timing";
-import { parseClosureTypeReferences } from "./closure-type-parser";
-import { parseJavaScriptSource } from "./typescript-parser";
+import { parseClosureTypeReferences } from "./parser/jsdoc";
+import { parseJavaScriptSource } from "./parser/typescript";
 import type { PlatformExternIndex, PlatformExternSeeds } from "./types";
 
 export async function collectPlatformExternSeeds(

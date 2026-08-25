@@ -1,10 +1,9 @@
 import path from "path";
 import ts from "@typescript/typescript6";
 
-import { hasModifier } from "../../shared/typescript";
+import { getPropertyNameText, hasModifier } from "../../shared/typescript";
 import {
   createEmptyContractRegistry,
-  getPropertyNameText,
   hasNonPublicModifier,
   isExternPropertyName,
   isScannedDeclarationSymbol,

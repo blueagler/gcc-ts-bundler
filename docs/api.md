@@ -35,6 +35,7 @@ if (!result.ok) {
 - `srcDir` defaults to `<projectRoot>/src`.
 - `outDir` defaults to `<projectRoot>/dist`.
 - Relative `entries` are resolved from `srcDir`.
+- Relative `outFile` values are resolved from `projectRoot`. After an off-mode publish, that entry is copied from `outDir` to `outFile` and relative import specifiers are rewritten.
 - Relative `externs`, `typedExterns`, `js`, `preserveModules`, and `cache.dir` paths are resolved from `projectRoot`.
 - `preserveModules` paths are canonicalized before graph resolution. Escaping symlink targets fail closed, and in-tree symlink aliases are also rejected with an explicit policy error.
 - A `tsconfig.json` must be discoverable from `projectRoot`.
@@ -43,7 +44,7 @@ if (!result.ok) {
 
 | Option             | Default           | Meaning                                                                                                                      |
 | ------------------ | ----------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `entries`          | required          | Entry files: a path, or `{ file, name }` with an explicit output filename. At least one is required.                         |
+| `entries`          | required          | Entry files: a path, or `{ file, name, outFile }` with an explicit `outDir` filename and optional project-root-relative published path. At least one is required. |
 | `projectRoot`      | current directory | Root for configuration, dependencies, and relative paths.                                                                    |
 | `srcDir`           | `src`             | Source root used for entry resolution and output-relative module IDs.                                                        |
 | `outDir`           | `dist`            | Published output directory. It is replaced on a non-cached compile.                                                          |
@@ -198,7 +199,7 @@ const result = await generateExterns({
 | `mode`                | `boundary-aware`  | `boundary-aware` or `runtime-aware`.                                                                       |
 | `appEntryFiles`       | `[]`              | Application entry files used for boundary/usage analysis.                                                  |
 | `runtimeEntryFiles`   | `[]`              | JavaScript runtime files used by runtime-aware mode.                                                       |
-| `includeDependencies` | `true`            | Follow imported declaration files.                                                                         |
+| `includeDependencies` | `false`           | Follow imported declaration files.                                                                         |
 | `projectRoot`         | current directory | Root for module and config resolution.                                                                     |
 | `srcDir`              | project root      | Base for relative app/runtime entry paths.                                                                 |
 | `tsConfigPath`        | discovered        | Explicit tsconfig path relative to `projectRoot`.                                                          |

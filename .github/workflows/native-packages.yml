@@ -230,7 +230,6 @@ jobs:
           bun-version: 1.3.14
 
       - run: bun install --frozen-lockfile
-      - run: bun run build:js
 
       - shell: bash
         run: |

@@ -3,8 +3,10 @@ use std::path::Path;
 
 use super::compat::collect_class_static_assignments;
 
+mod program;
 mod text;
 
+pub(crate) use self::program::apply_program_transforms;
 pub(super) use self::text::apply_js_compat_text_fixes;
 
 pub(crate) fn should_normalize_commonjs(

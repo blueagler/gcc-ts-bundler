@@ -17,7 +17,7 @@ Build flags:
   --src-dir             Source directory containing the entry files
   --entry               Entry file relative to --src-dir. May be provided multiple times
   --out-dir             Output directory
-  --language-out        ECMASCRIPT3 | ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT_NEXT
+  --language-out        ECMASCRIPT3 | ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT_2015 | ECMASCRIPT_2016 | ECMASCRIPT_2017 | ECMASCRIPT_2018 | ECMASCRIPT_2019 | ECMASCRIPT_2020 | ECMASCRIPT_2021 | STABLE | ECMASCRIPT_NEXT
   --compilation-level   WHITESPACE_ONLY | SIMPLE | ADVANCED
   --chunks              off | split | bundler-runtime
   --chunk-output-type   auto | script | esm
@@ -46,7 +46,7 @@ Extern flags:
   --runtime-entry         Runtime JS entry for runtime-aware analysis. May be provided multiple times
   --mode                  boundary-aware | runtime-aware
   --output-file           Write generated externs to a file instead of stdout
-  --include-dependencies  Follow imported declaration files across node_modules (default: true)
+  --include-dependencies  Follow imported declaration files across node_modules (default: false)
   --tsconfig              Explicit tsconfig path relative to --project-root
 
 Modes:

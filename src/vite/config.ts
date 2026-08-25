@@ -1,11 +1,8 @@
 import type { ResolvedConfig, UserConfig } from "vite";
 
-import { DEFAULT_BUILD_OPTIONS } from "../api/types";
+import { DEFAULT_BUILD_OPTIONS, LANGUAGE_OUTPUTS } from "../api/types";
 import type { BuildOptions, LanguageOut } from "../api/types";
-import {
-  CLOSURE_LANGUAGE_LEVELS,
-  mapViteTargetToLanguageOut,
-} from "../build/closure/capabilities";
+import { resolveViteTargetLanguageOut as resolveNativeViteTargetLanguageOut } from "../native/load";
 import { isRecord } from "../shared/validation";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type { ManifestFileSettings } from "./internal-types";
@@ -18,6 +15,11 @@ export const INTERNAL_VITE_AUTHORED_FILES_FILE =
   ".gcc-ts-bundler-vite-authored-files.json";
 export const VITE_LANGUAGE_OUT_ERROR =
   "gccTsBundler() does not accept compiler.languageOut. Set Vite build.target instead.";
+
+function mapViteTargetToLanguageOut(target: string): LanguageOut | null {
+  const languageOut = resolveNativeViteTargetLanguageOut(target);
+  return LANGUAGE_OUTPUTS.find((level) => level === languageOut) ?? null;
+}
 
 let warnedNonAdvancedCompilationLevel = false;
 
@@ -185,8 +187,8 @@ export function resolveViteLanguageOutTarget(
     }
     if (
       !resolvedLanguageOut ||
-      CLOSURE_LANGUAGE_LEVELS.indexOf(mapped) <
-        CLOSURE_LANGUAGE_LEVELS.indexOf(resolvedLanguageOut)
+      LANGUAGE_OUTPUTS.indexOf(mapped) <
+        LANGUAGE_OUTPUTS.indexOf(resolvedLanguageOut)
     ) {
       resolvedLanguageOut = mapped;
     }

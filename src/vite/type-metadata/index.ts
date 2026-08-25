@@ -5,10 +5,10 @@ export {
   parseRuntimeExportGraph,
   resolveRuntimeExportGraph,
 } from "./export-graphs";
-export { resolveRuntimeResolutionIdentity } from "./resolution-provenance";
+export { resolveRuntimeResolutionIdentity } from "./provenance";
 export {
   classifyTypeMetadataSource,
   shouldBypassTypeMetadataFusion,
   withOneToOneTypeProvenance,
-} from "./source-provenance";
+} from "./provenance";
 export type * from "./types";

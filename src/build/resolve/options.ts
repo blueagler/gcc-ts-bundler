@@ -168,6 +168,12 @@ export function normalizeBuildOptions(
         : path.resolve(projectRoot, filePath),
     ),
     typeMetadata: options.typeMetadata,
+    viteAuthoredFilesFile: options.viteAuthoredFilesFile
+      ? path.resolve(projectRoot, options.viteAuthoredFilesFile)
+      : undefined,
+    viteRuntimeSourceMapFile: options.viteRuntimeSourceMapFile
+      ? path.resolve(projectRoot, options.viteRuntimeSourceMapFile)
+      : undefined,
   };
 }
 
@@ -310,9 +316,14 @@ export function resolveVendorChunk({
 function normalizeEntry(entry: BuildEntryOption, srcDir: string) {
   const file = typeof entry === "string" ? entry : entry.file;
   const name = typeof entry === "string" ? null : (entry.name ?? null);
+  const outFile =
+    typeof entry === "string" || entry.outFile === undefined
+      ? undefined
+      : entry.outFile;
   return {
     file: path.isAbsolute(file) ? file : path.resolve(srcDir, file),
     name,
+    ...(outFile === undefined ? {} : { outFile }),
   };
 }
 

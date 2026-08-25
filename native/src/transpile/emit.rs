@@ -17,7 +17,7 @@ pub(super) struct EmittedProgram {
     pub(super) preserved_imports: Vec<PreservedImportPlan>,
     pub(super) shared_helpers: Vec<emit_helpers::SharedHelperDeclaration>,
     pub(super) reflective_property_names: std::collections::BTreeSet<String>,
-    pub(super) reifications: Vec<super::namespace::flow_oxc::NamespaceReification>,
+    pub(super) reifications: Vec<super::namespace::flow::NamespaceReification>,
     pub(super) type_metadata: TypeMetadataDelivery,
 }
 
@@ -25,38 +25,41 @@ pub(super) fn emit_module_program_oxc<'a>(
     allocator: &'a oxc_allocator::Allocator,
     file_path: &Path,
     program: &mut oxc_ast::ast::Program<'a>,
-    identity: &mut super::identity_oxc::ModuleIdentity,
+    identity: &mut super::identity::ModuleIdentity,
     context: &TranspileContext,
     file_metadata: Option<&ClosureFileMetadata>,
     commonjs_export_name: Option<&str>,
 ) -> std::result::Result<EmittedProgram, String> {
     strip_runtime_directives_oxc(program);
     if context.chunk_mode == ChunkMode::BundlerRuntime {
-        super::emit_goog_oxc::quote_external_boundary_accesses(
+        super::emit_goog::quote_external_boundary_accesses(
             allocator,
             file_path,
             program,
             identity,
             context,
             file_metadata,
-            super::emit_goog_oxc::ExternalBoundaryEvidence::GlobalOnly,
+            super::emit_goog::ExternalBoundaryEvidence::GlobalOnly,
         );
+    } else {
+        super::quote_keys::quote_literal_computed_members(allocator, program);
     }
     let mut reflective_property_names =
-        super::emit_reflective_oxc::collect_reflective_property_names(program, identity);
-    reflective_property_names
-        .extend(super::emit_helpers_oxc::collect_lowered_define_property_names(program));
+        super::emit_reflective::collect_reflective_property_names(program, identity);
+    reflective_property_names.extend(super::emit_helpers::collect_lowered_define_property_names(
+        program,
+    ));
     let mut emitted = match context.chunk_mode {
         ChunkMode::BundlerRuntime => {
             if let Some(plan) = context.hoist_plan.clone() {
                 let module_id = to_goog_module_id(file_path, &context.workspace_dir);
                 if plan.is_hoisted(&module_id) {
-                    let mut emitted = super::emit_hoist_oxc::emit_hoisted_module_text(
+                    let mut emitted = super::emit_hoist::emit_hoisted_module_text(
                         allocator,
                         file_path,
                         program,
                         identity,
-                        super::emit_hoist_oxc::HoistedModuleOptions {
+                        super::emit_hoist::HoistedModuleOptions {
                             context,
                             plan: &plan,
                             file_metadata,
@@ -67,7 +70,7 @@ pub(super) fn emit_module_program_oxc<'a>(
                     return Ok(emitted);
                 }
             }
-            let emitted = super::emit_runtime_oxc::emit_bundler_runtime_module_text(
+            let emitted = super::emit_runtime::emit_bundler_runtime_module_text(
                 allocator,
                 file_path,
                 program,
@@ -86,7 +89,7 @@ pub(super) fn emit_module_program_oxc<'a>(
                 type_metadata: emitted.type_metadata,
             }
         }
-        ChunkMode::Off => super::emit_goog_oxc::emit_goog_module_program(
+        ChunkMode::Off => super::emit_goog::emit_goog_module_program(
             allocator,
             file_path,
             program,

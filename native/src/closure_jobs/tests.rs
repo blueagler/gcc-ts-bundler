@@ -384,6 +384,154 @@ fn prepares_off_mode_jobs_and_filters_empty_externs() {
 }
 
 #[test]
+fn prepares_off_mode_jobs_for_disjoint_share_groups() {
+    let root = make_temp_dir("off-jobs-disjoint");
+    let emitted_out_dir = root.join("native-out");
+    let out_dir = root.join("dist");
+    let final_cache_dir = root.join("cache/final");
+    let package_root = root.join("pkg");
+    fs::create_dir_all(emitted_out_dir.join("src")).unwrap();
+    fs::create_dir_all(&out_dir).unwrap();
+    fs::create_dir_all(package_root.join("closure-lib")).unwrap();
+    for (name, module) in [
+        ("shared-ab", "gcc.src.shared_ab"),
+        ("entry-a", "gcc.src.entry_a"),
+        ("entry-b", "gcc.src.entry_b"),
+        ("shared-cd", "gcc.src.shared_cd"),
+        ("entry-c", "gcc.src.entry_c"),
+        ("entry-d", "gcc.src.entry_d"),
+    ] {
+        fs::write(
+            emitted_out_dir.join(format!("src/{name}.js")),
+            format!("goog.module(\"{module}\");\nexports.value = 1;\n"),
+        )
+        .unwrap();
+    }
+    fs::write(package_root.join("closure-lib/base.js"), "").unwrap();
+    let native_extern = root.join("native.externs.js");
+    fs::write(&native_extern, "/** @externs */\n").unwrap();
+
+    let output = prepare_closure_jobs(PrepareClosureJobsInput {
+        chunkMode: "off".to_string(),
+        chunkLoader: "script".to_string(),
+        chunkOutputType: "script".to_string(),
+        chunkPlan: vec![
+            ClosureJobChunkPlanChunkInput {
+                dependencies: vec![],
+                entryFiles: None,
+                files: vec!["src/shared-ab.ts".to_string()],
+                kind: None,
+                lazyModuleIds: None,
+                name: "shared".to_string(),
+            },
+            ClosureJobChunkPlanChunkInput {
+                dependencies: vec!["shared".to_string()],
+                entryFiles: None,
+                files: vec!["src/entry-a.ts".to_string()],
+                kind: None,
+                lazyModuleIds: None,
+                name: "entry-a".to_string(),
+            },
+            ClosureJobChunkPlanChunkInput {
+                dependencies: vec!["shared".to_string()],
+                entryFiles: None,
+                files: vec!["src/entry-b.ts".to_string()],
+                kind: None,
+                lazyModuleIds: None,
+                name: "entry-b".to_string(),
+            },
+            ClosureJobChunkPlanChunkInput {
+                dependencies: vec![],
+                entryFiles: None,
+                files: vec!["src/shared-cd.ts".to_string()],
+                kind: None,
+                lazyModuleIds: None,
+                name: "shared2".to_string(),
+            },
+            ClosureJobChunkPlanChunkInput {
+                dependencies: vec!["shared2".to_string()],
+                entryFiles: None,
+                files: vec!["src/entry-c.ts".to_string()],
+                kind: None,
+                lazyModuleIds: None,
+                name: "entry-c".to_string(),
+            },
+            ClosureJobChunkPlanChunkInput {
+                dependencies: vec!["shared2".to_string()],
+                entryFiles: None,
+                files: vec!["src/entry-d.ts".to_string()],
+                kind: None,
+                lazyModuleIds: None,
+                name: "entry-d".to_string(),
+            },
+        ],
+        compilationLevel: "ADVANCED".to_string(),
+        diagnosticsVerbose: false,
+        emittedOutDir: emitted_out_dir.to_string_lossy().to_string(),
+        explicitExternPaths: vec![],
+        explicitJsInputs: vec![],
+        finalCacheDir: final_cache_dir.to_string_lossy().to_string(),
+        generatedExternPaths: vec![],
+        languageOut: "ECMASCRIPT_NEXT".to_string(),
+        manifestFile: "".to_string(),
+        hasPreservedModules: false,
+        needsCssRuntime: false,
+        nativeExternPath: native_extern.to_string_lossy().to_string(),
+        outDir: out_dir.to_string_lossy().to_string(),
+        packageRoot: package_root.to_string_lossy().to_string(),
+        publicPath: "./".to_string(),
+        supportFiles: vec![],
+        typeMetadata: vec![],
+    })
+    .unwrap();
+
+    assert_eq!(output.compileJobs.len(), 2);
+    let job_chunk_names = output
+        .compileJobs
+        .iter()
+        .map(|job| {
+            job.chunk
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|spec| spec.split(':').next().unwrap().to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        job_chunk_names,
+        vec![
+            vec![
+                "shared".to_string(),
+                "entry-a".to_string(),
+                "entry-b".to_string()
+            ],
+            vec![
+                "shared2".to_string(),
+                "entry-c".to_string(),
+                "entry-d".to_string()
+            ],
+        ]
+    );
+    assert_eq!(output.postprocessActions.len(), 6);
+    let postprocess_names = output
+        .postprocessActions
+        .iter()
+        .map(|action| {
+            Path::new(&action.outputPath)
+                .file_stem()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        postprocess_names,
+        vec!["shared", "entry-a", "entry-b", "shared2", "entry-c", "entry-d"]
+    );
+}
+
+#[test]
 fn prepares_esm_bundler_runtime_jobs() {
     let root = make_temp_dir("bundler-runtime-esm-jobs");
     let emitted_out_dir = root.join("native-out");

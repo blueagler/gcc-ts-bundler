@@ -59,6 +59,7 @@ export function getOptionsSignature(
     hideWarningsFor: options.hideWarningsFor ?? null,
     entries: options.entries.map((entry) => ({
       name: entry.name,
+      ...(entry.outFile === undefined ? {} : { outFile: entry.outFile }),
       relativePath: path.relative(options.srcDir, entry.file),
     })),
     externals: options.externals,

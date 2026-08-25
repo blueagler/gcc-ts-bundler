@@ -153,8 +153,6 @@ export function resolveAliasedSymbol(
     : symbol;
 }
 
-export { renderStructuralExternLine } from "./barriers";
-
 export function addMapSetValue<K>(
   map: Map<K, Set<string>>,
   key: K,
@@ -182,20 +180,6 @@ export function hasNonPublicModifier(node: ts.Node) {
     hasModifier(node, ts.SyntaxKind.PrivateKeyword) ||
     hasModifier(node, ts.SyntaxKind.ProtectedKeyword)
   );
-}
-
-export function getPropertyNameText(name: ts.PropertyName | undefined) {
-  if (!name) {
-    return null;
-  }
-  if (
-    ts.isIdentifier(name) ||
-    ts.isStringLiteral(name) ||
-    ts.isNumericLiteral(name)
-  ) {
-    return name.text;
-  }
-  return null;
 }
 
 export function getStringLiteralMemberName(

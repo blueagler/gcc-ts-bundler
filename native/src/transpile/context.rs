@@ -4,8 +4,9 @@ use oxc_ast::ast::{
     BindingPattern, Declaration, ExportDefaultDeclarationKind, ImportOrExportKind,
     ModuleExportName, Program as OxcProgram, Statement,
 };
+use std::fs;
 
-pub(super) fn parse_chunk_mode(value: &str) -> std::result::Result<ChunkMode, String> {
+pub(crate) fn parse_chunk_mode(value: &str) -> std::result::Result<ChunkMode, String> {
     match value {
         "off" => Ok(ChunkMode::Off),
         "bundler-runtime" | "split" => Ok(ChunkMode::BundlerRuntime),
@@ -14,33 +15,33 @@ pub(super) fn parse_chunk_mode(value: &str) -> std::result::Result<ChunkMode, St
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct TranspileContext {
-    pub(super) bundler_module_slots: HashMap<String, BundlerModuleSlots>,
-    pub(super) bundler_runtime_logical_ids: HashMap<String, String>,
-    pub(super) chunk_mode: ChunkMode,
-    pub(super) class_map_calls: Vec<ClassMapCallInput>,
-    pub(super) pure_callees: HashSet<String>,
-    pub(super) commonjs_specifiers: HashSet<String>,
-    pub(super) opaque_commonjs: std::sync::Arc<OpaqueCommonJs>,
-    pub(super) boundary_identity_tokens: HashMap<String, String>,
-    pub(super) external_specifiers: HashMap<String, String>,
-    pub(super) opaque_external_specifiers: HashSet<String>,
-    pub(super) file_metadata: HashMap<String, ClosureFileMetadata>,
-    pub(super) hoist_plan: Option<std::sync::Arc<HoistPlan>>,
-    pub(super) lazy_imports_by_file: HashMap<String, Vec<LazyImportInput>>,
-    pub(super) lazy_target_module_ids: HashSet<String>,
-    pub(super) package_aliases: Vec<PackageAliasInput>,
-    pub(super) preserved_modules: HashMap<String, PreservedModuleInput>,
-    pub(super) resolved_module_ids: HashMap<String, String>,
-    pub(super) preserved_property_names: HashSet<String>,
-    pub(super) static_property_names: HashSet<String>,
-    pub(super) type_metadata_enabled: bool,
-    pub(super) assigner_pin_module_ids: HashSet<String>,
-    pub(super) workspace_dir: PathBuf,
+pub(crate) struct TranspileContext {
+    pub(crate) bundler_module_slots: HashMap<String, BundlerModuleSlots>,
+    pub(crate) bundler_runtime_logical_ids: HashMap<String, String>,
+    pub(crate) chunk_mode: ChunkMode,
+    pub(crate) class_map_calls: Vec<ClassMapCallInput>,
+    pub(crate) pure_callees: HashSet<String>,
+    pub(crate) commonjs_specifiers: HashSet<String>,
+    pub(crate) opaque_commonjs: std::sync::Arc<OpaqueCommonJs>,
+    pub(crate) boundary_identity_tokens: HashMap<String, String>,
+    pub(crate) external_specifiers: HashMap<String, String>,
+    pub(crate) opaque_external_specifiers: HashSet<String>,
+    pub(crate) file_metadata: HashMap<String, ClosureFileMetadata>,
+    pub(crate) hoist_plan: Option<std::sync::Arc<HoistPlan>>,
+    pub(crate) lazy_imports_by_file: HashMap<String, Vec<LazyImportInput>>,
+    pub(crate) lazy_target_module_ids: HashSet<String>,
+    pub(crate) package_aliases: Vec<PackageAliasInput>,
+    pub(crate) preserved_modules: HashMap<String, PreservedModuleInput>,
+    pub(crate) resolved_module_ids: HashMap<String, String>,
+    pub(crate) preserved_property_names: HashSet<String>,
+    pub(crate) static_property_names: HashSet<String>,
+    pub(crate) type_metadata_enabled: bool,
+    pub(crate) assigner_pin_module_ids: HashSet<String>,
+    pub(crate) workspace_dir: PathBuf,
 }
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct BundlerModuleSlots {
+pub(crate) struct BundlerModuleSlots {
     export_slots: BTreeMap<String, usize>,
 }
 
@@ -83,7 +84,7 @@ pub(crate) enum ChunkMode {
     BundlerRuntime,
 }
 
-pub(super) fn collect_bundler_module_slots(
+pub(crate) fn collect_bundler_module_slots(
     file_names: &[String],
     workspace_dir: &Path,
     package_aliases: &[PackageAliasInput],

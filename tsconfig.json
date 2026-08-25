@@ -23,5 +23,5 @@
     "module": "ESNext"
   },
   "exclude": ["node_modules", "bin"],
-  "include": ["src/**/*.ts", "scripts/**/*.ts"]
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "test/vite-types.assert.ts"]
 }

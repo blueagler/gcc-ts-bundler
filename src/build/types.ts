@@ -5,7 +5,7 @@ import type {
 import type {
   ClosureTypeMetadataFile,
   TypeMetadataCounts,
-} from "./transpile/closure-ir";
+} from "./transpile/type-metadata";
 import type { FileStateSnapshot } from "../shared/file-state";
 import { defineValues } from "../shared/validation";
 
@@ -33,7 +33,12 @@ export interface RollupChunkInput {
   name: string;
 }
 
-export type InternalBuildOptions = BuildOptions & {
+/**
+ * Vite/host-only pocket on a build. Absent from the public CLI/API surface;
+ * the plugin fills these so the planner can mirror Rollup's graph, skip
+ * in-pipeline minify, and attach CSS runtime rows after compile.
+ */
+export interface HostBuildExtensions {
   /**
    * Whether the caller attaches CSS rows to the runtime manifest after the
    * compile. Only the Vite plugin does, and it answers from the CSS-ownership
@@ -51,13 +56,27 @@ export type InternalBuildOptions = BuildOptions & {
    */
   rollupChunks?: readonly RollupChunkInput[] | undefined;
   typeMetadata?: BuildTypeMetadataSidecar | undefined;
-};
+  /** Vite-only sidecar listing authored source files for preflight. */
+  viteAuthoredFilesFile?: string | undefined;
+  /** Vite-only sidecar mapping runtime modules to original sources. */
+  viteRuntimeSourceMapFile?: string | undefined;
+}
 
+/** Public build options plus the host/Vite pocket. */
+export type InternalBuildOptions = BuildOptions & HostBuildExtensions;
+
+/**
+ * Resolved form of the public options plus {@link HostBuildExtensions}:
+ * `cssRuntime` defaults false, `finalMinify` defaults true, empty rollup
+ * graph. Vite still sets `finalMinify: false` and fills the rest.
+ */
 export interface ResolvedBuildOptions extends PublicResolvedBuildOptions {
   cssRuntime: boolean;
   finalMinify: boolean;
   rollupChunks: readonly RollupChunkInput[];
   typeMetadata: BuildTypeMetadataSidecar | undefined;
+  viteAuthoredFilesFile: string | undefined;
+  viteRuntimeSourceMapFile: string | undefined;
 }
 
 export interface BuildEntry {
@@ -65,6 +84,8 @@ export interface BuildEntry {
   exportNames: string[];
   hasDefaultExport: boolean;
   outputName: string;
+  /** Project-root-relative or absolute published path outside `outDir`. */
+  outFile?: string;
   sourcePath: string;
   sourceRelativePath: string;
 }

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use super::super::*;
 use super::shared::{aggregate_type_metadata, property_renaming_report_path};
 
@@ -63,111 +65,114 @@ pub(crate) fn prepare_off_mode_jobs(
             .collect::<Vec<_>>(),
     )?;
 
-    let compile_jobs = if resolved_chunks.len() == 1 && !chunk_output_type.is_esm() {
-        let entry_chunk = resolved_chunks
-            .first()
-            .ok_or_else(|| "Chunk plan must contain at least one chunk.".to_string())?;
-        vec![ClosureCompileJob {
-            assumeFunctionWrapper: true,
-            chunk: None,
-            chunkOutputPathPrefix: None,
-            chunkOutputType: None,
-            compilationLevel: input.compilationLevel.clone(),
-            dependencyMode: Some("PRUNE".to_string()),
-            entryPoint: (!entry_chunk.entry_points.is_empty())
-                .then_some(entry_chunk.entry_points.clone()),
-            externs,
-            js: unique_paths(
-                explicit_js_inputs
-                    .iter()
-                    .cloned()
-                    .chain(closure_lib_files.iter().cloned())
-                    .chain(input.supportFiles.iter().cloned())
-                    .chain(entry_chunk.files.iter().cloned())
-                    .collect(),
-            ),
-            jsOutputFile: Some(
-                raw_dir
-                    .join(format!("{}.js", entry_chunk.name))
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-            languageIn: "UNSTABLE".to_string(),
-            languageOut: input.languageOut.clone(),
-            propertyRenamingReportPath: property_renaming_report_path.clone(),
-            renamePrefixNamespace: None,
-            rewritePolyfills: false,
-            warningLevel: warning_level.to_string(),
-            hasTypeMetadata: has_type_metadata,
-            typeMetadataCounts: type_metadata_counts.clone(),
-        }]
-    } else {
-        let leading_js = unique_paths(
-            explicit_js_inputs
-                .iter()
-                .cloned()
-                .chain(closure_lib_files.iter().cloned())
-                .chain(input.supportFiles.iter().cloned())
-                .collect(),
-        );
-        let chunk_specs = resolved_chunks
-            .iter()
-            .enumerate()
-            .map(|(index, chunk)| {
-                let dependency_suffix = if chunk.dependencies.is_empty() {
-                    String::new()
-                } else {
-                    format!(":{}", chunk.dependencies.join(","))
-                };
-                format!(
-                    "{}:{}{}",
-                    chunk.name,
-                    unique_paths(chunk.files.clone()).len()
-                        + if index == 0 { leading_js.len() } else { 0 },
-                    dependency_suffix
-                )
-            })
-            .collect::<Vec<_>>();
-        let entry_points = unique_paths(
-            resolved_chunks
-                .iter()
-                .flat_map(|chunk| chunk.entry_points.iter().cloned())
-                .collect(),
-        );
-        vec![ClosureCompileJob {
-            assumeFunctionWrapper: true,
-            chunk: Some(chunk_specs),
-            chunkOutputPathPrefix: Some(format!(
-                "{}{}",
-                raw_dir.to_string_lossy(),
-                std::path::MAIN_SEPARATOR
-            )),
-            chunkOutputType: chunk_output_type.is_esm().then(|| "ES_MODULES".to_string()),
-            compilationLevel: input.compilationLevel.clone(),
-            dependencyMode: Some("PRUNE".to_string()),
-            entryPoint: (!entry_points.is_empty()).then_some(entry_points),
-            externs,
-            js: unique_paths(
-                leading_js
-                    .into_iter()
-                    .chain(
-                        resolved_chunks
+    let compile_jobs = partition_off_mode_components(resolved_chunks)
+        .into_iter()
+        .map(|component| {
+            if component.len() == 1 && !chunk_output_type.is_esm() {
+                let entry_chunk = component[0];
+                ClosureCompileJob {
+                    assumeFunctionWrapper: true,
+                    chunk: None,
+                    chunkOutputPathPrefix: None,
+                    chunkOutputType: None,
+                    compilationLevel: input.compilationLevel.clone(),
+                    dependencyMode: Some("PRUNE".to_string()),
+                    entryPoint: (!entry_chunk.entry_points.is_empty())
+                        .then_some(entry_chunk.entry_points.clone()),
+                    externs: externs.clone(),
+                    js: unique_paths(
+                        explicit_js_inputs
                             .iter()
-                            .flat_map(|chunk| chunk.files.iter().cloned()),
-                    )
-                    .collect(),
-            ),
-            jsOutputFile: None,
-            languageIn: "UNSTABLE".to_string(),
-            languageOut: input.languageOut.clone(),
-            propertyRenamingReportPath: property_renaming_report_path.clone(),
-            renamePrefixNamespace: None,
-            rewritePolyfills: false,
-            warningLevel: warning_level.to_string(),
-            hasTypeMetadata: has_type_metadata,
-            typeMetadataCounts: type_metadata_counts,
-        }]
-    };
+                            .cloned()
+                            .chain(closure_lib_files.iter().cloned())
+                            .chain(input.supportFiles.iter().cloned())
+                            .chain(entry_chunk.files.iter().cloned())
+                            .collect(),
+                    ),
+                    jsOutputFile: Some(
+                        raw_dir
+                            .join(format!("{}.js", entry_chunk.name))
+                            .to_string_lossy()
+                            .to_string(),
+                    ),
+                    languageIn: "UNSTABLE".to_string(),
+                    languageOut: input.languageOut.clone(),
+                    propertyRenamingReportPath: property_renaming_report_path.clone(),
+                    renamePrefixNamespace: None,
+                    rewritePolyfills: false,
+                    warningLevel: warning_level.to_string(),
+                    hasTypeMetadata: has_type_metadata,
+                    typeMetadataCounts: type_metadata_counts.clone(),
+                }
+            } else {
+                let leading_js = unique_paths(
+                    explicit_js_inputs
+                        .iter()
+                        .cloned()
+                        .chain(closure_lib_files.iter().cloned())
+                        .chain(input.supportFiles.iter().cloned())
+                        .collect(),
+                );
+                let chunk_specs = component
+                    .iter()
+                    .enumerate()
+                    .map(|(index, chunk)| {
+                        let dependency_suffix = if chunk.dependencies.is_empty() {
+                            String::new()
+                        } else {
+                            format!(":{}", chunk.dependencies.join(","))
+                        };
+                        format!(
+                            "{}:{}{}",
+                            chunk.name,
+                            unique_paths(chunk.files.clone()).len()
+                                + if index == 0 { leading_js.len() } else { 0 },
+                            dependency_suffix
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let entry_points = unique_paths(
+                    component
+                        .iter()
+                        .flat_map(|chunk| chunk.entry_points.iter().cloned())
+                        .collect(),
+                );
+                ClosureCompileJob {
+                    assumeFunctionWrapper: true,
+                    chunk: Some(chunk_specs),
+                    chunkOutputPathPrefix: Some(format!(
+                        "{}{}",
+                        raw_dir.to_string_lossy(),
+                        std::path::MAIN_SEPARATOR
+                    )),
+                    chunkOutputType: chunk_output_type.is_esm().then(|| "ES_MODULES".to_string()),
+                    compilationLevel: input.compilationLevel.clone(),
+                    dependencyMode: Some("PRUNE".to_string()),
+                    entryPoint: (!entry_points.is_empty()).then_some(entry_points),
+                    externs: externs.clone(),
+                    js: unique_paths(
+                        leading_js
+                            .into_iter()
+                            .chain(
+                                component
+                                    .iter()
+                                    .flat_map(|chunk| chunk.files.iter().cloned()),
+                            )
+                            .collect(),
+                    ),
+                    jsOutputFile: None,
+                    languageIn: "UNSTABLE".to_string(),
+                    languageOut: input.languageOut.clone(),
+                    propertyRenamingReportPath: property_renaming_report_path.clone(),
+                    renamePrefixNamespace: None,
+                    rewritePolyfills: false,
+                    warningLevel: warning_level.to_string(),
+                    hasTypeMetadata: has_type_metadata,
+                    typeMetadataCounts: type_metadata_counts.clone(),
+                }
+            }
+        })
+        .collect::<Vec<_>>();
 
     let postprocess_actions = resolved_chunks
         .iter()
@@ -197,4 +202,64 @@ pub(crate) fn prepare_off_mode_jobs(
         postprocessActions: postprocess_actions,
         publishedOutputs: published_outputs,
     })
+}
+
+fn partition_off_mode_components(
+    chunks: &[ResolvedClosureChunk],
+) -> Vec<Vec<&ResolvedClosureChunk>> {
+    if chunks.is_empty() {
+        return vec![Vec::new()];
+    }
+
+    let mut parent = (0..chunks.len()).collect::<Vec<_>>();
+    let index_by_name = chunks
+        .iter()
+        .enumerate()
+        .map(|(index, chunk)| (chunk.name.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    for (index, chunk) in chunks.iter().enumerate() {
+        for dependency in &chunk.dependencies {
+            if let Some(&dependency_index) = index_by_name.get(dependency.as_str()) {
+                union_job_roots(&mut parent, index, dependency_index);
+            }
+        }
+    }
+
+    let mut component_order = Vec::new();
+    let mut members = HashMap::<usize, Vec<usize>>::new();
+    for index in 0..chunks.len() {
+        let root = find_job_root(&mut parent, index);
+        if !members.contains_key(&root) {
+            component_order.push(root);
+        }
+        members.entry(root).or_default().push(index);
+    }
+
+    component_order
+        .into_iter()
+        .map(|root| {
+            members
+                .get(&root)
+                .into_iter()
+                .flatten()
+                .map(|&index| &chunks[index])
+                .collect()
+        })
+        .collect()
+}
+
+fn find_job_root(parent: &mut [usize], mut index: usize) -> usize {
+    while parent[index] != index {
+        parent[index] = parent[parent[index]];
+        index = parent[index];
+    }
+    index
+}
+
+fn union_job_roots(parent: &mut [usize], left: usize, right: usize) {
+    let left_root = find_job_root(parent, left);
+    let right_root = find_job_root(parent, right);
+    if left_root != right_root {
+        parent[right_root] = left_root;
+    }
 }

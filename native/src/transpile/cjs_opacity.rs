@@ -3,10 +3,11 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::{ImportDeclarationSpecifier, Program, Statement};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
+use std::fs;
 
 /// The one decision shared by the three CommonJS export-ABI emission sites.
 #[derive(Debug, Default)]
-pub(super) struct OpaqueCommonJs {
+pub(crate) struct OpaqueCommonJs {
     package_keys: HashSet<String>,
     specifiers: HashSet<String>,
 }
@@ -37,7 +38,7 @@ fn package_key(file_path: &Path) -> Option<String> {
     Some(format!("{head}{name}"))
 }
 
-pub(super) fn collect_opaque_commonjs(
+pub(crate) fn collect_opaque_commonjs(
     file_names: &[String],
     commonjs_specifiers: &HashSet<String>,
     package_aliases: &[PackageAliasInput],

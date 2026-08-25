@@ -14,24 +14,49 @@ export interface ExternAnalysisContext {
   scannedFiles: string[];
 }
 
+export interface TypeWorld {
+  checker: ts.TypeChecker;
+  compilerOptions: ts.CompilerOptions;
+  program: ts.Program;
+}
+
+export function createTypeWorld(
+  fileNames: readonly string[],
+  compilerOptions: ts.CompilerOptions,
+): TypeWorld {
+  const program = ts.createProgram(uniqueSortedStrings([...fileNames]), {
+    ...compilerOptions,
+    noEmit: true,
+    skipLibCheck: true,
+  });
+  return {
+    checker: program.getTypeChecker(),
+    compilerOptions,
+    program,
+  };
+}
+
 export function createExternAnalysisContext({
   appEntryFiles,
   compilerOptions,
   projectRoot,
   scannedFiles,
+  typeWorld,
 }: {
   appEntryFiles: string[];
   compilerOptions: ts.CompilerOptions;
   projectRoot: string;
   scannedFiles: string[];
+  typeWorld?: TypeWorld | undefined;
 }): ExternAnalysisContext {
-  const rootNames = uniqueSortedStrings([...scannedFiles, ...appEntryFiles]);
-  const program = ts.createProgram(rootNames, {
-    ...compilerOptions,
-    noEmit: true,
-    skipLibCheck: true,
-  });
-  const checker = program.getTypeChecker();
+  const program =
+    typeWorld?.program ??
+    ts.createProgram(uniqueSortedStrings([...scannedFiles, ...appEntryFiles]), {
+      ...compilerOptions,
+      noEmit: true,
+      skipLibCheck: true,
+    });
+  const checker = typeWorld?.checker ?? program.getTypeChecker();
   const registry =
     scannedFiles.length === 0
       ? createEmptyContractRegistry()
@@ -44,7 +69,7 @@ export function createExternAnalysisContext({
   return {
     appEntryFiles,
     checker,
-    compilerOptions,
+    compilerOptions: typeWorld?.compilerOptions ?? compilerOptions,
     program,
     projectRoot,
     registry,

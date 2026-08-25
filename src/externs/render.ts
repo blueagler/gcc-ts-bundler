@@ -1,5 +1,5 @@
 import type { ExternAnalysisContext } from "./context";
-import { analyzeRuntimeUsage } from "./runtime-analysis";
+import { analyzeRuntimeUsage } from "./runtime";
 import {
   collectBoundaryAwareExternLines,
   collectBoundaryAwareUsageMemberNames,

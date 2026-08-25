@@ -76,7 +76,7 @@ pub(crate) fn collect_extern_property_names_with_externs(
     for (path, source) in &retained_sources {
         match parse_program(&allocator, path, source) {
             Ok(mut program) => {
-                crate::transpile::emit_helpers_oxc::rewrite_this_field_helper_assignments(
+                crate::transpile::emit_helpers::rewrite_this_field_helper_assignments(
                     &allocator,
                     &mut program,
                 );

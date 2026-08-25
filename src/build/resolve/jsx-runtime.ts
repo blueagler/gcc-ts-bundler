@@ -2,7 +2,7 @@ import path from "path";
 import ts from "@typescript/typescript6";
 
 import { resolveGraph } from "../../native/load";
-import { loadCompilerOptions } from "../transpile/compiler-options";
+import { loadCompilerOptions } from "./compiler-options";
 import type { PackageAlias, ResolvedImport } from "../types";
 import { createBundleRequire } from "../../shared/bundle-location";
 

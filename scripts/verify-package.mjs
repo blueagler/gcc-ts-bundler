@@ -46,7 +46,7 @@ const temporaryRoot = await mkdtemp(
 );
 
 try {
-  await run(process.execPath, ["./scripts/build-js.mjs"], packageRoot);
+  await run(process.execPath, ["./scripts/build-self.mjs"], packageRoot);
 
   const packageJson = await readJson(path.join(packageRoot, "package.json"));
   const rootTargets = await verifyPackageTargets(packageRoot, packageJson);

@@ -20,9 +20,13 @@ use self::paths::{
 };
 
 pub(super) fn is_external_boundary_specifier(specifier: &str, context: &ResolveContext) -> bool {
-    context.external_specifiers.contains(specifier)
-        || (context.target.builtin_policy == BuiltinPolicy::ExternalBoundary
-            && (is_node_builtin(specifier) || is_bun_builtin(specifier)))
+    context.external_specifiers.iter().any(|external| {
+        specifier == external
+            || specifier
+                .strip_prefix(external)
+                .is_some_and(|rest| rest.starts_with('/'))
+    }) || (context.target.builtin_policy == BuiltinPolicy::ExternalBoundary
+        && (is_node_builtin(specifier) || is_bun_builtin(specifier)))
 }
 
 pub(super) fn resolve_module_specifier(

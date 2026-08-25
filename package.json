@@ -1,6 +1,6 @@
 {
   "name": "gcc-ts-bundler",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/blueagler/gcc-ts-bundler.git"
@@ -77,8 +77,8 @@
     "lint:rust": "cargo clippy --manifest-path native/Cargo.toml --all-targets --all-features -- -D warnings",
     "lint": "bun run typecheck && bun run format:rust && bun run lint:rust && bun --bun ./scripts/format.ts --check && oxlint src",
     "fix": "bun --bun ./scripts/format.ts && oxlint src --fix",
-    "test": "cargo test --manifest-path native/Cargo.toml && bun run build && bun test ./test/*.test.mjs",
-    "test:fast": "bun test ./test/build-native.test.mjs ./test/cache-correctness.test.mjs ./test/cli-args.test.mjs ./test/closure-ir.test.mjs ./test/final-oxc-pass.test.mjs ./test/install-sanity.test.mjs ./test/native-packages-workflow.test.mjs ./test/target-boundaries.test.mjs ./test/type-translate.test.mjs ./test/validation.test.mjs ./test/vite-type-metadata.test.mjs ./test/workspace.test.mjs",
+    "test": "cargo test --manifest-path native/Cargo.toml && bun run build && bun test ./test",
+    "test:fast": "bun test ./test/native/build-native.test.mjs ./test/build/cache-correctness.test.mjs ./test/cli/args.test.mjs ./test/build/type-metadata.test.mjs ./test/build/final-oxc-pass.test.mjs ./test/package/install-sanity.test.mjs ./test/native/packages-workflow.test.mjs ./test/externs/target-boundaries.test.mjs ./test/build/type-translate.test.mjs ./test/shared/validation.test.mjs ./test/vite/type-metadata.test.mjs ./test/build/workspace.test.mjs",
     "preview:examples": "node ./scripts/preview-example.mjs",
     "preview:react": "node ./scripts/preview-example.mjs react",
     "preview:svelte": "node ./scripts/preview-example.mjs svelte",

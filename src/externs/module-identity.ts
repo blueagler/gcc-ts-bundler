@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import type ts from "@typescript/typescript6";
 
-import { sanitizeClosureName } from "../build/transpile/closure-ir/metadata/closure-type-strings";
+import { sanitizeClosureName } from "../shared/closure-type-strings";
 
 export function stableExternNamespace(
   specifier: string,

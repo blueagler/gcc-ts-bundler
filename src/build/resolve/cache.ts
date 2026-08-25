@@ -31,6 +31,7 @@ export interface ResolveMetadata {
     exportNames: string[];
     hasDefaultExport: boolean;
     outputName: string;
+    outFile?: string;
     sourceRelativePath: string;
   }>;
   tsxRuntimeSourceFiles?: string[];
@@ -79,6 +80,7 @@ const isResolveEntry = isObjectOf<ResolveMetadata["entryFiles"][number]>({
   exportNames: isStringArray,
   hasDefaultExport: isBoolean,
   outputName: isString,
+  outFile: optional(isString),
   sourceRelativePath: isString,
 });
 

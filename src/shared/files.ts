@@ -38,7 +38,6 @@ export interface DirectoryEntry {
   relativePath: string;
 }
 
-
 export async function syncDirectoryEntries(
   rootDir: string,
   entries: DirectoryEntry[],
@@ -104,12 +103,34 @@ export async function writeFileIfChanged(
   await fs.writeFile(filePath, nextContent);
 }
 
-async function listRelativeFiles(rootDir: string, currentDir = rootDir) {
+export interface ListRelativeFilesOptions {
+  onMissing?: "empty" | "throw";
+  onError?: "empty" | "throw";
+}
+
+export async function listRelativeFiles(
+  rootDir: string,
+  options: ListRelativeFilesOptions = {},
+) {
+  return walkRelativeFiles(rootDir, rootDir, {
+    onMissing: options.onMissing ?? "empty",
+    onError: options.onError ?? "throw",
+  });
+}
+
+async function walkRelativeFiles(
+  rootDir: string,
+  currentDir: string,
+  policy: Required<ListRelativeFilesOptions>,
+) {
   let entries;
   try {
     entries = await fs.readdir(currentDir, { withFileTypes: true });
   } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) {
+    const action = hasErrorCode(error, "ENOENT")
+      ? policy.onMissing
+      : policy.onError;
+    if (action === "empty") {
       return [];
     }
     throw error;
@@ -119,7 +140,7 @@ async function listRelativeFiles(rootDir: string, currentDir = rootDir) {
   for (const entry of entries) {
     const entryPath = path.join(currentDir, entry.name);
     if (entry.isDirectory()) {
-      files.push(...(await listRelativeFiles(rootDir, entryPath)));
+      files.push(...(await walkRelativeFiles(rootDir, entryPath, policy)));
       continue;
     }
     files.push(normalizeRelativePath(path.relative(rootDir, entryPath)));
@@ -177,6 +198,6 @@ function fileContentsEqual(
   return currentBuffer.equals(nextBuffer);
 }
 
-function normalizeRelativePath(relativePath: string) {
+export function normalizeRelativePath(relativePath: string) {
   return relativePath.replace(/\\/g, "/").replace(/^\/+/u, "");
 }

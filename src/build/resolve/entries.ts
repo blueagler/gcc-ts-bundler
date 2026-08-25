@@ -43,6 +43,7 @@ export function toBuildEntry(
     exportNames: entry.exportNames,
     hasDefaultExport: entry.hasDefaultExport,
     outputName: entry.outputName,
+    ...(entry.outFile === undefined ? {} : { outFile: entry.outFile }),
     sourcePath: path.join(sourceRoot, entry.sourceRelativePath),
     sourceRelativePath: entry.sourceRelativePath,
   };

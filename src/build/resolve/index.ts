@@ -231,7 +231,13 @@ async function resolveFreshGraph(
   });
   const preservedModules = graphResult.preservedModules.map(
     (module): PreservedModule => ({
-      ...module,
+      // Spelled out rather than rest-spread: these keys reach the native addon,
+      // and only a literal written against the boundary type keeps its property
+      // names through the self-build's renaming.
+      exportNames: module.exportNames,
+      filePath: module.filePath,
+      hasDefaultExport: module.hasDefaultExport,
+      moduleId: module.moduleId,
       outputRelativePath: toPreservedOutputRelativePath(
         env.sourceRoot,
         module.filePath,
@@ -319,15 +325,20 @@ function createResolveMetadata(
 ): ResolveMetadata {
   const { options } = context;
   const entryFiles = zipExact(
-    fresh.graphResult.entries,
-    fresh.outputNames,
-    "resolved entries and output names",
+    zipExact(
+      fresh.graphResult.entries,
+      fresh.outputNames,
+      "resolved entries and output names",
+    ),
+    options.entries,
+    "resolved entries and entry options",
   ).map(
-    ([entry, outputName]): BuildEntry => ({
+    ([[entry, outputName], option]): BuildEntry => ({
       chunkName: sanitizeChunkName(outputName),
       exportNames: entry.exportNames,
       hasDefaultExport: entry.hasDefaultExport,
       outputName,
+      ...(option.outFile === undefined ? {} : { outFile: option.outFile }),
       sourcePath: entry.sourcePath,
       sourceRelativePath: path.relative(env.sourceRoot, entry.sourcePath),
     }),
@@ -393,6 +404,7 @@ function createResolveMetadata(
         exportNames: entry.exportNames,
         hasDefaultExport: entry.hasDefaultExport,
         outputName: entry.outputName,
+        ...(entry.outFile === undefined ? {} : { outFile: entry.outFile }),
         sourceRelativePath: entry.sourceRelativePath,
       }),
     ),

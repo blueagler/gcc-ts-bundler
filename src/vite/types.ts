@@ -20,7 +20,7 @@ export interface GccTsBundlerVitePluginOptions {
    *
    * `externs` is deliberately still accepted. `createCompilerOptions` does
    * replace the field, but with the `renameBarriers` list that
-   * `resolveCompilerExterns` builds *from* these paths — `src/vite/externs.ts`
+   * `resolveCompilerExterns` builds *from* these paths — `src/vite/compiler-externs.ts`
    * resolves each against `projectRoot` and unions it with the generated
    * extern file — so they do reach Closure. This is a different field from the
    * plugin-level `externs.generate` below.

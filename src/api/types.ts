@@ -1,8 +1,8 @@
 import { defineValues, isRecord } from "../shared/validation";
-import type { TargetName } from "../targets";
+import type { TargetName } from "./targets";
 
-export { TARGET_NAMES } from "../targets";
-export type { TargetName } from "../targets";
+export { TARGET_NAMES } from "./targets";
+export type { TargetName } from "./targets";
 
 export const COMPILATION_LEVELS = defineValues(
   "WHITESPACE_ONLY",
@@ -100,10 +100,10 @@ export interface ChunkOptions {
   vendorChunk?: boolean | "auto" | undefined;
 }
 
-/** An entry file, optionally with an explicit output name. */
+/** An entry file, optionally with an explicit output name and published path. */
 export type BuildEntryOption =
   | string
-  | { file: string; name?: string | undefined };
+  | { file: string; name?: string | undefined; outFile?: string | undefined };
 
 /**
  * A runtime call whose object-literal argument keys must survive property
@@ -239,7 +239,7 @@ export interface ResolvedBuildOptions {
   };
   hideWarningsFor: readonly string[] | undefined;
   /** Absolute entry file paths with explicit or `null` (derived) names. */
-  entries: Array<{ file: string; name: string | null }>;
+  entries: Array<{ file: string; name: string | null; outFile?: string }>;
   externals: string[];
   externs: string[];
   js: string[];

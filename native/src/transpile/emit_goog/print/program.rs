@@ -1,0 +1,145 @@
+//! goog.module program emit.
+
+use std::collections::HashSet;
+use std::path::Path;
+
+use oxc_allocator::{Allocator, Vec as ArenaVec};
+use oxc_ast::ast::*;
+use oxc_ast_visit::VisitMut;
+
+use super::super::super::emit::EmittedProgram;
+use super::super::super::fresh::FreshNameAllocator;
+use super::super::super::hoist::scan_namespace_usage;
+use super::super::super::identity::ModuleIdentity;
+use super::super::super::nocollapse::NocollapseAssignments;
+use super::super::super::type_metadata_oxc::{runtime_type_names_from_program, BoundTypeMetadata};
+use super::super::super::{
+    apply_js_compat_text_fixes, render_closure_enum, to_goog_module_id, TranspileContext,
+};
+use super::super::external::{quote_external_boundary_accesses, ExternalBoundaryEvidence};
+use super::super::live_bindings::{
+    collect_live_imported_binding_ids, live_export_bindings, render_live_export_accessors,
+    LiveImportCallRewriter,
+};
+use super::statements::emit_goog_module_statements;
+use crate::closure_metadata::ClosureFileMetadata;
+
+pub(crate) fn emit_goog_module_program<'a>(
+    allocator: &'a Allocator,
+    file_path: &Path,
+    program: &mut Program<'a>,
+    identity: &ModuleIdentity,
+    context: &TranspileContext,
+    file_metadata: Option<&ClosureFileMetadata>,
+    commonjs_export_name: Option<&str>,
+) -> std::result::Result<EmittedProgram, String> {
+    quote_external_boundary_accesses(
+        allocator,
+        file_path,
+        program,
+        identity,
+        context,
+        file_metadata,
+        ExternalBoundaryEvidence::All,
+    );
+    let namespace_usage = scan_namespace_usage(program, identity);
+    let live_imported_ids = collect_live_imported_binding_ids(program, identity, file_path);
+    if !live_imported_ids.is_empty() {
+        LiveImportCallRewriter::new(allocator, identity, live_imported_ids.clone())
+            .visit_program(program);
+    }
+    let live_imported_locals = live_imported_ids
+        .iter()
+        .map(|binding| identity.symbol(*binding).to_string())
+        .collect::<HashSet<_>>();
+    let live_exports = live_export_bindings(file_path);
+    let bound = BoundTypeMetadata::bind(
+        program,
+        identity,
+        file_metadata,
+        context.type_metadata_enabled,
+    );
+    let nocollapse_assignments = NocollapseAssignments::collect(program);
+    let runtime_type_names = runtime_type_names_from_program(program, identity, &bound);
+    let mut fresh_names = FreshNameAllocator::from_program(program, identity);
+    let mut type_metadata = bound.prepare(&mut fresh_names, &runtime_type_names, None);
+    let module_id = to_goog_module_id(file_path, &context.workspace_dir);
+    let mut output = vec![format!("goog.module({module_id:?});")];
+    output.extend(type_metadata.take_declaration_lines());
+    let enum_declarations = type_metadata.enum_declarations().to_vec();
+    for declaration in enum_declarations {
+        let emitted_name = type_metadata.enum_name(&declaration);
+        output.push(render_closure_enum(&declaration, &emitted_name));
+        type_metadata.count_enum();
+        if declaration.exported {
+            output.push(format!(
+                "exports.{} = {};",
+                declaration.binding_name, emitted_name
+            ));
+        }
+    }
+    let mut import_counter = 0usize;
+    let mut export_counter = 0usize;
+    let mut preserved_extern_lines = Vec::new();
+    let mut preserved_imports = Vec::new();
+    let body = std::mem::replace(&mut program.body, ArenaVec::new_in(&allocator));
+    emit_goog_module_statements(
+        file_path,
+        identity,
+        context,
+        &module_id,
+        &namespace_usage,
+        &live_imported_ids,
+        &live_imported_locals,
+        body,
+        &mut output,
+        &mut preserved_extern_lines,
+        &mut preserved_imports,
+        &mut fresh_names,
+        &mut type_metadata,
+        &nocollapse_assignments,
+        &mut import_counter,
+        &mut export_counter,
+    )?;
+    if let Some(export_name) = commonjs_export_name {
+        output.push(format!("exports.{export_name} = {export_name};"));
+        output.push(format!("exports.default = {export_name};"));
+    }
+    output.extend(render_live_export_accessors(&live_exports));
+    Ok(EmittedProgram {
+        code: apply_js_compat_text_fixes(
+            output
+                .into_iter()
+                .filter(|line| !line.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        preserved_extern_lines,
+        preserved_imports,
+        shared_helpers: Vec::new(),
+        reflective_property_names: Default::default(),
+        reifications: Vec::new(),
+        type_metadata: type_metadata.finish(),
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn emit_goog_module_text<'a>(
+    allocator: &'a Allocator,
+    file_path: &Path,
+    program: &mut Program<'a>,
+    identity: &ModuleIdentity,
+    context: &TranspileContext,
+    commonjs_export_name: Option<&str>,
+) -> std::result::Result<String, String> {
+    emit_goog_module_program(
+        allocator,
+        file_path,
+        program,
+        identity,
+        context,
+        None,
+        commonjs_export_name,
+    )
+    .map(|emitted| emitted.code)
+}

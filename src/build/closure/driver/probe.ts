@@ -19,7 +19,6 @@ export type ClosureDriverProbe =
       javaPath: string;
     };
 
-const ECJ_JAR = "/tmp/ecj/ecj.jar";
 const JAVA_PATH = "java";
 
 let cachedProbe: Promise<ClosureDriverProbe> | undefined;
@@ -27,7 +26,6 @@ let cachedProbe: Promise<ClosureDriverProbe> | undefined;
 export function isDriverForcedOff() {
   return process.env["GCC_CLOSURE_DRIVER"] === "0";
 }
-
 
 export function probeClosureDriver(): Promise<ClosureDriverProbe> {
   cachedProbe ??= runProbe();
@@ -155,43 +153,9 @@ async function compileWorker(
     };
   }
 
-  if (!existsSync(ECJ_JAR)) {
-    return {
-      ok: false,
-      reason: `javac failed and ${ECJ_JAR} is missing: ${javac.stderr || javac.stdout}`,
-    };
-  }
-
-  const ecj = await runOnce(JAVA_PATH, [
-    "-jar",
-    ECJ_JAR,
-    "-encoding",
-    "UTF-8",
-    "-source",
-    "17",
-    "-target",
-    "17",
-    "-cp",
-    jarPath,
-    "-d",
-    classesDir,
-    sourceFile,
-  ]);
-  if (
-    ecj.code === 0 &&
-    existsSync(path.join(classesDir, "ResidentCliWorker.class"))
-  ) {
-    return {
-      ok: true,
-      kind: "jar-worker",
-      jarPath,
-      classesDir,
-      javaPath: JAVA_PATH,
-    };
-  }
   return {
     ok: false,
-    reason: `worker compile failed: ${ecj.stderr || ecj.stdout || javac.stderr}`,
+    reason: `javac failed: ${javac.stderr || javac.stdout}`,
   };
 }
 

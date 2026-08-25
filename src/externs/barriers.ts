@@ -38,7 +38,7 @@ const RECORD_KEY = /"((?:[^"\\]|\\.)*)"\s*:/gu;
 
 export type BarrierKind = "flat" | "owner" | "record";
 
-export interface BarrierName {
+interface BarrierName {
   kind: BarrierKind;
   /** Owner expression for `kind === "owner"`, otherwise undefined. */
   owner?: string | undefined;
@@ -91,13 +91,6 @@ function collectBarrierNames(text: string): BarrierName[] {
   return found;
 }
 
-/** Distinct property names an extern source pins, across all three shapes. */
-export function collectBarrierPropertyNames(text: string): string[] {
-  return [
-    ...new Set(collectBarrierNames(text).map((barrier) => barrier.property)),
-  ].sort();
-}
-
 /**
  * `Object.prototype.<name>;`, or the quoted form when the name is not a bare
  * JavaScript identifier. The single implementation — `contracts/usage.ts` used
@@ -124,7 +117,7 @@ function stripComments(text: string) {
  * signal, not a correctness failure, and the only honest response is to show
  * the number and where it came from.
  */
-export const BARRIER_WARNING_THRESHOLD = 200;
+const BARRIER_WARNING_THRESHOLD = 200;
 
 export interface BarrierSource {
   /** Declaration files that fed this artifact, for package attribution. */

@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import ts from "@typescript/typescript6";
@@ -8,9 +8,9 @@ import {
   loadExternCompilerOptions,
   resolveModuleTypeEntry,
 } from "./compiler";
-import { createExternAnalysisContext } from "./context";
+import { createExternAnalysisContext, type TypeWorld } from "./context";
+import { findPackageDir, resolveAliasedSymbol } from "./shared";
 import { logInternalDetail } from "../shared/timing";
-import { resolveAliasedSymbol } from "./shared";
 import {
   renderTypedBoundaryDeclaration,
   renderTypedExternalDeclarations,
@@ -25,6 +25,7 @@ export async function renderNodeAmbientGlobals(input: {
   jsFiles: readonly string[];
   packageRoot: string;
   projectRoot: string;
+  typeWorld?: TypeWorld | undefined;
 }): Promise<RenderedAmbientGlobals | null> {
   const resolved = await resolveNodeDeclarationRoot(input);
   if (!resolved) return null;
@@ -33,17 +34,25 @@ export async function renderNodeAmbientGlobals(input: {
     "externs:node-ambient-resolution",
     `root=${resolved.resolutionRoot} entry=${resolved.declarationEntry}`,
   );
-  const scannedFiles = await collectReachableTypeFiles({
-    compilerOptions: resolved.compilerOptions,
-    entryFiles: [resolved.declarationEntry],
-    includeDependencies: true,
-  });
-  const analysis = createExternAnalysisContext({
-    appEntryFiles: [...input.jsFiles],
-    compilerOptions: resolved.compilerOptions,
-    projectRoot: resolved.resolutionRoot,
-    scannedFiles,
-  });
+  const typeWorld = input.typeWorld;
+  const scannedFiles = typeWorld
+    ? collectTypeWorldNodeDeclarationFiles(typeWorld, resolved.declarationEntry)
+    : await collectReachableTypeFiles({
+        compilerOptions: resolved.compilerOptions,
+        entryFiles: [resolved.declarationEntry],
+        includeDependencies: true,
+      });
+  const analysis = typeWorld
+    ? {
+        checker: typeWorld.checker,
+        program: typeWorld.program,
+      }
+    : createExternAnalysisContext({
+        appEntryFiles: [...input.jsFiles],
+        compilerOptions: resolved.compilerOptions,
+        projectRoot: resolved.resolutionRoot,
+        scannedFiles,
+      });
   const declarationFiles = new Set(
     scannedFiles.map((file) => path.resolve(file)),
   );
@@ -52,6 +61,7 @@ export async function renderNodeAmbientGlobals(input: {
     analysis.checker,
     input.jsFiles,
     declarationFiles,
+    typeWorld !== undefined,
   );
   logInternalDetail(
     "externs:node-ambient-scan",
@@ -172,38 +182,96 @@ async function resolveNodeDeclarationRoot(input: {
   return null;
 }
 
+function collectTypeWorldNodeDeclarationFiles(
+  typeWorld: TypeWorld,
+  declarationEntry: string,
+) {
+  const nodePackageDir = findPackageDir(declarationEntry);
+  if (!nodePackageDir) {
+    return [path.resolve(declarationEntry)];
+  }
+  return typeWorld.program
+    .getSourceFiles()
+    .map((sourceFile) => path.resolve(sourceFile.fileName))
+    .filter(
+      (filePath) =>
+        filePath === nodePackageDir ||
+        filePath.startsWith(`${nodePackageDir}${path.sep}`),
+    );
+}
+
 function collectReferencedAmbientGlobals(
   program: ts.Program,
   checker: ts.TypeChecker,
   jsFiles: readonly string[],
   declarationFiles: ReadonlySet<string>,
+  allowMissingFiles = false,
 ) {
   const names = new Set<string>();
+  const fallbackLocation = program.getSourceFiles()[0];
   for (const filePath of jsFiles) {
     const sourceFile = program.getSourceFile(path.resolve(filePath));
-    if (!sourceFile) {
+    if (sourceFile) {
+      collectAmbientGlobalNames(sourceFile, checker, declarationFiles, names);
+      continue;
+    }
+    if (!allowMissingFiles || !fallbackLocation) {
       throw new Error(
         `Unable to analyze Closure input for Node globals: ${filePath}`,
       );
     }
-    visit(sourceFile, (node) => {
+    const parsed = ts.createSourceFile(
+      path.resolve(filePath),
+      readFileSync(filePath, "utf8"),
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    visit(parsed, (node) => {
       if (!ts.isIdentifier(node) || !isValueIdentifier(node)) return;
       const symbol = resolveAliasedSymbol(
-        checker.getSymbolAtLocation(node),
+        checker.resolveName(
+          node.text,
+          fallbackLocation,
+          ts.SymbolFlags.Value,
+          false,
+        ),
         checker,
       );
-      if (
-        symbol?.declarations?.some((declaration) =>
-          declarationFiles.has(
-            path.resolve(declaration.getSourceFile().fileName),
-          ),
-        )
-      ) {
+      if (isDeclaredInFiles(symbol, declarationFiles)) {
         names.add(symbol.getName());
       }
     });
   }
   return names;
+}
+
+function collectAmbientGlobalNames(
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  declarationFiles: ReadonlySet<string>,
+  names: Set<string>,
+) {
+  visit(sourceFile, (node) => {
+    if (!ts.isIdentifier(node) || !isValueIdentifier(node)) return;
+    const symbol = resolveAliasedSymbol(
+      checker.getSymbolAtLocation(node),
+      checker,
+    );
+    if (isDeclaredInFiles(symbol, declarationFiles)) {
+      names.add(symbol.getName());
+    }
+  });
+}
+
+function isDeclaredInFiles(
+  symbol: ts.Symbol | null | undefined,
+  declarationFiles: ReadonlySet<string>,
+): symbol is ts.Symbol {
+  return (
+    symbol?.declarations?.some((declaration) =>
+      declarationFiles.has(path.resolve(declaration.getSourceFile().fileName)),
+    ) ?? false
+  );
 }
 
 function visit(node: ts.Node, callback: (node: ts.Node) => void) {
