@@ -4,13 +4,14 @@ use std::path::Path;
 use oxc_allocator::{Allocator, Vec as ArenaVec};
 use oxc_ast::ast::*;
 
+use super::super::super::emit::render_closure_enum;
 use super::super::super::fresh::FreshNameAllocator;
 use super::super::super::hoist::{suffixed_name, HoistPlan};
 use super::super::super::identity::ModuleIdentity;
 use super::super::super::imports_exports::BundlerExportSlotMode;
 use super::super::super::nocollapse::NocollapseAssignments;
 use super::super::super::type_metadata_oxc::PreparedTypeMetadata;
-use super::super::super::{render_closure_enum, TranspileContext};
+use super::super::super::TranspileContext;
 use super::super::helpers::print_node;
 use super::facade::render_facade;
 use super::render::{render_execution_require, render_hoisted_statement};

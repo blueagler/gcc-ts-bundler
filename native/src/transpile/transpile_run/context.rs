@@ -14,7 +14,7 @@ use super::super::napi::{
 use super::super::transpile_plan::{collect_assigner_pin_module_ids, group_lazy_imports_by_file};
 use super::maps::{
     collect_bundler_runtime_slots, index_external_specifiers, index_resolved_imports,
-    maybe_build_hoist_plan,
+    maybe_build_hoist_plan, CompiledModuleIndex,
 };
 use super::preserved::{
     allocate_run_boundary_identity_tokens, collect_preserved_module_ids,
@@ -63,24 +63,16 @@ pub(crate) fn build_transpile_context(
     let external_specifiers = index_external_specifiers(external_boundaries);
     let preserves_node_import_meta = target == "node";
     let file_metadata = load_closure_metadata(&metadata_path)?;
-    let (bundler_module_slots, bundler_runtime_logical_ids) = collect_bundler_runtime_slots(
+    let compiled_index = CompiledModuleIndex {
         chunk_mode,
-        &compiled_file_names,
-        &workspace_dir,
-        &package_aliases,
-        &resolved_module_ids,
-        &file_metadata,
-    )?;
-    let hoist_plan = maybe_build_hoist_plan(
-        chunk_mode,
-        &compiled_file_names,
-        &workspace_dir,
-        &package_aliases,
-        &resolved_module_ids,
-        chunk_graph,
-        &lazy_imports,
-        &file_metadata,
-    )?;
+        compiled_file_names: &compiled_file_names,
+        workspace_dir: &workspace_dir,
+        package_aliases: &package_aliases,
+        resolved_module_ids: &resolved_module_ids,
+        file_metadata: &file_metadata,
+    };
+    let bundler_runtime = collect_bundler_runtime_slots(&compiled_index)?;
+    let hoist_plan = maybe_build_hoist_plan(&compiled_index, chunk_graph, &lazy_imports)?;
     let ExternPropertyAnalysis {
         program_declared_names,
         explicit_extern_property_names,
@@ -107,8 +99,8 @@ pub(crate) fn build_transpile_context(
         .map(|lazy_import| lazy_import.moduleId.clone())
         .collect::<HashSet<_>>();
     let context = TranspileContext {
-        bundler_module_slots,
-        bundler_runtime_logical_ids,
+        bundler_module_slots: bundler_runtime.module_slots,
+        bundler_runtime_logical_ids: bundler_runtime.logical_ids,
         chunk_mode,
         class_map_calls,
         pure_callees: pure_callees.into_iter().collect(),

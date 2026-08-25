@@ -228,7 +228,7 @@ pub(super) fn force_var_for_lowered_declarations(
 }
 
 #[cfg(test)]
-mod namespaces {
+mod namespace_shapes {
     //! Namespace shapes against what the OX-A end-to-end test requires.
     //!
     //! The swc side needed an owned pre-strip pass here: `strip` qualifies a

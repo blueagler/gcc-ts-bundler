@@ -26,7 +26,7 @@ use super::transform::transform_source_with_oxc;
 /// one module declares it: the *users* are what the placement has to dominate,
 /// and a helper reference is a bare identifier with no import edge behind it,
 /// so nothing orders the declaring file before a sibling that uses it.
-pub(crate) fn plan_shared_helper_placement(
+pub(super) fn plan_shared_helper_placement(
     emitted_outputs: &[(PathBuf, PathBuf, EmittedProgram)],
     chunk_graph: &[TranspileChunkInput],
     out_dir: &Path,
@@ -179,7 +179,7 @@ pub(crate) fn parse_oxc_program<'a>(
     Ok(parsed.program)
 }
 
-pub(crate) fn transform_source_file(
+pub(super) fn transform_source_file(
     file_path: &Path,
     context: &TranspileContext,
 ) -> std::result::Result<EmittedProgram, String> {

@@ -17,7 +17,6 @@ mod preserved;
 mod properties;
 
 pub(crate) use self::context::{build_transpile_context, TranspileRunContext};
-pub(crate) use self::properties::extend_preserved_property_names;
 
 pub(crate) fn resolve_relative_module(file_path: &Path, specifier: &str) -> Option<PathBuf> {
     let base = normalize_path(&file_path.parent()?.join(specifier));

@@ -1,5 +1,6 @@
+use super::super::emit::render_closure_enum;
 use super::super::type_metadata_oxc::PreparedTypeMetadata;
-use super::super::{render_closure_enum, render_static_export_slot_with, BundlerModuleSlots};
+use super::super::{render_static_export_slot_with, BundlerModuleSlots};
 use super::exports::RuntimeBindingNames;
 
 pub(crate) fn emit_runtime_type_prelude(

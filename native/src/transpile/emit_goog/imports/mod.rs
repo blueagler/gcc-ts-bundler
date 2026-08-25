@@ -6,9 +6,7 @@ mod convert;
 mod external;
 
 pub(crate) use convert::{convert_export_all, convert_import_decl, convert_named_export};
-pub(crate) use external::{
-    boundary_identity_token, convert_external_import_decl, ExternalImportPlan,
-};
+pub(crate) use external::{boundary_identity_token, convert_external_import_decl};
 
 pub(crate) fn validate_preserved_import(
     import: &ImportDeclaration<'_>,

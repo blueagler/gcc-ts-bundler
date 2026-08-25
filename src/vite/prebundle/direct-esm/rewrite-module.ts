@@ -4,7 +4,7 @@ import ts from "@typescript/typescript6";
 
 import { applyTextEdits } from "../../../shared/text-edits";
 import type { MaterializedGraph } from "../../internal-types";
-import { createBarrelFlattener } from "../barrels";
+import type { createBarrelFlattener } from "../barrels";
 import { normalizePath } from "../shared";
 import {
   rewriteNamedImportStatement,

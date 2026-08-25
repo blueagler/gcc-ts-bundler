@@ -12,6 +12,20 @@ use super::super::napi::{
     TranspileChunkInput,
 };
 
+pub(crate) struct CompiledModuleIndex<'a> {
+    pub(crate) chunk_mode: ChunkMode,
+    pub(crate) compiled_file_names: &'a [String],
+    pub(crate) workspace_dir: &'a Path,
+    pub(crate) package_aliases: &'a [PackageAliasInput],
+    pub(crate) resolved_module_ids: &'a HashMap<String, String>,
+    pub(crate) file_metadata: &'a HashMap<String, ClosureFileMetadata>,
+}
+
+pub(crate) struct BundlerRuntimeMaps {
+    pub(crate) module_slots: HashMap<String, BundlerModuleSlots>,
+    pub(crate) logical_ids: HashMap<String, String>,
+}
+
 pub(crate) fn index_resolved_imports(
     resolved_imports: Vec<ResolvedImportInput>,
 ) -> HashMap<String, String> {
@@ -41,50 +55,43 @@ pub(crate) fn index_external_specifiers(
 }
 
 pub(crate) fn collect_bundler_runtime_slots(
-    chunk_mode: ChunkMode,
-    compiled_file_names: &[String],
-    workspace_dir: &Path,
-    package_aliases: &[PackageAliasInput],
-    resolved_module_ids: &HashMap<String, String>,
-    file_metadata: &HashMap<String, ClosureFileMetadata>,
-) -> std::result::Result<(HashMap<String, BundlerModuleSlots>, HashMap<String, String>), String> {
-    let bundler_module_slots = if chunk_mode == ChunkMode::BundlerRuntime {
+    index: &CompiledModuleIndex<'_>,
+) -> std::result::Result<BundlerRuntimeMaps, String> {
+    let bundler_module_slots = if index.chunk_mode == ChunkMode::BundlerRuntime {
         collect_bundler_module_slots(
-            compiled_file_names,
-            workspace_dir,
-            package_aliases,
-            resolved_module_ids,
-            file_metadata,
+            index.compiled_file_names,
+            index.workspace_dir,
+            index.package_aliases,
+            index.resolved_module_ids,
+            index.file_metadata,
         )?
     } else {
         HashMap::new()
     };
-    let bundler_runtime_logical_ids = bundler_module_slots
+    let logical_ids = bundler_module_slots
         .keys()
         .map(|module_id| (to_bundler_runtime_module_id(module_id), module_id.clone()))
         .collect::<HashMap<_, _>>();
-    Ok((bundler_module_slots, bundler_runtime_logical_ids))
+    Ok(BundlerRuntimeMaps {
+        module_slots: bundler_module_slots,
+        logical_ids,
+    })
 }
 
 pub(crate) fn maybe_build_hoist_plan(
-    chunk_mode: ChunkMode,
-    compiled_file_names: &[String],
-    workspace_dir: &Path,
-    package_aliases: &[PackageAliasInput],
-    resolved_module_ids: &HashMap<String, String>,
+    index: &CompiledModuleIndex<'_>,
     chunk_graph: &[TranspileChunkInput],
     lazy_imports: &[LazyImportInput],
-    file_metadata: &HashMap<String, ClosureFileMetadata>,
 ) -> std::result::Result<Option<HoistPlan>, String> {
-    if chunk_mode == ChunkMode::BundlerRuntime {
+    if index.chunk_mode == ChunkMode::BundlerRuntime {
         build_hoist_plan(
-            compiled_file_names,
-            workspace_dir,
-            package_aliases,
-            resolved_module_ids,
+            index.compiled_file_names,
+            index.workspace_dir,
+            index.package_aliases,
+            index.resolved_module_ids,
             chunk_graph,
             lazy_imports,
-            file_metadata,
+            index.file_metadata,
         )
     } else {
         Ok(None)

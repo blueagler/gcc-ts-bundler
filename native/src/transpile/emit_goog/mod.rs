@@ -16,8 +16,4 @@ pub(crate) use self::external::{
     allocate_boundary_identity_tokens, boundary_identity, quote_external_boundary_accesses,
     ExternalBoundaryEvidence,
 };
-pub(crate) use self::live_bindings::live_export_bindings;
 pub(crate) use self::print::emit_goog_module_program;
-
-#[cfg(test)]
-pub(crate) use self::print::emit_goog_module_text;

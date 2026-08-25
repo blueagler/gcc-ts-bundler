@@ -6,9 +6,7 @@ mod render;
 pub(super) use edits::{
     apply_source_edits, insert_before_class_member, insert_before_object_member,
 };
-pub(super) use render::{
-    render_declarations, render_template, RenderedDeclaration, RenderedTemplate,
-};
+pub(super) use render::{render_declarations, render_template};
 
 use crate::closure_metadata::{
     ClosureAnnotationTarget, ClosureFileMetadata, TypeMetadataCounts, TypeMetadataDiagnostic,

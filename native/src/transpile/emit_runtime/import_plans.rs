@@ -19,6 +19,7 @@ pub(crate) struct RuntimeImportBindings {
     pub(crate) slot_aliases: HashMap<String, ImportBindingSlotAlias>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_runtime_import_bindings<'a>(
     allocator: &'a Allocator,
     file_path: &Path,

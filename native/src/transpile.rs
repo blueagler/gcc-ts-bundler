@@ -37,25 +37,19 @@ pub(crate) use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 pub(crate) use std::path::{Path, PathBuf};
 
 pub(crate) use crate::closure_metadata::{
-    closure_metadata_key, ClosureEnumDeclaration, ClosureFileMetadata, EmittedTypeMetadata,
+    closure_metadata_key, ClosureEnumDeclaration, ClosureFileMetadata,
 };
-pub(crate) use crate::pathing::{normalize_path, to_bundler_runtime_module_id, to_goog_module_id};
+pub(crate) use crate::pathing::{to_bundler_runtime_module_id, to_goog_module_id};
 
 pub(crate) use self::cjs_opacity::*;
 pub(crate) use self::compat::*;
 pub(crate) use self::context::*;
-pub(crate) use self::emit::*;
 
 pub(crate) use self::externs::*;
 pub(crate) use self::hoist::*;
 pub(crate) use self::imports_exports::*;
 pub(crate) use self::js_compat::*;
-pub(crate) use self::transpile_plan::{
-    append_extension, collect_assigner_pin_module_ids, collect_decorated_metadata_property_names,
-    collect_pair_array_property_names, collect_prelowered_decorator_property_names,
-    group_lazy_imports_by_file, parse_oxc_program, plan_shared_helper_placement,
-    transform_source_file,
-};
+pub(crate) use self::transpile_plan::parse_oxc_program;
 pub(crate) use self::transpile_run::resolve_relative_module;
 pub use napi::*;
 

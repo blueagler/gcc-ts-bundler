@@ -1,5 +1,5 @@
 import path from "node:path";
-import ts from "@typescript/typescript6";
+import type ts from "@typescript/typescript6";
 
 import { renderRuntimeBridge, stableExternNamespace } from "../module-identity";
 import { emitSymbol, reserveSymbol } from "../typed-render-emit";

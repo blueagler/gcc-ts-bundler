@@ -1,4 +1,4 @@
-import ts from "@typescript/typescript6";
+import type ts from "@typescript/typescript6";
 
 import { stableExternNamespace, stableSymbolName } from "../module-identity";
 import type { ModuleSeed, RenderState } from "../typed-render";

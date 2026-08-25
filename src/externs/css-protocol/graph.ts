@@ -38,6 +38,8 @@ export class ModuleGraph implements TaintHost {
   private readonly sinkSites: string[] = [];
   private readonly slotCallSites = new Map<string, CallSite[]>();
   private readonly slotEdges = new Map<string, Set<string>>();
+  private steps = 0;
+  private readonly visited = new Set<string>();
   /**
    * Higher-order flow. antd hands `useCacheToken` the function that computes
    * its token, and hands `genStyleHooks` the function that prepares each
@@ -48,47 +50,9 @@ export class ModuleGraph implements TaintHost {
    * resolution, not taint, so it costs no hop.
    */
   readonly slotFunctions = new Map<string, Set<FunctionLikeNode>>();
-  private steps = 0;
-  private readonly visited = new Set<string>();
 
   constructor(modules: Map<string, ModuleInfo>) {
     this.modules = modules;
-  }
-
-  addKeyName(name: string | null) {
-    if (name && isRuntimeExternPropertyName(name)) this.keyNames.add(name);
-  }
-
-  // ---------------------------------------------------------------- resolution
-
-  /**
-   * The arguments one parameter slot receives at one call. A rest parameter
-   * (`(...sources) => …`) collects every argument from its index on, so it
-   * takes all of them — `shallowMergeOneLevel(a, b, { … })` puts the literal
-   * in slot 2 of the same rest binding.
-   */
-  argumentsForSlot(
-    fn: FunctionLikeNode,
-    index: number,
-    call: ts.CallExpression,
-  ): ts.Expression[] {
-    const args = call.arguments;
-    const rest = !!fn.parameters[index]?.dotDotDotToken;
-    const selected = rest ? args.slice(index) : [args[index]];
-    return selected
-      .filter((argument): argument is ts.Expression => !!argument)
-      .map((argument) =>
-        ts.isSpreadElement(argument) ? argument.expression : argument,
-      );
-  }
-
-  /** Direct calls, plus calls made through a parameter this function reaches. */
-  callSitesOf(fn: FunctionLikeNode): CallSite[] {
-    const sites = [...(this.callSites.get(fn) ?? [])];
-    for (const slot of this.functionSlots.get(fn) ?? []) {
-      sites.push(...(this.slotCallSites.get(slot) ?? []));
-    }
-    return sites;
   }
 
   /** Relay closure: a function passed on through another parameter. */
@@ -115,6 +79,8 @@ export class ModuleGraph implements TaintHost {
       for (const fn of functions) addToSet(this.functionSlots, fn, slot);
     }
   }
+
+  // ---------------------------------------------------------------- resolution
 
   private collectSinks(module: ModuleInfo) {
     const visit = (node: ts.Node) => {
@@ -152,27 +118,6 @@ export class ModuleGraph implements TaintHost {
       ts.forEachChild(node, visit);
     };
     visit(module.sourceFile);
-  }
-
-  enter(node: ts.Node, tag: string, frame: Frame | null) {
-    this.steps += 1;
-    if (this.steps > MAX_TAINT_STEPS) return false;
-    const context = frame ? `${frame.module.filePath}:${frame.call.pos}` : "";
-    const key = `${tag}\u0000${context}\u0000${node.getSourceFile().fileName}\u0000${node.pos}\u0000${node.end}`;
-    if (this.visited.has(key)) return false;
-    this.visited.add(key);
-    return true;
-  }
-
-  enterCall(
-    fn: FunctionLikeNode,
-    call: ts.CallExpression,
-    module: ModuleInfo,
-    frame: Frame | null,
-  ): Frame | null {
-    const depth = (frame?.depth ?? 0) + 1;
-    if (depth > MAX_FRAME_DEPTH) return null;
-    return { call, callee: fn, depth, module, parent: frame };
   }
 
   /**
@@ -258,8 +203,6 @@ export class ModuleGraph implements TaintHost {
     if (source) addToSet(this.slotEdges, source, slot);
   }
 
-  // ------------------------------------------------------------------ indexing
-
   private indexCall(
     module: ModuleInfo,
     call: ts.CallExpression,
@@ -302,53 +245,6 @@ export class ModuleGraph implements TaintHost {
     }
   }
 
-  /** The declaration a name refers to at one use site, by lexical scope. */
-  lookup(
-    module: ModuleInfo,
-    useSite: ts.Node,
-    name: string,
-  ): Resolution | null {
-    for (let node: ts.Node | undefined = useSite; node; node = node.parent) {
-      if (!isFunctionLikeNode(node) && !ts.isSourceFile(node)) continue;
-      const symbol = this.scopeTable(module, node).get(name);
-      if (!symbol) continue;
-      const specifier = symbol.specifier;
-      const exportName = symbol.exportName;
-      if (specifier === null || exportName === null) return { module, symbol };
-      const target = this.resolveSpecifier(module, specifier);
-      if (!target) return null;
-      const exported = this.resolveExport(target, exportName);
-      return exported
-        ? this.lookup(
-            exported.module,
-            exported.module.sourceFile,
-            exported.name,
-          )
-        : null;
-    }
-    return null;
-  }
-
-  moduleOf(node: ts.Node) {
-    return this.modules.get(node.getSourceFile().fileName) ?? null;
-  }
-
-  parameterSlotOf(
-    module: ModuleInfo,
-    useSite: ts.Node,
-    name: string,
-  ): string | null {
-    // Destructured from a checked resolution rather than through `?.`: an
-    // optional chain leaves the union optional, and Closure's property
-    // disambiguation then invalidates the reads below and renames the
-    // declaration without them.
-    const resolved = this.lookup(module, useSite, name);
-    const fn = resolved ? resolved.symbol.fn : null;
-    return fn && resolved
-      ? parameterSlotKey(fn, resolved.symbol.index, resolved.symbol.property)
-      : null;
-  }
-
   private resolveCallableSymbol(
     resolved: Resolution,
     depth: number,
@@ -370,31 +266,6 @@ export class ModuleGraph implements TaintHost {
       );
     }
     return null;
-  }
-
-  // --------------------------------------------------------------------- sinks
-
-  /**
-   * The function a callee identifier runs. Follows imports and re-exports, plus
-   * one deliberately narrow extra edge: a binding destructured from a call to a
-   * resolvable factory (`const { genStyleHooks } = genStyleUtils({…})`), which
-   * is how antd hands every component the hook that carries its tokens.
-   */
-  resolveCallee(
-    module: ModuleInfo,
-    callee: ts.Identifier,
-    depth = 0,
-  ): FunctionRef | null {
-    const cached = this.calleeCache.get(callee);
-    if (cached !== undefined) return cached;
-    if (depth > 6) return null;
-    this.calleeCache.set(callee, null);
-    const resolved = this.lookup(module, callee, callee.text);
-    const result = resolved
-      ? this.resolveCallableSymbol(resolved, depth)
-      : null;
-    this.calleeCache.set(callee, result);
-    return result;
   }
 
   private resolveExport(
@@ -420,8 +291,6 @@ export class ModuleGraph implements TaintHost {
     }
     return null;
   }
-
-  // --------------------------------------------------------------------- taint
 
   private resolveFactoryProperty(
     module: ModuleInfo,
@@ -457,6 +326,8 @@ export class ModuleGraph implements TaintHost {
     return null;
   }
 
+  // ------------------------------------------------------------------ indexing
+
   private resolveSpecifier(fromModule: ModuleInfo, specifier: string) {
     if (!specifier.startsWith(".")) return null;
     const base = path.resolve(path.dirname(fromModule.filePath), specifier);
@@ -478,6 +349,135 @@ export class ModuleGraph implements TaintHost {
     const table = buildScopeTable(scope);
     module.scopes.set(scope, table);
     return table;
+  }
+
+  addKeyName(name: string | null) {
+    if (name && isRuntimeExternPropertyName(name)) this.keyNames.add(name);
+  }
+
+  /**
+   * The arguments one parameter slot receives at one call. A rest parameter
+   * (`(...sources) => …`) collects every argument from its index on, so it
+   * takes all of them — `shallowMergeOneLevel(a, b, { … })` puts the literal
+   * in slot 2 of the same rest binding.
+   */
+  argumentsForSlot(
+    fn: FunctionLikeNode,
+    index: number,
+    call: ts.CallExpression,
+  ): ts.Expression[] {
+    const args = call.arguments;
+    const rest = !!fn.parameters[index]?.dotDotDotToken;
+    const selected = rest ? args.slice(index) : [args[index]];
+    return selected
+      .filter((argument): argument is ts.Expression => !!argument)
+      .map((argument) =>
+        ts.isSpreadElement(argument) ? argument.expression : argument,
+      );
+  }
+
+  /** Direct calls, plus calls made through a parameter this function reaches. */
+  callSitesOf(fn: FunctionLikeNode): CallSite[] {
+    const sites = [...(this.callSites.get(fn) ?? [])];
+    for (const slot of this.functionSlots.get(fn) ?? []) {
+      sites.push(...(this.slotCallSites.get(slot) ?? []));
+    }
+    return sites;
+  }
+
+  enter(node: ts.Node, tag: string, frame: Frame | null) {
+    this.steps += 1;
+    if (this.steps > MAX_TAINT_STEPS) return false;
+    const context = frame ? `${frame.module.filePath}:${frame.call.pos}` : "";
+    const key = `${tag}\u0000${context}\u0000${node.getSourceFile().fileName}\u0000${node.pos}\u0000${node.end}`;
+    if (this.visited.has(key)) return false;
+    this.visited.add(key);
+    return true;
+  }
+
+  // --------------------------------------------------------------------- sinks
+
+  enterCall(
+    fn: FunctionLikeNode,
+    call: ts.CallExpression,
+    module: ModuleInfo,
+    frame: Frame | null,
+  ): Frame | null {
+    const depth = (frame?.depth ?? 0) + 1;
+    if (depth > MAX_FRAME_DEPTH) return null;
+    return { call, callee: fn, depth, module, parent: frame };
+  }
+
+  /** The declaration a name refers to at one use site, by lexical scope. */
+  lookup(
+    module: ModuleInfo,
+    useSite: ts.Node,
+    name: string,
+  ): Resolution | null {
+    for (let node: ts.Node | undefined = useSite; node; node = node.parent) {
+      if (!isFunctionLikeNode(node) && !ts.isSourceFile(node)) continue;
+      const symbol = this.scopeTable(module, node).get(name);
+      if (!symbol) continue;
+      const specifier = symbol.specifier;
+      const exportName = symbol.exportName;
+      if (specifier === null || exportName === null) return { module, symbol };
+      const target = this.resolveSpecifier(module, specifier);
+      if (!target) return null;
+      const exported = this.resolveExport(target, exportName);
+      return exported
+        ? this.lookup(
+            exported.module,
+            exported.module.sourceFile,
+            exported.name,
+          )
+        : null;
+    }
+    return null;
+  }
+
+  // --------------------------------------------------------------------- taint
+
+  moduleOf(node: ts.Node) {
+    return this.modules.get(node.getSourceFile().fileName) ?? null;
+  }
+
+  parameterSlotOf(
+    module: ModuleInfo,
+    useSite: ts.Node,
+    name: string,
+  ): string | null {
+    // Destructured from a checked resolution rather than through `?.`: an
+    // optional chain leaves the union optional, and Closure's property
+    // disambiguation then invalidates the reads below and renames the
+    // declaration without them.
+    const resolved = this.lookup(module, useSite, name);
+    const fn = resolved ? resolved.symbol.fn : null;
+    return fn && resolved
+      ? parameterSlotKey(fn, resolved.symbol.index, resolved.symbol.property)
+      : null;
+  }
+
+  /**
+   * The function a callee identifier runs. Follows imports and re-exports, plus
+   * one deliberately narrow extra edge: a binding destructured from a call to a
+   * resolvable factory (`const { genStyleHooks } = genStyleUtils({…})`), which
+   * is how antd hands every component the hook that carries its tokens.
+   */
+  resolveCallee(
+    module: ModuleInfo,
+    callee: ts.Identifier,
+    depth = 0,
+  ): FunctionRef | null {
+    const cached = this.calleeCache.get(callee);
+    if (cached !== undefined) return cached;
+    if (depth > 6) return null;
+    this.calleeCache.set(callee, null);
+    const resolved = this.lookup(module, callee, callee.text);
+    const result = resolved
+      ? this.resolveCallableSymbol(resolved, depth)
+      : null;
+    this.calleeCache.set(callee, result);
+    return result;
   }
 
   run(): { keyNames: Set<string>; sinkSites: string[] } {

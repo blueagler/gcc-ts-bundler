@@ -7,15 +7,13 @@ use oxc_allocator::{Allocator, Vec as ArenaVec};
 use oxc_ast::ast::*;
 use oxc_ast_visit::VisitMut;
 
-use super::super::super::emit::EmittedProgram;
+use super::super::super::emit::{render_closure_enum, EmittedProgram};
 use super::super::super::fresh::FreshNameAllocator;
 use super::super::super::hoist::scan_namespace_usage;
 use super::super::super::identity::ModuleIdentity;
 use super::super::super::nocollapse::NocollapseAssignments;
 use super::super::super::type_metadata_oxc::{runtime_type_names_from_program, BoundTypeMetadata};
-use super::super::super::{
-    apply_js_compat_text_fixes, render_closure_enum, to_goog_module_id, TranspileContext,
-};
+use super::super::super::{apply_js_compat_text_fixes, to_goog_module_id, TranspileContext};
 use super::super::external::{quote_external_boundary_accesses, ExternalBoundaryEvidence};
 use super::super::live_bindings::{
     collect_live_imported_binding_ids, live_export_bindings, render_live_export_accessors,

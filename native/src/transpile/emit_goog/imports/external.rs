@@ -2,10 +2,11 @@
 
 use oxc_ast::ast::*;
 
+use super::super::super::emit::PreservedImportPlan;
 use super::super::super::fresh::FreshNameAllocator;
 use super::super::super::hoist::NamespaceUsage;
 use super::super::super::identity::ModuleIdentity;
-use super::super::super::{is_valid_js_identifier, PreservedImportPlan, TranspileContext};
+use super::super::super::{is_valid_js_identifier, TranspileContext};
 use super::module_export_name;
 
 pub(crate) struct ExternalImportPlan {

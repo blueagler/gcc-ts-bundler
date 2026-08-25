@@ -6,8 +6,8 @@ use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
 
-use super::emit::EmittedProgram;
-use super::{emit_module_program_oxc, ClosureFileMetadata, TranspileContext};
+use super::emit::{emit_module_program_oxc, EmittedProgram};
+use super::{ClosureFileMetadata, TranspileContext};
 
 mod parse;
 mod rewrite;

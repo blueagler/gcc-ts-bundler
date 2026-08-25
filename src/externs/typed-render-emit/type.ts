@@ -6,7 +6,7 @@ import { reserveSymbol } from "./reserve";
 import { diagnostic } from "../typed-render/shared";
 import type { ModuleSeed, RenderState } from "../typed-render";
 
-const BUILTINS: Record<string, string> = {
+const BUILTINS = {
   Array: "Array",
   Date: "Date",
   Error: "Error",
@@ -22,7 +22,14 @@ const BUILTINS: Record<string, string> = {
   Set: "Set",
   WeakMap: "WeakMap",
   WeakSet: "WeakSet",
-};
+} as const;
+
+function builtinTypeName(name: string) {
+  for (const [key, value] of Object.entries(BUILTINS)) {
+    if (key === name) return value;
+  }
+  return undefined;
+}
 const MAX_DEPTH = 24;
 const MAX_PROPERTIES = 48;
 const MAX_UNION = 16;
@@ -173,7 +180,7 @@ export function renderType(
     state.checker,
   );
   if (symbol && symbol.getName() !== "__type") {
-    const builtin = BUILTINS[symbol.getName()];
+    const builtin = builtinTypeName(symbol.getName());
     const args = isTypeReference(type)
       ? state.checker.getTypeArguments(type)
       : (type.aliasTypeArguments ?? []);
