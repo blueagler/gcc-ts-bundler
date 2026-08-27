@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
 
@@ -69,9 +70,16 @@ function deltaPct(baseline: number, output: number) {
 function toReportModuleId(moduleId: string, projectRoot: string) {
   const stripped = stripQuery(moduleId);
   const relative = path.relative(projectRoot, stripped);
-  return relative.startsWith("..") || path.isAbsolute(relative)
-    ? stripped
-    : relative.replace(/\\/gu, "/");
+  if (!relative.startsWith("..") && !path.isAbsolute(relative)) {
+    return relative.replace(/\\/gu, "/");
+  }
+  // Outside the project root (e.g. extern files in the shared build cache):
+  // anchor to the home directory so reports do not embed machine-specific
+  // absolute prefixes.
+  const home = os.homedir();
+  return stripped.startsWith(`${home}${path.sep}`)
+    ? `~/${path.relative(home, stripped).replace(/\\/gu, "/")}`
+    : stripped;
 }
 
 function collectDeadModules(input: {

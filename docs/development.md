@@ -19,15 +19,15 @@ bun test ./test
 ```
 
 `bun run verify:package` performs a clean JavaScript/declaration build, packs the npm archive, verifies every `exports`, `types`, and `bin` target, type-checks a NodeNext consumer, and smoke-imports the packed package with Node and Bun.
-`bun run verify:selfbuild` checks the self-hosted package fixpoint. The bootstrap JavaScript build emits declarations once. Later self-build stages copy those declarations instead of running the declaration bundler again. The script still compares stage 1 and stage 2 for byte identity.
+`bun run verify:selfbuild` runs the two-stage self-build (`GCC_SELFBUILD_STAGES=2`) and checks the self-hosted package fixpoint. The bootstrap JavaScript build emits declarations once. Later self-build stages copy those declarations instead of running the declaration bundler again. The script compares stage 1 and stage 2 for byte identity. `prepublishOnly` runs this after `verify:package`.
 
-`bun run build` runs `scripts/build-self.mjs`: it builds the host native addon, then the bootstrap JavaScript bundle, then compiles the bundler with itself twice, checks that stage 1 and stage 2 are byte-identical, and publishes stage 1 into `dist/` and `bin/`. The native build also creates a platform package under `npm/`.
+`bun run build` runs `scripts/build-self.mjs`: it builds the host native addon, then the bootstrap JavaScript bundle, then compiles the bundler with itself once (stage 1) and publishes that into `dist/` and `bin/`. The native build also creates a platform package under `npm/`. The two-stage byte-identity proof lives in `bun run verify:selfbuild` and in prepublish/CI, not in the default build.
 
 `bun run build:js` runs that same self-build script, so both commands replace `dist/` and `bin/` with the Closure-compiled artifact. `bun run build:js:bootstrap` (`node ./scripts/build-js.mjs`) is the only command that produces the plain bootstrap bundle.
 
 ### Build cost and the inner-loop lane
 
-A full `bun run build` is measured at 139s wall. Where it goes:
+A two-stage `bun run verify:selfbuild` (`GCC_SELFBUILD_STAGES=2`) is measured at 139s wall. Where it goes:
 
 | Phase | Time | Share |
 | --- | --- | --- |
@@ -35,26 +35,25 @@ A full `bun run build` is measured at 139s wall. Where it goes:
 | `closure:compile` stage 2 | 44.9s | 32% |
 | declaration bundle, native emit, resolve, publish | ~42s | 31% |
 
-So about 70% of the build is inside the Closure compiler, and stage 2 exists
-only to prove the fixpoint. The published bytes are always stage 1, so skipping
-stage 2 does not change the artifact — it only drops the byte-identity proof:
+So about 70% of that lane is inside the Closure compiler, and stage 2 exists
+only to prove the fixpoint. The published bytes are always stage 1, so the
+default `bun run build` / `build:js` is now stage-1 only — it roughly halves
+the lane by dropping the second ADVANCED compile. The two-stage byte-identity
+proof lives in `bun run verify:selfbuild` and in prepublish/CI.
 
 ```sh
 bun run build:fast
 ```
 
-This lane skips stage 2 and reuses the persistent cache. Measured against the
-139s full build: **89s cold, 28s warm**. Its output was verified byte-identical
-to the full two-stage cache-off build — 20 files, zero differing hashes — so the
-only thing given up is the fixpoint proof itself, which the lane warns about on
-every run. Use it while editing; use `bun run build` before releasing, and in
-CI.
+This lane also skips stage 2 (now the default) and additionally reuses the persistent cache. Measured against the
+139s two-stage build: **89s cold, 28s warm**. Its output was verified byte-identical
+to the full two-stage cache-off build — 20 files, zero differing hashes. Use it while editing; run `bun run verify:selfbuild` before releasing, and in CI.
 
 Two environment variables control the lanes directly:
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `GCC_SELFBUILD_STAGES` | `2` | `1` builds stage 1 only and skips the fixpoint comparison |
+| `GCC_SELFBUILD_STAGES` | `1` | `2` runs the second compile and the byte-identity fixpoint comparison |
 | `GCC_SELFBUILD_CACHE` | `off` | `persistent` reuses the project cache |
 
 `GCC_BUILD_TIMINGS=1` prints the `[gcc-ts-bundler timing]` lines the table above
@@ -175,7 +174,7 @@ bun run test
 This runs:
 
 1. Rust unit tests;
-2. `bun run build` — the native addon, the bootstrap JavaScript bundle, and the self-build fixpoint published into `dist/` and `bin/`;
+2. `bun run build` — the native addon, the bootstrap JavaScript bundle, and the stage-1 self-build published into `dist/` and `bin/`;
 3. the Bun integration test suite.
 
 Use the fast inner-loop lane while editing:

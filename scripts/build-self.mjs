@@ -130,17 +130,19 @@ const runtimeAssetExtensions = new Set([
 ]);
 
 /**
- * Inner-loop knobs. Both default to the release behaviour, so `bun run build`
- * is unchanged: two stages, no cache reuse.
+ * Build-lane knobs. The default build is stage-1 only: the published bytes
+ * are always stage-1, so a single self-compile already produces the exact
+ * artifact shape that ships.
  *
- * The published bytes are always stage-1. Stage-2 exists only to prove the
+ * Stage-2 exists only to prove the
  * compiler is a fixpoint (compiling the compiler with itself twice yields
  * byte-identical output), and it costs a second full ADVANCED compile —
- * measured 155s of a 363s build, 43% of wall time. An edit-test loop does not
- * need that proof on every iteration; CI and releases do.
+ * measured 155s of a 363s build, 43% of wall time. That proof runs in the
+ * verify lane (`bun run verify:selfbuild`, which sets GCC_SELFBUILD_STAGES=2)
+ * and before publishing (prepublishOnly), not on every build.
  */
 const fixpointStages = (() => {
-  const requested = process.env.GCC_SELFBUILD_STAGES ?? "2";
+  const requested = process.env.GCC_SELFBUILD_STAGES ?? "1";
   if (requested !== "1" && requested !== "2") {
     throw new Error(
       `GCC_SELFBUILD_STAGES must be "1" or "2", received ${JSON.stringify(requested)}`,
@@ -172,8 +174,8 @@ try {
     await assertTreesEqual(stage1, stage2);
     console.log("Self-build fixpoint: stage-1 and stage-2 are byte-identical.");
   } else {
-    console.warn(
-      "Self-build fixpoint SKIPPED (GCC_SELFBUILD_STAGES=1). stage-1 is published unverified; do not cut a release from this artifact.",
+    console.log(
+      "Self-build: stage-1 only — the published artifact shape. The byte-identity fixpoint is verified by `bun run verify:selfbuild` and prepublish, not on every build.",
     );
   }
   await printSizeReport(stage0, stage1);
