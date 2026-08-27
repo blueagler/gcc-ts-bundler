@@ -25,6 +25,7 @@ pub(crate) enum RuntimeTypeName {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TypeMetadataDelivery {
     pub(crate) counts: TypeMetadataCounts,
+    pub(crate) declarations: Vec<String>,
     pub(crate) diagnostics: Vec<TypeMetadataDiagnostic>,
 }
 

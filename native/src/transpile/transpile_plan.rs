@@ -7,12 +7,11 @@ use crate::commonjs::analyze_commonjs_source;
 use crate::pathing::to_goog_module_id;
 
 use super::commonjs;
-use super::compat_properties;
 use super::context::TranspileContext;
 use super::emit::EmittedProgram;
 use super::emit_helpers;
 use super::js_compat::should_normalize_commonjs;
-use super::napi::{ClassMapCallInput, LazyImportInput, TranspileChunkInput};
+use super::napi::{LazyImportInput, TranspileChunkInput};
 use super::transform::transform_source_with_oxc;
 
 /// Places each pooled lowering-helper declaration exactly once.
@@ -88,27 +87,6 @@ pub(crate) fn collect_decorated_metadata_property_names(
         let allocator = oxc_allocator::Allocator::default();
         let path = PathBuf::from(metadata_key).with_extension("js");
         let program = parse_oxc_program(&allocator, &path, lowered_source)?;
-        names.extend(emit_helpers::collect_decorator_metadata_property_names(
-            &program,
-        ));
-    }
-    Ok(names)
-}
-
-/// Property keys embedded as string literals by decorator lowering that ran
-/// before this stage (Vite/esbuild/oxc lower `experimentalDecorators` during
-/// their own transform, so no decorator metadata reaches us).
-pub(crate) fn collect_prelowered_decorator_property_names(
-    file_names: &[String],
-) -> std::result::Result<BTreeSet<String>, String> {
-    let mut names = BTreeSet::new();
-    for file_name in file_names {
-        if file_name.ends_with(".d.ts") {
-            continue;
-        }
-        let source = fs::read_to_string(file_name).map_err(|error| error.to_string())?;
-        let allocator = oxc_allocator::Allocator::default();
-        let program = parse_oxc_program(&allocator, Path::new(file_name), &source)?;
         names.extend(emit_helpers::collect_decorator_metadata_property_names(
             &program,
         ));
@@ -220,33 +198,4 @@ pub(super) fn transform_source_file(
         file_metadata.as_ref(),
         None,
     )
-}
-
-/// Property names pinned by pair-array `classMapCalls` rules across all inputs.
-pub(crate) fn collect_pair_array_property_names(
-    file_names: &[String],
-    class_map_calls: &[ClassMapCallInput],
-) -> std::result::Result<BTreeSet<String>, String> {
-    if class_map_calls
-        .iter()
-        .all(|call| call.keySource.as_deref() != Some("pairArray"))
-    {
-        return Ok(BTreeSet::new());
-    }
-    let mut names = BTreeSet::new();
-    for file_name in file_names {
-        if file_name.ends_with(".d.ts") {
-            continue;
-        }
-        let source = fs::read_to_string(file_name).map_err(|error| error.to_string())?;
-        let allocator = oxc_allocator::Allocator::default();
-        let program = parse_oxc_program(&allocator, Path::new(file_name), &source)?;
-        names.extend(
-            compat_properties::collect_pair_array_class_map_property_names(
-                &program,
-                class_map_calls,
-            )?,
-        );
-    }
-    Ok(names)
 }

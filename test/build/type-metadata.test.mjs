@@ -339,7 +339,10 @@ test.serial(
     expect(first.extractedCounts).toEqual({
       annotationCount: 1,
       enumDeclarationCount: 1,
-      memberAnnotationCount: 0,
+      // `Item.prototype.name` carries `@type {string}` inside the synthesized
+      // `@record`. Record properties are member-level type facts exactly like
+      // class fields, so they count as member annotations.
+      memberAnnotationCount: 1,
       typeDeclarationCount: 1,
       unresolvedTypeReferenceCount: 0,
     });

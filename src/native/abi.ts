@@ -210,8 +210,13 @@ export interface NativeTypeMetadataDiagnostic {
   target?: string;
 }
 
+export interface NativeEmittedTypeDeclaration {
+  template: string;
+}
+
 export interface NativeEmittedTypeMetadata {
   counts: NativeTypeMetadataCounts;
+  declarations: NativeEmittedTypeDeclaration[];
   diagnostics: NativeTypeMetadataDiagnostic[];
   emittedFile: string;
 }

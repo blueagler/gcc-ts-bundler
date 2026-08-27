@@ -9,12 +9,14 @@ import {
   readdir,
   rm,
   symlink,
+  writeFile,
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { gzip } from "node:zlib";
+import ts from "@typescript/typescript6";
 
 const gzipAsync = promisify(gzip);
 const root = path.resolve(
@@ -36,6 +38,54 @@ const runtimeExternals = [
   "vite",
 ];
 const preservedModules = ["src/native/load.ts"];
+/**
+ * Declaration sources whose property names must survive ADVANCED property
+ * renaming in the self-build.
+ *
+ * Objects handed over by the napi addon, and objects revived from the
+ * type-metadata sidecar JSON, keep their original property names at runtime.
+ * The self-compiled bundler reads them through renamed accessors, so any
+ * boundary property that is not pinned reads back `undefined`. Writing a
+ * boundary object as an explicit literal only keeps the write and the read
+ * consistent with each other; it does not pin the JSON/napi spelling.
+ *
+ * `roots: "all"` takes every type the file declares. An array names the entry
+ * types; same-file references from those entries are followed. Types in a
+ * listed file that the boundary does not reach are left unpinned.
+ */
+const boundaryDeclarationSources = [
+  { path: "src/native/abi.ts", roots: "all" },
+  {
+    path: "src/build/types.ts",
+    roots: ["BuildTypeMetadataSidecar", "PreservedImport"],
+  },
+  {
+    path: "src/build/transpile/type-metadata/types.ts",
+    roots: [
+      "ClosureAnnotation",
+      "ClosureEnumDeclaration",
+      "ClosureTypeDeclaration",
+      "ClosureTypeMetadataFile",
+      "ClosureTypeReference",
+      "ClosureTypeSymbol",
+      "TypeMetadataCounts",
+      "TypeMetadataDiagnostic",
+    ],
+  },
+];
+/**
+ * Boundary reads that already shipped broken: the published self-build threw
+ * `Cannot read properties of undefined (reading 'annotationCount')` because
+ * `sidecar.extractedCounts` had been renamed away. Fail the self-build rather
+ * than publish that artifact again.
+ */
+const requiredBoundaryNames = [
+  "annotationCount",
+  "counts",
+  "extractedCounts",
+  "files",
+  "typeMetadata",
+];
 const libraryEntries = Object.entries(packageManifest.exports).map(
   ([specifier, conditions]) => {
     const outputPath = conditions.default;
@@ -79,6 +129,35 @@ const runtimeAssetExtensions = new Set([
   ".wasm",
 ]);
 
+/**
+ * Inner-loop knobs. Both default to the release behaviour, so `bun run build`
+ * is unchanged: two stages, no cache reuse.
+ *
+ * The published bytes are always stage-1. Stage-2 exists only to prove the
+ * compiler is a fixpoint (compiling the compiler with itself twice yields
+ * byte-identical output), and it costs a second full ADVANCED compile —
+ * measured 155s of a 363s build, 43% of wall time. An edit-test loop does not
+ * need that proof on every iteration; CI and releases do.
+ */
+const fixpointStages = (() => {
+  const requested = process.env.GCC_SELFBUILD_STAGES ?? "2";
+  if (requested !== "1" && requested !== "2") {
+    throw new Error(
+      `GCC_SELFBUILD_STAGES must be "1" or "2", received ${JSON.stringify(requested)}`,
+    );
+  }
+  return Number(requested);
+})();
+const selfBuildCacheMode = (() => {
+  const requested = process.env.GCC_SELFBUILD_CACHE ?? "off";
+  if (requested !== "off" && requested !== "persistent") {
+    throw new Error(
+      `GCC_SELFBUILD_CACHE must be "off" or "persistent", received ${JSON.stringify(requested)}`,
+    );
+  }
+  return requested;
+})();
+
 try {
   await runCommand(process.execPath, ["./scripts/build-native.mjs"], { cwd: root });
   await runCommand(process.execPath, ["./scripts/build-js.mjs"], { cwd: root });
@@ -87,11 +166,16 @@ try {
 
   const stage1 = path.join(temporaryRoot, "stage-1");
   await buildStage(path.join(root, "dist/index.mjs"), stage1, "stage-1");
-  const stage2 = path.join(temporaryRoot, "stage-2");
-  await buildStage(path.join(stage1, "dist/index.mjs"), stage2, "stage-2");
-
-  await assertTreesEqual(stage1, stage2);
-  console.log("Self-build fixpoint: stage-1 and stage-2 are byte-identical.");
+  if (fixpointStages === 2) {
+    const stage2 = path.join(temporaryRoot, "stage-2");
+    await buildStage(path.join(stage1, "dist/index.mjs"), stage2, "stage-2");
+    await assertTreesEqual(stage1, stage2);
+    console.log("Self-build fixpoint: stage-1 and stage-2 are byte-identical.");
+  } else {
+    console.warn(
+      "Self-build fixpoint SKIPPED (GCC_SELFBUILD_STAGES=1). stage-1 is published unverified; do not cut a release from this artifact.",
+    );
+  }
   await printSizeReport(stage0, stage1);
   await publishStage(stage1);
 } finally {
@@ -105,6 +189,11 @@ async function buildStage(compilerPath, stageRoot, label) {
     `${pathToFileURL(compilerPath).href}?selfbuild=${encodeURIComponent(label)}`
   );
   const typedExternPath = path.join(stageRoot, "public-api.typed.externs.js");
+  const boundaryExternPath = path.join(
+    stageRoot,
+    "native-boundary.externs.js",
+  );
+  await generateBoundaryExterns(boundaryExternPath);
   const externResult = await compiler.generateExterns({
     modules: publicSpecifiers.map((specifier) => ({
       exports: "all",
@@ -119,6 +208,7 @@ async function buildStage(compilerPath, stageRoot, label) {
   assertCompletePublicExterns(externResult);
 
   await runCompilerBuild(compiler.build, {
+    boundaryExternPath,
     entries: packageEntries(stageRoot),
     outDir: path.join(stageRoot, "dist"),
     typedExternPath,
@@ -128,13 +218,14 @@ async function buildStage(compilerPath, stageRoot, label) {
   await assertCliShebang(path.join(stageRoot, cliOutputRelative));
 }
 
-async function runCompilerBuild(build, { entries, outDir, typedExternPath }) {
+async function runCompilerBuild(build, { boundaryExternPath, entries, outDir, typedExternPath }) {
   const result = await build({
-    cache: { mode: "off" },
+    cache: { mode: selfBuildCacheMode },
     chunks: { mode: "off", outputType: "esm" },
     compilationLevel: "ADVANCED",
     diagnostics: { preflight: "errors-only", verbose: true },
     entries,
+    externs: [boundaryExternPath],
     externals: runtimeExternals,
     languageOut: "ECMASCRIPT_NEXT",
     outDir,
@@ -152,6 +243,233 @@ async function runCompilerBuild(build, { entries, outDir, typedExternPath }) {
         .join("\n")}`,
     );
   }
+}
+
+async function generateBoundaryExterns(outputPath) {
+  const names = await collectBoundaryPropertyNames();
+  for (const required of requiredBoundaryNames) {
+    if (!names.has(required)) {
+      throw new Error(
+        `Native boundary extern generation missed required property ${JSON.stringify(required)}`,
+      );
+    }
+  }
+  const declarations = [...names]
+    .sort((left, right) => left.localeCompare(right))
+    .map((name) =>
+      /^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(name)
+        ? `Object.prototype.${name};`
+        : `Object.prototype[${JSON.stringify(name)}];`,
+    );
+  await writeFile(
+    outputPath,
+    [
+      "/** @externs */",
+      "",
+      "/**",
+      " * Generated from native ABI and type-metadata sidecar declarations.",
+      " * Napi results and JSON-revived sidecars keep original property names;",
+      " * ADVANCED renaming of the matching accessors would read undefined.",
+      " */",
+      ...declarations,
+      "",
+    ].join("\n"),
+  );
+}
+
+async function collectBoundaryPropertyNames() {
+  const names = new Set();
+  for (const source of boundaryDeclarationSources) {
+    const sourceFile = await readBoundarySourceFile(source.path);
+    const fileTypes = indexBoundaryFileTypes(sourceFile);
+    const { enqueueTypeName, queue } = createBoundaryTypeQueue(fileTypes, source);
+    const walk = { enqueueTypeName, names };
+    while (queue.length > 0) {
+      collectBoundaryDeclaration(fileTypes.get(queue.shift()), walk);
+    }
+  }
+  return names;
+}
+
+async function readBoundarySourceFile(relativePath) {
+  const filePath = path.join(root, relativePath);
+  return ts.createSourceFile(
+    filePath,
+    await readFile(filePath, "utf8"),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+}
+
+function indexBoundaryFileTypes(sourceFile) {
+  const fileTypes = new Map();
+  for (const statement of sourceFile.statements) {
+    if (
+      ts.isInterfaceDeclaration(statement) ||
+      ts.isTypeAliasDeclaration(statement)
+    ) {
+      fileTypes.set(statement.name.text, statement);
+    }
+  }
+  return fileTypes;
+}
+
+function createBoundaryTypeQueue(fileTypes, source) {
+  const queued = new Set();
+  const queue = [];
+  const roots = source.roots === "all" ? [...fileTypes.keys()] : source.roots;
+  for (const typeName of roots) {
+    if (!fileTypes.has(typeName)) {
+      throw new Error(
+        `Native boundary extern generation expected ${source.path} to declare ${typeName}`,
+      );
+    }
+    queued.add(typeName);
+    queue.push(typeName);
+  }
+  const enqueueTypeName = (typeName) => {
+    if (fileTypes.has(typeName) && !queued.has(typeName)) {
+      queued.add(typeName);
+      queue.push(typeName);
+    }
+  };
+  return { enqueueTypeName, queue };
+}
+
+function collectBoundaryDeclaration(declaration, walk) {
+  if (ts.isInterfaceDeclaration(declaration)) {
+    collectBoundaryMembers(declaration.members, walk);
+    walkBoundaryHeritageTypes(declaration, walk);
+    return;
+  }
+  if (ts.isTypeAliasDeclaration(declaration)) {
+    walkBoundaryType(declaration.type, walk);
+  }
+}
+
+function walkBoundaryHeritageTypes(declaration, walk) {
+  for (const clause of declaration.heritageClauses ?? []) {
+    walkBoundaryTypeList(clause.types, walk);
+  }
+}
+
+function collectBoundaryMembers(members, walk) {
+  for (const member of members) {
+    collectBoundaryMember(member, walk);
+  }
+}
+
+function collectBoundaryMember(member, walk) {
+  if (ts.isIndexSignatureDeclaration(member)) {
+    if (member.type) walkBoundaryType(member.type, walk);
+    return;
+  }
+  if (!ts.isPropertySignature(member) && !ts.isMethodSignature(member)) return;
+  const name = boundaryMemberName(member.name);
+  if (name) walk.names.add(name);
+  if (member.type) walkBoundaryType(member.type, walk);
+  if (ts.isMethodSignature(member)) {
+    walkBoundaryParameterTypes(member.parameters, walk);
+  }
+}
+
+function walkBoundaryParameterTypes(parameters, walk) {
+  for (const parameter of parameters) {
+    if (parameter.type) walkBoundaryType(parameter.type, walk);
+  }
+}
+
+function walkBoundaryType(node, walk) {
+  if (!node) return;
+  if (ts.isTypeReferenceNode(node)) {
+    walkBoundaryTypeReference(node, walk);
+    return;
+  }
+  if (ts.isExpressionWithTypeArguments(node)) {
+    walkBoundaryHeritageType(node, walk);
+    return;
+  }
+  if (ts.isTypeLiteralNode(node)) {
+    collectBoundaryMembers(node.members, walk);
+    return;
+  }
+  if (ts.isUnionTypeNode(node) || ts.isIntersectionTypeNode(node)) {
+    walkBoundaryTypeList(node.types, walk);
+    return;
+  }
+  if (ts.isArrayTypeNode(node)) {
+    walkBoundaryType(node.elementType, walk);
+    return;
+  }
+  if (
+    ts.isParenthesizedTypeNode(node) ||
+    ts.isTypeOperatorNode(node) ||
+    ts.isRestTypeNode(node)
+  ) {
+    walkBoundaryType(node.type, walk);
+    return;
+  }
+  if (ts.isFunctionTypeNode(node) || ts.isConstructorTypeNode(node)) {
+    walkBoundaryFunctionType(node, walk);
+    return;
+  }
+  if (ts.isTupleTypeNode(node)) {
+    walkBoundaryTypeList(node.elements, walk);
+    return;
+  }
+  if (ts.isIndexedAccessTypeNode(node)) {
+    walkBoundaryIndexedAccess(node, walk);
+  }
+}
+
+function walkBoundaryTypeReference(node, walk) {
+  const typeName = boundaryEntityName(node.typeName);
+  if (typeName) walk.enqueueTypeName(typeName);
+  walkBoundaryTypeList(node.typeArguments ?? [], walk);
+}
+
+function walkBoundaryHeritageType(node, walk) {
+  if (ts.isIdentifier(node.expression)) {
+    walk.enqueueTypeName(node.expression.text);
+  }
+  walkBoundaryTypeList(node.typeArguments ?? [], walk);
+}
+
+function walkBoundaryFunctionType(node, walk) {
+  walkBoundaryParameterTypes(node.parameters, walk);
+  walkBoundaryType(node.type, walk);
+}
+
+function walkBoundaryIndexedAccess(node, walk) {
+  walkBoundaryType(node.objectType, walk);
+  walkBoundaryType(node.indexType, walk);
+}
+
+function walkBoundaryTypeList(nodes, walk) {
+  for (const node of nodes) {
+    walkBoundaryType(node, walk);
+  }
+}
+
+function boundaryMemberName(name) {
+  if (!name) return null;
+  if (
+    ts.isIdentifier(name) ||
+    ts.isStringLiteral(name) ||
+    ts.isNumericLiteral(name)
+  ) {
+    return name.text;
+  }
+  if (!ts.isComputedPropertyName(name)) return null;
+  if (!ts.isStringLiteralLike(name.expression)) return null;
+  return name.expression.text;
+}
+
+function boundaryEntityName(node) {
+  if (ts.isIdentifier(node)) return node.text;
+  if (ts.isQualifiedName(node)) return node.right.text;
+  return null;
 }
 
 async function assertDeclaredPackageEntrypoints(stageRoot) {

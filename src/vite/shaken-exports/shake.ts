@@ -1,6 +1,7 @@
 import ts from "@typescript/typescript6";
 
-import { applyTextEdits } from "../../shared/text-edits";
+import { applyTextEdits, type TextEdit } from "../../shared/text-edits";
+import { getCapturedSourceFile } from "../capture-analysis";
 
 export function shakeModuleOnce(
   moduleId: string,
@@ -8,72 +9,20 @@ export function shakeModuleOnce(
   demandedNames: ReadonlySet<string>,
   stranded: Set<string>,
 ) {
-  const sourceFile = ts.createSourceFile(
-    moduleId,
-    code,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.JS,
-  );
-  const edits: Array<{ end: number; start: number; text: string }> = [];
+  const sourceFile = getCapturedSourceFile(moduleId, code);
+  const edits: TextEdit[] = [];
   const forwarded = collectForwardedBindings(sourceFile);
   const droppedBindings = new Set<ts.ImportSpecifier | ts.Identifier>();
 
   for (const statement of sourceFile.statements) {
-    if (
-      !ts.isExportDeclaration(statement) ||
-      statement.isTypeOnly ||
-      !statement.exportClause
-    ) {
-      continue;
-    }
-
-    if (ts.isNamespaceExport(statement.exportClause)) {
-      if (
-        statement.moduleSpecifier &&
-        !demandedNames.has(statement.exportClause.name.text)
-      ) {
-        edits.push({
-          end: statement.getEnd(),
-          start: statement.getStart(sourceFile),
-          text: "",
-        });
-      }
-      continue;
-    }
-
-    const elements = statement.exportClause.elements;
-    const kept = elements.filter((element) =>
-      demandedNames.has(element.name.text),
-    );
-    if (kept.length === elements.length) {
-      continue;
-    }
-    // Vite rewrites `export { a } from "m"` into an import plus a local
-    // `export { a }`, so the forwarding shape has to be shaken in both forms.
-    for (const element of elements) {
-      if (kept.includes(element)) {
-        continue;
-      }
-      const localName = (element.propertyName ?? element.name).text;
-      stranded.add(localName);
-      const binding = forwarded.get(localName);
-      if (binding) {
-        droppedBindings.add(binding);
-      }
-    }
-    edits.push(
-      kept.length === 0
-        ? {
-            end: statement.getEnd(),
-            start: statement.getStart(sourceFile),
-            text: "",
-          }
-        : {
-            end: statement.exportClause.getEnd(),
-            start: statement.exportClause.getStart(sourceFile),
-            text: `{ ${kept.map((element) => element.getText(sourceFile)).join(", ")} }`,
-          },
+    shakeExportStatement(
+      sourceFile,
+      statement,
+      demandedNames,
+      forwarded,
+      stranded,
+      droppedBindings,
+      edits,
     );
   }
 
@@ -85,6 +34,132 @@ export function shakeModuleOnce(
   edits.push(...dropImportBindings(sourceFile, droppedBindings));
   edits.push(...dropUnreadFunctions(sourceFile, stranded, demandedNames));
   return edits.length === 0 ? code : applyTextEdits(code, edits);
+}
+
+/** Statements other than a value export clause are left exactly as written. */
+function shakeExportStatement(
+  sourceFile: ts.SourceFile,
+  statement: ts.Statement,
+  demandedNames: ReadonlySet<string>,
+  forwarded: ReadonlyMap<string, ts.ImportSpecifier | ts.Identifier>,
+  stranded: Set<string>,
+  droppedBindings: Set<ts.ImportSpecifier | ts.Identifier>,
+  edits: TextEdit[],
+) {
+  if (
+    !ts.isExportDeclaration(statement) ||
+    statement.isTypeOnly ||
+    !statement.exportClause
+  ) {
+    return;
+  }
+  const exportClause = statement.exportClause;
+  if (ts.isNamespaceExport(exportClause)) {
+    shakeNamespaceReexport(
+      sourceFile,
+      statement,
+      exportClause,
+      demandedNames,
+      edits,
+    );
+    return;
+  }
+  shakeNamedExports(
+    sourceFile,
+    statement,
+    exportClause,
+    demandedNames,
+    forwarded,
+    stranded,
+    droppedBindings,
+    edits,
+  );
+}
+
+/**
+ * `export * as ns from "m"` binds one name from another module, so an undemanded
+ * one takes the whole statement with it. A local namespace export has no module
+ * specifier and nothing to forward, so it stays.
+ */
+function shakeNamespaceReexport(
+  sourceFile: ts.SourceFile,
+  statement: ts.ExportDeclaration,
+  exportClause: ts.NamespaceExport,
+  demandedNames: ReadonlySet<string>,
+  edits: TextEdit[],
+) {
+  if (!statement.moduleSpecifier) {
+    return;
+  }
+  if (demandedNames.has(exportClause.name.text)) {
+    return;
+  }
+  edits.push({
+    end: statement.getEnd(),
+    start: statement.getStart(sourceFile),
+    text: "",
+  });
+}
+
+/**
+ * One edit per export clause: the whole statement once nothing is demanded, the
+ * rewritten clause otherwise.
+ */
+function shakeNamedExports(
+  sourceFile: ts.SourceFile,
+  statement: ts.ExportDeclaration,
+  exportClause: ts.NamedExports,
+  demandedNames: ReadonlySet<string>,
+  forwarded: ReadonlyMap<string, ts.ImportSpecifier | ts.Identifier>,
+  stranded: Set<string>,
+  droppedBindings: Set<ts.ImportSpecifier | ts.Identifier>,
+  edits: TextEdit[],
+) {
+  const elements = exportClause.elements;
+  const kept = elements.filter((element) =>
+    demandedNames.has(element.name.text),
+  );
+  if (kept.length === elements.length) {
+    return;
+  }
+  strandDroppedExports(elements, kept, forwarded, stranded, droppedBindings);
+  if (kept.length === 0) {
+    edits.push({
+      end: statement.getEnd(),
+      start: statement.getStart(sourceFile),
+      text: "",
+    });
+    return;
+  }
+  edits.push({
+    end: exportClause.getEnd(),
+    start: exportClause.getStart(sourceFile),
+    text: `{ ${kept.map((element) => element.getText(sourceFile)).join(", ")} }`,
+  });
+}
+
+/**
+ * Vite rewrites `export { a } from "m"` into an import plus a local
+ * `export { a }`, so the forwarding shape has to be shaken in both forms.
+ */
+function strandDroppedExports(
+  elements: readonly ts.ExportSpecifier[],
+  kept: readonly ts.ExportSpecifier[],
+  forwarded: ReadonlyMap<string, ts.ImportSpecifier | ts.Identifier>,
+  stranded: Set<string>,
+  droppedBindings: Set<ts.ImportSpecifier | ts.Identifier>,
+) {
+  for (const element of elements) {
+    if (kept.includes(element)) {
+      continue;
+    }
+    const localName = (element.propertyName ?? element.name).text;
+    stranded.add(localName);
+    const binding = forwarded.get(localName);
+    if (binding) {
+      droppedBindings.add(binding);
+    }
+  }
 }
 
 /**
@@ -232,6 +307,24 @@ function dropImportBindings(
   sourceFile: ts.SourceFile,
   bindings: ReadonlySet<ts.ImportSpecifier | ts.Identifier>,
 ) {
+  const edits: TextEdit[] = [];
+  for (const [declaration, dropped] of groupBindingsByDeclaration(bindings)) {
+    const clause = declaration.importClause;
+    if (!clause) {
+      continue;
+    }
+    edits.push(rewriteImportClause(sourceFile, declaration, clause, dropped));
+  }
+  return edits;
+}
+
+/**
+ * Dropped bindings keyed by the import declaration they belong to, first
+ * occurrence first, so the edits keep the order the bindings were dropped in.
+ */
+function groupBindingsByDeclaration(
+  bindings: ReadonlySet<ts.ImportSpecifier | ts.Identifier>,
+) {
   const byDeclaration = new Map<
     ts.ImportDeclaration,
     Set<ts.ImportSpecifier | ts.Identifier>
@@ -250,40 +343,54 @@ function dropImportBindings(
     }
     byDeclaration.set(declaration, new Set([binding]));
   }
+  return byDeclaration;
+}
 
-  const edits: Array<{ end: number; start: number; text: string }> = [];
-  for (const [declaration, dropped] of byDeclaration) {
-    const clause = declaration.importClause;
-    if (!clause) {
-      continue;
-    }
-    const namedBindings = clause.namedBindings;
-    const keptNames =
-      namedBindings && ts.isNamedImports(namedBindings)
-        ? namedBindings.elements.filter((element) => !dropped.has(element))
-        : [];
-    const keptDefault =
-      clause.name && !dropped.has(clause.name) ? clause.name : null;
-    if (!keptDefault && keptNames.length === 0) {
-      edits.push({
-        end: declaration.getEnd(),
-        start: declaration.getStart(sourceFile),
-        text: "",
-      });
-      continue;
-    }
-    edits.push({
-      end: clause.getEnd(),
-      start: clause.getStart(sourceFile),
-      text: [
-        ...(keptDefault ? [keptDefault.getText(sourceFile)] : []),
-        ...(keptNames.length > 0
-          ? [
-              `{ ${keptNames.map((element) => element.getText(sourceFile)).join(", ")} }`,
-            ]
-          : []),
-      ].join(", "),
-    });
+/**
+ * The clause narrowed to the bindings that survive, or the whole declaration
+ * removed once it binds nothing a reader still needs.
+ */
+function rewriteImportClause(
+  sourceFile: ts.SourceFile,
+  declaration: ts.ImportDeclaration,
+  clause: ts.ImportClause,
+  dropped: ReadonlySet<ts.ImportSpecifier | ts.Identifier>,
+): TextEdit {
+  const keptNames = keptNamedImports(clause, dropped);
+  const keptDefault =
+    clause.name && !dropped.has(clause.name) ? clause.name : null;
+  if (!keptDefault && keptNames.length === 0) {
+    return {
+      end: declaration.getEnd(),
+      start: declaration.getStart(sourceFile),
+      text: "",
+    };
   }
-  return edits;
+  return {
+    end: clause.getEnd(),
+    start: clause.getStart(sourceFile),
+    text: [
+      ...(keptDefault ? [keptDefault.getText(sourceFile)] : []),
+      ...(keptNames.length > 0
+        ? [
+            `{ ${keptNames.map((element) => element.getText(sourceFile)).join(", ")} }`,
+          ]
+        : []),
+    ].join(", "),
+  };
+}
+
+/**
+ * Surviving named specifiers in their written order. A namespace clause binds
+ * no specifiers, so it never contributes any.
+ */
+function keptNamedImports(
+  clause: ts.ImportClause,
+  dropped: ReadonlySet<ts.ImportSpecifier | ts.Identifier>,
+): readonly ts.ImportSpecifier[] {
+  const namedBindings = clause.namedBindings;
+  if (!namedBindings || !ts.isNamedImports(namedBindings)) {
+    return [];
+  }
+  return namedBindings.elements.filter((element) => !dropped.has(element));
 }

@@ -1,10 +1,9 @@
 import fs from "node:fs/promises";
 
-import { finalizeJavaScriptOutputs } from "../../../build/closure/final-minify";
 import { parseGccRuntimeManifest } from "../../../build/closure/runtime-manifest";
 import type { OutputBundle, PluginContext } from "../../internal-types";
 import { preserveCompiledChunkIdentities } from "../../naming";
-import { logOutputStats, rewritePreservedImportSpecifiers } from "../../output";
+import { logOutputStats } from "../../output";
 import type { ViteTimingTotals } from "../../plugin-graph";
 import type { CompiledViteGraph } from "../compile";
 import { measureAsync } from "../measure";
@@ -31,13 +30,6 @@ export async function finalizeCompiledEmit(
   finalizedBaseOutput: { emittedOutputFiles: string[] },
 ) {
   const { compiled } = input;
-  await rewritePreservedImportSpecifiers({
-    outDir: compiled.compiledCoreOutputs.finalOutDir,
-    outputFiles: finalizedBaseOutput.emittedOutputFiles,
-  });
-  await finalizeJavaScriptOutputs({
-    outputFiles: finalizedBaseOutput.emittedOutputFiles,
-  });
   const emittedOutputFiles = filterInternalOutputs(
     finalizedBaseOutput.emittedOutputFiles,
     compiled,
@@ -68,4 +60,5 @@ export async function finalizeCompiledEmit(
     finalOutDir: compiled.compiledCoreOutputs.finalOutDir,
     finalScriptFileName: identityOutputs.baseScriptFileName,
   });
+  return { finalOutputFiles: identityOutputs.finalOutputFiles };
 }

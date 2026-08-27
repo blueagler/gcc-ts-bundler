@@ -25,9 +25,10 @@ export function analysisFromSidecar(
     extractedCounts: sidecar.extractedCounts,
     files: sidecar.files.map((file) =>
       toNativeTypeMetadataFile({
-        // Spelled out rather than rest-spread: these keys reach the native addon,
-        // and only a literal written against the boundary type keeps its property
-        // names through the self-build's renaming.
+        // Spelled out rather than rest-spread: these keys reach the native addon.
+        // A literal keeps the write and the matching read consistent with each
+        // other; the JSON/napi spellings are pinned for the self-build by
+        // scripts/build-self.mjs (native-boundary.externs.js).
         ambientGlobals: file.ambientGlobals,
         annotations: file.annotations,
         declarations: file.declarations,
@@ -152,9 +153,10 @@ function createSimpleDiagnostic(messageText: string): ts.Diagnostic {
 export function toNativeTypeMetadataFile(
   file: ClosureTypeMetadataFile,
 ): ClosureTypeMetadataFile {
-  // Spelled out rather than rest-spread: these keys reach the native addon,
-  // and only a literal written against the boundary type keeps its property
-  // names through the self-build's renaming.
+  // Spelled out rather than rest-spread: these keys reach the native addon.
+  // A literal keeps the write and the matching read consistent with each
+  // other; the JSON/napi spellings are pinned for the self-build by
+  // scripts/build-self.mjs (native-boundary.externs.js).
   return {
     ambientGlobals: file.ambientGlobals,
     annotations: file.annotations,

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import { spawnSync } from "node:child_process";
 import {
   chmod,
@@ -16,6 +17,28 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const requiredBunVersion = "1.3.14";
+// In-repo trust anchor for every Bun archive this script is allowed to provision.
+// The release's own SHASUMS256.txt travels with the archive it claims to
+// authenticate over the same channel at the same moment, so it can only ever be
+// a secondary cross-check -- never the trust decision.
+// Provenance for bun-v1.3.14: each archive was downloaded and hashed locally,
+// then matched against both the release SHASUMS256.txt and the GitHub REST API
+// server-side asset digest metadata. All three agreed.
+// Bumping requiredBunVersion REQUIRES replacing every digest below.
+const pinnedBunArchiveDigests = {
+  "bun-darwin-aarch64.zip":
+    "d8b96221828ad6f97ac7ac0ab7e95872341af763001e8803e8267652c2652620",
+  "bun-darwin-x64.zip":
+    "4183df3374623e5bab315c547cfa0974533cd457d86b73b639f7a87974cd6633",
+  "bun-linux-aarch64.zip":
+    "a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b",
+  "bun-linux-x64.zip":
+    "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f",
+  "bun-windows-aarch64.zip":
+    "89841f5a57f2348b67ec0839b718f4bf4ea7d07c371c9ba4b77b6c790f918953",
+  "bun-windows-x64.zip":
+    "0a0620930b6675d7ba440e81f4e0e00d3cfbe096c4b140d3fff02205e9e18922",
+};
 const bun = process.env.GCC_BUN_BIN ?? (await provisionReleasedBun());
 const examples = [
   "jquery-vite-official",
@@ -25,6 +48,14 @@ const examples = [
   "vue-vapor-vite-official",
 ];
 const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "gcc-example-dists-"));
+// The product thesis is authored-dominant wins ("Lit is the canary. The
+// library is the prize."). These floors are kill criteria: committed plugin
+// output must beat the committed stock Vite output (dist-pure/) by at least
+// this much JavaScript gzip. App-shaped examples are reported, not gated.
+const exampleGzipFloorPct = {
+  "jquery-vite-official": 10,
+  "lit-vite-official": 8,
+};
 
 try {
   const version = run(bun, ["--version"], root, { capture: true }).trim();
@@ -47,7 +78,6 @@ try {
     await cp(source, fixture, {
       filter(sourcePath) {
         return ![
-          ".gcc-ts-bundler-vite",
           "dist",
           "dist-pure",
           "node_modules",
@@ -68,12 +98,14 @@ try {
     }
     console.log(`Verified ${example} fresh dist byte-for-byte.`);
   }
+  await assertExampleSizeFloors();
 } finally {
   await rm(temporaryRoot, { force: true, recursive: true });
 }
 
 async function provisionReleasedBun() {
   const archiveName = bunArchiveName();
+  const pinnedHash = pinnedArchiveDigest(archiveName);
   const cacheRoot = path.join(
     process.env.GCC_TOOL_CACHE_DIR ??
       process.env.XDG_CACHE_HOME ??
@@ -85,47 +117,56 @@ async function provisionReleasedBun() {
   const binaryName = process.platform === "win32" ? "bun.exe" : "bun";
   const extractedDir = path.join(cacheRoot, archiveName.replace(/\.zip$/u, ""));
   const binaryPath = path.join(extractedDir, binaryName);
-  if (releasedBunMatches(binaryPath)) {
-    return binaryPath;
-  }
-
   await mkdir(cacheRoot, { recursive: true });
   const releaseRoot = `https://github.com/oven-sh/bun/releases/download/bun-v${requiredBunVersion}`;
-  const sumsPath = path.join(cacheRoot, "SHASUMS256.txt");
   const archivePath = path.join(cacheRoot, archiveName);
-  const sums = await download(`${releaseRoot}/SHASUMS256.txt`, sumsPath);
-  const expectedHash = parseExpectedHash(sums, archiveName);
+
   let archive = await readFile(archivePath).catch(() => null);
-  if (!archive || sha256(archive) !== expectedHash) {
+  if (!archive || sha256(archive) !== pinnedHash) {
+    if (archive) {
+      await rm(archivePath, { force: true });
+    }
     archive = await download(`${releaseRoot}/${archiveName}`, archivePath);
-  }
-  const actualHash = sha256(archive);
-  if (actualHash !== expectedHash) {
-    throw new Error(
-      `Bun ${requiredBunVersion} archive checksum mismatch for ${archiveName}: expected ${expectedHash}, received ${actualHash}`,
+    const downloadedHash = sha256(archive);
+    if (downloadedHash !== pinnedHash) {
+      await rm(archivePath, { force: true });
+      throw new Error(
+        `Bun ${requiredBunVersion} archive checksum mismatch for ${archiveName}: expected ${pinnedHash}, received ${downloadedHash}`,
+      );
+    }
+    await crossCheckPublishedSums(
+      releaseRoot,
+      path.join(cacheRoot, "SHASUMS256.txt"),
+      archiveName,
+      pinnedHash,
     );
   }
 
-  await rm(extractedDir, { force: true, recursive: true });
-  if (process.platform === "win32") {
-    run(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-Command",
-        `Expand-Archive -LiteralPath '${archivePath.replaceAll("'", "''")}' -DestinationPath '${cacheRoot.replaceAll("'", "''")}' -Force`,
-      ],
-      root,
-    );
-  } else {
-    run("unzip", ["-q", archivePath, "-d", cacheRoot], root);
+  const extractRoot = await mkdtemp(path.join(os.tmpdir(), "gcc-bun-extract-"));
+  try {
+    if (process.platform === "win32") {
+      run(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-Command",
+          `Expand-Archive -LiteralPath '${archivePath.replaceAll("'", "''")}' -DestinationPath '${extractRoot.replaceAll("'", "''")}' -Force`,
+        ],
+        root,
+      );
+    } else {
+      run("unzip", ["-q", archivePath, "-d", extractRoot], root);
+    }
+    const stagedDir = path.join(extractRoot, archiveName.replace(/\.zip$/u, ""));
+    await rm(extractedDir, { force: true, recursive: true });
+    await cp(stagedDir, extractedDir, { recursive: true });
+  } finally {
+    await rm(extractRoot, { force: true, recursive: true });
+  }
+  if (process.platform !== "win32") {
     await chmod(binaryPath, 0o755);
   }
-  if (!releasedBunMatches(binaryPath)) {
-    throw new Error(
-      `Provisioned Bun binary does not report required version ${requiredBunVersion}: ${binaryPath}`,
-    );
-  }
+  assertReleasedBunVersion(binaryPath);
   return binaryPath;
 }
 
@@ -152,14 +193,42 @@ function bunArchiveName() {
   return `bun-${platform}-${architecture}.zip`;
 }
 
-function releasedBunMatches(binaryPath) {
-  try {
-    return (
-      run(binaryPath, ["--version"], root, { capture: true }).trim() ===
-      requiredBunVersion
+function pinnedArchiveDigest(archiveName) {
+  const digest = pinnedBunArchiveDigests[archiveName];
+  if (!digest) {
+    throw new Error(
+      `No pinned SHA-256 for Bun ${requiredBunVersion} archive ${archiveName}; add its digest to pinnedBunArchiveDigests`,
     );
+  }
+  return digest;
+}
+
+function assertReleasedBunVersion(binaryPath) {
+  const version = run(binaryPath, ["--version"], root, { capture: true }).trim();
+  if (version !== requiredBunVersion) {
+    throw new Error(
+      `Provisioned Bun binary does not report required version ${requiredBunVersion}: ${binaryPath} reported ${version}`,
+    );
+  }
+}
+
+async function crossCheckPublishedSums(
+  releaseRoot,
+  sumsPath,
+  archiveName,
+  pinnedHash,
+) {
+  let sums;
+  try {
+    sums = await download(`${releaseRoot}/SHASUMS256.txt`, sumsPath);
   } catch {
-    return false;
+    return;
+  }
+  const publishedHash = parseExpectedHash(sums, archiveName);
+  if (publishedHash !== pinnedHash) {
+    throw new Error(
+      `Bun ${requiredBunVersion} published SHASUMS256.txt for ${archiveName} is ${publishedHash}, which disagrees with the in-repo pin ${pinnedHash}`,
+    );
   }
 }
 
@@ -187,6 +256,33 @@ function parseExpectedHash(sums, archiveName) {
 
 function sha256(contents) {
   return createHash("sha256").update(contents).digest("hex");
+}
+async function assertExampleSizeFloors() {
+  for (const example of examples) {
+    const exampleRoot = path.join(root, "examples", example);
+    const plugin = await gzipJsBytes(path.join(exampleRoot, "dist"));
+    const stock = await gzipJsBytes(path.join(exampleRoot, "dist-pure"));
+    const winPct = ((stock - plugin) / stock) * 100;
+    const floor = exampleGzipFloorPct[example];
+    console.log(
+      `${example}: js gzip ${plugin} vs stock ${stock} (win ${winPct.toFixed(1)}%${floor === undefined ? "" : `, floor ${floor}%`})`,
+    );
+    if (floor !== undefined && winPct < floor) {
+      throw new Error(
+        `${example} gzip win ${winPct.toFixed(1)}% fell below the ${floor}% floor; the authored-dominant thesis gate failed`,
+      );
+    }
+  }
+}
+
+async function gzipJsBytes(rootDir) {
+  const files = await listFiles(rootDir);
+  let total = 0;
+  for (const filePath of files) {
+    if (!filePath.endsWith(".js")) continue;
+    total += gzipSync(await readFile(filePath), { level: 9 }).length;
+  }
+  return total;
 }
 
 async function checksums(rootDir) {

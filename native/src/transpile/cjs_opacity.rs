@@ -1,9 +1,11 @@
 use super::*;
+#[cfg(test)]
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{ImportDeclarationSpecifier, Program, Statement};
+#[cfg(test)]
 use oxc_parser::Parser;
+#[cfg(test)]
 use oxc_span::SourceType;
-use std::fs;
 
 /// The one decision shared by the three CommonJS export-ABI emission sites.
 #[derive(Debug, Default)]
@@ -38,35 +40,36 @@ fn package_key(file_path: &Path) -> Option<String> {
     Some(format!("{head}{name}"))
 }
 
-pub(crate) fn collect_opaque_commonjs(
-    file_names: &[String],
+/// Package keys this already-parsed file marks opaque (own CJS surface or a
+/// reflecting import of a CommonJS namespace).
+pub(crate) fn collect_opaque_package_keys_from_program(
+    program: &Program<'_>,
+    file_path: &Path,
     commonjs_specifiers: &HashSet<String>,
     package_aliases: &[PackageAliasInput],
-) -> std::result::Result<OpaqueCommonJs, String> {
+) -> HashSet<String> {
     let mut package_keys = HashSet::new();
-
-    for file_name in file_names {
-        if file_name.ends_with(".d.ts") {
-            continue;
+    if let Some(key) = package_key(file_path) {
+        let analysis = crate::commonjs::analyze_commonjs_program(program);
+        if should_normalize_commonjs(file_path, &analysis) && analysis.exports_are_opaque {
+            package_keys.insert(key);
         }
-        let file_path = PathBuf::from(file_name);
-        let source = fs::read_to_string(&file_path).map_err(|error| error.to_string())?;
-        let allocator = Allocator::default();
-        let program = parse_program(&allocator, &file_path, &source)?;
-        if let Some(key) = package_key(&file_path) {
-            let analysis = crate::commonjs::analyze_commonjs_program(&program);
-            if should_normalize_commonjs(&file_path, &analysis) && analysis.exports_are_opaque {
-                package_keys.insert(key);
-            }
-        }
-        mark_reflecting_imports(
-            &program,
-            commonjs_specifiers,
-            &mut package_keys,
-            package_aliases,
-        );
     }
+    mark_reflecting_imports(
+        program,
+        commonjs_specifiers,
+        &mut package_keys,
+        package_aliases,
+    );
+    package_keys
+}
 
+/// Rebuilds the CommonJS opacity decision from the union of per-file keys.
+pub(crate) fn opaque_commonjs_from_package_keys(
+    package_keys: HashSet<String>,
+    commonjs_specifiers: &HashSet<String>,
+    package_aliases: &[PackageAliasInput],
+) -> OpaqueCommonJs {
     let specifiers = commonjs_specifiers
         .iter()
         .filter(|specifier| {
@@ -76,13 +79,13 @@ pub(crate) fn collect_opaque_commonjs(
         })
         .cloned()
         .collect();
-
-    Ok(OpaqueCommonJs {
+    OpaqueCommonJs {
         package_keys,
         specifiers,
-    })
+    }
 }
 
+#[cfg(test)]
 fn parse_program<'a>(
     allocator: &'a Allocator,
     file_path: &Path,

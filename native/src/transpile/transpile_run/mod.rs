@@ -13,6 +13,7 @@ use super::transpile_write::emit_and_write_transpile_outputs;
 
 mod context;
 mod maps;
+mod prelude;
 mod preserved;
 mod properties;
 

@@ -52,9 +52,6 @@ var NodeListOf;
  */
 var RegExpExecArray;
 
-/** @typedef {!Set} */
-var ReadonlySet;
-
 /** @typedef {function(new:Promise)} */
 var PromiseConstructor;
 

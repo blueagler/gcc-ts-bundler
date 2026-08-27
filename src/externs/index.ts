@@ -1,5 +1,4 @@
 export type {
-  ExternBarrierWarning,
   ExternModuleInput,
   ExternRuntimePlacement,
   ExternTypeDiagnostic,

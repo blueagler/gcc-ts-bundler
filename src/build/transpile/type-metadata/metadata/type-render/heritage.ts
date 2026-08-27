@@ -5,7 +5,7 @@ import {
   unionClosureTypes,
 } from "../../../../../shared/closure-type-strings";
 import type { ClosureDocRenderContext } from "./context";
-import { toClosureType } from "./to-closure";
+import { recurseClosureType as toClosureType } from "./core";
 
 export function getTypedDeclarationClosureType(
   declaration:

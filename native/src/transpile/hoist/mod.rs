@@ -11,7 +11,9 @@ use super::*;
 mod plan;
 mod usage;
 
+#[cfg(test)]
 pub(crate) use plan::build_hoist_plan;
+pub(crate) use plan::{assemble_hoist_plan, scan_hoist_module, ModuleScan};
 pub(crate) use usage::{collect_used_binding_ids, scan_namespace_usage, NamespaceUsage};
 
 #[derive(Clone, Debug)]

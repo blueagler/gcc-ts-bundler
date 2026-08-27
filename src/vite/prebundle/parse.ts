@@ -3,6 +3,7 @@ import path from "node:path";
 
 import ts from "@typescript/typescript6";
 
+import { dynamicImportSpecifier, hasModifier } from "../../shared/typescript";
 import { normalizePath } from "./shared";
 import type {
   ParsedDependencyImport,
@@ -25,6 +26,16 @@ type ParsedStatementTarget =
     }
   | null;
 
+interface ModuleParseCollected {
+  bareImportSpecifiers: Set<string>;
+  dependencyFilePaths: Set<string>;
+  dependencyImports: ParsedDependencyImport[];
+  exportedNames: Set<string>;
+  hasDefaultExport: boolean;
+  hasDefineReferences: boolean;
+  staticAuthoredImports: Set<string>;
+}
+
 /**
  * A cached parser over materialized runtime modules: exports, authored
  * imports, and dependency imports that may become region bundles.
@@ -32,7 +43,7 @@ type ParsedStatementTarget =
 export function createModuleParser(targets: ParseTargets) {
   const parseCache = new Map<string, ParsedMaterializedModule>();
 
-  return async function parseModule(
+  async function parseModule(
     filePath: string,
   ): Promise<ParsedMaterializedModule> {
     const normalizedFilePath = normalizePath(filePath);
@@ -49,129 +60,187 @@ export function createModuleParser(targets: ParseTargets) {
       true,
       ts.ScriptKind.JS,
     );
-    const staticAuthoredImports = new Set<string>();
-    const bareImportSpecifiers = new Set<string>();
-    const dependencyFilePaths = new Set<string>();
-    const dependencyImports: ParsedDependencyImport[] = [];
-    const exportedNames = new Set<string>();
-    let hasDefaultExport = false;
-
-    for (const statement of sourceFile.statements) {
-      hasDefaultExport =
-        collectLocalExportNames(statement, exportedNames) || hasDefaultExport;
-      if (
-        (ts.isImportDeclaration(statement) ||
-          ts.isExportDeclaration(statement)) &&
-        statement.moduleSpecifier &&
-        ts.isStringLiteralLike(statement.moduleSpecifier) &&
-        isBareSpecifier(statement.moduleSpecifier.text)
-      ) {
-        bareImportSpecifiers.add(statement.moduleSpecifier.text);
-      }
-
-      const parsed = parseStatementTarget(
-        statement,
-        normalizedFilePath,
-        targets,
-      );
-      if (!parsed) {
-        continue;
-      }
-      if (parsed.kind === "authored") {
-        staticAuthoredImports.add(parsed.target);
-        continue;
-      }
-      if (parsed.kind === "dependency") {
-        dependencyFilePaths.add(parsed.dependencyImport.targetFilePath);
-        dependencyImports.push(parsed.dependencyImport);
-        continue;
-      }
-      for (const name of parsed.localExportedNames) {
-        exportedNames.add(name);
-      }
-      if (parsed.hasDefaultExport) {
-        hasDefaultExport = true;
-        exportedNames.add("default");
-      }
-      if (parsed.dependencyImport) {
-        dependencyFilePaths.add(parsed.dependencyImport.targetFilePath);
-        dependencyImports.push(parsed.dependencyImport);
-      }
-    }
-
-    let hasDefineReferences = false;
-    const visitDynamicImports = (node: ts.Node) => {
-      const firstArgument = ts.isCallExpression(node)
-        ? node.arguments[0]
-        : undefined;
-      if (
-        (ts.isIdentifier(node) && /^__[A-Z\d_]+__$/u.test(node.text)) ||
-        isProcessNodeEnvAccess(node)
-      ) {
-        hasDefineReferences = true;
-      }
-      if (
-        ts.isCallExpression(node) &&
-        node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-        firstArgument !== undefined &&
-        ts.isStringLiteralLike(firstArgument) &&
-        firstArgument.text.startsWith(".")
-      ) {
-        const targetFilePath = normalizePath(
-          path.resolve(path.dirname(normalizedFilePath), firstArgument.text),
-        );
-        if (
-          targets.moduleFilePaths.has(targetFilePath) &&
-          !targets.authoredFiles.has(targetFilePath)
-        ) {
-          dependencyFilePaths.add(targetFilePath);
-        }
-      } else if (
-        ts.isCallExpression(node) &&
-        firstArgument !== undefined &&
-        ts.isStringLiteralLike(firstArgument) &&
-        (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
-          (ts.isIdentifier(node.expression) &&
-            node.expression.text === "require")) &&
-        isBareSpecifier(firstArgument.text)
-      ) {
-        bareImportSpecifiers.add(firstArgument.text);
-      }
-      ts.forEachChild(node, visitDynamicImports);
+    const collected: ModuleParseCollected = {
+      bareImportSpecifiers: new Set<string>(),
+      dependencyFilePaths: new Set<string>(),
+      dependencyImports: [],
+      exportedNames: new Set<string>(),
+      hasDefaultExport: false,
+      hasDefineReferences: false,
+      staticAuthoredImports: new Set<string>(),
     };
-    visitDynamicImports(sourceFile);
-
-    if (!hasDefaultExport && exportedNames.size === 0) {
+    collectStaticModuleFacts(
+      sourceFile,
+      normalizedFilePath,
+      targets,
+      collected,
+    );
+    visitDynamicImports(sourceFile, normalizedFilePath, targets, collected);
+    if (!collected.hasDefaultExport && collected.exportedNames.size === 0) {
       // A CommonJS-only dependency (jquery's UMD wrapper, any `module.exports`
       // package) has no ESM export syntax to collect, but its ESM view still
       // has a default binding: `module.exports`. Without this, a stock
       // `import $ from "jquery"` renders a region entry with no exports and
       // the bundler-runtime stage has no slot to bind the default to.
-      hasDefaultExport = assignsCommonJsExports(sourceFile);
+      collected.hasDefaultExport = assignsCommonJsExports(sourceFile);
     }
 
-    const parsed = {
-      bareImportSpecifiers: [...bareImportSpecifiers].sort((left, right) =>
-        left.localeCompare(right),
-      ),
-      dependencyFilePaths: [...dependencyFilePaths].sort((left, right) =>
-        left.localeCompare(right),
-      ),
-      dependencyImports,
-      exportedNames: [...exportedNames].sort((left, right) =>
-        left.localeCompare(right),
-      ),
-      hasDefaultExport,
-      hasDefineReferences,
-      isFusedDistribution:
-        (sourceText.match(/(?:^|\n)\s*\/\/\s*#region\b/gu)?.length ?? 0) > 1,
-      staticAuthoredImports: [...staticAuthoredImports].sort((left, right) =>
-        left.localeCompare(right),
-      ),
-    } satisfies ParsedMaterializedModule;
+    const parsed = toParsedMaterializedModule(sourceText, collected);
     parseCache.set(normalizedFilePath, parsed);
     return parsed;
-  };
+  }
+
+  /**
+   * Forget the modules whose text on disk a rewrite pass may have changed.
+   * Every other module keeps its parse, so rewriting a handful of files no
+   * longer costs a re-read and re-parse of the whole materialized graph.
+   */
+  function invalidate(filePaths: Iterable<string>) {
+    for (const filePath of filePaths) {
+      parseCache.delete(normalizePath(filePath));
+    }
+  }
+
+  return { invalidate, parseModule };
+}
+
+function collectStaticModuleFacts(
+  sourceFile: ts.SourceFile,
+  importerFilePath: string,
+  targets: ParseTargets,
+  collected: ModuleParseCollected,
+) {
+  for (const statement of sourceFile.statements) {
+    collected.hasDefaultExport =
+      collectLocalExportNames(statement, collected.exportedNames) ||
+      collected.hasDefaultExport;
+    recordBareModuleSpecifier(statement, collected.bareImportSpecifiers);
+    applyParsedStatementTarget(
+      parseStatementTarget(statement, importerFilePath, targets),
+      collected,
+    );
+  }
+}
+
+function recordBareModuleSpecifier(
+  statement: ts.Statement,
+  bareImportSpecifiers: Set<string>,
+) {
+  if (
+    !(ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) ||
+    !statement.moduleSpecifier ||
+    !ts.isStringLiteralLike(statement.moduleSpecifier) ||
+    !isBareSpecifier(statement.moduleSpecifier.text)
+  ) {
+    return;
+  }
+  bareImportSpecifiers.add(statement.moduleSpecifier.text);
+}
+
+function applyParsedStatementTarget(
+  parsed: ParsedStatementTarget,
+  collected: ModuleParseCollected,
+) {
+  if (!parsed) {
+    return;
+  }
+  if (parsed.kind === "authored") {
+    collected.staticAuthoredImports.add(parsed.target);
+    return;
+  }
+  if (parsed.kind === "dependency") {
+    collected.dependencyFilePaths.add(parsed.dependencyImport.targetFilePath);
+    collected.dependencyImports.push(parsed.dependencyImport);
+    return;
+  }
+  for (const name of parsed.localExportedNames) {
+    collected.exportedNames.add(name);
+  }
+  if (parsed.hasDefaultExport) {
+    collected.hasDefaultExport = true;
+    collected.exportedNames.add("default");
+  }
+  if (parsed.dependencyImport) {
+    collected.dependencyFilePaths.add(parsed.dependencyImport.targetFilePath);
+    collected.dependencyImports.push(parsed.dependencyImport);
+  }
+}
+
+function visitDynamicImports(
+  node: ts.Node,
+  importerFilePath: string,
+  targets: ParseTargets,
+  collected: ModuleParseCollected,
+) {
+  const firstArgument = ts.isCallExpression(node)
+    ? node.arguments[0]
+    : undefined;
+  if (
+    (ts.isIdentifier(node) && /^__[A-Z\d_]+__$/u.test(node.text)) ||
+    isProcessNodeEnvAccess(node)
+  ) {
+    collected.hasDefineReferences = true;
+  }
+  const specifier = dynamicImportSpecifier(node);
+  if (specifier !== null && specifier.startsWith(".")) {
+    recordRelativeDynamicImport(
+      specifier,
+      importerFilePath,
+      targets,
+      collected.dependencyFilePaths,
+    );
+  } else if (
+    ts.isCallExpression(node) &&
+    firstArgument !== undefined &&
+    ts.isStringLiteralLike(firstArgument) &&
+    (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+      (ts.isIdentifier(node.expression) &&
+        node.expression.text === "require")) &&
+    isBareSpecifier(firstArgument.text)
+  ) {
+    collected.bareImportSpecifiers.add(firstArgument.text);
+  }
+  ts.forEachChild(node, (child) => {
+    visitDynamicImports(child, importerFilePath, targets, collected);
+  });
+}
+
+function recordRelativeDynamicImport(
+  specifier: string,
+  importerFilePath: string,
+  targets: ParseTargets,
+  dependencyFilePaths: Set<string>,
+) {
+  const targetFilePath = normalizePath(
+    path.resolve(path.dirname(importerFilePath), specifier),
+  );
+  if (
+    targets.moduleFilePaths.has(targetFilePath) &&
+    !targets.authoredFiles.has(targetFilePath)
+  ) {
+    dependencyFilePaths.add(targetFilePath);
+  }
+}
+
+function toParsedMaterializedModule(
+  sourceText: string,
+  collected: ModuleParseCollected,
+): ParsedMaterializedModule {
+  return {
+    bareImportSpecifiers: localeSorted(collected.bareImportSpecifiers),
+    dependencyFilePaths: localeSorted(collected.dependencyFilePaths),
+    dependencyImports: collected.dependencyImports,
+    exportedNames: localeSorted(collected.exportedNames),
+    hasDefaultExport: collected.hasDefaultExport,
+    hasDefineReferences: collected.hasDefineReferences,
+    isFusedDistribution:
+      (sourceText.match(/(?:^|\n)\s*\/\/\s*#region\b/gu)?.length ?? 0) > 1,
+    staticAuthoredImports: localeSorted(collected.staticAuthoredImports),
+  } satisfies ParsedMaterializedModule;
+}
+
+function localeSorted(values: Iterable<string>): string[] {
+  return [...values].sort((left, right) => left.localeCompare(right));
 }
 
 /** Matches `process.env.NODE_ENV`, the define Vite substitutes at capture. */
@@ -199,54 +268,138 @@ function collectLocalExportNames(
   statement: ts.Statement,
   exportedNames: Set<string>,
 ): boolean {
-  if (ts.isExportAssignment(statement) && !statement.isExportEquals) {
-    exportedNames.add("default");
-    return true;
+  const assignmentDefault = collectExportAssignmentDefault(
+    statement,
+    exportedNames,
+  );
+  if (assignmentDefault !== undefined) {
+    return assignmentDefault;
   }
-  if (
-    (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) &&
-    statement.modifiers?.some(
-      (modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword,
-    ) &&
-    statement.modifiers.some(
-      (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
-    )
-  ) {
-    exportedNames.add("default");
-    return true;
+  const defaultDeclaration = collectDefaultExportedDeclaration(
+    statement,
+    exportedNames,
+  );
+  if (defaultDeclaration !== undefined) {
+    return defaultDeclaration;
   }
-  if (
-    ts.isExportDeclaration(statement) &&
-    !statement.moduleSpecifier &&
-    statement.exportClause &&
-    ts.isNamedExports(statement.exportClause)
-  ) {
-    let hasDefaultExport = false;
-    for (const element of statement.exportClause.elements) {
-      exportedNames.add(element.name.text);
-      hasDefaultExport ||= element.name.text === "default";
-    }
-    return hasDefaultExport;
+  const namedClause = collectNamedExportClauseNames(statement, exportedNames);
+  if (namedClause !== undefined) {
+    return namedClause;
   }
-  if (
-    (ts.isFunctionDeclaration(statement) ||
-      ts.isClassDeclaration(statement) ||
-      ts.isVariableStatement(statement)) &&
-    statement.modifiers?.some(
-      (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
-    )
-  ) {
-    if (ts.isVariableStatement(statement)) {
-      for (const declaration of statement.declarationList.declarations) {
-        if (ts.isIdentifier(declaration.name)) {
-          exportedNames.add(declaration.name.text);
-        }
-      }
-    } else if (statement.name) {
-      exportedNames.add(statement.name.text);
-    }
-  }
+  collectExportedDeclarationNames(statement, exportedNames);
   return false;
+}
+
+/**
+ * `export default <expr>` (not `export =`). Returns undefined when the
+ * statement is a different form so later collectors can still run.
+ */
+function collectExportAssignmentDefault(
+  statement: ts.Statement,
+  exportedNames: Set<string>,
+): boolean | undefined {
+  if (!ts.isExportAssignment(statement) || statement.isExportEquals) {
+    return undefined;
+  }
+  exportedNames.add("default");
+  return true;
+}
+
+/**
+ * `export default function` / `export default class`, including anonymous
+ * ones. Must run before the named-declaration collector so `foo` in
+ * `export default function foo()` is not also recorded as a named export.
+ */
+function collectDefaultExportedDeclaration(
+  statement: ts.Statement,
+  exportedNames: Set<string>,
+): boolean | undefined {
+  if (
+    !(ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement))
+  ) {
+    return undefined;
+  }
+  if (!hasModifier(statement, ts.SyntaxKind.DefaultKeyword)) {
+    return undefined;
+  }
+  if (!hasModifier(statement, ts.SyntaxKind.ExportKeyword)) {
+    return undefined;
+  }
+  exportedNames.add("default");
+  return true;
+}
+
+/**
+ * A local `export { a, b as c, default }`. Returns whether `default` was
+ * among the exported names; undefined when the statement is not this form.
+ */
+function collectNamedExportClauseNames(
+  statement: ts.Statement,
+  exportedNames: Set<string>,
+): boolean | undefined {
+  if (!ts.isExportDeclaration(statement) || statement.moduleSpecifier) {
+    return undefined;
+  }
+  if (!statement.exportClause || !ts.isNamedExports(statement.exportClause)) {
+    return undefined;
+  }
+  let hasDefaultExport = false;
+  for (const element of statement.exportClause.elements) {
+    exportedNames.add(element.name.text);
+    hasDefaultExport ||= element.name.text === "default";
+  }
+  return hasDefaultExport;
+}
+
+/**
+ * `export function` / `export class` / `export const` names. Binding patterns
+ * are skipped, matching the previous collector: only identifier declarators
+ * become export names.
+ */
+function collectExportedDeclarationNames(
+  statement: ts.Statement,
+  exportedNames: Set<string>,
+) {
+  if (!isExportedFunctionClassOrVariable(statement)) {
+    return;
+  }
+  if (ts.isVariableStatement(statement)) {
+    collectExportedVariableIdentifierNames(statement, exportedNames);
+    return;
+  }
+  if (statement.name) {
+    exportedNames.add(statement.name.text);
+  }
+}
+
+function isExportedFunctionClassOrVariable(
+  statement: ts.Statement,
+): statement is
+  | ts.FunctionDeclaration
+  | ts.ClassDeclaration
+  | ts.VariableStatement {
+  if (
+    !(
+      ts.isFunctionDeclaration(statement) ||
+      ts.isClassDeclaration(statement) ||
+      ts.isVariableStatement(statement)
+    )
+  ) {
+    return false;
+  }
+  return hasModifier(statement, ts.SyntaxKind.ExportKeyword);
+}
+
+function collectExportedVariableIdentifierNames(
+  statement: ts.VariableStatement,
+  exportedNames: Set<string>,
+) {
+  for (const declaration of statement.declarationList.declarations) {
+    if (!ts.isIdentifier(declaration.name)) {
+      continue;
+    }
+    exportedNames.add(declaration.name.text);
+  }
 }
 
 function parseStatementTarget(
@@ -285,33 +438,39 @@ function parseDependencyImport(
   targetFilePath: string,
 ): ParsedStatementTarget {
   const importClause = statement.importClause;
-  let hasDefault = false;
-  let hasNamespace = false;
-  const namedExports = new Set<string>();
+  if (!importClause) {
+    return {
+      dependencyImport: {
+        hasDefault: false,
+        hasNamespace: false,
+        isSideEffectOnly: true,
+        namedExports: [],
+        node: statement,
+        targetFilePath,
+      },
+      kind: "dependency",
+    };
+  }
 
-  if (importClause) {
-    if (importClause.name) {
-      hasDefault = true;
-    }
-    if (importClause.namedBindings) {
-      if (ts.isNamespaceImport(importClause.namedBindings)) {
-        hasNamespace = true;
-      } else {
-        for (const element of importClause.namedBindings.elements) {
-          namedExports.add((element.propertyName ?? element.name).text);
-        }
-      }
+  const namedExports = new Set<string>();
+  let hasNamespace = false;
+  if (
+    importClause.namedBindings &&
+    ts.isNamespaceImport(importClause.namedBindings)
+  ) {
+    hasNamespace = true;
+  } else if (importClause.namedBindings) {
+    for (const element of importClause.namedBindings.elements) {
+      namedExports.add((element.propertyName ?? element.name).text);
     }
   }
 
   return {
     dependencyImport: {
-      hasDefault,
+      hasDefault: importClause.name !== undefined,
       hasNamespace,
-      isSideEffectOnly: !importClause,
-      namedExports: [...namedExports].sort((left, right) =>
-        left.localeCompare(right),
-      ),
+      isSideEffectOnly: false,
+      namedExports: localeSorted(namedExports),
       node: statement,
       targetFilePath,
     },
@@ -359,9 +518,7 @@ function parseDependencyReexport(
       hasDefault: false,
       hasNamespace: false,
       isSideEffectOnly: false,
-      namedExports: [...namedExports].sort((left, right) =>
-        left.localeCompare(right),
-      ),
+      namedExports: localeSorted(namedExports),
       node: statement,
       targetFilePath,
     },

@@ -7,52 +7,74 @@ mod slots;
 use super::super::*;
 use super::HoistPlan;
 use exports::{resolve_all_export_bindings, resolve_all_namespace_reexports};
+#[cfg(test)]
 use oxc_allocator::Allocator;
 use oxc_semantic::SemanticBuilder;
-use scan::{
-    collect_state_writing_declarations, scan_commonjs_module, scan_esm_program, ModuleScan,
-};
+use scan::{collect_state_writing_declarations, scan_commonjs_module, scan_esm_program};
 use slots::compute_facade_slots;
+#[cfg(test)]
 use std::fs;
 
-pub(crate) fn build_hoist_plan(
-    file_names: &[String],
+pub(crate) use scan::ModuleScan;
+
+/// Scan one already-parsed module for hoist-plan construction.
+pub(crate) fn scan_hoist_module(
+    program: &oxc_ast::ast::Program<'_>,
+    file_path: &Path,
     workspace_dir: &Path,
-    package_aliases: &[PackageAliasInput],
-    resolved_module_ids: &HashMap<String, String>,
+    metadata: Option<&ClosureFileMetadata>,
+    resolution_context: &TranspileContext,
+) -> std::result::Result<(String, ModuleScan), String> {
+    let module_id = to_goog_module_id(file_path, workspace_dir);
+    let commonjs_analysis = crate::commonjs::analyze_commonjs_program(program);
+    let mut scan = if should_normalize_commonjs(file_path, &commonjs_analysis) {
+        scan_commonjs_module(file_path, &commonjs_analysis, resolution_context)
+    } else {
+        let semantic = SemanticBuilder::new()
+            .with_build_nodes(true)
+            .with_enum_eval(true)
+            .build(program);
+        if !semantic.diagnostics.is_empty() {
+            return Err(semantic
+                .diagnostics
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"));
+        }
+        let live_assigners = collect_state_writing_declarations(&semantic.semantic);
+        let identity =
+            super::super::identity::ModuleIdentity::new(semantic.semantic.into_scoping());
+        let mut scan = scan_esm_program(program, &identity, file_path, resolution_context);
+        scan.local_export_modes =
+            super::super::emit_runtime::collect_local_export_modes(program, &identity);
+        scan.live_assigners = live_assigners;
+        scan
+    };
+    if let Some(metadata) = metadata {
+        scan.own_exports.extend(
+            metadata
+                .enums
+                .iter()
+                .filter(|enum_decl| enum_decl.exported)
+                .map(|enum_decl| {
+                    (
+                        enum_decl.binding_name.clone(),
+                        enum_decl.binding_name.clone(),
+                    )
+                }),
+        );
+    }
+    Ok((module_id, scan))
+}
+
+/// Fold per-file scans into the cross-module hoist plan.
+pub(crate) fn assemble_hoist_plan(
+    scans: HashMap<String, ModuleScan>,
+    workspace_dir: &Path,
     chunk_graph: &[TranspileChunkInput],
     lazy_imports: &[LazyImportInput],
-    file_metadata: &HashMap<String, ClosureFileMetadata>,
-) -> std::result::Result<Option<HoistPlan>, String> {
-    if chunk_graph.is_empty() {
-        return Ok(None);
-    }
-
-    let resolution_context = TranspileContext {
-        bundler_module_slots: HashMap::new(),
-        bundler_runtime_logical_ids: HashMap::new(),
-        chunk_mode: ChunkMode::BundlerRuntime,
-        class_map_calls: Vec::new(),
-        pure_callees: HashSet::new(),
-        commonjs_specifiers: HashSet::new(),
-        opaque_commonjs: Default::default(),
-        boundary_identity_tokens: HashMap::new(),
-        external_specifiers: HashMap::new(),
-        opaque_external_specifiers: HashSet::new(),
-        file_metadata: HashMap::new(),
-        hoist_plan: None,
-        lazy_imports_by_file: HashMap::new(),
-        lazy_target_module_ids: HashSet::new(),
-        package_aliases: package_aliases.to_vec(),
-        preserved_modules: HashMap::new(),
-        resolved_module_ids: resolved_module_ids.clone(),
-        preserved_property_names: HashSet::new(),
-        static_property_names: HashSet::new(),
-        type_metadata_enabled: false,
-        assigner_pin_module_ids: HashSet::new(),
-        workspace_dir: workspace_dir.to_path_buf(),
-    };
-
+) -> HoistPlan {
     let mut module_chunks = HashMap::new();
     let mut module_positions = HashMap::new();
     for (chunk_index, chunk) in chunk_graph.iter().enumerate() {
@@ -63,74 +85,12 @@ pub(crate) fn build_hoist_plan(
         }
     }
     let chunk_dependency_closure = build_chunk_dependency_closure(chunk_graph);
-
-    let mut scans = HashMap::<String, ModuleScan>::new();
+    let sorted_module_ids = scans.keys().cloned().collect::<BTreeSet<_>>();
     let mut hoistable = HashSet::new();
-    let mut sorted_module_ids = BTreeSet::new();
-    for file_name in file_names {
-        if file_name.ends_with(".d.ts") {
-            continue;
-        }
-        let file_path = PathBuf::from(file_name);
-        let module_id = to_goog_module_id(&file_path, workspace_dir);
-        sorted_module_ids.insert(module_id.clone());
-        let metadata = file_metadata.get(&closure_metadata_key(&file_path));
-        let authored_source = fs::read_to_string(&file_path).map_err(|error| error.to_string())?;
-        let source = metadata
-            .and_then(|metadata| metadata.decorated_output_text.as_deref())
-            .unwrap_or(&authored_source);
-        let effective_path =
-            if metadata.is_some_and(|metadata| metadata.decorated_output_text.is_some()) {
-                file_path.with_extension("js")
-            } else {
-                file_path.clone()
-            };
-        let allocator = Allocator::default();
-        let program = super::super::parse_oxc_program(&allocator, &effective_path, source)?;
-        let commonjs_analysis = crate::commonjs::analyze_commonjs_program(&program);
-        let normalize_commonjs = should_normalize_commonjs(&file_path, &commonjs_analysis);
-        let mut scan = if normalize_commonjs {
-            scan_commonjs_module(&file_path, &commonjs_analysis, &resolution_context)
-        } else {
-            let semantic = SemanticBuilder::new()
-                .with_build_nodes(true)
-                .with_enum_eval(true)
-                .build(&program);
-            if !semantic.diagnostics.is_empty() {
-                return Err(semantic
-                    .diagnostics
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("\n"));
-            }
-            let live_assigners = collect_state_writing_declarations(&semantic.semantic);
-            let identity =
-                super::super::identity::ModuleIdentity::new(semantic.semantic.into_scoping());
-            let mut scan = scan_esm_program(&program, &identity, &file_path, &resolution_context);
-            scan.local_export_modes =
-                super::super::emit_runtime::collect_local_export_modes(&program, &identity);
-            scan.live_assigners = live_assigners;
-            scan
-        };
-        if let Some(metadata) = metadata {
-            scan.own_exports.extend(
-                metadata
-                    .enums
-                    .iter()
-                    .filter(|enum_decl| enum_decl.exported)
-                    .map(|enum_decl| {
-                        (
-                            enum_decl.binding_name.clone(),
-                            enum_decl.binding_name.clone(),
-                        )
-                    }),
-            );
-        }
-        if module_chunks.contains_key(&module_id) && !scan.scan_failed {
+    for (module_id, scan) in &scans {
+        if module_chunks.contains_key(module_id) && !scan.scan_failed {
             hoistable.insert(module_id.clone());
         }
-        scans.insert(module_id, scan);
     }
 
     let module_ordinals = sorted_module_ids
@@ -169,11 +129,66 @@ pub(crate) fn build_hoist_plan(
         module_ordinals,
     };
     let facade_slots = compute_facade_slots(&plan_without_facades, &scans, lazy_imports);
-
-    Ok(Some(HoistPlan {
+    HoistPlan {
         facade_slots,
         ..plan_without_facades
-    }))
+    }
+}
+
+/// Whole-graph driver retained for hoist unit tests. Production uses the fused
+/// prelude, which parses once and calls `scan_hoist_module` / `assemble_hoist_plan`.
+#[cfg(test)]
+pub(crate) fn build_hoist_plan(
+    file_names: &[String],
+    workspace_dir: &Path,
+    package_aliases: &[PackageAliasInput],
+    resolved_module_ids: &HashMap<String, String>,
+    chunk_graph: &[TranspileChunkInput],
+    lazy_imports: &[LazyImportInput],
+    file_metadata: &HashMap<String, ClosureFileMetadata>,
+) -> std::result::Result<Option<HoistPlan>, String> {
+    if chunk_graph.is_empty() {
+        return Ok(None);
+    }
+    let resolution_context = super::super::analysis_resolution_context(
+        workspace_dir,
+        package_aliases,
+        resolved_module_ids,
+    );
+    let mut scans = HashMap::<String, ModuleScan>::new();
+    for file_name in file_names {
+        if file_name.ends_with(".d.ts") {
+            continue;
+        }
+        let file_path = PathBuf::from(file_name);
+        let metadata = file_metadata.get(&closure_metadata_key(&file_path));
+        let authored_source = fs::read_to_string(&file_path).map_err(|error| error.to_string())?;
+        let source = metadata
+            .and_then(|metadata| metadata.decorated_output_text.as_deref())
+            .unwrap_or(&authored_source);
+        let effective_path =
+            if metadata.is_some_and(|metadata| metadata.decorated_output_text.is_some()) {
+                file_path.with_extension("js")
+            } else {
+                file_path.clone()
+            };
+        let allocator = Allocator::default();
+        let program = super::super::parse_oxc_program(&allocator, &effective_path, source)?;
+        let (module_id, scan) = scan_hoist_module(
+            &program,
+            &file_path,
+            workspace_dir,
+            metadata,
+            &resolution_context,
+        )?;
+        scans.insert(module_id, scan);
+    }
+    Ok(Some(assemble_hoist_plan(
+        scans,
+        workspace_dir,
+        chunk_graph,
+        lazy_imports,
+    )))
 }
 
 /// Transitive closure of the plan's chunk dependency edges, by chunk index.

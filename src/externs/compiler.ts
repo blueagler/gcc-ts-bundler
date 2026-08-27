@@ -7,4 +7,3 @@ export {
   resolveModuleTypeEntries,
   resolveAnalysisEntryFiles,
 } from "./compiler/index";
-export type { ResolvedModuleTypeEntry } from "./compiler/index";

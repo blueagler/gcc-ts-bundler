@@ -18,6 +18,13 @@ export interface ExternTypeDiagnostic {
 export interface GeneratedExternExport {
   exportName: string;
   qualifiedName: string;
+  /**
+   * How the exported TypeScript symbol should be re-bound at a program
+   * boundary. Derived from the symbol, not from emitted extern text.
+   */
+  kind: "constructor" | "value" | "type";
+  /** Max constructor/call arity when `kind` is `"constructor"`. */
+  parameterCount: number;
 }
 
 export interface GeneratedExternModule {

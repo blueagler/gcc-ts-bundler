@@ -109,14 +109,27 @@ Passing a namespace value to another operation also reifies it when the compiler
 
 ## Build speed
 
-By default, typed ADVANCED jobs use `platformExterns: "minimal"`: a
+By default, ADVANCED jobs use `platformExterns: "minimal"`: a
 dependency-closed slice of the exact typed browser declarations shipped with
-Closure. Untyped jobs, `GCC_DISABLE_TYPE_INFERENCE=1`, archive/index failures,
+Closure. Eligibility does not require type metadata. `GCC_DISABLE_TYPE_INFERENCE=1`, polyfill jobs, archive/index failures,
 and failed custom-environment compiles safely use Closure's full browser
 externs. Set `compiler: { platformExterns: "full" }` to always use the full set.
 
-Warm builds reuse the persistent cache in `~/.cache/gcc-ts-bundler` and skip
+Warm builds reuse the persistent cache (Linux `~/.cache/gcc-ts-bundler`, macOS `~/Library/Caches/gcc-ts-bundler`, Windows `%LOCALAPPDATA%/gcc-ts-bundler`) and skip
 Closure entirely; persist that directory in CI.
+
+Type metadata is a build-speed and diagnostics feature, not a size feature:
+its measured effect on output is ~0.2% of gzip. Its value is letting
+ADVANCED jobs run with type inference against exact typed extern surfaces
+instead of Closure's full untyped browser externs.
+
+Vite type metadata has a process-lifetime memo and an on-disk sidecar. With
+`cache.mode: "persistent"`, the sidecar lives at
+`<cache.dir or platform cache>/<project-hash>/vite-type-metadata`. With
+`cache.mode: "temp"` or `"off"`, it lives at
+`<capture-root>/vite-type-metadata` and disappears with that capture
+workspace. Internal timings report `cache:vite-type-metadata: hit` or
+`cache:vite-type-metadata: miss`.
 
 With the persistent cache, renaming maps from the previous build are fed
 back into Closure (`--property_map_input_file`/`--variable_map_input_file`),
@@ -266,6 +279,12 @@ externs: {
 
 `runtime-aware` is the Vite default when generation is enabled. Package runtime facts are cached separately in persistent cache mode. `boundary-aware` delegates to the root `generateExterns()` API.
 
+Every extern scan awaits the post-prebundle graph. The old concurrent scan
+could observe pre-prebundle text while prebundling rewrote authored and
+direct-dependency modules in place. Because `generated.externs.js` is an input
+to the resolve, native-emit, and Closure cache keys, that race also made a cold
+build and its first rebuild disagree and forced a needless recompile.
+
 Generated Vite externs are rename barriers only because Vite materializes ordinary dependencies into the Closure job. External-runtime typed declarations require a real host loader and compiled bridge, so the plugin rejects attempts to invent that placement. Generate such declarations separately, provide the bridge/`__gccExternalRuntimeLoad` contract yourself, and pass only the declaration artifact through `compiler.typedExterns`.
 
 `appendLines` adds explicit extern statements after generated content. Use it only for contracts that cannot be discovered from declarations, runtime code, or application usage.
@@ -306,7 +325,31 @@ must reach Closure without becoming native rename barriers.
 
 ### Debug options
 
-`debug.dumpCapturedGraphDir` writes the materialized workspace to a stable project-relative directory and clears that directory before each build. Without it, workspaces live under `.gcc-ts-bundler-vite/<build-id>` so identical persistent builds can reuse the same capture root.
+`debug.dumpCapturedGraphDir` writes the materialized workspace to a stable project-relative directory and clears that directory before each build. Without it, persistent `compiler.cache` keeps the workspace under the cache store (`<cache.dir or platform cache>/<project-hash>/vite-capture/<build-id>`). `cache.mode = "temp"` and `"off"` use an isolated tmpdir and delete it after the build. The plugin never writes `.gcc-ts-bundler-vite/` into the project.
+
+### Build report
+
+`report: { file?: string }` writes a machine-readable evidence report after
+emit (default `gcc-report.json`, resolved against the project root) and
+prints a one-line summary. Every number is measured on the build's own
+artifacts:
+
+- `javascript` — raw and gzip bytes (zlib level 9, the same methodology as
+  `verify:examples`) of the Vite JS chunks the plugin replaced vs the
+  compiled output, with percentage deltas. This is the plugin's value on
+  *your* app, recomputed every build — the committed-example wins do not
+  transfer to dependency-dominated graphs, and the report says so in
+  numbers.
+- `modules.deadModules` — modules Vite rendered into chunks that the linked
+  whole-program graph proved unreferenced. These bytes are deletable even if
+  you ship stock Vite output.
+- `properties.pinned` — property names pinned as rename barriers
+  (`Object.prototype.<name>` lines across the extern files). Each entry is a
+  boundary Closure must not rename; shrinking this list is the size lever.
+
+The report is useful as a standalone analysis pass: dead modules and pinned
+properties are findings about your module graph and boundary contracts, not
+about this bundler.
 
 ## CSS and lazy chunks
 

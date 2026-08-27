@@ -410,6 +410,139 @@ test.serial(
 );
 
 test.serial(
+  "declares each external boundary variable exactly once across importers",
+  async () => {
+    const fixture = await createFixture();
+    const cacheDir = path.join(fixture.projectRoot, "cache");
+    await fixture.write("package.json", '{"type":"module"}\n');
+    await fixture.write(
+      "node_modules/shared-ext/package.json",
+      '{"name":"shared-ext","type":"module","exports":"./index.js","types":"./index.d.ts"}\n',
+    );
+    await fixture.write(
+      "node_modules/shared-ext/index.js",
+      [
+        "export const count = 1;",
+        'export const label = "boundary";',
+        "export const extra = 2;",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "node_modules/shared-ext/index.d.ts",
+      [
+        "export declare const count: number;",
+        "export declare const label: string;",
+        "export declare const extra: number;",
+        "",
+      ].join("\n"),
+    );
+    // Two *separate* modules importing the same export from the same external
+    // is the entire reproduction. The boundary name is deliberately shared —
+    // it *is* the shared boundary global — so every importer contributed its
+    // own declaration of it, and the aggregator deduplicated by line text
+    // instead of by declared name. A single importer never reproduces this.
+    await fixture.write(
+      "src/first.ts",
+      [
+        'import { count } from "shared-ext";',
+        "export const first = count + 1;",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/second.ts",
+      [
+        'import { count } from "shared-ext";',
+        "export const second = count + 2;",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/third.ts",
+      [
+        'import * as namespaced from "shared-ext";',
+        "export const third = namespaced.extra;",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/index.ts",
+      [
+        'import { first } from "./first";',
+        'import { second } from "./second";',
+        'import { third } from "./third";',
+        'if (first + second + third !== 7) throw new Error("boundary mismatch");',
+        "",
+      ].join("\n"),
+    );
+
+    const result = await build({
+      cache: { dir: cacheDir, mode: "persistent" },
+      chunks: { mode: "off", outputType: "esm" },
+      entries: ["./index.ts"],
+      externals: ["shared-ext"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+      target: "node",
+    });
+    expect(result.ok).toBe(true);
+    // Proves both importers survived to runtime: a fixture whose second
+    // importer got tree-shaken away would silently stop testing anything.
+    await execFileAsync(
+      process.execPath,
+      [path.join(fixture.outDir, "index.js")],
+      { cwd: fixture.projectRoot },
+    );
+
+    const externFiles = await findFilesNamed(
+      cacheDir,
+      "native-generated.externs.js",
+    );
+    expect(externFiles).toHaveLength(1);
+    const externText = await fs.readFile(externFiles[0], "utf8");
+
+    // Guard the guard: without at least one boundary declaration present the
+    // duplicate check below would pass vacuously on an empty externs file.
+    const boundaryDeclarations = Array.from(
+      externText.matchAll(/\bvar\s+(e[\da-z]+_0_[$\w]*)/gu),
+      (match) => match[1],
+    );
+    expect(boundaryDeclarations.length).toBeGreaterThan(0);
+
+    const declarationCounts = new Map();
+    for (const [, name] of externText.matchAll(
+      /\bvar\s+([$A-Z_a-z][$\w]*)/gu,
+    )) {
+      declarationCounts.set(name, (declarationCounts.get(name) ?? 0) + 1);
+    }
+    // Closure reports repeats as JSC_VAR_MULTIPLY_DECLARED_ERROR, which is a
+    // hard failure under GCC_DISABLE_TYPE_INFERENCE=1.
+    const duplicated = [...declarationCounts]
+      .filter(([, count]) => count > 1)
+      .map(([name, count]) => `${name} declared ${count} times`)
+      .sort((left, right) => left.localeCompare(right));
+    expect(duplicated, duplicated.join("; ")).toEqual([]);
+
+    // Member lines are additive rename barriers, not declarations. Satisfying
+    // the assertion above by deleting them would unpin these property names,
+    // so they have to still be here.
+    const pinnedProperties = [
+      ...new Set(
+        Array.from(
+          externText.matchAll(/^\s*e[\da-z]+_0_[$\w]*\.([$\w]+);\s*$/gmu),
+          (match) => match[1],
+        ),
+      ),
+    ].sort((left, right) => left.localeCompare(right));
+    expect(pinnedProperties).toContain("count");
+    expect(pinnedProperties).toContain("extra");
+    expect(pinnedProperties).toContain("label");
+  },
+);
+
+test.serial(
   "quotes typed Node namespace accesses and also protects them with externs",
   async () => {
     const fixture = await createFixture();

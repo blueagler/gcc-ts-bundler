@@ -1,6 +1,7 @@
 import ts from "@typescript/typescript6";
 
 import { uniqueSortedStrings } from "../../shared/files";
+import { logInternalDetail } from "../../shared/timing";
 import { loadCompilerOptions } from "../../build/resolve/compiler-options";
 import type { ResolvedBuildOptions } from "../../build/types";
 import {
@@ -28,8 +29,15 @@ export async function createBuildTypeWorld(input: {
     target: ts.ScriptTarget.ESNext,
   });
   const packageSpecifiers = [...new Set(input.specifiers)].filter(
-    (specifier) => !isPlatformBuiltin(specifier),
+    (specifier) =>
+      input.options.target !== "browser" || !isPlatformBuiltin(specifier),
   );
+  // Node ambient globals (`process`, `Buffer`) are derived from `@types/node`
+  // even when nothing imports a builtin, so the declaration root has to be in
+  // this program or the ambient scan sees zero declaration files.
+  if (input.options.target === "node") {
+    packageSpecifiers.push("node:process");
+  }
   const typeEntryFiles = await resolveModuleTypeEntries({
     compilerOptions,
     projectRoot: input.options.projectRoot,
@@ -45,6 +53,10 @@ export async function createBuildTypeWorld(input: {
           entryFiles: typeEntryFiles,
           includeDependencies: false,
         });
+  logInternalDetail(
+    "externs:type-world-roots",
+    `specifiers=${packageSpecifiers.length} entries=${typeEntryFiles.length} declarations=${scannedDecls.length}`,
+  );
   return createTypeWorld(
     uniqueSortedStrings([
       ...input.emitFileNames,

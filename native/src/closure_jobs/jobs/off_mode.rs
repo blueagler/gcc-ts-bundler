@@ -33,8 +33,6 @@ pub(crate) fn prepare_off_mode_jobs(
         Some(&input.nativeExternPath),
         None,
     )?;
-    let property_renaming_report_path =
-        property_renaming_report_path(raw_dir, &input.compilationLevel);
     let mut explicit_js_inputs = input.explicitJsInputs.clone();
     let adapter_scan_contents = read_candidate_contents(&unique_paths(
         input
@@ -68,6 +66,12 @@ pub(crate) fn prepare_off_mode_jobs(
     let compile_jobs = partition_off_mode_components(resolved_chunks)
         .into_iter()
         .map(|component| {
+            let job_stem = component
+                .first()
+                .map(|chunk| chunk.name.as_str())
+                .unwrap_or("job");
+            let property_renaming_report_path =
+                property_renaming_report_path(raw_dir, &input.compilationLevel, job_stem);
             if component.len() == 1 && !chunk_output_type.is_esm() {
                 let entry_chunk = component[0];
                 ClosureCompileJob {

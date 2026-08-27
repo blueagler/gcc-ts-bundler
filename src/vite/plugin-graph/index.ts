@@ -3,6 +3,7 @@ import type {
   ManifestFileSettings,
   MaterializedGraph,
   OutputChunk,
+  ViteAssetPlaceholder,
   ViteCssOwnership,
 } from "../internal-types";
 import type { ViteTypeMetadataSidecar } from "../type-metadata";
@@ -24,6 +25,7 @@ export interface ViteTimingTotals {
 }
 
 export interface PreparedViteGraph {
+  assetPlaceholders: ViteAssetPlaceholder[];
   captureRoot: string;
   coreOutDir: string;
   cssOwnership: ViteCssOwnership;

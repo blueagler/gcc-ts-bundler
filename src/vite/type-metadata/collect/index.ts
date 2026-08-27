@@ -1,6 +1,20 @@
 import path from "node:path";
 
+import {
+  collectFileStates,
+  matchFileStates,
+  type NativeFileStateEntry,
+} from "../../../native/load";
+import { logInternalDetail } from "../../../shared/timing";
 import type { MaterializedGraph } from "../../internal-types";
+import type { GccTsBundlerVitePluginOptions } from "../../types";
+import {
+  hashTypeMetadataSidecarDiskKey,
+  hashTypeMetadataSidecarKey,
+  readCachedViteTypeMetadataSidecar,
+  resolveViteTypeMetadataCacheRoot,
+  writeCachedViteTypeMetadataSidecar,
+} from "../cache";
 import { finalizeSidecar } from "../fusion";
 import type {
   ViteTypeMetadataDiagnostic,
@@ -12,12 +26,88 @@ import { collectOverlayAttachments, readRuntimeModuleSources } from "./overlay";
 import { collectMaterializedExternalGlobalProtocol } from "./protocol";
 import { collectDirectTargets } from "./targets";
 
+let typeMetadataSidecarMemo:
+  | {
+      dependencyStates: NativeFileStateEntry[];
+      key: string;
+      sidecar: ViteTypeMetadataSidecar;
+    }
+  | undefined;
+
 export async function collectViteTypeMetadata(input: {
+  cache?:
+    | {
+        captureRoot: string;
+        options: GccTsBundlerVitePluginOptions;
+      }
+    | undefined;
   materialized: MaterializedGraph;
   projectRoot: string;
   sourceGraph?: MaterializedGraph | undefined;
 }): Promise<ViteTypeMetadataSidecar> {
   const sourceGraph = input.sourceGraph ?? input.materialized;
+  const key = hashTypeMetadataSidecarKey({
+    materialized: input.materialized,
+    projectRoot: input.projectRoot,
+    sourceGraph,
+  });
+  if (
+    typeMetadataSidecarMemo !== undefined &&
+    typeMetadataSidecarMemo.key === key &&
+    matchFileStates(typeMetadataSidecarMemo.dependencyStates)
+  ) {
+    return typeMetadataSidecarMemo.sidecar;
+  }
+  const diskCache =
+    input.cache === undefined
+      ? undefined
+      : {
+          key: await hashTypeMetadataSidecarDiskKey({
+            materialized: input.materialized,
+            projectRoot: input.projectRoot,
+            sourceGraph,
+          }),
+          root: resolveViteTypeMetadataCacheRoot({
+            captureRoot: input.cache.captureRoot,
+            options: input.cache.options,
+            projectRoot: input.projectRoot,
+          }),
+        };
+  if (diskCache !== undefined) {
+    const cached = await readCachedViteTypeMetadataSidecar({
+      cacheRoot: diskCache.root,
+      key: diskCache.key,
+    });
+    if (cached !== undefined && matchFileStates(cached.dependencyStates)) {
+      typeMetadataSidecarMemo = {
+        dependencyStates: cached.dependencyStates,
+        key,
+        sidecar: cached.sidecar,
+      };
+      logInternalDetail("cache:vite-type-metadata", "hit");
+      return cached.sidecar;
+    }
+    logInternalDetail("cache:vite-type-metadata", "miss");
+  }
+
+  async function rememberSidecar(sidecar: ViteTypeMetadataSidecar) {
+    const dependencyStates = collectFileStates(sidecar.dependencies);
+    typeMetadataSidecarMemo = {
+      dependencyStates,
+      key,
+      sidecar,
+    };
+    if (diskCache !== undefined) {
+      await writeCachedViteTypeMetadataSidecar({
+        cacheRoot: diskCache.root,
+        dependencyStates,
+        key: diskCache.key,
+        sidecar,
+      });
+    }
+    return sidecar;
+  }
+
   const diagnostics: ViteTypeMetadataDiagnostic[] = [];
   const dependencies = new Set<string>();
   const externalGlobalProtocol =
@@ -57,7 +147,7 @@ export async function collectViteTypeMetadata(input: {
     externalGlobalFiles: externalGlobalProtocol.files,
   });
   if (analysis.status === "done") {
-    return analysis.sidecar;
+    return await rememberSidecar(analysis.sidecar);
   }
 
   const files = await assembleViteTypeMetadataFiles({
@@ -68,9 +158,10 @@ export async function collectViteTypeMetadata(input: {
     overlayPlans: overlayAttachments.plans,
   });
 
-  return finalizeSidecar({
+  const sidecar = finalizeSidecar({
     dependencies,
     diagnostics,
     files: files.concat(externalGlobalProtocol.files),
   });
+  return await rememberSidecar(sidecar);
 }

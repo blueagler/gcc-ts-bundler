@@ -312,7 +312,7 @@ impl<'a> Visit<'a> for LoweredDefinePropertyNames {
     }
 }
 
-pub(super) fn collect_decorator_metadata_property_names(program: &Program<'_>) -> BTreeSet<String> {
+pub(crate) fn collect_decorator_metadata_property_names(program: &Program<'_>) -> BTreeSet<String> {
     let mut collector = DecoratorMetadataNames {
         names: BTreeSet::new(),
     };

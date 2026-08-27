@@ -1,6 +1,8 @@
+import fs from "node:fs/promises";
+
 import type { ResolvedConfig } from "vite";
 
-import type { LanguageOut } from "../../api/types";
+import { DEFAULT_BUILD_OPTIONS, type LanguageOut } from "../../api/types";
 import type { CapturedModuleResolutionCache } from "../capture";
 import { resolveViteLanguageOut } from "../config";
 import type {
@@ -17,6 +19,12 @@ import {
   type ViteTimingTotals,
 } from "../plugin-graph";
 import type { GccTsBundlerVitePluginOptions } from "../types";
+import {
+  measureViteBaselineJs,
+  resolveViteBuildReportFile,
+  writeViteBuildReport,
+} from "../report";
+import { prepareViteWorkspace } from "../workspace";
 import { resetBuildMetrics } from "./metrics";
 
 export async function compileAndEmitViteBundle(
@@ -42,27 +50,63 @@ export async function compileAndEmitViteBundle(
 
   input.resolutionCache.clear();
   resetBuildMetrics(input.buildMetrics);
-  const prepared = await prepareViteGraph.call(this, {
-    buildMetrics: input.buildMetrics,
-    bundle: input.bundle,
-    capturedModules: input.capturedModules,
+  const workspace = await prepareViteWorkspace({
     config: input.config,
+    debugDir: input.options.debug?.dumpCapturedGraphDir,
     options: input.options,
-    resolutionCache: input.resolutionCache,
-    timingTotals: input.timingTotals,
+    projectRoot: input.config.root,
   });
-  const compiled = await compileViteGraph.call(this, {
-    config: input.config,
-    languageOut: input.languageOut ?? resolveViteLanguageOut(input.config),
-    options: input.options,
-    prepared,
-  });
-  await emitViteGraph.call(this, {
-    bundle: input.bundle,
-    config: input.config,
-    compiled,
-    options: input.options,
-    outputOptions: input.outputOptions,
-    timingTotals: input.timingTotals,
-  });
+  try {
+    const prepared = await prepareViteGraph.call(this, {
+      buildMetrics: input.buildMetrics,
+      bundle: input.bundle,
+      capturedModules: input.capturedModules,
+      config: input.config,
+      options: input.options,
+      resolutionCache: input.resolutionCache,
+      timingTotals: input.timingTotals,
+      workspace,
+    });
+    const reportFile = resolveViteBuildReportFile(
+      input.options,
+      input.config.root,
+    );
+    // Snapshot before compile: emit writes compiled code back into these
+    // same bundle chunks, so a later measurement compares output with itself.
+    const reportBaseline =
+      reportFile === null ? null : measureViteBaselineJs(prepared.jsChunks);
+    const compiled = await compileViteGraph.call(this, {
+      config: input.config,
+      languageOut: input.languageOut ?? resolveViteLanguageOut(input.config),
+      options: input.options,
+      prepared,
+    });
+    const emitted = await emitViteGraph.call(this, {
+      bundle: input.bundle,
+      config: input.config,
+      compiled,
+      options: input.options,
+      outputOptions: input.outputOptions,
+      timingTotals: input.timingTotals,
+    });
+    if (reportFile !== null && reportBaseline !== null) {
+      await writeViteBuildReport({
+        baseline: reportBaseline,
+        capturedModules: input.capturedModules,
+        externs: compiled.externs,
+        finalOutputFiles: emitted.finalOutputFiles,
+        materialized: compiled.materialized,
+        projectRoot: input.config.root,
+        reportFile,
+      });
+    }
+  } finally {
+    if (
+      input.options.debug?.dumpCapturedGraphDir === undefined &&
+      (input.options.compiler?.cache?.mode ??
+        DEFAULT_BUILD_OPTIONS.cache.mode) !== "persistent"
+    ) {
+      await fs.rm(workspace.captureRoot, { force: true, recursive: true });
+    }
+  }
 }

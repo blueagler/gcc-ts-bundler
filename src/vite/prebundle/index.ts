@@ -14,14 +14,14 @@ import {
 } from "./requests";
 import { normalizePath } from "./shared";
 import type { PrebundleContext } from "./types";
-import { assembleGraph, mirrorGraphWithoutBundles } from "./write-out";
+import { assembleGraph, stageGraphWithoutBundles } from "./write-out";
 
 export async function prebundleMaterializedDependencies(input: {
   dynamicRootModuleIds: string[];
   materialized: MaterializedGraph;
   outputSrcDir?: string;
 }): Promise<MaterializedGraph> {
-  let context = createPrebundleContext(input);
+  const context = createPrebundleContext(input);
   const hasFusionSensitiveTypes = context.materialized.modules.some(
     (module) =>
       !context.authoredFiles.has(normalizePath(module.filePath)) &&
@@ -32,7 +32,7 @@ export async function prebundleMaterializedDependencies(input: {
     context.materialized.modules.length <= 256 &&
     !(await hasBarePackageEdges(context))
   ) {
-    return mirrorGraphWithoutBundles(context);
+    return await stageGraphWithoutBundles(context);
   }
   const dependencyRouting = await classifyDependencyRouting(context);
   await rewriteDirectEsmImports({
@@ -40,7 +40,10 @@ export async function prebundleMaterializedDependencies(input: {
     materialized: context.materialized,
     prebundleFilePaths: dependencyRouting.prebundleFilePaths,
   });
-  context = createPrebundleContext(input);
+  context.invalidateParsed([
+    ...context.authoredFiles,
+    ...dependencyRouting.directFilePaths,
+  ]);
   const {
     atomRequestKeyByTargetFilePath,
     bundleRequests,
@@ -54,7 +57,7 @@ export async function prebundleMaterializedDependencies(input: {
     dependencyRouting.prebundleFilePaths,
   );
   if (bundleRequests.size === 0) {
-    return mirrorGraphWithoutBundles(context);
+    return await stageGraphWithoutBundles(context);
   }
 
   const bundles = await buildDependencyBundles(
@@ -106,15 +109,18 @@ function createPrebundleContext(input: {
     }
   }
 
+  const { invalidate, parseModule } = createModuleParser({
+    authoredFiles,
+    moduleFilePaths: new Set(moduleByFilePath.keys()),
+  });
+
   return {
     authoredFiles,
+    invalidateParsed: invalidate,
     materialized: input.materialized,
     moduleByFilePath,
     moduleBySourceId,
-    parseModule: createModuleParser({
-      authoredFiles,
-      moduleFilePaths: new Set(moduleByFilePath.keys()),
-    }),
+    parseModule,
     runtimeSrcDir: input.outputSrcDir ?? input.materialized.srcDir,
   };
 }

@@ -41,6 +41,10 @@ export interface CapturedModule {
   normalizedAnalysis?: CapturedModuleAnalysis;
   rawAnalysis?: CapturedModuleAnalysis;
 }
+export interface ViteAssetPlaceholder {
+  canonical: string;
+  current: string;
+}
 
 export interface CapturedRuntimeModule {
   /** Named properties proven on the canonical CommonJS export value. */

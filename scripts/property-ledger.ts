@@ -132,134 +132,215 @@ const EXAMPLES: ExampleDescriptor[] = [
  * heuristic, which is what keeps a quote inside `/["']/` from opening a string.
  */
 export function blankLiterals(source: string): string {
-  const out = source.split("");
-  const blank = (from: number, to: number) => {
-    for (let cursor = from; cursor < to && cursor < out.length; cursor += 1) {
-      if (out[cursor] !== "\n") out[cursor] = " ";
-    }
+  const context: LexContext = {
+    source,
+    out: source.split(""),
+    index: 0,
+    previous: "",
+    braceDepth: 0,
+    templates: [],
   };
-  // Stack of open template literals; a `}` closes an interpolation only when
-  // brace depth returns to the level the interpolation opened at.
-  const templates: number[] = [];
-  let braceDepth = 0;
-  let index = 0;
-  let previous = "";
-
-  while (index < source.length) {
-    const char = source[index] ?? "";
-
-    if (char === "{") {
-      braceDepth += 1;
-      previous = char;
-      index += 1;
-      continue;
+  let state: LexState = "code";
+  while (context.index < source.length) {
+    switch (state) {
+      case "code":
+        state = stepCode(context);
+        break;
+      case "single-quote-string":
+        state = stepQuotedString(context, "'");
+        break;
+      case "double-quote-string":
+        state = stepQuotedString(context, '"');
+        break;
+      case "template-text":
+        state = stepTemplateText(context);
+        break;
+      case "regex":
+        state = stepRegexLiteral(context);
+        break;
     }
-    if (char === "}") {
-      braceDepth -= 1;
-      if (templates.length > 0 && braceDepth === templates[templates.length - 1]) {
-        // Interpolation closed: resume the enclosing template's text run.
-        index = blankTemplateText(source, blank, index + 1, templates, () => braceDepth);
-        previous = "literal";
-        continue;
-      }
-      previous = char;
-      index += 1;
-      continue;
-    }
-    if (char === "`") {
-      templates.push(braceDepth);
-      index = blankTemplateText(source, blank, index + 1, templates, () => braceDepth);
-      previous = "literal";
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      const startIndex = index;
-      index += 1;
-      while (index < source.length) {
-        const inner = source[index];
-        if (inner === "\\") {
-          index += 2;
-          continue;
-        }
-        if (inner === char) break;
-        index += 1;
-      }
-      blank(startIndex + 1, index);
-      index += 1;
-      previous = "literal";
-      continue;
-    }
-    if (char === "/" && regexCanStart(previous)) {
-      const startIndex = index;
-      index += 1;
-      let inClass = false;
-      let closed = false;
-      while (index < source.length) {
-        const inner = source[index];
-        if (inner === "\\") {
-          index += 2;
-          continue;
-        }
-        if (inner === "\n") break;
-        if (inner === "[") inClass = true;
-        else if (inner === "]") inClass = false;
-        else if (inner === "/" && !inClass) {
-          closed = true;
-          break;
-        }
-        index += 1;
-      }
-      if (closed) {
-        blank(startIndex + 1, index);
-        index += 1;
-        previous = "literal";
-        continue;
-      }
-      index = startIndex + 1;
-      previous = "/";
-      continue;
-    }
-    if (!/\s/u.test(char)) previous = char;
-    index += 1;
   }
-  return out.join("");
+  return context.out.join("");
 }
 
 /**
- * Blanks a template literal's text run starting at `from`, stopping at the
- * closing backtick or at a `${` interpolation (whose expression is left for
- * the main scanner, because property accesses do occur there).
- * Returns the index to resume from.
+ * Scanner states. A template literal's interpolation is `code` again; what
+ * distinguishes it is the brace depth recorded on `LexContext.templates`.
  */
-function blankTemplateText(
-  source: string,
-  blank: (from: number, to: number) => void,
-  from: number,
-  templates: number[],
-  braceDepth: () => number,
-): number {
+type LexState =
+  | "code"
+  | "single-quote-string"
+  | "double-quote-string"
+  | "template-text"
+  | "regex";
+
+interface LexContext {
+  readonly source: string;
+  /** Per-character output; blanked characters become spaces. */
+  readonly out: string[];
+  /** Index of the next character to read. */
+  index: number;
+  /** Previous significant character, or `"literal"` just after a literal. */
+  previous: string;
+  braceDepth: number;
+  /**
+   * Stack of open template literals; a `}` closes an interpolation only when
+   * brace depth returns to the level the interpolation opened at.
+   */
+  readonly templates: number[];
+}
+
+/** Blanks `[from, to)`, keeping newlines so line numbers still hold. */
+function blankRange(out: string[], from: number, to: number) {
+  for (let cursor = from; cursor < to && cursor < out.length; cursor += 1) {
+    if (out[cursor] !== "\n") out[cursor] = " ";
+  }
+}
+
+/**
+ * Code, including an interpolation body: the only state that opens a literal.
+ * A flat ladder in the order the characters are significant.
+ */
+function stepCode(context: LexContext): LexState {
+  const char = context.source[context.index] ?? "";
+  if (char === "{") {
+    context.braceDepth += 1;
+    context.previous = char;
+    context.index += 1;
+    return "code";
+  }
+  if (char === "}") return stepCloseBrace(context);
+  if (char === "`") {
+    context.templates.push(context.braceDepth);
+    context.index += 1;
+    return "template-text";
+  }
+  if (char === "'") {
+    context.index += 1;
+    return "single-quote-string";
+  }
+  if (char === '"') {
+    context.index += 1;
+    return "double-quote-string";
+  }
+  if (char === "/" && regexCanStart(context.previous)) {
+    context.index += 1;
+    return "regex";
+  }
+  if (!/\s/u.test(char)) context.previous = char;
+  context.index += 1;
+  return "code";
+}
+
+/** `}` resumes the enclosing template's text run when it closes its `${`. */
+function stepCloseBrace(context: LexContext): LexState {
+  context.braceDepth -= 1;
+  context.index += 1;
+  if (
+    context.templates.length > 0 &&
+    context.braceDepth === context.templates[context.templates.length - 1]
+  ) {
+    return "template-text";
+  }
+  context.previous = "}";
+  return "code";
+}
+
+/**
+ * A `'`/`"` body, entered just past the opening quote. `\` skips two
+ * characters, and an unterminated string runs to end of input.
+ */
+function stepQuotedString(context: LexContext, quote: string): LexState {
+  const { source } = context;
+  const from = context.index;
+  while (context.index < source.length) {
+    const char = source[context.index];
+    if (char === "\\") {
+      context.index += 2;
+      continue;
+    }
+    if (char === quote) break;
+    context.index += 1;
+  }
+  blankRange(context.out, from, context.index);
+  context.index += 1;
+  context.previous = "literal";
+  return "code";
+}
+
+/**
+ * A template literal's text run, entered just past the opening backtick or
+ * past the `}` that closed an interpolation. Stops at the closing backtick or
+ * at a `${`, whose expression is left to `code` because property accesses do
+ * occur there.
+ */
+function stepTemplateText(context: LexContext): LexState {
+  const { source, out, templates } = context;
+  const from = context.index;
+  context.previous = "literal";
   let index = from;
   while (index < source.length) {
     const char = source[index];
     if (char === "\\") {
-      blank(index, index + 2);
+      blankRange(out, index, index + 2);
       index += 2;
       continue;
     }
     if (char === "`") {
-      blank(from, index);
+      blankRange(out, from, index);
       templates.pop();
-      return index + 1;
+      context.index = index + 1;
+      return "code";
     }
     if (char === "$" && source[index + 1] === "{") {
-      blank(from, index);
-      templates[templates.length - 1] = braceDepth();
-      return index + 1; // main loop sees `{` and increments brace depth
+      blankRange(out, from, index);
+      templates[templates.length - 1] = context.braceDepth;
+      context.index = index + 1; // `code` sees `{` and counts the brace depth
+      return "code";
     }
     index += 1;
   }
-  blank(from, index);
-  return index;
+  blankRange(out, from, index);
+  context.index = index;
+  return "code";
+}
+
+/**
+ * A `/` candidate, entered just past the slash. With no closing `/` on the
+ * line it was division after all, and the body is rescanned as code.
+ */
+function stepRegexLiteral(context: LexContext): LexState {
+  const end = findRegexEnd(context.source, context.index);
+  if (end < 0) {
+    context.previous = "/";
+    return "code";
+  }
+  blankRange(context.out, context.index, end);
+  context.index = end + 1;
+  context.previous = "literal";
+  return "code";
+}
+
+/**
+ * Index of the closing `/`, or -1 when a newline or end of input comes first.
+ * `[`/`]` track a character class, inside which `/` is an ordinary character.
+ */
+function findRegexEnd(source: string, from: number): number {
+  let index = from;
+  let inClass = false;
+  while (index < source.length) {
+    const char = source[index];
+    if (char === "\\") {
+      index += 2;
+      continue;
+    }
+    if (char === "\n") return -1;
+    if (char === "[") inClass = true;
+    else if (char === "]") inClass = false;
+    else if (char === "/" && !inClass) return index;
+    index += 1;
+  }
+  return -1;
 }
 
 /**
@@ -466,7 +547,7 @@ function buildViteExample(example: ExampleDescriptor) {
     "bash",
     [
       "-c",
-      `tar cf - --exclude=node_modules --exclude=dist --exclude=.gcc-ts-bundler-vite -C ${JSON.stringify(projectRoot)} . | tar xf - -C ${JSON.stringify(probeDir)}`,
+      `tar cf - --exclude=node_modules --exclude=dist -C ${JSON.stringify(projectRoot)} . | tar xf - -C ${JSON.stringify(probeDir)}`,
     ],
     probeDir,
   );

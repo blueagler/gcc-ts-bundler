@@ -1,6 +1,5 @@
 export type {
   ClosureCompilerEnvironment,
-  ClosureCompilerOption,
   ClosureCompilerOptions,
 } from "./environment-resolve";
 export {

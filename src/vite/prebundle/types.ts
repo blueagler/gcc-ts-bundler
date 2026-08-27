@@ -13,6 +13,7 @@ import type { ParsedMaterializedModule } from "./shared";
 
 export interface PrebundleContext {
   authoredFiles: Set<string>;
+  invalidateParsed: (filePaths: Iterable<string>) => void;
   materialized: MaterializedGraph;
   moduleByFilePath: Map<string, CapturedRuntimeModule>;
   moduleBySourceId: Map<string, CapturedRuntimeModule>;

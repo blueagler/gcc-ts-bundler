@@ -26,6 +26,15 @@ export interface ExternsProtocolHelpers {
 export interface GenerateExternsOptions {
   appEntryFiles?: readonly string[] | undefined;
   includeDependencies?: boolean | undefined;
+  /**
+   * Bounds how far past a seed export a referenced type is still spelled out.
+   * Omitted means unbounded, which is required wherever the emitted surface is
+   * a published contract (the self-build asserts its public API externs carry
+   * no degradations). Set it for modules that Closure never compiles: their
+   * type detail only feeds optimization, and the unbounded closure of a single
+   * export can reach an entire dependency's type graph.
+   */
+  maxSymbolDepth?: number | undefined;
   mode?: GenerateExternsMode | undefined;
   modules: readonly (string | ExternModuleInput)[];
   outputFile?: string | undefined;
@@ -76,6 +85,7 @@ export type ResolvedExternOptions = {
   };
   runtimeEntryFiles: string[];
   srcDir: string;
+  maxSymbolDepth: number | undefined;
   target: TargetName;
   typedOutputFile: string | undefined;
   unresolvedDeclarationDependencies: Map<string, number>;
@@ -150,6 +160,7 @@ export async function resolveExternOptions(
     // Package-local by default. Following imported declarations is opt-in;
     // platform specifiers are never crawled either way.
     includeDependencies: options.includeDependencies ?? false,
+    maxSymbolDepth: options.maxSymbolDepth,
     mode,
     modules,
     outputFile,

@@ -4,6 +4,7 @@ import ts from "@typescript/typescript6";
 
 import { applyTextEdits } from "../../shared/text-edits";
 import { stripQuery } from "../capture";
+import { getCapturedSourceFile } from "../capture-analysis";
 import type { PluginContext } from "../internal-types";
 
 export interface ExportOrigin {
@@ -11,94 +12,162 @@ export interface ExportOrigin {
   name: string;
 }
 
+interface ImporterBindingRewrite {
+  code: string;
+  importerId: string;
+  originOf: (moduleId: string, name: string) => Promise<ExportOrigin>;
+  resolve: (specifier: string, importerId: string) => Promise<string | null>;
+  retainedModuleIds: ReadonlySet<string>;
+}
+
+interface RebindableBinding {
+  imported: string;
+  local: string;
+}
+
+interface ImportTextEdit {
+  end: number;
+  start: number;
+  text: string;
+}
+
 export async function rewriteImporterBindings(
   this: PluginContext,
-  input: {
-    code: string;
-    importerId: string;
-    originOf: (moduleId: string, name: string) => Promise<ExportOrigin>;
-    resolve: (specifier: string, importerId: string) => Promise<string | null>;
-    retainedModuleIds: ReadonlySet<string>;
-  },
+  input: ImporterBindingRewrite,
 ) {
-  const sourceFile = ts.createSourceFile(
-    input.importerId,
-    input.code,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.JS,
-  );
-  const edits: Array<{ end: number; start: number; text: string }> = [];
+  // Side-effect and named imports are the only statements this pass rewrites.
+  // A file with no `import` token cannot have either, so skip the parse.
+  if (!input.code.includes("import")) {
+    return input.code;
+  }
+  const sourceFile = getCapturedSourceFile(input.importerId, input.code);
+  const edits: ImportTextEdit[] = [];
 
   for (const statement of sourceFile.statements) {
-    if (
-      !ts.isImportDeclaration(statement) ||
-      !ts.isStringLiteralLike(statement.moduleSpecifier)
-    ) {
-      continue;
+    const edit = await rewriteImportStatement(sourceFile, statement, input);
+    if (edit) {
+      edits.push(edit);
     }
-    const specifierText = statement.moduleSpecifier.text;
-    const targetId = await input.resolve(specifierText, input.importerId);
-    if (!targetId) {
-      continue;
-    }
-    const targetIsDropped = !input.retainedModuleIds.has(targetId);
-
-    // Rollup keeps every module whose execution it cannot prove pointless, so
-    // a module it dropped has no side effect left to run.
-    if (!statement.importClause) {
-      if (targetIsDropped) {
-        edits.push({
-          end: statement.getEnd(),
-          start: statement.getStart(sourceFile),
-          text: "",
-        });
-      }
-      continue;
-    }
-
-    const bindings = readRebindableSpecifiers(statement);
-    if (!bindings) {
-      continue;
-    }
-
-    const grouped = new Map<string, string[]>();
-    let changed = false;
-    for (const binding of bindings) {
-      const origin = await input.originOf(targetId, binding.imported);
-      const specifier =
-        origin.moduleId === targetId
-          ? null
-          : toRelativeModuleSpecifier(input.importerId, origin.moduleId);
-      if (specifier === null) {
-        grouped.set(specifierText, [
-          ...(grouped.get(specifierText) ?? []),
-          `${binding.imported} as ${binding.local}`,
-        ]);
-        continue;
-      }
-      changed = true;
-      grouped.set(specifier, [
-        ...(grouped.get(specifier) ?? []),
-        `${origin.name} as ${binding.local}`,
-      ]);
-    }
-    if (!changed) {
-      continue;
-    }
-    edits.push({
-      end: statement.getEnd(),
-      start: statement.getStart(sourceFile),
-      text: [...grouped.entries()]
-        .map(
-          ([specifier, names]) =>
-            `import { ${names.join(", ")} } from ${JSON.stringify(specifier)};`,
-        )
-        .join("\n"),
-    });
   }
 
   return edits.length === 0 ? input.code : applyTextEdits(input.code, edits);
+}
+
+async function rewriteImportStatement(
+  sourceFile: ts.SourceFile,
+  statement: ts.Statement,
+  input: ImporterBindingRewrite,
+): Promise<ImportTextEdit | null> {
+  if (
+    !ts.isImportDeclaration(statement) ||
+    !ts.isStringLiteralLike(statement.moduleSpecifier)
+  ) {
+    return null;
+  }
+  const specifierText = statement.moduleSpecifier.text;
+  const targetId = await input.resolve(specifierText, input.importerId);
+  if (!targetId) {
+    return null;
+  }
+  if (!statement.importClause) {
+    return droppedSideEffectEdit(sourceFile, statement, targetId, input);
+  }
+  return rewriteNamedImportBindings(
+    sourceFile,
+    statement,
+    specifierText,
+    targetId,
+    input,
+  );
+}
+
+/**
+ * Rollup keeps every module whose execution it cannot prove pointless, so a
+ * module it dropped has no side effect left to run.
+ */
+function droppedSideEffectEdit(
+  sourceFile: ts.SourceFile,
+  statement: ts.ImportDeclaration,
+  targetId: string,
+  input: ImporterBindingRewrite,
+): ImportTextEdit | null {
+  if (input.retainedModuleIds.has(targetId)) {
+    return null;
+  }
+  return {
+    end: statement.getEnd(),
+    start: statement.getStart(sourceFile),
+    text: "",
+  };
+}
+
+async function rewriteNamedImportBindings(
+  sourceFile: ts.SourceFile,
+  statement: ts.ImportDeclaration,
+  specifierText: string,
+  targetId: string,
+  input: ImporterBindingRewrite,
+): Promise<ImportTextEdit | null> {
+  const bindings = readRebindableSpecifiers(statement);
+  if (!bindings) {
+    return null;
+  }
+
+  const grouped = new Map<string, string[]>();
+  let changed = false;
+  for (const binding of bindings) {
+    const redirected = await redirectBinding(
+      binding,
+      specifierText,
+      targetId,
+      input,
+    );
+    grouped.set(redirected.specifier, [
+      ...(grouped.get(redirected.specifier) ?? []),
+      redirected.clause,
+    ]);
+    if (redirected.changed) {
+      changed = true;
+    }
+  }
+  if (!changed) {
+    return null;
+  }
+  return {
+    end: statement.getEnd(),
+    start: statement.getStart(sourceFile),
+    text: [...grouped.entries()]
+      .map(
+        ([specifier, names]) =>
+          `import { ${names.join(", ")} } from ${JSON.stringify(specifier)};`,
+      )
+      .join("\n"),
+  };
+}
+
+async function redirectBinding(
+  binding: RebindableBinding,
+  specifierText: string,
+  targetId: string,
+  input: ImporterBindingRewrite,
+) {
+  const origin = await input.originOf(targetId, binding.imported);
+  const specifier =
+    origin.moduleId === targetId
+      ? null
+      : toRelativeModuleSpecifier(input.importerId, origin.moduleId);
+  if (specifier === null) {
+    return {
+      changed: false,
+      clause: `${binding.imported} as ${binding.local}`,
+      specifier: specifierText,
+    };
+  }
+  return {
+    changed: true,
+    clause: `${origin.name} as ${binding.local}`,
+    specifier,
+  };
 }
 
 /**
@@ -111,7 +180,7 @@ function readRebindableSpecifiers(statement: ts.ImportDeclaration) {
   if (!statement.importClause || statement.importClause.isTypeOnly) {
     return null;
   }
-  const names: Array<{ imported: string; local: string }> = [];
+  const names: RebindableBinding[] = [];
   if (statement.importClause.name) {
     names.push({
       imported: "default",
@@ -119,21 +188,35 @@ function readRebindableSpecifiers(statement: ts.ImportDeclaration) {
     });
   }
   const namedBindings = statement.importClause.namedBindings;
-  if (namedBindings && ts.isNamespaceImport(namedBindings)) {
+  if (!namedBindings) {
+    return names.length === 0 ? null : names;
+  }
+  const named = namedImportElements(namedBindings);
+  if (!named) {
     return null;
   }
-  if (namedBindings && ts.isNamedImports(namedBindings)) {
-    for (const element of namedBindings.elements) {
-      if (element.isTypeOnly) {
-        return null;
-      }
-      names.push({
-        imported: (element.propertyName ?? element.name).text,
-        local: element.name.text,
-      });
-    }
-  }
+  names.push(...named);
   return names.length === 0 ? null : names;
+}
+
+function namedImportElements(namedBindings: ts.NamedImportBindings) {
+  if (ts.isNamespaceImport(namedBindings)) {
+    return null;
+  }
+  if (!ts.isNamedImports(namedBindings)) {
+    return [];
+  }
+  const names: RebindableBinding[] = [];
+  for (const element of namedBindings.elements) {
+    if (element.isTypeOnly) {
+      return null;
+    }
+    names.push({
+      imported: (element.propertyName ?? element.name).text,
+      local: element.name.text,
+    });
+  }
+  return names;
 }
 
 /**

@@ -9,6 +9,7 @@ use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
 
+use super::super::emit_helpers::SharedHelperDeclaration;
 use super::super::fresh::FreshNameAllocator;
 use super::super::identity::{BindingKey, BindingKeyMap, ModuleIdentity};
 use super::super::is_valid_js_identifier;
@@ -28,6 +29,7 @@ pub(crate) struct PreparedTypeMetadata {
     enum_names: HashMap<String, String>,
     pub(super) member_annotations: BindingKeyMap<Vec<ClosureAnnotation>>,
     pub(super) metadata: ClosureFileMetadata,
+    shared_type_declarations: Vec<SharedHelperDeclaration>,
     pub(super) symbol_resolutions: HashMap<String, RuntimeTypeName>,
     pub(super) symbols_by_id: HashMap<String, ClosureTypeSymbol>,
 }
@@ -69,18 +71,35 @@ impl PreparedTypeMetadata {
                     .unwrap_or(RuntimeTypeName::Unresolved("runtime-binding-not-found")),
             );
         }
+        for (symbol_id, binding) in &bound.declared_value_bindings {
+            symbol_resolutions.insert(
+                symbol_id.clone(),
+                runtime_names
+                    .get(binding)
+                    .cloned()
+                    .unwrap_or(RuntimeTypeName::Unresolved("runtime-binding-not-found")),
+            );
+        }
         for symbol in bound.symbols_by_id.values() {
             if symbol_resolutions.contains_key(&symbol.id) {
                 continue;
             }
             if symbol.kind == "runtime" {
+                // Type-only imports have no JS binding in this module. Using
+                // the class's local name as a global Closure type produces
+                // `Unknown type Model` under checkTypes.
                 symbol_resolutions.insert(
                     symbol.id.clone(),
-                    in_graph_type_name(symbol)
-                        .map(RuntimeTypeName::Name)
-                        .unwrap_or(RuntimeTypeName::Unresolved("runtime-binding-not-found")),
+                    RuntimeTypeName::Unresolved("runtime-binding-not-found"),
                 );
             } else if symbol.kind == "declared" {
+                // A hoisted job concatenates modules: the bare authored name is
+                // not the emitted binding, and a per-module synthetic name is
+                // a distinct nominal type. Leave unresolved here; the
+                // declaration_names pass assigns one job-wide name.
+                if hoist_ordinal.is_some() {
+                    continue;
+                }
                 if let Some(name) = in_graph_type_name(symbol) {
                     symbol_resolutions.insert(symbol.id.clone(), RuntimeTypeName::Name(name));
                 }
@@ -103,17 +122,32 @@ impl PreparedTypeMetadata {
         let mut declaration_names = HashMap::new();
         if bound.enabled {
             for declaration in &bound.metadata.declarations {
+                if bound
+                    .runtime_symbol_bindings
+                    .contains_key(&declaration.declared_symbol_id)
+                    || bound
+                        .declared_value_bindings
+                        .contains_key(&declaration.declared_symbol_id)
+                {
+                    continue;
+                }
                 let authored_name = bound
                     .symbols_by_id
                     .get(&declaration.declared_symbol_id)
                     .map(|symbol| symbol.diagnostic_name.as_str())
                     .unwrap_or("ClosureType");
                 let preferred = hoist_ordinal
-                    .map(|ordinal| format!("{authored_name}$$type$${ordinal}"))
+                    .map(|_| {
+                        shared_type_declaration_name(authored_name, &declaration.declared_symbol_id)
+                    })
                     .unwrap_or_else(|| authored_name.to_string());
                 declaration_names.insert(
                     declaration.declared_symbol_id.clone(),
-                    fresh_names.fresh(&preferred),
+                    if hoist_ordinal.is_some() {
+                        preferred
+                    } else {
+                        fresh_names.fresh(&preferred)
+                    },
                 );
             }
             for (symbol_id, name) in &declaration_names {
@@ -133,10 +167,20 @@ impl PreparedTypeMetadata {
             ..Default::default()
         };
         let mut declaration_lines = Vec::new();
+        let mut shared_type_declarations = Vec::new();
         if bound.enabled {
+            let synthesized = bound
+                .metadata
+                .declarations
+                .iter()
+                .filter(|declaration| {
+                    declaration_names.contains_key(&declaration.declared_symbol_id)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
             let first_pass = render_declarations(
                 &bound.metadata,
-                &bound.metadata.declarations,
+                &synthesized,
                 &bound.symbols_by_id,
                 &declaration_names,
                 &symbol_resolutions,
@@ -158,7 +202,7 @@ impl PreparedTypeMetadata {
             } else {
                 render_declarations(
                     &bound.metadata,
-                    &bound.metadata.declarations,
+                    &synthesized,
                     &bound.symbols_by_id,
                     &declaration_names,
                     &symbol_resolutions,
@@ -169,7 +213,22 @@ impl PreparedTypeMetadata {
                 delivery.counts.add_assign(&declaration.rendered_counts);
                 delivery.diagnostics.extend(declaration.diagnostics);
                 if let Some(code) = declaration.code {
-                    declaration_lines.push(code.trim().to_string());
+                    let emitted = code.trim().to_string();
+                    let template = declaration.template.trim();
+                    if !template.is_empty() {
+                        delivery.declarations.push(template.to_string());
+                    }
+                    if hoist_ordinal.is_some() {
+                        if let Some(canonical_name) = declaration_names.get(&declaration.symbol_id)
+                        {
+                            shared_type_declarations.push(SharedHelperDeclaration {
+                                canonical_name: canonical_name.clone(),
+                                text: emitted,
+                            });
+                        }
+                    } else {
+                        declaration_lines.push(emitted);
+                    }
                 }
             }
         }
@@ -181,6 +240,7 @@ impl PreparedTypeMetadata {
             enum_names,
             member_annotations: bound.member_annotations,
             metadata: bound.metadata,
+            shared_type_declarations,
             symbol_resolutions,
             symbols_by_id: bound.symbols_by_id,
         }
@@ -188,6 +248,9 @@ impl PreparedTypeMetadata {
 
     pub(crate) fn take_declaration_lines(&mut self) -> Vec<String> {
         std::mem::take(&mut self.declaration_lines)
+    }
+    pub(crate) fn take_shared_type_declarations(&mut self) -> Vec<SharedHelperDeclaration> {
+        std::mem::take(&mut self.shared_type_declarations)
     }
 
     pub(crate) fn enum_name(&self, declaration: &ClosureEnumDeclaration) -> String {
@@ -214,6 +277,15 @@ impl PreparedTypeMetadata {
             .dedup_by(|left, right| left.stable_key() == right.stable_key());
         self.delivery
     }
+}
+
+fn shared_type_declaration_name(authored_name: &str, symbol_id: &str) -> String {
+    let base = if is_valid_js_identifier(authored_name) {
+        authored_name
+    } else {
+        "ClosureType"
+    };
+    format!("{base}$$type$${symbol_id}")
 }
 
 fn in_graph_type_name(symbol: &crate::closure_metadata::ClosureTypeSymbol) -> Option<String> {

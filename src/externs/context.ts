@@ -39,23 +39,32 @@ export function createTypeWorld(
 export function createExternAnalysisContext({
   appEntryFiles,
   compilerOptions,
+  declarationRoots,
   projectRoot,
   scannedFiles,
   typeWorld,
 }: {
   appEntryFiles: string[];
   compilerOptions: ts.CompilerOptions;
+  declarationRoots?: readonly string[] | undefined;
   projectRoot: string;
   scannedFiles: string[];
   typeWorld?: TypeWorld | undefined;
 }): ExternAnalysisContext {
   const program =
     typeWorld?.program ??
-    ts.createProgram(uniqueSortedStrings([...scannedFiles, ...appEntryFiles]), {
-      ...compilerOptions,
-      noEmit: true,
-      skipLibCheck: true,
-    });
+    ts.createProgram(
+      uniqueSortedStrings([
+        ...scannedFiles,
+        ...appEntryFiles,
+        ...(declarationRoots ?? []),
+      ]),
+      {
+        ...compilerOptions,
+        noEmit: true,
+        skipLibCheck: true,
+      },
+    );
   const checker = typeWorld?.checker ?? program.getTypeChecker();
   const registry =
     scannedFiles.length === 0

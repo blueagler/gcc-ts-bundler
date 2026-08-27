@@ -39,9 +39,7 @@ export async function loadCachedPackageRuntimeHazards(input: {
   };
 }) {
   const fileHashes = await Promise.all(
-    [...input.filePaths]
-      .sort((left, right) => left.localeCompare(right))
-      .map((filePath) => hashFileInput(filePath)),
+    [...input.filePaths].sort().map((filePath) => hashFileInput(filePath)),
   );
   const cacheKey = hashJson({
     cacheVersion: VITE_EXTERN_PACKAGE_CACHE_VERSION,
@@ -88,8 +86,7 @@ const isCachedRuntimeHazards = isObjectOf<CachedRuntimeHazards>({
 function serializeRuntimeHazards(
   hazards: RuntimeRenameHazards,
 ): CachedRuntimeHazards {
-  const sorted = (values: ReadonlySet<string>) =>
-    [...values].sort((left, right) => left.localeCompare(right));
+  const sorted = (values: ReadonlySet<string>) => [...values].sort();
   return {
     constructedKeyFragments: sorted(hazards.constructedKeyFragments),
     constructedKeyPrefixes: sorted(hazards.constructedKeyPrefixes),

@@ -1,12 +1,8 @@
 export type {
-  ClosureCompilerCapabilities,
   NativeEmittedTypeMetadata,
   NativeFileStateEntry,
-  NativePreservedModuleEntry,
-  NativeRollupChunkInput,
   NativeTranspileOutput,
   NativeTypeMetadataCounts,
-  NativeTypeMetadataDiagnostic,
 } from "./abi";
 export {
   collectFileStates,

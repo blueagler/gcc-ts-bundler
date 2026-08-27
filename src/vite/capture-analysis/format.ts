@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { hasErrorCode, isRecord } from "../../shared/validation";
-import { getCapturedModuleAnalysis } from "./index";
+import { getCapturedModuleAnalysis } from "./code";
 import { isDependencyModuleId, stripQuery } from "../capture/specifiers";
 import type { CapturedModule, CapturedModuleFormat } from "../internal-types";
 

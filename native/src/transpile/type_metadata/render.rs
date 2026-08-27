@@ -15,9 +15,37 @@ pub(in super::super) struct RenderedTemplate {
 
 pub(in super::super) struct RenderedDeclaration {
     pub(in super::super) code: Option<String>,
+    pub(in super::super) template: String,
     pub(in super::super) diagnostics: Vec<TypeMetadataDiagnostic>,
     pub(in super::super) rendered_counts: TypeMetadataCounts,
     pub(in super::super) symbol_id: String,
+}
+
+/// Typed member declarations inside a generated type template: the renderer
+/// emits an annotation line followed by the member line, so a member counts
+/// only when the line above it carries a type tag. Mirrors `countTypedMembers`
+/// in `src/build/transpile/type-metadata/types.ts`.
+fn count_typed_members(template: &str) -> u32 {
+    let mut count = 0u32;
+    let mut previous = "";
+    for line in template.lines() {
+        let trimmed = line.trim();
+        let is_member = trimmed.ends_with(';')
+            && trimmed.contains(".prototype.")
+            && !trimmed.contains('(')
+            && !trimmed.contains('=');
+        if is_member
+            && (previous.contains("@type")
+                || previous.contains("@param")
+                || previous.contains("@return"))
+        {
+            count += 1;
+        }
+        if !trimmed.is_empty() {
+            previous = trimmed;
+        }
+    }
+    count
 }
 
 pub(in super::super) fn render_declarations(
@@ -61,10 +89,16 @@ pub(in super::super) fn render_declarations(
             RenderedDeclaration {
                 rendered_counts: TypeMetadataCounts {
                     typeDeclarationCount: u32::from(code.is_some()),
+                    memberAnnotationCount: if code.is_some() {
+                        count_typed_members(&rendered.text)
+                    } else {
+                        0
+                    },
                     unresolvedTypeReferenceCount: rendered.unresolved_count,
                     ..Default::default()
                 },
                 code,
+                template: rendered.text,
                 diagnostics,
                 symbol_id: declaration.declared_symbol_id.clone(),
             }

@@ -89,8 +89,8 @@ blocker.** Removing all 1233 pins recovers 10.7 KB gzip but does **not** enable
 ambiguation (reuse 7.6 → 7.9, distinct short names *up*). Pins and structural
 types are two separate walls; clearing one leaves the other.
 
-**C5 — The CLI is a strict subset of the compiler.** The pipeline spawns
-`java -jar` with argv. Decisive controls exist only behind `CompilerOptions`:
+**C5 — The CLI is a strict subset of the compiler.** Closure jobs still speak
+argv (resident CLI worker, or `java -jar` fallback). Decisive controls exist only behind `CompilerOptions`:
 `setPropertyRenaming(OFF)` combined with ADVANCED (the CLI hard-errors:
 `renaming cannot be disabled when ADVANCED_OPTIMIZATIONS is used`),
 `setTypedAstListInputFilename` / `initWithTypedAstFilesystem` (the multistage
@@ -125,9 +125,10 @@ Those four byte-identical rows are not one defect. They split:
   false` because the planner mirrors Rollup. Those fields are type errors on
   the Vite surface, so a caller who writes them fails at compile time instead
   of being silently ignored.
-- **`compiler.externs` is not discarded.** `src/vite/externs.ts:66` reads it,
-  resolves the paths, and unions them into `renameBarriers`, which
-  `createCompilerOptions` then writes through as `externs`. `test/vite-plugin.test.mjs`
+- **`compiler.externs` is not discarded.** `resolveCompilerExterns` in
+  `src/vite/compiler-externs/index.ts` reads and resolves the
+  paths, then unions them into `renameBarriers`, which `createCompilerOptions`
+  writes through as `externs`. `test/vite/plugin.test.mjs`
   and `docs/vite.md` treat this as the live explicit-externs path. The old
   reading that line 104 of `config.ts` replaced the caller's list wholesale was
   wrong: that line is the composed-input parameter, not a drop.
@@ -136,10 +137,16 @@ Those four byte-identical rows are not one defect. They split:
   does not read it. **`externs.generate.modules`** is written into the
   generated comment and is otherwise unused for pins: pins come from proven
   hazard sites, not the module list. Byte-identical output is that design.
-- **`finalMinify`** is overridden by design, not inert. `src/vite/plugin.ts:568-573`
-  hardcodes `finalMinify: false` on the Closure stage so hashing and URL
-  rewrite can finish first; `emitViteGraph` (~710-712) then always runs
-  `finalizeJavaScriptOutputs`. There is exactly one post-pass. See §6.
+- **`finalMinify`** is overridden by design, not inert.
+  `src/vite/plugin-compile/compile.ts:96-100` sets `finalMinify: false` on the
+  Closure stage so hashing and URL rewrite can finish first. `emitViteGraph`
+  (`src/vite/plugin-compile/emit/index.ts:15-32`) calls `finalizeCompiledEmit`
+  (`src/vite/plugin-compile/emit/outputs.ts:23-41`), which calls
+  `preserveCompiledChunkIdentities`; its `rewriteAndRenameCompiledFiles` path
+  performs preserved-import rewriting, `minifyFinalJavaScriptText`, and
+  identity rewriting in one file read and write
+  (`src/vite/naming/identities-rewrite.ts:48-78`). There is exactly one
+  post-pass. See §6.
 
 `compilationLevel` — which the Vite path does not manage — still passes through
 and visibly changed the build; `1d5f29d` now warns once on a non-ADVANCED
@@ -153,7 +160,7 @@ Ordered by leverage, not by ease.
 
 ### M1 — Replace argv with a compiler driver
 
-Today: TS options object → snake_case argv → `java -jar`. This caps us at 67
+Today: TS options object → snake_case argv → resident CLI worker (or `java -jar` fallback). This caps us at 67
 advertised flags plus the 41 hidden ones, and C5 says the interesting controls
 are not there.
 
@@ -269,10 +276,14 @@ Structural simplification is part of the fix:
   renames, OXC re-minifies (`native/src/minify.rs`, `oxc_minifier`,
   `CompressOptions::smallest()`). Each was chosen independently. The overlap
   worth investigating is rollup's tree-shaking versus Closure's DCE, not the
-  minifier: `src/vite/plugin.ts:568-573` hardcodes `finalMinify: false` for the
-  Closure stage, and `emitViteGraph` (~710-712) then always runs
-  `finalizeJavaScriptOutputs`. There is exactly one post-pass, deliberately
-  placed after hashing and URL rewrite — not a redundant pair.
+  minifier: `src/vite/plugin-compile/compile.ts:96-100` sets `finalMinify:
+  false` for the Closure stage. `emitViteGraph` calls `finalizeCompiledEmit`,
+  which calls `preserveCompiledChunkIdentities`; the latter's
+  `rewriteAndRenameCompiledFiles` path applies preserved-import rewriting,
+  `minifyFinalJavaScriptText`, and identity rewriting in memory between one
+  file read and write (`src/vite/naming/identities-rewrite.ts:48-78`). There
+  is exactly one post-pass, deliberately placed after hashing and URL rewrite
+  — not a redundant pair.
 - **Ineffective generate options** (§3). `compiler.externs` is live;
   `chunks.mode` is now a type error (`1d5f29d`); the generate include/module
   knobs remain honored but do not change pins. The `barriers.ts` advice was
@@ -368,9 +379,9 @@ run the CPU-side claim is arithmetic, not evidence.
 
 Measured on the pinned jar and the trial app:
 
-- **153 ms** JVM start + jar load, best of three, paid on **every spawn** because
-  the pipeline shells out to `java -jar` per job — and then hands a cold JIT a
-  ~17 s compile.
+- **153 ms** JVM start + jar load, best of three, was paid on **every spawn** when
+  the pipeline shelled out to `java -jar` per job — and then handed a cold JIT a
+  ~17 s compile. The resident CLI worker now reuses one JVM for sequential argv jobs.
 - `--num_parallel_threads` is accepted and we do not pass it.
 - Multistage `save`/`restore` produces **byte-identical output**. We dismissed it
   on the size axis, which was the wrong axis: byte-identical output is exactly

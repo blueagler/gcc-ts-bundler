@@ -57,18 +57,24 @@ names as "silently discarded"; that was wrong on three of them.
 - **`chunks.mode`** *was* overwritten (`createCompilerOptions` hardcodes
   `mode: "bundler-runtime"` at `src/vite/config.ts:137`). Making it a type
   error is the fix that landed.
-- **`compiler.externs` is live**, not discarded. `src/vite/externs.ts:66` reads
-  it, resolves paths, and unions them into `renameBarriers`, which
-  `createCompilerOptions` then writes. `test/vite-plugin.test.mjs` and
+- **`compiler.externs` is live**, not discarded. `resolveCompilerExterns` in
+  `src/vite/compiler-externs/index.ts` reads and resolves the
+  paths, then unions them into `renameBarriers`, which `createCompilerOptions`
+  writes through. `test/vite/plugin.test.mjs` and
   `docs/vite.md` treat this as the explicit-externs path.
 - **`externs.generate.includeDependencies`** is live only on the
   boundary-aware `generateExterns` path. The default Vite runtime-aware path
   does not read it. **`externs.generate.modules`** is written into the
   generated comment and is otherwise unused for pins.
 - **`finalMinify`** is overridden by design, not inert.
-  `src/vite/plugin.ts:568-573` hardcodes `finalMinify: false` on the Closure
-  stage so hashing and URL rewrite can finish first; `emitViteGraph` (~710-712)
-  then always runs `finalizeJavaScriptOutputs`. One post-pass. See Part C.
+  `src/vite/plugin-compile/compile.ts:96-100` sets `finalMinify: false` on the
+  Closure stage so hashing and URL rewrite can finish first. `emitViteGraph`
+  (`src/vite/plugin-compile/emit/index.ts:15-32`) calls `finalizeCompiledEmit`
+  (`src/vite/plugin-compile/emit/outputs.ts:23-41`), which calls
+  `preserveCompiledChunkIdentities`; its `rewriteAndRenameCompiledFiles` path
+  performs preserved-import rewriting, `minifyFinalJavaScriptText`, and
+  identity rewriting in one file read and write
+  (`src/vite/naming/identities-rewrite.ts:48-78`). One post-pass. See Part C.
 
 **A2. The advice that names them.** Landed `1d5f29d`: the `barriers.ts` warning
 was rewritten to state the measured cost (10.7 KB gzip, ambiguation blocked)
@@ -140,9 +146,9 @@ verified present and all unreachable from argv: `addCustomPass`,
 `Compiler.setPassConfig`, `setPropertyRenaming(OFF)` combined with ADVANCED,
 `initWithTypedAstFilesystem`, `setNameGenerator`, `setAliasStringsMode`.
 
-It is simultaneously the build-time fix: **153 ms** of JVM start and jar load per
-spawn today, a cold JIT handed a ~17 s compile, `--num_parallel_threads` accepted
-and unused, and multistage `save`/`restore` producing byte-identical output —
+The resident CLI worker already reuses one JVM for sequential argv jobs. Remaining
+build-time work is constructing `CompilerOptions` directly: `--num_parallel_threads` is
+accepted and unused, and multistage `save`/`restore` producing byte-identical output —
 useless for size, exactly right for caching the `CHECKS` segment.
 
 *Deletes:* most of the camelCase→argv mapping in `src/build/closure/compiler.ts`,
@@ -206,16 +212,22 @@ the trial build, and which `typed-input.md` names as the reason typed input pays
 nothing. Phase 4 will not make them load-bearing. After Phase 5 the question is
 whether they are 1,509 lines of cache machinery for an unused artifact.
 
-## Part C — Collapse the overlapping optimizers
+## Part C — Collapse the overlapping optimizers — **emit I/O fusion landed;
+optimizer overlap remains open**
 
 rollup tree-shakes, Closure DCEs and renames, OXC re-minifies
 (`native/src/minify.rs`, `oxc_minifier`, `CompressOptions::smallest()`). Each
 was chosen independently. The overlap worth investigating is rollup's
 tree-shaking versus Closure's DCE, not the minifier: `finalMinify` is
-overridden by design (`src/vite/plugin.ts:568-573` hardcodes `false` on the
-Closure stage; `emitViteGraph` ~710-712 always runs
-`finalizeJavaScriptOutputs`). There is exactly one post-pass, deliberately
-placed after hashing and URL rewrite — not a redundant pair, and not esbuild.
+overridden by design (`src/vite/plugin-compile/compile.ts:96-100` sets it to
+`false` on the Closure stage). `emitViteGraph` now reaches
+`preserveCompiledChunkIdentities` through `finalizeCompiledEmit`; its
+`rewriteAndRenameCompiledFiles` path applies preserved-import rewriting,
+`minifyFinalJavaScriptText`, and identity rewriting in memory between one file
+read and write (`src/vite/naming/identities-rewrite.ts:48-78`). The emit I/O
+fusion has landed; the rollup-versus-Closure optimizer question remains open.
+There is exactly one post-pass, deliberately placed after hashing and URL
+rewrite — not a redundant pair, and not esbuild.
 More aggressively: an ultimate optimizer **is** the consumer of the module
 graph. Rollup-then-Closure destroys the disjointness evidence before the
 optimizer sees it. Google's pipeline is source-to-one-binary. Open this
@@ -343,8 +355,7 @@ Whole-program, per declaration:
 - any object literal satisfies it → keep `@record`
 - emit `@struct` on TS classes (audit `closure_metadata.rs` for
   downgrades; ES classes already ambiguate)
-- emit casts `/** @type {T} */ (e)` — we do not today; brands need
-  this channel (`typed-input.md` catalog)
+- emit brand casts `/** @type {T} */ (e)` on leftover authored literals — TypeScript `as T` / `satisfies T` already lower to this form; brands still need it applied at the literal (`typed-input.md` catalog)
 
 Lit's `MyElement` is a class. React `Props` and
 `HTMLElementTagNameMap` stay `@record`. Do not blanket-rewrite
@@ -392,7 +403,7 @@ leftover `@record` names (`setPropertyRenaming` is Java-API only;
 CLI hard-errors under ADVANCED), `addCustomPass(BEFORE_CHECKS)` if
 JSDoc brands get lossy, cache `CHECKS` (multistage is
 byte-identical — closed for size, correct for incrementality),
-`--num_parallel_threads`, stop paying 153 ms JVM/spawn. Foundation
+`--num_parallel_threads`. JVM warmth for argv jobs is already landed. Foundation
 of the product; not the first experiment on a typed fixture.
 
 **F9 — Consume the module graph, not the post-rollup bundle.**

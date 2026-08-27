@@ -13,7 +13,7 @@ import {
   referenceBuiltin,
   safeTypeToString,
 } from "./context";
-import { toClosureType } from "./core";
+import { recurseClosureType as toClosureType } from "./core";
 
 export type FunctionLikeDeclaration =
   | ts.ArrowFunction

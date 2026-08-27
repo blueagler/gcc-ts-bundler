@@ -45,10 +45,19 @@ export async function syncDirectoryEntries(
     preserve?: (relativePath: string) => boolean;
   } = {},
 ) {
-  await ensureDirectory(rootDir);
   const expectedEntries = new Map(
-    entries.map((entry) => [normalizeRelativePath(entry.relativePath), entry]),
+    entries.map((entry) => {
+      const relativePath = normalizeRelativePath(entry.relativePath);
+      return [
+        relativePath,
+        {
+          content: entry.content,
+          filePath: resolveContainedEntryPath(rootDir, relativePath),
+        },
+      ] as const;
+    }),
   );
+  await ensureDirectory(rootDir);
   const existingFiles = await listRelativeFiles(rootDir);
 
   await Promise.all(
@@ -65,15 +74,34 @@ export async function syncDirectoryEntries(
   await removeEmptyDirectories(rootDir);
 
   await Promise.all(
-    [...expectedEntries.values()].map(async (entry) => {
-      const filePath = path.join(
-        rootDir,
-        normalizeRelativePath(entry.relativePath),
-      );
+    [...expectedEntries.values()].map(async ({ content, filePath }) => {
       await ensureParentDirectory(filePath);
-      await writeFileIfChanged(filePath, entry.content);
+      await writeFileIfChanged(filePath, content);
     }),
   );
+}
+
+/**
+ * Joins an already-normalized entry path onto `rootDir` and refuses any result
+ * that lands outside it. Callers derive entry paths with `path.relative` from a
+ * source root, so a module resolved outside that root (a `file:`/`link:`
+ * workspace dependency, a symlinked source file) yields `../…` and would
+ * otherwise write dependency-controlled content outside the staging tree, where
+ * the stale-file sweep can never reclaim it.
+ */
+function resolveContainedEntryPath(rootDir: string, relativePath: string) {
+  const filePath = path.join(rootDir, relativePath);
+  const contained = normalizeRelativePath(path.relative(rootDir, filePath));
+  if (
+    contained === ".." ||
+    contained.startsWith("../") ||
+    path.isAbsolute(contained)
+  ) {
+    throw new Error(
+      `Directory entry escaped ${rootDir}: ${relativePath} resolves to ${filePath}`,
+    );
+  }
+  return filePath;
 }
 
 export async function writeFileIfChanged(

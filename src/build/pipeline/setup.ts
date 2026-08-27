@@ -69,6 +69,7 @@ export async function preparePipelineEmit(
     workspaceDir: resolved.workspaceDir,
   });
   const externalExternPlan = await deriveExternalExternPlan({
+    appEntryFiles: emitFileNames,
     options: context.options,
     specifiers,
     typeWorld,

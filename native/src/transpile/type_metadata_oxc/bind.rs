@@ -15,6 +15,7 @@ use crate::closure_metadata::{
 #[derive(Clone, Debug)]
 pub(crate) struct BoundTypeMetadata {
     pub(super) binding_annotations: BindingKeyMap<Vec<ClosureAnnotation>>,
+    pub(super) declared_value_bindings: HashMap<String, BindingKey>,
     pub(super) diagnostics: Vec<TypeMetadataDiagnostic>,
     pub(super) enabled: bool,
     pub(super) member_annotations: BindingKeyMap<Vec<ClosureAnnotation>>,
@@ -52,6 +53,25 @@ impl BoundTypeMetadata {
             };
             if let Some(binding) = unique_binding(&top_level_bindings, local_name) {
                 runtime_symbol_bindings.insert(symbol.id.clone(), binding);
+            }
+        }
+        // A `.d.ts`-declared type whose name is also an import binding of this
+        // module *is* that binding: TypeScript resolved the type and the value
+        // meaning through the same specifier. Annotating with a synthesized
+        // record instead mints a second, nominally incompatible type for a
+        // class that the job already compiles.
+        let import_bindings = collect_import_bindings(program, identity);
+        let mut declared_value_bindings = HashMap::new();
+        for symbol in &metadata.symbols {
+            if symbol.kind != "declared" {
+                continue;
+            }
+            let name = symbol
+                .local_name
+                .as_deref()
+                .unwrap_or(symbol.diagnostic_name.as_str());
+            if let Some(binding) = unique_binding(&import_bindings, name) {
+                declared_value_bindings.insert(symbol.id.clone(), binding);
             }
         }
 
@@ -107,6 +127,7 @@ impl BoundTypeMetadata {
 
         Self {
             binding_annotations,
+            declared_value_bindings,
             diagnostics,
             enabled,
             member_annotations,
@@ -117,7 +138,9 @@ impl BoundTypeMetadata {
     }
 
     pub(crate) fn runtime_binding_ids(&self) -> impl Iterator<Item = &BindingKey> {
-        self.runtime_symbol_bindings.values()
+        self.runtime_symbol_bindings
+            .values()
+            .chain(self.declared_value_bindings.values())
     }
 }
 
@@ -205,6 +228,21 @@ pub(super) fn collect_top_level_bindings(
                 if let Some(declaration) = statement.as_declaration() {
                     add_declaration_bindings(&mut bindings, declaration, identity);
                 }
+            }
+        }
+    }
+    bindings
+}
+
+fn collect_import_bindings(
+    program: &Program<'_>,
+    identity: &ModuleIdentity,
+) -> HashMap<String, Vec<BindingKey>> {
+    let mut bindings = HashMap::<String, Vec<BindingKey>>::new();
+    for statement in &program.body {
+        if let Statement::ImportDeclaration(import) = statement {
+            for specifier in import.specifiers.iter().flatten() {
+                push_binding(&mut bindings, specifier.local(), identity);
             }
         }
     }

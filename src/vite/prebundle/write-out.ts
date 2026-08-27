@@ -1,1 +1,1 @@
-export { assembleGraph, mirrorGraphWithoutBundles } from "./write-out/index";
+export { assembleGraph, stageGraphWithoutBundles } from "./write-out/index";

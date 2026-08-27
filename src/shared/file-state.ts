@@ -2,7 +2,7 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
 
-import { collectFileStates, matchFileStates } from "../native/load";
+import { collectFileStates } from "../native/load";
 import {
   listRelativeFiles,
   normalizeRelativePath,
@@ -97,24 +97,23 @@ export async function collectTrackedFiles(
 export async function trackedFilesMatch(
   trackedFiles: Record<string, FileStateSnapshot>,
 ): Promise<boolean> {
-  const entries = Object.entries(trackedFiles);
+  const expected = uniqueSortedStrings(Object.keys(trackedFiles));
+  const states = collectFileStates(expected);
   if (
-    !matchFileStates(
-      entries.map(([filePath, state]) => ({
-        exists: true,
-        filePath,
-        mtimeMs: state.mtimeMs,
-        size: state.size,
-      })),
-    )
+    states.some((state) => {
+      const identity = trackedFiles[state.filePath];
+      return !identity || !state.exists || state.size !== identity.size;
+    })
   ) {
     return false;
   }
 
   const digests = await Promise.all(
-    entries.map(([filePath]) => hashFile(filePath).catch(() => null)),
+    expected.map((filePath) => hashFile(filePath).catch(() => null)),
   );
-  return entries.every(([, state], index) => digests[index] === state.digest);
+  return expected.every(
+    (filePath, index) => digests[index] === trackedFiles[filePath]?.digest,
+  );
 }
 
 export async function filesExist(filePaths: string[]): Promise<boolean> {

@@ -1,2 +1,2 @@
 export { gccTsBundler } from "./plugin";
-export type { GccTsBundlerVitePluginOptions } from "./types";
+export type { GccTsBundlerVitePluginOptions, ViteBuildReport } from "./types";

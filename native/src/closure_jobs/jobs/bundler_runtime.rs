@@ -207,7 +207,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
     )?;
     effective_externs = unique_paths(effective_externs);
     let property_renaming_report_path =
-        property_renaming_report_path(raw_dir, &input.compilationLevel);
+        property_renaming_report_path(raw_dir, &input.compilationLevel, &base_chunk.name);
     let leading_js_inputs = unique_paths(input.explicitJsInputs.clone());
 
     if !input.manifestFile.is_empty() {

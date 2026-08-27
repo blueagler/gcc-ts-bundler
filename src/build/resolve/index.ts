@@ -169,14 +169,23 @@ async function restoreResolveSnapshot(
     resolveSnapshotPath(env),
     isResolveSnapshot,
   );
+  if (!snapshot) {
+    logInternalDetail("cache:resolve-snapshot", "miss");
+    return null;
+  }
+  const externalInputHash = await hashExternalInputs([
+    ...context.options.externs,
+    ...context.options.js,
+    ...context.options.typedExterns,
+  ]);
   const snapshotHit =
-    !!snapshot &&
     snapshot.packageSignature === context.packageSignature &&
     snapshot.compilerOptionsHash === env.compilerOptionsHash &&
     snapshot.optionsSignature === context.optionsSignature &&
+    snapshot.externalInputHash === externalInputHash &&
     (await trackedFilesMatch(snapshot.trackedFiles));
   logInternalDetail("cache:resolve-snapshot", snapshotHit ? "hit" : "miss");
-  if (!snapshot || !snapshotHit) {
+  if (!snapshotHit) {
     return null;
   }
 
@@ -193,7 +202,12 @@ async function restoreResolveSnapshot(
     chunkPlan,
     externalBoundaries: snapshot.externalBoundaries,
     entryFiles: snapshot.entryFiles.map(
-      (entry): BuildEntry => toBuildEntry(entry, env.sourceRoot),
+      (entry, index): BuildEntry =>
+        toBuildEntry(
+          entry,
+          env.sourceRoot,
+          context.options.entries[index]?.outFile,
+        ),
     ),
     finalKey: snapshot.finalKey,
     lazyImports: snapshot.lazyImports,
@@ -404,7 +418,6 @@ function createResolveMetadata(
         exportNames: entry.exportNames,
         hasDefaultExport: entry.hasDefaultExport,
         outputName: entry.outputName,
-        ...(entry.outFile === undefined ? {} : { outFile: entry.outFile }),
         sourceRelativePath: entry.sourceRelativePath,
       }),
     ),
@@ -420,6 +433,13 @@ async function finalizeResolvedBuild(
 ): Promise<ResolvedBuild> {
   const { options } = context;
   const tsxRuntimeSourceFiles = metadata.tsxRuntimeSourceFiles ?? [];
+  const externalInputHash = env.usesPersistentCache
+    ? await hashExternalInputs([
+        ...options.externs,
+        ...options.js,
+        ...options.typedExterns,
+      ])
+    : "";
   const nativeEmitKey = env.usesPersistentCache
     ? hashJson({
         optionsSignature: context.optionsSignature,
@@ -435,11 +455,7 @@ async function finalizeResolvedBuild(
     ? hashJson({
         optionsSignature: context.optionsSignature,
         compilationLevel: options.compilationLevel,
-        externalInputHash: await hashExternalInputs([
-          ...options.externs,
-          ...options.js,
-          ...options.typedExterns,
-        ]),
+        externalInputHash,
         languageOut: options.languageOut,
         packageSignature: context.packageSignature,
         resolveKey: fresh.resolveKey,
@@ -453,9 +469,6 @@ async function finalizeResolvedBuild(
           ...fresh.tsxRuntimeSupport.trackedFiles,
         ]),
         env.tsConfigPath,
-        ...options.externs,
-        ...options.js,
-        ...options.typedExterns,
       ])
     : {};
   if (env.usesPersistentCache) {
@@ -463,6 +476,7 @@ async function finalizeResolvedBuild(
       compilerOptionsHash: env.compilerOptionsHash,
       entryFiles: metadata.entryFiles,
       externalBoundaries: fresh.externalBoundaries,
+      externalInputHash,
       finalKey,
       lazyImports: fresh.graphResult.lazyImports,
       nativeEmitKey,
@@ -483,7 +497,12 @@ async function finalizeResolvedBuild(
     chunkPlan: metadata.chunkPlan,
     externalBoundaries: fresh.externalBoundaries,
     entryFiles: metadata.entryFiles.map(
-      (entry): BuildEntry => toBuildEntry(entry, env.sourceRoot),
+      (entry, index): BuildEntry =>
+        toBuildEntry(
+          entry,
+          env.sourceRoot,
+          context.options.entries[index]?.outFile,
+        ),
     ),
     finalKey,
     lazyImports: fresh.graphResult.lazyImports,

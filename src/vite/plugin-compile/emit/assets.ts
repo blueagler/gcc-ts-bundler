@@ -49,6 +49,7 @@ export async function resolveCompiledEmitAssets(
     input.outputOptions,
   );
   const resolvedAssetUrls = await resolveViteAssetUrls({
+    assetPlaceholders: compiled.assetPlaceholders,
     chunkOutputType: compiled.chunkOutputType,
     config: input.config,
     jsChunks: compiled.jsChunks,

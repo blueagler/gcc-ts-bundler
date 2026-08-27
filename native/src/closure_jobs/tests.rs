@@ -19,6 +19,7 @@ fn emitted_type_metadata(
         path.to_string_lossy().to_string(),
         counts,
         Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -528,6 +529,24 @@ fn prepares_off_mode_jobs_for_disjoint_share_groups() {
     assert_eq!(
         postprocess_names,
         vec!["shared", "entry-a", "entry-b", "shared2", "entry-c", "entry-d"]
+    );
+    let report_stems = output
+        .compileJobs
+        .iter()
+        .map(|job| {
+            Path::new(job.propertyRenamingReportPath.as_ref().unwrap())
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        report_stems,
+        vec![
+            "shared.property-renaming-report.txt".to_string(),
+            "shared2.property-renaming-report.txt".to_string(),
+        ]
     );
 }
 

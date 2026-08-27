@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::closure_metadata::{closure_metadata_key, ClosureAnnotationTarget, ClosureFileMetadata};
+#[cfg(test)]
+use crate::closure_metadata::closure_metadata_key;
+use crate::closure_metadata::{ClosureAnnotationTarget, ClosureFileMetadata};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_ast_visit::{walk, Visit};
@@ -54,78 +56,94 @@ struct ParsedExternFileAnalysis {
     unproven_monomorphic_access_names: HashSet<String>,
 }
 
-pub(crate) fn collect_extern_property_names_with_externs(
-    file_names: &[String],
+/// One file's contribution to the extern-property analysis.
+///
+/// Owned so the whole-graph pass can produce every file's facts in parallel and
+/// fold them back in file order: every field is a set union except
+/// `class_surface_facts`, whose cross-file inheritance walk is index-based and
+/// therefore needs the concatenation to follow input order.
+#[derive(Default)]
+pub(crate) struct ExternFileFacts {
+    declared_names: HashSet<String>,
+    preserved_property_names: HashSet<String>,
+    static_property_names: HashSet<String>,
+    class_surface_facts: Vec<ClassSurfaceFact>,
+}
+
+/// Extern-property facts for one already-parsed file.
+///
+/// Rewrites `this`-field helper assignments first, exactly as the property
+/// collector has always seen them, so this must run after every collector that
+/// needs the pristine program.
+pub(crate) fn analyze_extern_file_program<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    metadata: Option<&ClosureFileMetadata>,
+) -> ExternFileFacts {
+    crate::transpile::emit_helpers::rewrite_this_field_helper_assignments(allocator, program);
+    let mut collector = ExternPropertyCollector::new(metadata);
+    collector.visit_program(program);
+    let analysis = collector.finish();
+    let static_property_names = analysis.static_property_names.clone();
+    let mut preserved_property_names = HashSet::new();
+    preserved_property_names.extend(analysis.platform_callback_names);
+    preserved_property_names.extend(analysis.reflective_property_names);
+    let is_proven_monomorphic = |name: &String| {
+        analysis.proven_definition_names.contains(name)
+            && analysis.proven_monomorphic_access_names.contains(name)
+            && !analysis.unproven_definition_names.contains(name)
+            && !analysis.unproven_monomorphic_access_names.contains(name)
+    };
+    preserved_property_names.extend(
+        analysis
+            .defined_hazard_names
+            .intersection(&analysis.accessed_hazard_names)
+            .filter(|name| !is_proven_monomorphic(name))
+            .cloned(),
+    );
+    preserved_property_names.extend(
+        analysis
+            .callback_record_names
+            .iter()
+            .filter(|name| !is_proven_monomorphic(name))
+            .cloned(),
+    );
+    preserved_property_names.extend(
+        analysis
+            .constructor_read_names
+            .intersection(&analysis.static_assigned_names)
+            .cloned(),
+    );
+    let mut class_surface_facts = Vec::new();
+    collect_program_class_surface_facts(program, &mut class_surface_facts);
+    ExternFileFacts {
+        declared_names: collect_program_declared_names(program),
+        preserved_property_names,
+        static_property_names,
+        class_surface_facts,
+    }
+}
+
+/// Folds per-file facts, in input order, into the whole-graph analysis.
+pub(crate) fn merge_extern_property_facts(
+    per_file: Vec<ExternFileFacts>,
     extern_file_names: &[String],
-    file_metadata: &HashMap<String, ClosureFileMetadata>,
 ) -> Result<ExternPropertyAnalysis, String> {
-    let retained_sources = file_names
-        .iter()
-        .filter(|file_name| !file_name.ends_with(".d.ts"))
-        .map(|file_name| {
-            fs::read_to_string(file_name)
-                .map(|source| (PathBuf::from(file_name), source))
-                .map_err(|error| error.to_string())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let allocator = Allocator::default();
-    let mut programs = Vec::new();
+    let mut program_declared_names = HashSet::new();
     let mut preserved_property_names = HashSet::new();
     let mut static_property_names = HashSet::new();
-
-    for (path, source) in &retained_sources {
-        match parse_program(&allocator, path, source) {
-            Ok(mut program) => {
-                crate::transpile::emit_helpers::rewrite_this_field_helper_assignments(
-                    &allocator,
-                    &mut program,
-                );
-                let metadata = file_metadata.get(&closure_metadata_key(path));
-                let mut collector = ExternPropertyCollector::new(metadata);
-                collector.visit_program(&program);
-                let analysis = collector.finish();
-                static_property_names.extend(analysis.static_property_names.iter().cloned());
-                preserved_property_names.extend(analysis.platform_callback_names);
-                preserved_property_names.extend(analysis.reflective_property_names);
-                let is_proven_monomorphic = |name: &String| {
-                    analysis.proven_definition_names.contains(name)
-                        && analysis.proven_monomorphic_access_names.contains(name)
-                        && !analysis.unproven_definition_names.contains(name)
-                        && !analysis.unproven_monomorphic_access_names.contains(name)
-                };
-                preserved_property_names.extend(
-                    analysis
-                        .defined_hazard_names
-                        .intersection(&analysis.accessed_hazard_names)
-                        .filter(|name| !is_proven_monomorphic(name))
-                        .cloned(),
-                );
-                preserved_property_names.extend(
-                    analysis
-                        .callback_record_names
-                        .iter()
-                        .filter(|name| !is_proven_monomorphic(name))
-                        .cloned(),
-                );
-                preserved_property_names.extend(
-                    analysis
-                        .constructor_read_names
-                        .intersection(&analysis.static_assigned_names)
-                        .cloned(),
-                );
-                programs.push(program);
-            }
-            Err(_) => {
-                static_property_names.extend(collect_static_property_names_from_text(source));
-            }
-        }
+    let mut class_surface_facts = Vec::new();
+    for facts in per_file {
+        program_declared_names.extend(facts.declared_names);
+        preserved_property_names.extend(facts.preserved_property_names);
+        static_property_names.extend(facts.static_property_names);
+        class_surface_facts.extend(facts.class_surface_facts);
     }
 
-    preserved_property_names.extend(collect_custom_element_surface_names(&programs));
+    preserved_property_names.extend(resolve_custom_element_surface_names(&class_surface_facts));
     let explicit_extern_property_names = collect_explicit_extern_property_names(extern_file_names)?;
     preserved_property_names.extend(explicit_extern_property_names.iter().cloned());
     preserved_property_names.extend(static_property_names.iter().cloned());
-    let program_declared_names = collect_program_declared_names(&programs);
 
     Ok(ExternPropertyAnalysis {
         program_declared_names,
@@ -133,6 +151,50 @@ pub(crate) fn collect_extern_property_names_with_externs(
         preserved_property_names,
         static_property_names,
     })
+}
+
+/// Whole-graph driver retained for the analysis unit tests, which exercise one
+/// fixture file at a time. Production runs the fused parallel prelude instead,
+/// where the shared parse fails the build before this stage can see a file the
+/// parser rejected.
+#[cfg(test)]
+pub(crate) fn collect_extern_property_names_with_externs(
+    file_names: &[String],
+    extern_file_names: &[String],
+    file_metadata: &HashMap<String, ClosureFileMetadata>,
+) -> Result<ExternPropertyAnalysis, String> {
+    let mut per_file = Vec::new();
+    let mut text_only_static_names = HashSet::new();
+    for file_name in file_names
+        .iter()
+        .filter(|file_name| !file_name.ends_with(".d.ts"))
+    {
+        let path = PathBuf::from(file_name);
+        let source = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+        let allocator = Allocator::default();
+        match parse_program(&allocator, &path, &source) {
+            Ok(mut program) => {
+                let metadata = file_metadata.get(&closure_metadata_key(&path));
+                per_file.push(analyze_extern_file_program(
+                    &allocator,
+                    &mut program,
+                    metadata,
+                ));
+            }
+            Err(_) => {
+                text_only_static_names.extend(collect_static_property_names_from_text(&source));
+            }
+        }
+    }
+
+    let mut analysis = merge_extern_property_facts(per_file, extern_file_names)?;
+    analysis
+        .static_property_names
+        .extend(text_only_static_names.iter().cloned());
+    analysis
+        .preserved_property_names
+        .extend(text_only_static_names);
+    Ok(analysis)
 }
 
 fn parse_program<'a>(
@@ -170,6 +232,7 @@ fn collect_explicit_extern_property_names(
     Ok(property_names)
 }
 
+#[cfg(test)]
 pub(crate) fn collect_static_property_names_from_text(source_text: &str) -> HashSet<String> {
     let mut names = HashSet::new();
     for (_, property_name) in super::super::collect_class_static_assignments(source_text) {
@@ -791,12 +854,7 @@ struct ClassSurfaceFact {
     super_name: Option<String>,
 }
 
-fn collect_custom_element_surface_names(programs: &[Program<'_>]) -> HashSet<String> {
-    let mut facts = Vec::new();
-    for program in programs {
-        collect_program_class_surface_facts(program, &mut facts);
-    }
-
+fn resolve_custom_element_surface_names(facts: &[ClassSurfaceFact]) -> HashSet<String> {
     let mut facts_by_name: HashMap<String, Vec<usize>> = HashMap::new();
     let mut pending = VecDeque::new();
     for (index, fact) in facts.iter().enumerate() {
@@ -1254,30 +1312,28 @@ fn collect_pattern_property_reads(pattern: &BindingPattern<'_>, names: &mut Hash
     }
 }
 
-fn collect_program_declared_names(programs: &[Program<'_>]) -> HashSet<String> {
+fn collect_program_declared_names(program: &Program<'_>) -> HashSet<String> {
     let mut names = HashSet::new();
-    for program in programs {
-        for statement in &program.body {
-            match statement {
-                Statement::VariableDeclaration(declaration) if !declaration.declare => {
-                    for declarator in &declaration.declarations {
-                        if let BindingPattern::BindingIdentifier(binding) = &declarator.id {
-                            names.insert(binding.name.to_string());
-                        }
+    for statement in &program.body {
+        match statement {
+            Statement::VariableDeclaration(declaration) if !declaration.declare => {
+                for declarator in &declaration.declarations {
+                    if let BindingPattern::BindingIdentifier(binding) = &declarator.id {
+                        names.insert(binding.name.to_string());
                     }
                 }
-                Statement::FunctionDeclaration(function) if !function.declare => {
-                    if let Some(identifier) = &function.id {
-                        names.insert(identifier.name.to_string());
-                    }
-                }
-                Statement::ClassDeclaration(class) if !class.declare => {
-                    if let Some(identifier) = &class.id {
-                        names.insert(identifier.name.to_string());
-                    }
-                }
-                _ => {}
             }
+            Statement::FunctionDeclaration(function) if !function.declare => {
+                if let Some(identifier) = &function.id {
+                    names.insert(identifier.name.to_string());
+                }
+            }
+            Statement::ClassDeclaration(class) if !class.declare => {
+                if let Some(identifier) = &class.id {
+                    names.insert(identifier.name.to_string());
+                }
+            }
+            _ => {}
         }
     }
     names

@@ -10,7 +10,7 @@ use oxc_ast::ast::{
 pub(super) const DEFAULT_EXPORT_LOCAL: &str = "__gcc_dflt";
 
 #[derive(Clone, Debug, Default)]
-pub(super) struct ModuleScan {
+pub(crate) struct ModuleScan {
     /// export name -> local top-level binding name
     pub(super) own_exports: BTreeMap<String, String>,
     /// export name -> (target module id, original export name on the target)

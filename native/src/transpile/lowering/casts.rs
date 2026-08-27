@@ -58,9 +58,15 @@ fn wrap_type_assertion<'a>(
     expression: &mut Expression<'a>,
 ) -> bool {
     let type_string = match expression {
-        Expression::TSAsExpression(node) => cast_type_string(&node.type_annotation),
-        Expression::TSTypeAssertion(node) => cast_type_string(&node.type_annotation),
-        Expression::TSSatisfiesExpression(node) => cast_type_string(&node.type_annotation),
+        Expression::TSAsExpression(node) => {
+            cast_type_string(&node.type_annotation, &node.expression)
+        }
+        Expression::TSTypeAssertion(node) => {
+            cast_type_string(&node.type_annotation, &node.expression)
+        }
+        Expression::TSSatisfiesExpression(node) => {
+            cast_type_string(&node.type_annotation, &node.expression)
+        }
         _ => return false,
     };
     let inner = match expression {
@@ -76,11 +82,46 @@ fn wrap_type_assertion<'a>(
     true
 }
 
-fn cast_type_string(type_annotation: &TSType<'_>) -> Option<String> {
+fn cast_type_string(type_annotation: &TSType<'_>, operand: &Expression<'_>) -> Option<String> {
     if type_annotation.is_const_type_reference() {
+        // `as const` is not a Closure type.
         return None;
     }
+    if is_any_or_unknown_type(type_annotation) {
+        // `as any` / `as unknown` are TypeScript-only escape hatches so tsc
+        // stays quiet. Erasing them keeps Closure's view of the operand's real
+        // type, so `checkTypes` still reports genuine lies.
+        //
+        // A `null`/`undefined` operand is the one exception. Erasing there does
+        // not expose a real type — it collides with the non-nullable `!T`
+        // annotation we ourselves synthesized from the callee's declared
+        // parameter type, manufacturing a diagnostic of our own annotation's
+        // making for the single idiom (`null as any`) that exists purely to
+        // inject a placeholder. Such a cast is a nullability escape, not a
+        // type-identity claim, so keep the wildcard and let the value stay
+        // assignable. The discriminator is the syntactic kind of the operand,
+        // never an identifier, type name, or source string.
+        return is_nullish_literal(operand).then(|| "?".to_string());
+    }
     Some(render_closure_type(type_annotation))
+}
+
+fn is_nullish_literal(expression: &Expression<'_>) -> bool {
+    match expression.get_inner_expression() {
+        Expression::NullLiteral(_) => true,
+        Expression::Identifier(identifier) => identifier.name == "undefined",
+        // `void <expr>` always evaluates to `undefined`.
+        Expression::UnaryExpression(unary) => unary.operator == UnaryOperator::Void,
+        _ => false,
+    }
+}
+
+fn is_any_or_unknown_type(type_annotation: &TSType<'_>) -> bool {
+    match type_annotation {
+        TSType::TSAnyKeyword(_) | TSType::TSUnknownKeyword(_) => true,
+        TSType::TSParenthesizedType(inner) => is_any_or_unknown_type(&inner.type_annotation),
+        _ => false,
+    }
 }
 
 fn synthesized_cast_expression<'a>(
@@ -341,6 +382,41 @@ mod synthesize_casts {
         let code = emit("const n = value as const;\n");
         assert!(!code.contains("@type"), "{code}");
         assert!(code.contains("value"), "{code}");
+    }
+
+    #[test]
+    fn any_and_unknown_assertions_erase() {
+        let any_code = emit("const n = value as any;\n");
+        assert!(!any_code.contains("@type"), "{any_code}");
+        assert!(any_code.contains("value"), "{any_code}");
+        let unknown_code = emit("const n = value as unknown;\n");
+        assert!(!unknown_code.contains("@type"), "{unknown_code}");
+        assert!(unknown_code.contains("value"), "{unknown_code}");
+    }
+
+    #[test]
+    fn nullish_any_unknown_assertions_keep_wildcard() {
+        for source in [
+            "const n = null as any;\n",
+            "const n = undefined as unknown;\n",
+            "const n = void 0 as any;\n",
+            "const n = (null) as any;\n",
+        ] {
+            let code = emit(source);
+            assert!(
+                code.contains("/** @type {?} */"),
+                "expected wildcard for {source:?}: {code}"
+            );
+            assert!(!code.contains(CAST_MARKER_PREFIX), "{code}");
+        }
+    }
+
+    #[test]
+    fn string_any_assertion_still_erases() {
+        let code = emit(r#"const n = "bad" as any;"#);
+        assert!(!code.contains("@type"), "{code}");
+        assert!(!code.contains(CAST_MARKER_PREFIX), "{code}");
+        assert!(code.contains("bad"), "{code}");
     }
 
     #[test]

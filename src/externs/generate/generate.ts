@@ -11,12 +11,16 @@ import {
   resolveModuleTypeEntry,
 } from "../compiler";
 import { accountBarriers, formatBarrierWarning } from "../barriers";
-import { createExternAnalysisContext } from "../context";
+import {
+  createExternAnalysisContext,
+  type ExternAnalysisContext,
+} from "../context";
 import {
   renderBoundaryAwareExterns,
   renderRuntimeAwareExterns,
 } from "../render";
 import { renderTypedExternalDeclarations } from "../typed-render";
+import type { ModuleSeed } from "../typed-render";
 import type {
   GeneratedRenameBarrierArtifact,
   GeneratedTypedExternArtifact,
@@ -33,15 +37,17 @@ export async function generateExterns(
 ): Promise<GenerateExternsResult> {
   const resolved = await resolveExternOptions(options);
   const scannedFiles = await resolveScannedFiles(resolved);
+  const typedSeeds = await resolveTypedModuleSeeds(resolved);
   const analysis = createExternAnalysisContext({
     appEntryFiles: resolved.appEntryFiles,
     compilerOptions: resolved.compilerOptions,
+    declarationRoots: typedSeeds.map((seed) => seed.declarationEntry),
     projectRoot: resolved.projectRoot,
     scannedFiles,
     typeWorld: resolved.typeWorld,
   });
   const barrierText = await renderBarriers(resolved, analysis);
-  const typed = await renderTypedDeclarations(resolved, analysis);
+  const typed = renderTypedDeclarations(resolved, analysis, typedSeeds);
 
   const barrierAccounting = accountBarriers({
     contributingFiles: scannedFiles,
@@ -138,11 +144,21 @@ async function resolveScannedFiles(options: ResolvedExternOptions) {
       });
 }
 
-async function renderTypedDeclarations(
+/** A resolved external module plus the export-selection policy to apply once
+ * the analysis program exists. */
+interface TypedModuleSeed extends Omit<ModuleSeed, "selectedExports"> {
+  usedExportsOnly: boolean;
+}
+
+/**
+ * Declaration entries must be known before the analysis program exists: they
+ * are program roots, without which the checker has no module symbol for an
+ * external specifier and every typed surface renders empty.
+ */
+async function resolveTypedModuleSeeds(
   options: ResolvedExternOptions,
-  analysis: ReturnType<typeof createExternAnalysisContext>,
-) {
-  const modules = await Promise.all(
+): Promise<TypedModuleSeed[]> {
+  return Promise.all(
     options.externalModules.map(async (module) => {
       const declaration = await resolveModuleTypeEntry({
         compilerOptions: options.compilerOptions,
@@ -156,16 +172,28 @@ async function renderTypedDeclarations(
         );
       return {
         ...declaration,
-        selectedExports:
-          module.exports === "used"
-            ? collectUsedExports(analysis, module.specifier)
-            : undefined,
+        declarationEntry: declaration.declarationEntry,
         specifier: module.specifier,
+        usedExportsOnly: module.exports === "used",
       };
     }),
   );
+}
+
+function renderTypedDeclarations(
+  options: ResolvedExternOptions,
+  analysis: ExternAnalysisContext,
+  seeds: readonly TypedModuleSeed[],
+) {
+  const modules = seeds.map(({ usedExportsOnly, ...seed }) => ({
+    ...seed,
+    selectedExports: usedExportsOnly
+      ? collectUsedExports(analysis, seed.specifier)
+      : undefined,
+  }));
   return renderTypedExternalDeclarations({
     checker: analysis.checker,
+    maxSymbolDepth: options.maxSymbolDepth,
     modules,
     program: analysis.program,
     projectRoot: options.projectRoot,

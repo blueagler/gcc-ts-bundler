@@ -37,8 +37,16 @@ import {
   createFixture,
   execFileAsync,
   findFilesNamed,
+  getProjectCacheDir,
   listDirectoryNames,
 } from "../helpers.mjs";
+
+function persistentViteCaptureDir(projectRoot, cacheDir = ".cache") {
+  return path.join(
+    getProjectCacheDir(path.resolve(projectRoot, cacheDir), projectRoot),
+    "vite-capture",
+  );
+}
 
 async function listFiles(rootDir, currentDir = rootDir) {
   const entries = await fs.readdir(currentDir, { withFileTypes: true });
@@ -96,6 +104,7 @@ async function buildViteFixture(fixture, overrides = {}) {
             "      },",
           ]
         : []),
+      ...(overrides.pluginOptionLines ?? []),
       "    }),",
       ...(overrides.trailingPluginEntries ?? []),
       "  ],",
@@ -1305,7 +1314,7 @@ test.serial(
     await fixture.write("clean.js", "export const value = 1;\n");
     const runtimeFile = path.join(fixture.projectRoot, "runtime.js");
     const cleanFile = path.join(fixture.projectRoot, "clean.js");
-    const parseModule = createModuleParser({
+    const { parseModule } = createModuleParser({
       authoredFiles: new Set(),
       moduleFilePaths: new Set([runtimeFile, cleanFile]),
     });
@@ -3049,9 +3058,39 @@ test("resolveViteCaptureRootPath is deterministic for identical inputs", () => {
     projectRoot: "/tmp/demo",
   };
 
-  expect(resolveViteCaptureRootPath(input)).toBe(
-    resolveViteCaptureRootPath(input),
+  const captureRoot = resolveViteCaptureRootPath(input);
+  expect(captureRoot).toBe(resolveViteCaptureRootPath(input));
+  expect(captureRoot.startsWith(`${path.resolve("/tmp/demo")}${path.sep}`)).toBe(
+    false,
   );
+  expect(path.basename(path.dirname(captureRoot))).toBe("vite-capture");
+});
+
+test("resolveViteCaptureRootPath uses the specified persistent cache.dir", () => {
+  const input = {
+    config: {
+      base: "/",
+      build: {
+        assetsDir: "assets",
+        cssCodeSplit: true,
+        minify: "esbuild",
+        target: "esnext",
+      },
+      mode: "production",
+      root: "/tmp/demo",
+    },
+    options: {
+      compiler: {
+        cache: { dir: ".cache", mode: "persistent" },
+        compilationLevel: "ADVANCED",
+      },
+    },
+    projectRoot: "/tmp/demo",
+  };
+
+  const captureRoot = resolveViteCaptureRootPath(input);
+  expect(captureRoot.startsWith(path.resolve("/tmp/demo", ".cache"))).toBe(true);
+  expect(path.basename(path.dirname(captureRoot))).toBe("vite-capture");
 });
 
 test("resolveViteCaptureRootPath changes when material build identity changes", () => {
@@ -3090,6 +3129,22 @@ test("resolveViteCaptureRootPath changes when material build identity changes", 
 });
 
 test.serial(
+  "gccTsBundler does not write .gcc-ts-bundler-vite into the project without persistent cache",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    await writeViteCssFixture(fixture);
+    await buildViteFixture(fixture);
+
+    expect(
+      await listDirectoryNames(
+        path.join(fixture.projectRoot, ".gcc-ts-bundler-vite"),
+      ),
+    ).toEqual([]);
+  },
+);
+
+test.serial(
   "gccTsBundler reuses the same Vite capture root and hits resolve snapshot plus final fast cache on identical builds",
   { timeout: 20000 },
   async () => {
@@ -3107,9 +3162,14 @@ test.serial(
 
     expect(
       await listDirectoryNames(
-        path.join(fixture.projectRoot, ".gcc-ts-bundler-vite"),
+        persistentViteCaptureDir(fixture.projectRoot),
       ),
     ).toHaveLength(1);
+    expect(
+      await listDirectoryNames(
+        path.join(fixture.projectRoot, ".gcc-ts-bundler-vite"),
+      ).catch(() => []),
+    ).toEqual([]);
     expect(first.stderr).toContain(
       "[gcc-ts-bundler timing] cache:final-fast: miss",
     );
@@ -3344,7 +3404,7 @@ test.serial(
     };
 
     await buildViteFixture(fixture, options);
-    await fs.rm(path.join(fixture.projectRoot, ".gcc-ts-bundler-vite"), {
+    await fs.rm(persistentViteCaptureDir(fixture.projectRoot), {
       force: true,
       recursive: true,
     });
@@ -3353,16 +3413,16 @@ test.serial(
     expect(rebuilt.stderr).toContain(
       "[gcc-ts-bundler timing] cache:native-emit: miss",
     );
-    const [captureRootId] = await listDirectoryNames(
-      path.join(fixture.projectRoot, ".gcc-ts-bundler-vite"),
-    );
+    const captureDir = persistentViteCaptureDir(fixture.projectRoot);
+    const [captureRootId] = await listDirectoryNames(captureDir);
     expect(
-      await fixture.read(
+      await fs.readFile(
         path.join(
-          ".gcc-ts-bundler-vite",
+          captureDir,
           captureRootId,
           ".gcc-ts-bundler-vite-runtime-module-sources.json",
         ),
+        "utf8",
       ),
     ).toContain("{");
   },
@@ -3380,17 +3440,11 @@ test.serial(
       env: { GCC_BUILD_TIMINGS: "1" },
     });
 
-    const [captureRootId] = await listDirectoryNames(
-      path.join(fixture.projectRoot, ".gcc-ts-bundler-vite"),
-    );
+    const captureDir = persistentViteCaptureDir(fixture.projectRoot);
+    const [captureRootId] = await listDirectoryNames(captureDir);
     expect(captureRootId).toBeTruthy();
     await fs.rm(
-      path.join(
-        fixture.projectRoot,
-        ".gcc-ts-bundler-vite",
-        captureRootId,
-        "gcc-core-out",
-      ),
+      path.join(captureDir, captureRootId, "gcc-core-out"),
       { force: true, recursive: true },
     );
 
@@ -3928,5 +3982,68 @@ test.serial(
       if (previousRuntime === undefined) delete globalThis.__g;
       else globalThis.__g = previousRuntime;
     }
+  },
+);
+test.serial(
+  "gccTsBundler writes an evidence report with byte deltas and pinned properties",
+  { timeout: 30000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<script type="module" src="/src/main.js"></script>\n',
+    );
+    await fixture.write(
+      "src/greet.js",
+      "export function greet(name) { return `hello:${name}`; }\n",
+    );
+    await fixture.write(
+      "src/main.js",
+      [
+        'import { greet } from "./greet.js";',
+        'globalThis["__reportFixtureResult"] = greet("report");',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "externs/app.externs.js",
+      [
+        "/**",
+        " * @fileoverview",
+        " * @externs",
+        " */",
+        "Object.prototype.myPinnedProp;",
+        "",
+      ].join("\n"),
+    );
+
+    await buildViteFixture(fixture, {
+      compilerLines: ['        externs: ["externs/app.externs.js"],'],
+      pluginOptionLines: ['      report: { file: "gcc-report.json" },'],
+    });
+
+    const report = JSON.parse(await fixture.read("gcc-report.json"));
+    expect(report.version).toBe(1);
+    expect(report.javascript.baseline.chunkCount).toBeGreaterThanOrEqual(1);
+    expect(report.javascript.baseline.rawBytes).toBeGreaterThan(0);
+    expect(report.javascript.baseline.gzipBytes).toBeGreaterThan(0);
+    expect(report.javascript.output.fileCount).toBeGreaterThanOrEqual(1);
+    expect(report.javascript.output.rawBytes).toBeGreaterThan(0);
+    // Baseline must be the pre-replacement Vite chunks, not the compiled
+    // output measured against itself.
+    expect(report.javascript.output.rawBytes).not.toBe(
+      report.javascript.baseline.rawBytes,
+    );
+    expect(Number.isFinite(report.javascript.deltaPct.raw)).toBe(true);
+    expect(Number.isFinite(report.javascript.deltaPct.gzip)).toBe(true);
+    expect(report.modules.capturedCount).toBeGreaterThanOrEqual(
+      report.modules.compiledCount,
+    );
+    expect(report.modules.compiledCount).toBeGreaterThan(0);
+    expect(Array.isArray(report.modules.deadModules)).toBe(true);
+    expect(report.properties.pinned).toContain("myPinnedProp");
+    expect(report.properties.renameBarrierFiles).toContain(
+      "externs/app.externs.js",
+    );
   },
 );

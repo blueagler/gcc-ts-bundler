@@ -98,6 +98,29 @@ export interface TypeMetadataTarget {
   sourceFilePath: string;
 }
 
+/**
+ * Typed member declarations inside a generated type template. The renderer
+ * emits them as an annotation line followed by the member line, so a member
+ * only counts when the line above it actually carries a type tag.
+ */
+function countTypedMembers(template: string): number {
+  const lines = template.split("\n");
+  let count = 0;
+  let previous = "";
+  for (const line of lines) {
+    const isMember = /^\s*[\w$]+(?:\.[\w$]+)*\.prototype\.[\w$]+;\s*$/u.test(
+      line,
+    );
+    if (isMember && /@(?:type|param|return)\b/u.test(previous)) {
+      count += 1;
+    }
+    if (line.trim().length > 0) {
+      previous = line;
+    }
+  }
+  return count;
+}
+
 export function countTypeMetadata(
   files: readonly ClosureTypeMetadataFile[],
 ): TypeMetadataCounts {
@@ -111,6 +134,10 @@ export function countTypeMetadata(
         (annotation) =>
           annotation.target.kind === "member" && annotation.typeBearing,
       ).length;
+      counts.memberAnnotationCount += file.declarations.reduce(
+        (total, declaration) => total + countTypedMembers(declaration.template),
+        0,
+      );
       counts.typeDeclarationCount += file.declarations.length;
       counts.enumDeclarationCount += file.enums.length;
       counts.unresolvedTypeReferenceCount += file.diagnostics.length;

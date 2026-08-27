@@ -5,5 +5,4 @@ export {
   readAssetText,
   stripPublicPathPrefix,
 } from "./helpers";
-export { rewritePreservedImportSpecifiers } from "./rewrite";
 export { logOutputStats } from "./stats";

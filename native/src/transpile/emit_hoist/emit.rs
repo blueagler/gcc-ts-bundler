@@ -66,7 +66,8 @@ pub(crate) fn emit_hoisted_module_text<'a>(
         HashSet::new()
     };
     apply_top_level_renames(allocator, program, identity, &renames);
-    let shared_helpers = take_shared_helper_declarations(allocator, program, &shared_helper_names);
+    let mut shared_helpers =
+        take_shared_helper_declarations(allocator, program, &shared_helper_names);
     let lexical_binding_names = collect_lexical_binding_names(program);
     let fresh_names = FreshNameAllocator::from_program(program, identity);
 
@@ -105,6 +106,7 @@ pub(crate) fn emit_hoisted_module_text<'a>(
         &bound,
     )?;
     let mut type_metadata = bound.prepare(&mut fresh_names, &runtime_type_names, Some(ordinal));
+    shared_helpers.extend(type_metadata.take_shared_type_declarations());
     let body = assemble_hoisted_module_text(
         allocator,
         program,

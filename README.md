@@ -26,6 +26,10 @@ bun install gcc-ts-bundler
 ```
 
 Requires Node.js 18 or newer. Vite is an optional peer dependency and is only needed when importing `gcc-ts-bundler/vite`.
+The peer range is pinned to the tested Vite line (`^8.2.0`): the plugin
+replaces the output of Vite's bundler while byte-preserving its module graph
+and naming, so each new Vite minor is validated and adopted deliberately
+rather than assumed compatible.
 
 ## Documentation
 
@@ -215,16 +219,40 @@ writes to `dist-pure/` and never touches the plugin-built `dist/`.
 
 ## Results and limits
 
-These measurements compare GCC output with stock Vite output.
+Every number is reproducible from the committed examples: each ships the
+plugin build (`dist/`) next to the identical stock Vite build
+(`vite.pure.config.ts` -> `dist-pure/`). JavaScript deltas of the committed
+trees, plugin vs stock:
 
-| App       | Total raw | Total gzip | Initial load |
-| --------- | --------: | ---------: | -----------: |
-| React app |    -11.1% |      -2.2% |       -13.9% |
-| Vue app   |    -68.4% |     -66.5% |  gzip -40.5% |
+| Example             |    Raw |   Gzip |
+| ------------------- | -----: | -----: |
+| jquery (vanilla-ts) | -13.8% | -12.3% |
+| lit                 | -12.2% | -10.0% |
+| react               | -11.5% |  -4.4% |
+| svelte              |  +5.3% |  -1.9% |
+| vue-vapor           |  -6.7% |  +0.5% |
 
-The React app had zero page errors. The Vue app loaded three routes with zero page errors.
+The wins concentrate where code is authored-dominant: libraries, design
+systems, and low-dependency apps whose bytes are their own classes and
+functions. As dependency share grows the advantage decays monotonically — a
+2,352-module dependency-dominated app measured +4% gzip against stock Vite.
+If most of your bundle is `node_modules`, use stock Vite; Closure ADVANCED
+cannot rename or delete what third-party code shapes at runtime.
 
-Builds take about 10x longer than stock Vite in these measurements. Vite worker entry graphs are unsupported.
+`bun run verify:examples` rebuilds every example byte-for-byte and enforces
+the authored-dominant wins as a regression gate (jquery >= 10% gzip, lit >=
+8% gzip). Those floors are the product's kill criteria, not build checks.
+
+To measure the same delta on your own app, set `report: { file: "gcc-report.json" }`
+on the Vite plugin: every build then writes an evidence report with the JS
+byte delta vs the Vite chunks it replaced, the modules the whole-program link
+proved dead, and the property names pinned as rename barriers. See
+`docs/vite.md`.
+
+Cold builds cost roughly 10x stock Vite (Closure ADVANCED is a whole-program
+optimizer); warm builds reuse the persistent cache and renaming maps, keeping
+unchanged chunks byte-identical and skipping Closure entirely. Vite worker
+entry graphs are unsupported.
 
 ## License
 

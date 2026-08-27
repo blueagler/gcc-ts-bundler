@@ -2,6 +2,7 @@ import ts from "@typescript/typescript6";
 
 import { applyTextEdits } from "../../shared/text-edits";
 import { toMaterializedRelativePath } from "../capture";
+import { getCapturedSourceFile } from "../capture-analysis";
 import type { ExportDemand } from "../graph";
 import type { CapturedModule } from "../internal-types";
 import { shakeModuleOnce } from "./shake";
@@ -122,13 +123,7 @@ function shakeModuleReexports(
 
 /** Drops a function tail that cannot run after an expressionless return. */
 function dropUnreachableTails(moduleId: string, code: string) {
-  const sourceFile = ts.createSourceFile(
-    moduleId,
-    code,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.JS,
-  );
+  const sourceFile = getCapturedSourceFile(moduleId, code);
   const edits: Array<{ end: number; start: number; text: string }> = [];
   const visit = (node: ts.Node) => {
     if (

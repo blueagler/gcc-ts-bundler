@@ -1,10 +1,8 @@
 use super::*;
-use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     BindingPattern, Declaration, ExportDefaultDeclarationKind, ImportOrExportKind,
     ModuleExportName, Program as OxcProgram, Statement,
 };
-use std::fs;
 
 pub(crate) fn parse_chunk_mode(value: &str) -> std::result::Result<ChunkMode, String> {
     match value {
@@ -84,14 +82,13 @@ pub(crate) enum ChunkMode {
     BundlerRuntime,
 }
 
-pub(crate) fn collect_bundler_module_slots(
-    file_names: &[String],
+/// Resolution-only context for prelude scans that need specifier lookup.
+pub(crate) fn analysis_resolution_context(
     workspace_dir: &Path,
     package_aliases: &[PackageAliasInput],
     resolved_module_ids: &HashMap<String, String>,
-    file_metadata: &HashMap<String, ClosureFileMetadata>,
-) -> std::result::Result<HashMap<String, BundlerModuleSlots>, String> {
-    let resolution_context = TranspileContext {
+) -> TranspileContext {
+    TranspileContext {
         bundler_module_slots: HashMap::new(),
         bundler_runtime_logical_ids: HashMap::new(),
         chunk_mode: ChunkMode::BundlerRuntime,
@@ -114,59 +111,56 @@ pub(crate) fn collect_bundler_module_slots(
         type_metadata_enabled: false,
         assigner_pin_module_ids: HashSet::new(),
         workspace_dir: workspace_dir.to_path_buf(),
-    };
-
-    let mut raw_exports_by_module = HashMap::<String, RawBundlerExportInfo>::new();
-    for file_name in file_names {
-        if file_name.ends_with(".d.ts") {
-            continue;
-        }
-        let file_path = PathBuf::from(file_name);
-        let module_id = to_goog_module_id(&file_path, workspace_dir);
-        let authored_source = fs::read_to_string(&file_path).map_err(|error| error.to_string())?;
-        let metadata = file_metadata.get(&closure_metadata_key(&file_path));
-        let source = metadata
-            .and_then(|metadata| metadata.decorated_output_text.as_deref())
-            .unwrap_or(&authored_source);
-        let effective_path =
-            if metadata.is_some_and(|metadata| metadata.decorated_output_text.is_some()) {
-                file_path.with_extension("js")
-            } else {
-                file_path.clone()
-            };
-        let allocator = Allocator::default();
-        let program = super::parse_oxc_program(&allocator, &effective_path, source)?;
-        let commonjs_analysis = crate::commonjs::analyze_commonjs_program(&program);
-        let mut raw_exports = if should_normalize_commonjs(&file_path, &commonjs_analysis) {
-            RawBundlerExportInfo {
-                explicit_exports: BTreeSet::from([
-                    "__cjsExports".to_string(),
-                    "default".to_string(),
-                ]),
-                export_all_modules: Vec::new(),
-            }
-        } else {
-            collect_raw_bundler_exports(&program, &file_path, &resolution_context)?
-        };
-        if let Some(metadata) = metadata {
-            raw_exports.explicit_exports.extend(
-                metadata
-                    .enums
-                    .iter()
-                    .filter(|enum_decl| enum_decl.exported)
-                    .map(|enum_decl| enum_decl.binding_name.clone()),
-            );
-        }
-        raw_exports_by_module.insert(module_id, raw_exports);
     }
+}
 
+/// Bundler-runtime export names for one already-parsed file.
+pub(crate) fn collect_file_bundler_exports(
+    program: &OxcProgram<'_>,
+    file_path: &Path,
+    workspace_dir: &Path,
+    metadata: Option<&ClosureFileMetadata>,
+    resolution_context: &TranspileContext,
+) -> std::result::Result<(String, RawBundlerExportInfo), String> {
+    let module_id = to_goog_module_id(file_path, workspace_dir);
+    let commonjs_analysis = crate::commonjs::analyze_commonjs_program(program);
+    let mut raw_exports = if should_normalize_commonjs(file_path, &commonjs_analysis) {
+        RawBundlerExportInfo {
+            explicit_exports: BTreeSet::from(["__cjsExports".to_string(), "default".to_string()]),
+            export_all_modules: Vec::new(),
+        }
+    } else {
+        collect_raw_bundler_exports(program, file_path, resolution_context)?
+    };
+    if let Some(metadata) = metadata {
+        raw_exports.explicit_exports.extend(
+            metadata
+                .enums
+                .iter()
+                .filter(|enum_decl| enum_decl.exported)
+                .map(|enum_decl| enum_decl.binding_name.clone()),
+        );
+    }
+    Ok((module_id, raw_exports))
+}
+
+/// Resolves `export *` edges across per-file bundler export facts.
+///
+/// Module ids are walked in sorted order so a missing-target error is
+/// byte-stable regardless of which rayon worker produced which file.
+pub(crate) fn resolve_bundler_module_slots(
+    raw_exports_by_module: HashMap<String, RawBundlerExportInfo>,
+) -> std::result::Result<HashMap<String, BundlerModuleSlots>, String> {
     let mut resolved_export_names = raw_exports_by_module
         .iter()
         .map(|(module_id, raw)| (module_id.clone(), raw.explicit_exports.clone()))
         .collect::<HashMap<_, _>>();
     loop {
         let mut changed = false;
-        for (module_id, raw_exports) in &raw_exports_by_module {
+        let mut module_ids = raw_exports_by_module.keys().cloned().collect::<Vec<_>>();
+        module_ids.sort();
+        for module_id in &module_ids {
+            let raw_exports = &raw_exports_by_module[module_id];
             for target_module_id in &raw_exports.export_all_modules {
                 let Some(target_names) = resolved_export_names.get(target_module_id).cloned()
                 else {

@@ -189,8 +189,15 @@ const isNativeTypeMetadataDiagnostic = isObjectOf<
   target: optional(isString),
 });
 
+const isNativeEmittedTypeDeclaration = isObjectOf<
+  NativeEmittedTypeMetadata["declarations"][number]
+>({
+  template: isString,
+});
+
 const isNativeEmittedTypeMetadata = isObjectOf<NativeEmittedTypeMetadata>({
   counts: isNativeTypeMetadataCounts,
+  declarations: arrayOf(isNativeEmittedTypeDeclaration),
   diagnostics: arrayOf(isNativeTypeMetadataDiagnostic),
   emittedFile: isString,
 });

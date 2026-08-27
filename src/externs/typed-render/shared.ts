@@ -13,15 +13,24 @@ export type ModuleSeed = {
 export type RenderState = {
   checker: ts.TypeChecker;
   currentSymbol?: ts.Symbol | undefined;
+  /**
+   * Distance from a seed export for the symbol being emitted. Seeds are 0.
+   * `reserveSymbol` refuses anything past `MAX_EXTERN_SYMBOL_DEPTH`, which is
+   * what bounds the emitted type closure.
+   */
+  currentDepth: number;
   degradedOccurrences: number;
   degradedSymbols: Set<ts.Symbol>;
   projectRoot?: string | undefined;
   diagnostics: ExternTypeDiagnostic[];
   emitted: Set<ts.Symbol>;
   lines: string[];
+  depthForSymbol: Map<ts.Symbol, number>;
   moduleForSymbol: Map<ts.Symbol, ModuleSeed>;
   nameForSymbol: Map<ts.Symbol, string>;
   namespaces: Set<string>;
+  /** Unbounded when undefined. See `GenerateExternsOptions.maxSymbolDepth`. */
+  maxSymbolDepth?: number | undefined;
   pending: ts.Symbol[];
 };
 

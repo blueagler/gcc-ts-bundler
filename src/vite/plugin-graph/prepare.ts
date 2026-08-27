@@ -21,6 +21,7 @@ import type {
   PluginContext,
   ViteBuildMetrics,
   ViteCssOwnership,
+  ViteWorkspaceLayout,
 } from "../internal-types";
 import { materializeCapturedGraph } from "../materialize";
 import { listJavaScriptChunks } from "../output";
@@ -31,7 +32,6 @@ import { prebundleMaterializedDependencies } from "../prebundle";
 import { collectMaterializedGraphStats } from "../size";
 import { collectViteTypeMetadata } from "../type-metadata";
 import type { GccTsBundlerVitePluginOptions } from "../types";
-import { prepareViteWorkspace } from "../workspace";
 
 export async function prepareViteGraph(
   this: PluginContext,
@@ -43,6 +43,7 @@ export async function prepareViteGraph(
     options: GccTsBundlerVitePluginOptions;
     resolutionCache: CapturedModuleResolutionCache;
     timingTotals: ViteTimingTotals;
+    workspace: ViteWorkspaceLayout;
   },
 ): Promise<PreparedViteGraph> {
   const jsChunks = listJavaScriptChunks(input.bundle);
@@ -84,12 +85,7 @@ export async function prepareViteGraph(
     );
   }
 
-  const workspace = await prepareViteWorkspace({
-    config: input.config,
-    debugDir: input.options.debug?.dumpCapturedGraphDir,
-    options: input.options,
-    projectRoot: input.config.root,
-  });
+  const { workspace } = input;
   const publicPath = resolvePublicPath(input.config, input.options);
   const manifestSettings = resolveManifestFileSettings(input.options);
   const cssOwnership = measure(
@@ -106,6 +102,7 @@ export async function prepareViteGraph(
   );
 
   const normalized = await normalizeCapturedGraph.call(this, {
+    bundle: input.bundle,
     buildMetrics: input.buildMetrics,
     capturedModules: input.capturedModules,
     initialModuleIds: retainedCaptured.materializedModuleIds,
@@ -139,11 +136,12 @@ export async function prepareViteGraph(
     stage: "before-prebundle",
   });
 
-  // Externs analysis keeps its app-side scans on the pre-prebundle graph and
-  // starts them immediately, so it still overlaps with prebundling; the
-  // dependency-hazard scan awaits the prebundle promise inside, because the
-  // string-keyed field definitions it looks for are created by esbuild's
-  // lowering and only exist in the graph Closure actually compiles.
+  // Every extern scan awaits the prebundle promise inside `resolveCompilerExterns`.
+  // Prebundling rewrites authored and direct-dependency modules in place, so a scan
+  // overlapping it read pre-rewrite text on one build and post-rewrite text on the
+  // next purely on interleaving — and `generated.externs.js` is a cache-key input,
+  // so that instability cost every first rebuild a full recompile. The rewritten
+  // text is also the only text that matters: it is what Closure compiles.
   const prebundlePromise = measureAsync(
     input.timingTotals,
     "dependencyPrebundleMs",
@@ -175,6 +173,10 @@ export async function prepareViteGraph(
     "typeMetadataMs",
     () =>
       collectViteTypeMetadata({
+        cache: {
+          captureRoot: workspace.captureRoot,
+          options: input.options,
+        },
         materialized,
         projectRoot: input.config.root,
         sourceGraph: materializedBeforePrebundle,
@@ -196,6 +198,7 @@ export async function prepareViteGraph(
   });
 
   return {
+    assetPlaceholders: normalized.assetPlaceholders,
     captureRoot: workspace.captureRoot,
     coreOutDir: workspace.coreOutDir,
     cssOwnership,

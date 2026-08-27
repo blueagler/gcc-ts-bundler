@@ -1,8 +1,10 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import type { ResolvedConfig } from "vite";
 
+import { DEFAULT_BUILD_OPTIONS } from "../api/types";
 import { syncDirectoryEntries } from "../shared/files";
 import type { GccTsBundlerVitePluginOptions } from "./types";
 import type {
@@ -20,15 +22,22 @@ export async function prepareViteWorkspace(input: {
   options: GccTsBundlerVitePluginOptions;
   projectRoot: string;
 }): Promise<ViteWorkspaceLayout> {
-  const captureRoot = input.debugDir
-    ? path.resolve(input.projectRoot, input.debugDir)
-    : resolveViteCaptureRootPath({
-        config: input.config,
-        options: input.options,
-        projectRoot: input.projectRoot,
-      });
+  const cacheMode =
+    input.options.compiler?.cache?.mode ?? DEFAULT_BUILD_OPTIONS.cache.mode;
+  let captureRoot: string;
   if (input.debugDir) {
+    captureRoot = path.resolve(input.projectRoot, input.debugDir);
     await fs.rm(captureRoot, { force: true, recursive: true });
+  } else if (cacheMode === "persistent") {
+    captureRoot = resolveViteCaptureRootPath({
+      config: input.config,
+      options: input.options,
+      projectRoot: input.projectRoot,
+    });
+  } else {
+    captureRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "gcc-ts-bundler-vite-"),
+    );
   }
   const workspace = {
     captureRoot,

@@ -8,10 +8,16 @@ use super::super::PrepareClosureJobsInput;
 pub(super) fn property_renaming_report_path(
     raw_dir: &Path,
     compilation_level: &str,
+    job_stem: &str,
 ) -> Option<String> {
+    // Each compile job must own its report files. ADVANCED jobs previously
+    // all wrote `raw_dir/property-renaming-report.txt`, so concurrent jobs
+    // raced, persistRenamingMaps copied the winner into every job's pinned
+    // maps, and the next run's renamingMapHash (part of the job cache key)
+    // changed for a random subset of jobs.
     (compilation_level == "ADVANCED").then(|| {
         raw_dir
-            .join("property-renaming-report.txt")
+            .join(format!("{job_stem}.property-renaming-report.txt"))
             .to_string_lossy()
             .to_string()
     })

@@ -40,12 +40,7 @@ export function collectGlobalSurfaceExports(
       byName.set(symbol.getName(), symbol);
     }
   }
-  if (selectedExports && !selectedExports.has("*")) {
-    for (const name of byName.keys()) {
-      if (!selectedExports.has(name)) byName.delete(name);
-    }
-  }
-  return [...byName].map(([exportName, symbol]) => ({ exportName, symbol }));
+  return selectExportedSymbols(byName, selectedExports, checker);
 }
 
 export function collectModuleExports(
@@ -63,10 +58,80 @@ export function collectModuleExports(
   );
   const resolvedExportEquals = resolveAliasedSymbol(exportEquals, checker);
   if (resolvedExportEquals) byName.set("export=", resolvedExportEquals);
+  return selectExportedSymbols(byName, selectedExports, checker);
+}
+
+/**
+ * Narrows the collected names to `selectedExports` (`*` selects everything) and
+ * drops members that only restate something a base type already declares.
+ * `byName` insertion order is the emitted order, so both steps filter in place
+ * rather than rebuilding the map.
+ */
+function selectExportedSymbols(
+  byName: Map<string, ts.Symbol>,
+  selectedExports: ReadonlySet<string> | undefined,
+  checker: ts.TypeChecker,
+) {
   if (selectedExports && !selectedExports.has("*")) {
     for (const exportName of byName.keys()) {
       if (!selectedExports.has(exportName)) byName.delete(exportName);
     }
   }
-  return [...byName].map(([exportName, symbol]) => ({ exportName, symbol }));
+  return [...byName]
+    .filter(([, symbol]) => !isRedundantInheritedMember(symbol, checker))
+    .map(([exportName, symbol]) => ({ exportName, symbol }));
+}
+
+/** `ts.Symbol.parent` is not on the public type but is what identifies the
+ * class or interface a member was declared on. */
+function hasSymbolParent(
+  symbol: ts.Symbol,
+): symbol is ts.Symbol & { parent: ts.Symbol } {
+  return "parent" in symbol && symbol.parent !== undefined;
+}
+
+function hasObjectFlags(type: ts.Type): type is ts.ObjectType {
+  return "objectFlags" in type;
+}
+
+/** Narrowed to `InterfaceType` because only that carries a base-type list. */
+function isClassOrInterfaceType(type: ts.Type): type is ts.InterfaceType {
+  return (
+    (type.flags & ts.TypeFlags.Object) !== 0 &&
+    hasObjectFlags(type) &&
+    (type.objectFlags & (ts.ObjectFlags.Class | ts.ObjectFlags.Interface)) !== 0
+  );
+}
+
+function isRedundantInheritedMember(
+  symbol: ts.Symbol,
+  checker: ts.TypeChecker,
+) {
+  if (!hasSymbolParent(symbol)) return false;
+  const parent = symbol.parent;
+  if (
+    (parent.flags & (ts.SymbolFlags.Class | ts.SymbolFlags.Interface)) ===
+    0
+  ) {
+    return false;
+  }
+  const parentType = checker.getDeclaredTypeOfSymbol(parent);
+  if (!isClassOrInterfaceType(parentType)) return false;
+  if (
+    !checker
+      .getBaseTypes(parentType)
+      .some((baseType) => checker.getPropertyOfType(baseType, symbol.getName()))
+  ) {
+    return false;
+  }
+  return !isDeclaredOnParent(symbol, parent);
+}
+
+function isDeclaredOnParent(symbol: ts.Symbol, parent: ts.Symbol) {
+  const parentDeclarations = parent.declarations ?? [];
+  return (symbol.declarations ?? []).some((declaration) =>
+    parentDeclarations.some(
+      (parentDeclaration) => parentDeclaration === declaration.parent,
+    ),
+  );
 }

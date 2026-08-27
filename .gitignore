@@ -21,7 +21,6 @@ native/target/
 /dist/
 /npm/
 examples/**/node_modules/
-examples/**/.gcc-ts-bundler-vite/
 examples/**/.gcc-debug/
 examples/**/.investigate-cache/
 examples/**/.investigate-dist/

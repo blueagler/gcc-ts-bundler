@@ -1,0 +1,91 @@
+{
+  "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
+
+  // Additive on top of fallow's auto-discovery. Every entry below is a real
+  // runtime root that no manifest declares: the published `exports` subpaths,
+  // the `bin`, the build/release scripts, the oxlint plugin pack, and the test
+  // suite (run by `bun test`, which fallow cannot see).
+  "entry": [
+    "src/index.ts",
+    "src/vite/index.ts",
+    "src/presets/react.ts",
+    "src/presets/svelte.ts",
+    "src/presets/vue.ts",
+    "src/cli/main.ts",
+    "scripts/**/*.{mjs,cjs,ts}",
+    "tools/**/*.ts",
+    "test/**/*.test.mjs",
+    "test/**/*.assert.ts",
+    "test/helpers.mjs",
+    "test/helpers/**/*.mjs"
+  ],
+
+  // Not TypeScript module graphs. `closure-externs/` and `closure-lib/` are
+  // Closure compiler inputs passed by path on the command line; `examples/`
+  // are standalone consumer projects with their own lockfiles; `native/target/`
+  // is Cargo build output.
+  "ignorePatterns": [
+    "closure-externs/**",
+    "closure-lib/**",
+    "examples/**",
+    "native/target/**"
+  ],
+
+  // Packages referenced in ways no static import graph can express. Exact
+  // names only -- fallow does not glob this list.
+  "ignoreDependencies": [
+    // Ambient declaration root for the `workerd` target, named as a string
+    // literal in `src/api/targets.ts` and resolved when that target is built.
+    "@cloudflare/workers-types",
+
+    // Invoked by path, not imported:
+    // `scripts/bundle-declarations.mjs` spawns
+    // `./node_modules/dts-bundle-generator/dist/bin/dts-bundle-generator.js`.
+    "dts-bundle-generator",
+
+    // Loaded by the oxlint runner from `.oxlintrc.json` -> `jsPlugins`.
+    "eslint-plugin-perfectionist",
+
+    // Aliased `npm:typescript@5.9.3`, resolved through the require hook in
+    // `scripts/typescript-dts-register.cjs` so dts-bundle-generator gets the
+    // TypeScript 5 compiler API while the repo builds on TypeScript 7.
+    "typescript-dts",
+
+    // Correctly a devDependency: it backs the lint rules in `tools/oxlint/**`,
+    // which never ship. Those files are entry points above, so fallow counts
+    // them as production code and reports the import as a prod/dev mismatch.
+    "@oxlint/plugins",
+
+    // Prebuilt napi addons chosen at runtime. `src/native/index.ts` holds the
+    // eight names as string literals in a target -> package map and imports
+    // whichever matches the host platform, so none is statically reachable.
+    "gcc-ts-bundler-darwin-arm64",
+    "gcc-ts-bundler-darwin-x64",
+    "gcc-ts-bundler-linux-arm64-gnu",
+    "gcc-ts-bundler-linux-arm64-musl",
+    "gcc-ts-bundler-linux-x64-gnu",
+    "gcc-ts-bundler-linux-x64-musl",
+    "gcc-ts-bundler-win32-arm64-msvc",
+    "gcc-ts-bundler-win32-x64-msvc"
+  ],
+
+  // Same-name-across-layers artifacts, verified not to be duplicate symbols.
+  //
+  // `build` and `cleanCache`: `src/build/pipeline.ts` holds the sole
+  // implementation of each; `src/api/build.ts` is the published facade that
+  // wraps it (adding the extern-audit warning pass for `build`, and an
+  // explicit `Promise<void>` signature for `cleanCache`). `src/api/build.ts`
+  // is the only importer of the pipeline exports.
+  //
+  // `ResolvedBuildOptions`: two deliberately co-named interfaces, not one
+  // symbol exported twice. `src/api/types.ts` declares the public base;
+  // `src/build/types.ts` imports it aliased and declares a subtype that adds
+  // the host/Vite fields. `scripts/verify-package.mjs` carries a
+  // `@ts-expect-error` asserting the subtype is NOT publicly exported.
+  //
+  // Scoped to these names so a genuine duplicate elsewhere still fails.
+  "ignoreExports": [
+    { "file": "src/api/build.ts", "exports": ["build", "cleanCache"] },
+    { "file": "src/api/types.ts", "exports": ["ResolvedBuildOptions"] }
+  ]
+}

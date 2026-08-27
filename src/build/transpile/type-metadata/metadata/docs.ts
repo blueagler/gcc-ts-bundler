@@ -216,29 +216,48 @@ export function buildClassJsDoc(
   context: ClosureDocRenderContext,
 ) {
   const typeParameters = statement.typeParameters ?? [];
-  const tags = [
+  const tags: JsDocTagInput[] = [
     ...collectPreservedJsDocTags(statement),
     ...templateTags(typeParameters),
   ];
   if (hasModifier(statement, ts.SyntaxKind.AbstractKeyword)) {
     tags.push({ name: "abstract" });
   }
-  if (statement.heritageClauses) {
-    for (const clause of statement.heritageClauses) {
-      for (const typeNode of clause.types) {
-        const closureType = toClosureHeritageType(typeNode, checker, context);
-        if (!closureType) {
-          continue;
-        }
-        if (clause.token === ts.SyntaxKind.ExtendsKeyword) {
-          tags.push({ name: "extends", type: closureType });
-        } else if (clause.token === ts.SyntaxKind.ImplementsKeyword) {
-          tags.push({ name: "implements", type: closureType });
-        }
-      }
+  appendClassHeritageTags(tags, statement, checker, context);
+  return tags.length > 0 ? renderJsDoc(tags) : null;
+}
+
+function appendClassHeritageTags(
+  tags: JsDocTagInput[],
+  statement: ts.ClassDeclaration,
+  checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
+) {
+  for (const clause of statement.heritageClauses ?? []) {
+    for (const typeNode of clause.types) {
+      appendHeritageTypeTag(tags, clause.token, typeNode, checker, context);
     }
   }
-  return tags.length > 0 ? renderJsDoc(tags) : null;
+}
+
+function appendHeritageTypeTag(
+  tags: JsDocTagInput[],
+  token: ts.SyntaxKind,
+  typeNode: ts.ExpressionWithTypeArguments,
+  checker: ts.TypeChecker,
+  context: ClosureDocRenderContext,
+) {
+  const closureType = toClosureHeritageType(typeNode, checker, context);
+  if (!closureType) {
+    return;
+  }
+  if (token === ts.SyntaxKind.ExtendsKeyword) {
+    tags.push({ name: "extends", type: closureType });
+    return;
+  }
+  if (token === ts.SyntaxKind.ImplementsKeyword) {
+    tags.push({ name: "implements", type: closureType });
+  }
 }
 
 export function buildFunctionLikeDoc(
@@ -625,6 +644,16 @@ function buildTypeJsDoc(closureType: string) {
   return renderJsDoc([{ name: "type", type: closureType }]);
 }
 
+/**
+ * Near-twin of `appendSynthesizedDtsMembers` in `type-render/named.ts`, and
+ * deliberately not merged with it. This one emits members for a real authored
+ * interface: it accepts only `TypeElement` signatures, emits every member with
+ * no cap, renders each member type verbatim, and does not thread a `seen` set
+ * into signature rendering. The synthesized-`.d.ts` variant does the opposite
+ * on all four counts because it is reconstructing a type it never saw declared.
+ * Unifying them would need four behaviour flags and would make both paths
+ * harder to reason about than the duplication does.
+ */
 function appendInterfaceMembers(
   lines: string[],
   typeName: string,

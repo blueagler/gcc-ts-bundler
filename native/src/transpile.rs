@@ -36,12 +36,13 @@ mod type_metadata_oxc;
 pub(crate) use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 pub(crate) use std::path::{Path, PathBuf};
 
-pub(crate) use crate::closure_metadata::{
-    closure_metadata_key, ClosureEnumDeclaration, ClosureFileMetadata,
-};
+#[cfg(test)]
+pub(crate) use crate::closure_metadata::closure_metadata_key;
+pub(crate) use crate::closure_metadata::{ClosureEnumDeclaration, ClosureFileMetadata};
 pub(crate) use crate::pathing::{to_bundler_runtime_module_id, to_goog_module_id};
 
 pub(crate) use self::cjs_opacity::*;
+#[cfg(test)]
 pub(crate) use self::compat::*;
 pub(crate) use self::context::*;
 
@@ -49,6 +50,7 @@ pub(crate) use self::externs::*;
 pub(crate) use self::hoist::*;
 pub(crate) use self::imports_exports::*;
 pub(crate) use self::js_compat::*;
+#[cfg(test)]
 pub(crate) use self::transpile_plan::parse_oxc_program;
 pub(crate) use self::transpile_run::resolve_relative_module;
 pub use napi::*;

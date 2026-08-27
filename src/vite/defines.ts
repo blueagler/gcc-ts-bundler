@@ -37,9 +37,9 @@ export function createDefineApplier(
       isString(value) ? value : JSON.stringify(value),
     ]),
   );
-  // The first segment is what appears verbatim in source for dotted keys such
-  // as `process.env.NODE_ENV`, so it is the cheapest correct prefilter.
-  const probes = entries.map(([key]) => key.split(".")[0] ?? key);
+  // Probe the full define key so dotted identifiers such as `import.meta.env`
+  // do not match every ESM module that merely contains `import`.
+  const probes = entries.map(([key]) => key);
 
   return async function applyDefines(
     code: string,

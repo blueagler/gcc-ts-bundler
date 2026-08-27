@@ -1,7 +1,4 @@
-export type {
-  CapturedModuleResolution,
-  CapturedModuleResolutionCache,
-} from "./specifiers";
+export type { CapturedModuleResolutionCache } from "./specifiers";
 export {
   classifyModuleId,
   isAuthoredModuleId,
@@ -16,5 +13,4 @@ export {
   analyzeModuleCode,
   getCapturedModuleAnalysis,
   resolveCapturedModuleFormat,
-  resolveScriptKind,
 } from "../capture-analysis";

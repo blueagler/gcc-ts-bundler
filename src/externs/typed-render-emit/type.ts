@@ -1,6 +1,9 @@
 import ts from "@typescript/typescript6";
 
-import { sanitizeClosureName } from "../../shared/closure-type-strings";
+import {
+  commonPrimitiveClosureType,
+  sanitizeClosureName,
+} from "../../shared/closure-type-strings";
 import { resolveAliasedSymbol } from "../shared";
 import { reserveSymbol } from "./reserve";
 import { diagnostic } from "../typed-render/shared";
@@ -130,6 +133,18 @@ function renderFunctionType(
   return `function(${params.join(", ")}): ${renderType(state.checker.getReturnTypeOfSignature(signature), state, module, new Set(seen))}`;
 }
 
+/**
+ * Ordered dispatcher. The family helpers below are tried in *source order* and
+ * that order is load-bearing: the guards are not mutually exclusive (a union of
+ * literals is also literal-flagged, a callable object is also a record), so
+ * precedence is what decides the emitted text. Each helper returns `undefined`
+ * for "not my family, keep walking".
+ *
+ * `seen` is mutated exactly once, here, before any family runs: adding the type
+ * later — or per family — would change the recursion cut-off and therefore the
+ * output. Helpers that recurse decide for themselves whether to hand the set
+ * onward shared or copied; those decisions are documented at each call.
+ */
 export function renderType(
   type: ts.Type,
   state: RenderState,
@@ -139,75 +154,223 @@ export function renderType(
   if (seen.size > MAX_DEPTH || seen.has(type))
     return fallback(state, module, type, "recursive-or-deep-type");
   seen.add(type);
+  const primitive = renderPrimitiveType(type);
+  if (primitive !== undefined) return primitive;
+  const parameter = renderTypeParameterType(type, state);
+  if (parameter !== undefined) return parameter;
+  const operator = renderTypeOperatorType(type, state, module, seen);
+  if (operator !== undefined) return operator;
+  const unionType = renderUnionType(type, state, module, seen);
+  if (unionType !== undefined) return unionType;
+  const intersection = renderIntersectionType(type);
+  if (intersection !== undefined) return intersection;
+  const arrayLike = renderArrayLikeType(type, state, module, seen);
+  if (arrayLike !== undefined) return arrayLike;
+  const callable = renderCallSignatureType(type, state, module, seen);
+  if (callable !== undefined) return callable;
+  const reference = renderSymbolReferenceType(type, state, module, seen);
+  if (reference !== undefined) return reference;
+  const record = renderRecordType(type, state, module, seen);
+  if (record !== undefined) return record;
+  return fallback(state, module, type, "unresolved-type");
+}
+
+function renderPrimitiveType(type: ts.Type): string | undefined {
+  // Any/unknown/never collapse to `?` for this Closure target; bigint/symbol
+  // stay unmapped here. Shared primitive arms follow.
   if (
     type.flags &
     (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)
   )
     return "?";
-  if (type.flags & ts.TypeFlags.StringLike) return "string";
-  if (type.flags & ts.TypeFlags.NumberLike) return "number";
-  if (type.flags & ts.TypeFlags.BooleanLike) return "boolean";
-  if (type.flags & ts.TypeFlags.Void) return "void";
-  if (type.flags & ts.TypeFlags.Undefined) return "undefined";
-  if (type.flags & ts.TypeFlags.Null) return "null";
-  if (type.flags & ts.TypeFlags.TypeParameter)
-    return sanitizeClosureName(state.checker.typeToString(type));
-  if (
-    type.flags &
-    (ts.TypeFlags.Conditional |
-      ts.TypeFlags.IndexedAccess |
-      ts.TypeFlags.Substitution)
-  ) {
-    return fallback(state, module, type, "unsupported-type-operator");
+  return commonPrimitiveClosureType(type);
+}
+
+function renderTypeParameterType(
+  type: ts.Type,
+  state: RenderState,
+): string | undefined {
+  if (!(type.flags & ts.TypeFlags.TypeParameter)) return undefined;
+  return sanitizeClosureName(state.checker.typeToString(type));
+}
+
+/**
+ * Conditional / indexed-access / substitution types have no Closure spelling.
+ * An indexed access whose apparent type has already resolved to something
+ * concrete is rendered through that instead; everything else degrades.
+ */
+function renderTypeOperatorType(
+  type: ts.Type,
+  state: RenderState,
+  module: ModuleSeed,
+  seen: ReadonlySet<ts.Type>,
+): string | undefined {
+  if (!(type.flags & UNSPELLABLE_TYPE_FLAGS)) return undefined;
+  const resolved = resolvedIndexedAccess(type, state, module, seen);
+  if (resolved !== undefined) return resolved;
+  return fallback(state, module, type, "unsupported-type-operator");
+}
+
+const UNSPELLABLE_TYPE_FLAGS =
+  ts.TypeFlags.Conditional |
+  ts.TypeFlags.IndexedAccess |
+  ts.TypeFlags.Substitution;
+
+function resolvedIndexedAccess(
+  type: ts.Type,
+  state: RenderState,
+  module: ModuleSeed,
+  seen: ReadonlySet<ts.Type>,
+): string | undefined {
+  if (!(type.flags & ts.TypeFlags.IndexedAccess)) return undefined;
+  const apparent = state.checker.getApparentType(type);
+  if (apparent === type) return undefined;
+  if (apparent.flags & UNSPELLABLE_TYPE_FLAGS) return undefined;
+  return renderType(apparent, state, module, new Set(seen));
+}
+
+/**
+ * Over `MAX_UNION` members, rendering every arm is both slow and useless to
+ * Closure, so the union is collapsed to one primitive when the arms allow it
+ * and degraded otherwise. Members are rendered against *copies* of `seen`:
+ * arms are siblings, not a chain, so one arm's depth must not charge another.
+ */
+function renderUnionType(
+  type: ts.Type,
+  state: RenderState,
+  module: ModuleSeed,
+  seen: ReadonlySet<ts.Type>,
+): string | undefined {
+  if (!type.isUnion()) return undefined;
+  if (type.types.length > MAX_UNION) {
+    const collapsed = collapsedOversizeUnion(type.types);
+    if (collapsed !== undefined) return collapsed;
+    return fallback(state, module, type, "union-too-large");
   }
-  if (type.isUnion()) {
-    if (type.types.length > MAX_UNION)
-      return fallback(state, module, type, "union-too-large");
-    return union(
-      type.types.map((item) => renderType(item, state, module, new Set(seen))),
-    );
-  }
-  if (type.isIntersection()) return "!Object";
-  if (state.checker.isArrayType(type) || state.checker.isTupleType(type)) {
-    const args = getTypeArguments(type, state.checker);
-    return `!Array<${args.length ? union(args.map((item) => renderType(item, state, module, new Set(seen)))) : "?"}>`;
-  }
+  return union(
+    type.types.map((item) => renderType(item, state, module, new Set(seen))),
+  );
+}
+
+function renderIntersectionType(type: ts.Type): string | undefined {
+  if (!type.isIntersection()) return undefined;
+  return collapsedIntersectionPrimitive(type.types) ?? "!Object";
+}
+
+function renderArrayLikeType(
+  type: ts.Type,
+  state: RenderState,
+  module: ModuleSeed,
+  seen: ReadonlySet<ts.Type>,
+): string | undefined {
+  if (!state.checker.isArrayType(type) && !state.checker.isTupleType(type))
+    return undefined;
+  const args = getTypeArguments(type, state.checker);
+  return `!Array<${args.length ? union(args.map((item) => renderType(item, state, module, new Set(seen)))) : "?"}>`;
+}
+
+/**
+ * Only a *bare* callable is a function type. Once it carries properties it is
+ * a record that happens to be callable, and the record family renders it.
+ *
+ * `seen` is handed on shared, not copied: `renderFunctionType` is the same
+ * recursion edge as any other and copying here is what previously turned
+ * `MAX_DEPTH` into a no-op.
+ */
+function renderCallSignatureType(
+  type: ts.Type,
+  state: RenderState,
+  module: ModuleSeed,
+  seen: ReadonlySet<ts.Type>,
+): string | undefined {
   const call = type.getCallSignatures()[0];
-  if (call && type.getProperties().length === 0)
-    return renderFunctionType(call, state, module, seen);
+  if (!call || type.getProperties().length !== 0) return undefined;
+  return renderFunctionType(call, state, module, seen);
+}
+
+/**
+ * Named types: a known builtin, or a symbol declared in a `.d.ts` that we can
+ * reserve an extern name for. A symbol that is neither — an inline object type
+ * (`__type`), or a local declaration with no extern of its own — falls through
+ * to the structural families.
+ */
+function renderSymbolReferenceType(
+  type: ts.Type,
+  state: RenderState,
+  module: ModuleSeed,
+  seen: ReadonlySet<ts.Type>,
+): string | undefined {
   const symbol = resolveAliasedSymbol(
     type.aliasSymbol ?? type.getSymbol(),
     state.checker,
   );
-  if (symbol && symbol.getName() !== "__type") {
-    const builtin = builtinTypeName(symbol.getName());
-    const args = isTypeReference(type)
-      ? state.checker.getTypeArguments(type)
-      : (type.aliasTypeArguments ?? []);
-    if (builtin)
-      return `!${builtin}${args.length ? `<${args.map((item) => renderType(item, state, module, new Set(seen))).join(", ")}>` : ""}`;
-    if (
-      (symbol.declarations ?? []).some(
-        (item) => item.getSourceFile().isDeclarationFile,
-      )
-    ) {
-      const name = reserveSymbol(symbol, module, state);
-      return `!${name}${args.length ? `<${args.map((item) => renderType(item, state, module, new Set(seen))).join(", ")}>` : ""}`;
-    }
+  if (!symbol || symbol.getName() === "__type") return undefined;
+  const builtin = builtinTypeName(symbol.getName());
+  const args = isTypeReference(type)
+    ? state.checker.getTypeArguments(type)
+    : (type.aliasTypeArguments ?? []);
+  if (builtin) return namedReference(builtin, args, state, module, seen);
+  if (
+    !(symbol.declarations ?? []).some(
+      (item) => item.getSourceFile().isDeclarationFile,
+    )
+  )
+    return undefined;
+  const reserved = reserveSymbol(symbol, module, state);
+  if (reserved === undefined) {
+    return fallback(state, module, type, "closure-depth-exceeded");
   }
+  return namedReference(reserved, args, state, module, seen);
+}
+
+function namedReference(
+  name: string,
+  args: readonly ts.Type[],
+  state: RenderState,
+  module: ModuleSeed,
+  seen: ReadonlySet<ts.Type>,
+) {
+  const rendered = args.map((item) =>
+    renderType(item, state, module, new Set(seen)),
+  );
+  return rendered.length ? `!${name}<${rendered.join(", ")}>` : `!${name}`;
+}
+
+/**
+ * Anonymous records, and the bare `!Object` an empty object type degrades to.
+ * Both live here so the property list is asked for once.
+ */
+function renderRecordType(
+  type: ts.Type,
+  state: RenderState,
+  module: ModuleSeed,
+  seen: ReadonlySet<ts.Type>,
+): string | undefined {
   const properties = state.checker.getPropertiesOfType(type);
   if (properties.length > 0 && properties.length <= MAX_PROPERTIES) {
+    // A comment terminator inside a key has no faithful record spelling: it
+    // would close the enclosing JSDoc block and turn the rest of the line
+    // into extern source. Degrade the whole record instead of emitting it.
+    if (properties.some((property) => property.getName().includes("*/")))
+      return fallback(state, module, type, "unrepresentable-property-name");
     const fields = properties.map((property) => {
       const declaration =
         property.valueDeclaration ?? property.declarations?.[0];
       const propertyType = declaration
         ? state.checker.getTypeOfSymbolAtLocation(property, declaration)
         : state.checker.getTypeOfSymbol(property);
-      return `${JSON.stringify(property.getName())}: ${renderType(propertyType, state, module, new Set(seen))}`;
+      return `${jsdocSafeMemberName(property.getName())}: ${renderType(propertyType, state, module, new Set(seen))}`;
     });
     return `{${fields.join(", ")}}`;
   }
-  return fallback(state, module, type, "unresolved-type");
+  if (
+    properties.length === 0 &&
+    type.flags & ts.TypeFlags.Object &&
+    type.getConstructSignatures().length === 0
+  ) {
+    return "!Object";
+  }
+  return undefined;
 }
 
 function fallback(
@@ -228,12 +391,145 @@ function fallback(
   return "?";
 }
 
+/**
+ * Member names are interpolated into a JSDoc block, where a literal `@` opens
+ * a tag: TypeScript spells well-known-symbol members `__@toStringTag@42`, and
+ * Closure rejects those with `illegal use of unknown JSDoc tag "toStringTag"`.
+ * `\u0040` is the JSON escape for `@`, so the quoted key still decodes to the
+ * original name while the emitted comment carries no tag-opening character.
+ * Quoting belongs here rather than at the call site: escaping before
+ * `JSON.stringify` would leave the backslash to be escaped a second time.
+ * Names carrying a comment terminator are rejected before they reach this.
+ */
+function jsdocSafeMemberName(name: string) {
+  const quoted = JSON.stringify(name);
+  return quoted.includes("@") ? quoted.replaceAll("@", "\\u0040") : quoted;
+}
+
 export function union(types: string[]) {
   const unique = [...new Set(types)].sort();
   const only = unique[0];
   return unique.length === 1 && only !== undefined
     ? only
     : `(${unique.join("|")})`;
+}
+
+function primitiveClosureType(type: ts.Type): string | undefined {
+  // BigIntLike is bit-disjoint from StringLike/NumberLike/BooleanLike and from
+  // Void/Undefined/Null, so checking it before the shared arms cannot change a
+  // result on any flags word TypeScript actually produces.
+  if (type.flags & ts.TypeFlags.BigIntLike) return "bigint";
+  const common = commonPrimitiveClosureType(type);
+  if (common !== undefined) return common;
+  if (type.isUnion()) return collapsedUnionPrimitive(type.types);
+  if (type.isIntersection()) return collapsedIntersectionPrimitive(type.types);
+  return undefined;
+}
+
+function isIgnorableBrandIntersection(type: ts.IntersectionType) {
+  return type.types.every(
+    (item) =>
+      !!(
+        item.flags &
+        (ts.TypeFlags.Object |
+          ts.TypeFlags.NonPrimitive |
+          ts.TypeFlags.Void |
+          ts.TypeFlags.Undefined |
+          ts.TypeFlags.Null)
+      ),
+  );
+}
+
+function applyIntersectionArm(
+  item: ts.Type,
+  primitive: string | undefined,
+): { primitive: string | undefined } | undefined {
+  if (item.flags & (ts.TypeFlags.Object | ts.TypeFlags.NonPrimitive)) {
+    return { primitive };
+  }
+  const inner = primitiveClosureType(item);
+  if (inner === undefined) return undefined;
+  if (inner === "undefined" || inner === "null" || inner === "void") {
+    return { primitive };
+  }
+  if (primitive !== undefined && primitive !== inner) return undefined;
+  return { primitive: inner };
+}
+
+function collapsedIntersectionPrimitive(
+  types: readonly ts.Type[],
+): string | undefined {
+  let primitive: string | undefined;
+  for (const item of types) {
+    const next = applyIntersectionArm(item, primitive);
+    if (!next) return undefined;
+    primitive = next.primitive;
+  }
+  return primitive;
+}
+
+function applyUnionArm(
+  item: ts.Type,
+  primitive: string | undefined,
+): { primitive: string | undefined; wrapper?: string } | undefined {
+  const inner = primitiveClosureType(item);
+  if (inner === undefined) {
+    if (item.isIntersection() && isIgnorableBrandIntersection(item)) {
+      return { primitive };
+    }
+    return undefined;
+  }
+  if (inner === "undefined" || inner === "null" || inner === "void") {
+    return { primitive, wrapper: inner };
+  }
+  if (primitive !== undefined && primitive !== inner) return undefined;
+  return { primitive: inner };
+}
+
+function collapsedUnionPrimitive(
+  types: readonly ts.Type[],
+): string | undefined {
+  let primitive: string | undefined;
+  const wrappers: string[] = [];
+  for (const item of types) {
+    const next = applyUnionArm(item, primitive);
+    if (!next) return undefined;
+    primitive = next.primitive;
+    if (next.wrapper !== undefined) wrappers.push(next.wrapper);
+  }
+  if (primitive === undefined) return undefined;
+  return union([primitive, ...wrappers]);
+}
+
+function oversizeUnionArm(item: ts.Type) {
+  if (
+    item.flags &
+    (ts.TypeFlags.Any |
+      ts.TypeFlags.Unknown |
+      ts.TypeFlags.Never |
+      UNSPELLABLE_TYPE_FLAGS)
+  ) {
+    return false;
+  }
+  const inner = primitiveClosureType(item);
+  if (inner !== undefined) return inner;
+  if (item.isIntersection() && isIgnorableBrandIntersection(item)) {
+    return undefined;
+  }
+  return "!Object";
+}
+
+function collapsedOversizeUnion(types: readonly ts.Type[]): string | undefined {
+  const primitive = collapsedUnionPrimitive(types);
+  if (primitive !== undefined) return primitive;
+  const parts: string[] = [];
+  for (const item of types) {
+    const arm = oversizeUnionArm(item);
+    if (arm === false) return undefined;
+    if (arm !== undefined) parts.push(arm);
+  }
+  if (parts.length === 0) return undefined;
+  return union(parts);
 }
 
 export function appendTemplates(

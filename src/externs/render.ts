@@ -62,80 +62,146 @@ export function collectRuntimeUsageExternLines(
   appUsage: AppUsageMembers,
 ): Set<string> {
   const emittedLines = new Set<string>();
-  for (const member of runtimeUsage.protocolMembers) {
-    emittedLines.add(renderStructuralExternLine(member));
-  }
+  addStructuralExternLines(emittedLines, runtimeUsage.protocolMembers);
   // Self-referential keys are unconditional: the string that names the key is
   // the whole evidence, and it is already narrow enough that intersecting it
   // with a read class would only lose the hazard it exists to catch (the read
   // goes through a variable and is statically invisible).
-  for (const member of runtimeUsage.selfReferentialKeys) {
-    emittedLines.add(renderStructuralExternLine(member));
-  }
+  addStructuralExternLines(emittedLines, runtimeUsage.selfReferentialKeys);
   // Enumerated key names are unconditional for the same reason, and on
   // stronger evidence: the collector already proved the computed access
   // exists, so the read side needs no second witness. The definition side is
   // often invisible anyway — lodash publishes half its surface through
   // `mixin`, which copies under keys taken from `keys(source)`.
-  for (const member of runtimeUsage.enumeratedKeyNames) {
-    emittedLines.add(renderStructuralExternLine(member));
-  }
+  addStructuralExternLines(emittedLines, runtimeUsage.enumeratedKeyNames);
   // CSS custom-property names are unconditional and need no read witness at
   // all: the consumer is a stylesheet, not JavaScript. There is nothing in the
   // program to intersect with — the only place the name is read back is the
   // `var(--ant-…)` reference the same pass emitted.
-  for (const member of runtimeUsage.cssVariableKeyNames) {
-    emittedLines.add(renderStructuralExternLine(member));
-  }
-  for (const member of runtimeUsage.stringDefined) {
-    if (
-      runtimeUsage.dotAccessed.has(member) ||
-      appUsage.dotAccessed.has(member)
-    ) {
-      emittedLines.add(renderStructuralExternLine(member));
-    }
-  }
-  for (const member of runtimeUsage.dotDefined) {
-    if (
-      runtimeUsage.stringLiteralRead.has(member) ||
-      appUsage.stringLiteralRead.has(member)
-    ) {
-      emittedLines.add(renderStructuralExternLine(member));
-    }
-  }
+  addStructuralExternLines(emittedLines, runtimeUsage.cssVariableKeyNames);
+  addWitnessedExternLines(
+    emittedLines,
+    runtimeUsage.stringDefined,
+    runtimeUsage.dotAccessed,
+    appUsage.dotAccessed,
+  );
+  addWitnessedExternLines(
+    emittedLines,
+    runtimeUsage.dotDefined,
+    runtimeUsage.stringLiteralRead,
+    appUsage.stringLiteralRead,
+  );
   // Constructed-key reads are invisible statically, so the dot side alone
   // is the evidence: any dot-mentioned member (assignments included —
   // compiled templates assign handlers to plain locals) matching a
   // collected `$`/`_` template prefix must keep its literal name.
-  const prefixes = [...runtimeUsage.constructedKeyPrefixes];
-  const fragments = [...runtimeUsage.constructedKeyFragments].map(
-    (fragment) => {
-      const separator = fragment.indexOf(":");
-      return {
-        side: fragment.slice(0, separator),
-        text: fragment.slice(separator + 1),
-      };
-    },
+  addConstructedKeyExternLines(
+    emittedLines,
+    [...runtimeUsage.constructedKeyPrefixes],
+    parseConstructedKeyFragments(runtimeUsage.constructedKeyFragments),
+    runtimeUsage.dotAccessed,
+    appUsage.dotAccessed,
   );
-  if (prefixes.length > 0 || fragments.length > 0) {
-    for (const member of [
-      ...runtimeUsage.dotAccessed,
-      ...appUsage.dotAccessed,
-    ]) {
-      const matchesPrefix = prefixes.some(
-        (prefix) => member.length > prefix.length && member.startsWith(prefix),
-      );
-      const matchesFragment = fragments.some(
-        ({ side, text }) =>
-          member.length > text.length &&
-          (side === "prefix" ? member.startsWith(text) : member.endsWith(text)),
-      );
-      if (matchesPrefix || matchesFragment) {
-        emittedLines.add(renderStructuralExternLine(member));
-      }
+  return emittedLines;
+}
+
+/** A constructed-key fragment: the literal text and which end it anchors to. */
+interface ConstructedKeyFragment {
+  side: string;
+  text: string;
+}
+
+function parseConstructedKeyFragments(
+  fragments: Iterable<string>,
+): ConstructedKeyFragment[] {
+  const parsed: ConstructedKeyFragment[] = [];
+  for (const fragment of fragments) {
+    const separator = fragment.indexOf(":");
+    parsed.push({
+      side: fragment.slice(0, separator),
+      text: fragment.slice(separator + 1),
+    });
+  }
+  return parsed;
+}
+
+/** Members whose own name is the whole evidence, needing no read witness. */
+function addStructuralExternLines(
+  emittedLines: Set<string>,
+  members: Iterable<string>,
+) {
+  for (const member of members) {
+    emittedLines.add(renderStructuralExternLine(member));
+  }
+}
+
+/**
+ * Members externed only where the opposite syntax witnesses a read: a member
+ * defined and read through the same syntax renames consistently inside one
+ * Closure invocation and must not be externed.
+ */
+function addWitnessedExternLines(
+  emittedLines: Set<string>,
+  members: Iterable<string>,
+  runtimeWitness: ReadonlySet<string>,
+  appWitness: ReadonlySet<string>,
+) {
+  for (const member of members) {
+    if (runtimeWitness.has(member) || appWitness.has(member)) {
+      emittedLines.add(renderStructuralExternLine(member));
     }
   }
-  return emittedLines;
+}
+
+function addConstructedKeyExternLines(
+  emittedLines: Set<string>,
+  prefixes: readonly string[],
+  fragments: readonly ConstructedKeyFragment[],
+  runtimeDotAccessed: ReadonlySet<string>,
+  appDotAccessed: ReadonlySet<string>,
+) {
+  if (prefixes.length === 0 && fragments.length === 0) return;
+  for (const member of [...runtimeDotAccessed, ...appDotAccessed]) {
+    addConstructedKeyMember(emittedLines, member, prefixes, fragments);
+  }
+}
+
+function addConstructedKeyMember(
+  emittedLines: Set<string>,
+  member: string,
+  prefixes: readonly string[],
+  fragments: readonly ConstructedKeyFragment[],
+) {
+  if (
+    !matchesConstructedKeyPrefix(member, prefixes) &&
+    !matchesConstructedKeyFragment(member, fragments)
+  ) {
+    return;
+  }
+  emittedLines.add(renderStructuralExternLine(member));
+}
+
+function matchesConstructedKeyPrefix(
+  member: string,
+  prefixes: readonly string[],
+) {
+  for (const prefix of prefixes) {
+    if (member.length > prefix.length && member.startsWith(prefix)) return true;
+  }
+  return false;
+}
+
+function matchesConstructedKeyFragment(
+  member: string,
+  fragments: readonly ConstructedKeyFragment[],
+) {
+  for (const { side, text } of fragments) {
+    if (member.length <= text.length) continue;
+    if (side === "prefix" ? member.startsWith(text) : member.endsWith(text)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 type GenerateExternsMode = "boundary-aware" | "runtime-aware";
@@ -213,7 +279,7 @@ function renderExternText({
 
   return [
     "/** @externs */",
-    `// Generated by gcc-ts-bundler for: ${modules.join(", ")}`,
+    `// Generated by gcc-ts-bundler for: ${modules.map((specifier) => specifier.replace(/[\r\n]+/gu, " ")).join(", ")}`,
     `// Mode: ${mode}`,
     scannedSummary,
     "",

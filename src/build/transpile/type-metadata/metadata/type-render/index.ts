@@ -5,15 +5,15 @@ export {
   referencesForTemplate,
   registerDeclaredTypeSymbol,
 } from "./context";
+export { toClosureType } from "./to-closure";
 export type { FunctionLikeDeclaration, SignatureParamInfo } from "./function";
 export {
   collectSignatureParamInfos,
   signatureToClosureFunctionType,
 } from "./function";
-export { applyTypeArguments } from "./named";
 export {
   getTypedDeclarationClosureType,
   isWorthAnnotatingVariableType,
   toClosureHeritageType,
-  toClosureType,
-} from "./core";
+} from "./heritage";
+export { applyTypeArguments } from "./named";

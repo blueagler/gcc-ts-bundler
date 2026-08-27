@@ -13,8 +13,11 @@ import type { ContractRegistry } from "../shared";
 
 interface ContractCollectionContext {
   checker: ts.TypeChecker;
+  dependencyQueue: ts.Symbol[];
+  program: ts.Program;
   registry: ContractRegistry;
   scannedFileSet: Set<string>;
+  visitedDependencySymbols: Set<ts.Symbol>;
 }
 
 export function collectContracts({
@@ -29,8 +32,11 @@ export function collectContracts({
   const registry = createEmptyContractRegistry();
   const context: ContractCollectionContext = {
     checker,
+    dependencyQueue: [],
+    program,
     registry,
     scannedFileSet: registry.scannedFiles,
+    visitedDependencySymbols: new Set(),
   };
   for (const filePath of scannedFiles) {
     registry.scannedFiles.add(path.resolve(filePath));
@@ -45,7 +51,74 @@ export function collectContracts({
     }
   }
 
+  drainDependencyContracts(context);
+
   return registry;
+}
+/**
+ * A package can type a boundary parameter with an interface that lives in one
+ * of its own dependencies (`host: BaseHost`, where `BaseHost` is declared by
+ * `base-host/index.d.ts`). Those declaration files sit outside the scanned set
+ * whenever the plan resolves types without dependencies, yet the contract they
+ * describe is still part of the package's call surface into app-owned objects.
+ * Referenced dependency symbols are therefore queued while the scanned sweep
+ * runs and collected afterwards, in reference order.
+ */
+function drainDependencyContracts(context: ContractCollectionContext) {
+  for (let index = 0; index < context.dependencyQueue.length; index += 1) {
+    const symbol = context.dependencyQueue[index];
+    if (!symbol) continue;
+    for (const declaration of symbol.declarations ?? []) {
+      if (!isCollectableContractDeclaration(declaration)) continue;
+      collectContract(declaration, context);
+    }
+  }
+}
+
+function isCollectableContractDeclaration(
+  declaration: ts.Declaration,
+): declaration is
+  | ts.InterfaceDeclaration
+  | ts.TypeAliasDeclaration
+  | ts.ClassDeclaration {
+  return (
+    ts.isInterfaceDeclaration(declaration) ||
+    ts.isTypeAliasDeclaration(declaration) ||
+    ts.isClassDeclaration(declaration)
+  );
+}
+
+/**
+ * Contract references are honoured when they resolve into the scanned set, and
+ * additionally when they resolve into a non-default-library declaration file
+ * reachable from it. The latter are queued so their members are collected too;
+ * default libraries stay excluded so `Promise` or DOM members never leak in.
+ */
+function acceptsContractSymbol(
+  symbol: ts.Symbol,
+  context: ContractCollectionContext,
+) {
+  if (isScannedDeclarationSymbol(symbol, context.scannedFileSet)) {
+    return true;
+  }
+  if (!isDependencyDeclarationSymbol(symbol, context.program)) {
+    return false;
+  }
+  if (!context.visitedDependencySymbols.has(symbol)) {
+    context.visitedDependencySymbols.add(symbol);
+    context.dependencyQueue.push(symbol);
+  }
+  return true;
+}
+
+function isDependencyDeclarationSymbol(symbol: ts.Symbol, program: ts.Program) {
+  return (symbol.declarations ?? []).some((declaration) => {
+    const sourceFile = declaration.getSourceFile();
+    return (
+      sourceFile.isDeclarationFile &&
+      !program.isSourceFileDefaultLibrary(sourceFile)
+    );
+  });
 }
 
 function collectContract(
@@ -91,8 +164,7 @@ function collectInterfaceContract(
   context.registry.interfaceContracts.set(symbol, {
     extends: getReferencedContractSymbols(
       statement.heritageClauses?.flatMap((clause) => clause.types) ?? [],
-      context.checker,
-      context.scannedFileSet,
+      context,
     ),
     members: collectTypeElementMembers(statement.members),
     name: statement.name.text,
@@ -131,8 +203,7 @@ function collectClassContract(
   context.registry.classContracts.set(symbol, {
     constructorParamContracts: collectConstructorParamContracts(
       statement,
-      context.checker,
-      context.scannedFileSet,
+      context,
     ),
     instanceMembers,
     name: statement.name.text,
@@ -198,16 +269,11 @@ function collectAliasMembers(typeNode: ts.TypeNode): Set<string> {
 
 function getReferencedContractSymbols(
   typeNodes: readonly (ts.TypeNode | ts.ExpressionWithTypeArguments)[],
-  checker: ts.TypeChecker,
-  scannedFiles: Set<string>,
+  context: ContractCollectionContext,
 ) {
   const symbols = new Set<ts.Symbol>();
   for (const typeNode of typeNodes) {
-    for (const symbol of getContractSymbolsFromTypeNode(
-      typeNode,
-      checker,
-      scannedFiles,
-    )) {
+    for (const symbol of getContractSymbolsFromTypeNode(typeNode, context)) {
       symbols.add(symbol);
     }
   }
@@ -216,31 +282,26 @@ function getReferencedContractSymbols(
 
 function getContractSymbolsFromTypeNode(
   typeNode: ts.TypeNode | ts.ExpressionWithTypeArguments,
-  checker: ts.TypeChecker,
-  scannedFiles: Set<string>,
+  context: ContractCollectionContext,
 ): Set<ts.Symbol> {
   if (ts.isExpressionWithTypeArguments(typeNode)) {
     const symbol = resolveAliasedSymbol(
-      checker.getSymbolAtLocation(typeNode.expression),
-      checker,
+      context.checker.getSymbolAtLocation(typeNode.expression),
+      context.checker,
     );
-    return symbol && isScannedDeclarationSymbol(symbol, scannedFiles)
+    return symbol && acceptsContractSymbol(symbol, context)
       ? new Set<ts.Symbol>([symbol])
       : new Set<ts.Symbol>();
   }
 
   if (ts.isParenthesizedTypeNode(typeNode)) {
-    return getContractSymbolsFromTypeNode(typeNode.type, checker, scannedFiles);
+    return getContractSymbolsFromTypeNode(typeNode.type, context);
   }
 
   if (ts.isIntersectionTypeNode(typeNode) || ts.isUnionTypeNode(typeNode)) {
     const symbols = new Set<ts.Symbol>();
     for (const child of typeNode.types) {
-      for (const symbol of getContractSymbolsFromTypeNode(
-        child,
-        checker,
-        scannedFiles,
-      )) {
+      for (const symbol of getContractSymbolsFromTypeNode(child, context)) {
         symbols.add(symbol);
       }
     }
@@ -248,11 +309,7 @@ function getContractSymbolsFromTypeNode(
   }
 
   if (ts.isTypeReferenceNode(typeNode)) {
-    return getContractSymbolsFromEntityName(
-      typeNode.typeName,
-      checker,
-      scannedFiles,
-    );
+    return getContractSymbolsFromEntityName(typeNode.typeName, context);
   }
 
   return new Set<ts.Symbol>();
@@ -260,25 +317,23 @@ function getContractSymbolsFromTypeNode(
 
 function getContractSymbolsFromEntityName(
   entityName: ts.EntityName,
-  checker: ts.TypeChecker,
-  scannedFiles: Set<string>,
+  context: ContractCollectionContext,
 ): Set<ts.Symbol> {
   const symbol = ts.isIdentifier(entityName)
-    ? checker.getSymbolAtLocation(entityName)
-    : checker.getSymbolAtLocation(entityName.right);
-  const resolved = resolveAliasedSymbol(symbol, checker);
+    ? context.checker.getSymbolAtLocation(entityName)
+    : context.checker.getSymbolAtLocation(entityName.right);
+  const resolved = resolveAliasedSymbol(symbol, context.checker);
   if (!resolved) {
     return new Set<ts.Symbol>();
   }
-  return isScannedDeclarationSymbol(resolved, scannedFiles)
+  return acceptsContractSymbol(resolved, context)
     ? new Set<ts.Symbol>([resolved])
     : new Set<ts.Symbol>();
 }
 
 function collectConstructorParamContracts(
   statement: ts.ClassDeclaration,
-  checker: ts.TypeChecker,
-  scannedFiles: Set<string>,
+  context: ContractCollectionContext,
 ) {
   const constructorDeclaration = statement.members.find((member) =>
     ts.isConstructorDeclaration(member),
@@ -292,7 +347,7 @@ function collectConstructorParamContracts(
 
   return constructorDeclaration.parameters.map((parameter) =>
     parameter.type
-      ? getContractSymbolsFromTypeNode(parameter.type, checker, scannedFiles)
+      ? getContractSymbolsFromTypeNode(parameter.type, context)
       : new Set<ts.Symbol>(),
   );
 }

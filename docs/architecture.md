@@ -39,7 +39,7 @@ The CLI was previously compiled as a separate closed-world job. The package now 
 
 Closure is the middle-end inside an Oxc envelope: Oxc normalizes source syntax into Closure-ready inputs, Closure performs optimization and property renaming, then the Oxc finishing pass prints the delivered JavaScript. The finishing pass does not perform dead-code elimination or top-level renaming, but it can mangle function-local names. The versioned table in [`native/src/closure_capabilities.rs`](../native/src/closure_capabilities.rs) is the single source of truth for the pinned `google-closure-compiler` parser contract, including the ES2021 dependency-bundle target and the fact that final printer modernization belongs to the finishing pass.
 
-[`test/closure-capabilities.test.mjs`](../test/closure-capabilities.test.mjs) invokes the pinned compiler jar directly with `WHITESPACE_ONLY` fixtures for every declared syntax capability. A compiler bump must update the table only when the canary proves it: a newly supported construct makes an obsolete `false` entry fail, prompting removal of its Oxc envelope workaround rather than silently preserving it.
+[`test/native/closure-capabilities.test.mjs`](../test/native/closure-capabilities.test.mjs) invokes the pinned compiler jar directly with `WHITESPACE_ONLY` fixtures for every declared syntax capability. A compiler bump must update the table only when the canary proves it: a newly supported construct makes an obsolete `false` entry fail, prompting removal of its Oxc envelope workaround rather than silently preserving it.
 
 ## Core build flow
 
@@ -118,7 +118,9 @@ module code lives inside the chunk wrapper function, so it never pays the
 
 The JavaScript layer uses one TypeScript checker/extractor for standalone and Vite. It serializes tokenized binding/member annotations, declarations, enums, canonical symbol identities, provenance, and non-fatal degradation diagnostics through `closure-ir.json`. Plain JavaScript files can take a faster scan path when no semantic work is needed.
 
-Rust resolves that metadata against the final Oxc/import/hoist plan, transforms files in parallel, and returns exact delivered counts and diagnostics per emitted JavaScript file. The same stage strips TypeScript, lowers JSX where needed, normalizes supported CommonJS, rewrites imports/exports, emits support files, and generates proven property rename barriers.
+Rust resolves that metadata against the final Oxc/import/hoist plan, transforms files in parallel, and returns exact delivered counts and diagnostics per emitted JavaScript file. Before transforming, `run_analysis_prelude` performs one Oxc parse per file for all collectors — extern facts, decorator keys, pair-array keys, CommonJS opacity, bundler slots, and the hoist plan — replacing five to six serial whole-graph parse loops. Files run under `rayon` with `par_iter().map().collect()`, and the collected results merge in input order. A second parse is taken only when emit-shaped `decorated_output_text` differs from authored source.
+
+The source representation is deliberate. Extern, pair-array, and pre-lowered decorator scans read authored source, as does CommonJS opacity analysis. Bundler and hoist scans read the lowered `decorated_output_text` when it exists because their slots must match the code Closure emits. Decorators and TypeScript accessibility modifiers are erased by lowering; scanning only lowered text lost their property facts and caused incorrect renaming. The same stage strips TypeScript, lowers JSX where needed, normalizes supported CommonJS, rewrites imports/exports, emits support files, and generates proven property rename barriers.
 
 Closure Compiler 20260811 rejects private class elements even with `language_in=UNSTABLE` and `language_out=ECMASCRIPT_NEXT`. As an upstream capability workaround, the Oxc stage structurally detects modules containing private identifiers and enables its class-properties transform only for those modules, before Closure sees them on every target. Generated instance-field slots and method/accessor brands are rewritten from opaque `WeakMap`/`WeakSet` allocations to module-local Symbol-backed slots: ordinary enumeration, spread, and JSON omit them, `symbol in receiver` supplies the brand test, and Closure can rename and inline the small slot operations and module-scope private functions. Oxc's exact static-private class check/storage shape remains the per-form fallback for anything that rewrite cannot prove equivalent.
 
@@ -149,7 +151,7 @@ rule should have fired and it did not, so a rule cannot silently become a no-op.
 
 ### 5. Compile and postprocess
 
-Rust prepares explicit Closure jobs and aggregates delivered metadata counts over each job's real native inputs. The JavaScript layer enables silent `checkTypes` inference and the typed platform extern slice only for ADVANCED jobs whose aggregate is non-empty, unless `GCC_DISABLE_TYPE_INFERENCE=1`, then invokes the installed `google-closure-compiler` package.
+Rust prepares explicit Closure jobs and aggregates delivered metadata counts over each job's real native inputs. Silent `checkTypes` inference is enabled only for ADVANCED jobs with both `typeDeclarationCount > 0` and `memberAnnotationCount > 0`, unless `GCC_DISABLE_TYPE_INFERENCE=1`. Typed properties on a generated record count as member annotations. The minimal platform extern slice is a separate ADVANCED-only gate and does not require those counts. Jobs then run through the resident Closure driver when it is available, otherwise the installed `google-closure-compiler` package.
 
 Configured preserved modules retain their runtime semantics and stable ESM API, not their authored bytes. Oxc parses and reprints them with comments and unnecessary whitespace removed; identifiers are not renamed, code is not optimized or dead-code eliminated, and the existing TypeScript-only path still performs type erasure plus relative extension rewriting.
 
@@ -206,10 +208,11 @@ The default persistent cache is outside the project:
 Each project gets a directory keyed by its absolute `projectRoot`. The main cache layers are:
 
 1. **Resolve snapshot** — graph, entries, lazy imports, tracked file state.
-2. **Native emit** — transpiled Closure inputs, serialized metadata, delivered per-file counts/diagnostics, rename barriers, dependency-content snapshots, and support files.
-3. **Closure jobs** — compiler artifacts keyed per job, compiler version, delivered counts, inference decision, platform environment, JS, and extern content.
-4. **Final metadata** — immutable cached outputs plus type/declaration dependency identities that can repopulate a deleted `outDir`.
-5. **Final-fast snapshot** — returns immediately only when options, metadata/provenance dependencies, package/runtime signatures, and published outputs still match.
+2. **Vite type-metadata sidecar** — an in-process memo plus an on-disk sidecar under the project cache, allowing a later Vite process to reuse collected type metadata and its dependency states.
+3. **Native emit** — transpiled Closure inputs, serialized metadata, delivered per-file counts/diagnostics, rename barriers, dependency-content snapshots, and support files.
+4. **Closure jobs** — compiler artifacts keyed per job, compiler version, delivered counts, inference decision, platform environment, JS, and extern content.
+5. **Final metadata** — immutable cached outputs plus type/declaration dependency identities that can repopulate a deleted `outDir`.
+6. **Final-fast snapshot** — returns immediately only when options, metadata/provenance dependencies, package/runtime signatures, and published outputs still match.
 
 `cache.mode = "temp"` uses an isolated temporary workspace and does not reuse data across builds. `cache.mode = "off"` also uses a temporary workspace and disables compiler artifact restoration.
 

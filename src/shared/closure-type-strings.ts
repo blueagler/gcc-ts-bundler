@@ -1,5 +1,27 @@
+import ts from "@typescript/typescript6";
+
 import { firstOrUndefined } from "./arrays";
 import { uniqueSortedStrings } from "./files";
+
+/**
+ * The primitive arms the metadata renderer and the externs renderer agree on.
+ *
+ * Only these six: the metadata renderer also spells `bigint` and `symbol`, and
+ * the externs renderer also collapses `any` / `unknown` / `never` to `?`. Those
+ * belong to one Closure target each, so every caller layers its own arms in
+ * front of this call rather than pushing them down here. The order inside is
+ * load-bearing — `StringLike` before `NumberLike` before `BooleanLike` — since a
+ * single type can carry more than one `*Like` bit.
+ */
+export function commonPrimitiveClosureType(type: ts.Type): string | undefined {
+  if (type.flags & ts.TypeFlags.StringLike) return "string";
+  if (type.flags & ts.TypeFlags.NumberLike) return "number";
+  if (type.flags & ts.TypeFlags.BooleanLike) return "boolean";
+  if (type.flags & ts.TypeFlags.Void) return "void";
+  if (type.flags & ts.TypeFlags.Undefined) return "undefined";
+  if (type.flags & ts.TypeFlags.Null) return "null";
+  return undefined;
+}
 
 export function unionClosureTypes(types: string[]) {
   const unique = uniqueSortedStrings(types.flatMap(expandClosureUnionType));

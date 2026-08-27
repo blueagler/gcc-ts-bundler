@@ -186,8 +186,17 @@ impl TypeMetadataDiagnostic {
 #[napi(object)]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct EmittedTypeDeclaration {
+    pub template: String,
+}
+
+#[allow(non_snake_case)]
+#[napi(object)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EmittedTypeMetadata {
     pub counts: TypeMetadataCounts,
+    pub declarations: Vec<EmittedTypeDeclaration>,
     pub diagnostics: Vec<TypeMetadataDiagnostic>,
     pub emittedFile: String,
 }
@@ -196,12 +205,17 @@ impl EmittedTypeMetadata {
     pub(crate) fn new(
         emitted_file: String,
         counts: TypeMetadataCounts,
+        declarations: Vec<String>,
         mut diagnostics: Vec<TypeMetadataDiagnostic>,
     ) -> Self {
         diagnostics.sort_by(|left, right| left.stable_key().cmp(&right.stable_key()));
         diagnostics.dedup_by(|left, right| left.stable_key() == right.stable_key());
         Self {
             counts,
+            declarations: declarations
+                .into_iter()
+                .map(|template| EmittedTypeDeclaration { template })
+                .collect(),
             diagnostics,
             emittedFile: emitted_file,
         }

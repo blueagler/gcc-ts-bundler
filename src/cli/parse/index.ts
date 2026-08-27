@@ -1,2 +1,2 @@
-export { parseCliArgs, type CliParseResult } from "./options";
+export { parseCliArgs } from "./options";
 export { parseExternsCliArgs } from "./externs";

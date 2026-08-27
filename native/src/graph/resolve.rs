@@ -283,10 +283,16 @@ fn validate_preserved_export_sources(
         let program = parse_scanned_module(&allocator, &path, &source)?;
         for statement in &program.body {
             let source = match statement {
-                oxc_ast::ast::Statement::ExportAllDeclaration(export) => {
+                // Type-only re-exports are erased before anything runs, so they
+                // are not runtime edges out of the preserved subgraph.
+                oxc_ast::ast::Statement::ExportAllDeclaration(export)
+                    if export.export_kind == oxc_ast::ast::ImportOrExportKind::Value =>
+                {
                     Some(export.source.value.as_str())
                 }
-                oxc_ast::ast::Statement::ExportNamedDeclaration(export) => {
+                oxc_ast::ast::Statement::ExportNamedDeclaration(export)
+                    if export.export_kind == oxc_ast::ast::ImportOrExportKind::Value =>
+                {
                     export.source.as_ref().map(|source| source.value.as_str())
                 }
                 _ => None,

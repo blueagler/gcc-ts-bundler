@@ -3,6 +3,7 @@ import path from "node:path";
 import { expect, test } from "bun:test";
 
 import { generateExterns } from "../../src/api/build.ts";
+import { renderTypedBoundaryDeclaration } from "../../src/externs/typed-render/index.ts";
 import { runClosureCompiler } from "../../src/build/closure/compiler.ts";
 import { createFixture } from "../helpers.mjs";
 
@@ -329,4 +330,52 @@ test("typed declaration barriers are counted, not invisible", async () => {
     expect(result.renameBarriers.propertyNames).toContain(name);
   }
   expect(Array.isArray(result.barrierWarnings)).toBe(true);
+});
+test("boundary declarations are synthesized from the export symbol", () => {
+  const constructor = renderTypedBoundaryDeclaration(
+    {
+      exportName: "URL",
+      kind: "constructor",
+      parameterCount: 2,
+      qualifiedName: "__gccExtern$ns.URL$abc",
+    },
+    "URL",
+  );
+  expect(constructor.join("\n")).toBe(
+    [
+      "/**",
+      " * @constructor",
+      " * @extends {__gccExtern$ns.URL$abc}",
+      " */",
+      "var URL = function(param0, param1) {};",
+    ].join("\n"),
+  );
+  expect(constructor.join("\n")).not.toContain("@record");
+
+  const typeOnly = renderTypedBoundaryDeclaration(
+    {
+      exportName: "Options",
+      kind: "type",
+      parameterCount: 0,
+      qualifiedName: "__gccExtern$ns.Options$def",
+    },
+    "Options",
+  );
+  expect(typeOnly.join("\n")).toBe(
+    "/** @typedef {!__gccExtern$ns.Options$def} */\nOptions;",
+  );
+
+  const moduleExport = renderTypedBoundaryDeclaration(
+    {
+      exportName: "make",
+      kind: "value",
+      parameterCount: 1,
+      qualifiedName: "__gccExtern$ns.make$ghi",
+    },
+    "ns.make",
+    false,
+  );
+  expect(moduleExport.join("\n")).toBe(
+    "/** @type {!__gccExtern$ns.make$ghi} */\nns.make;",
+  );
 });

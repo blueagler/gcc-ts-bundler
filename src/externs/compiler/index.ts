@@ -14,7 +14,6 @@ export {
   isNodeBuiltin,
   isPlatformBuiltin,
   resolveModuleTypeEntry,
-  type ResolvedModuleTypeEntry,
 } from "./target";
 
 export async function loadExternCompilerOptions({
