@@ -277,66 +277,88 @@ function collectAmbientStatements(
 ) {
   for (const statement of statements) {
     if (ts.isModuleDeclaration(statement)) {
-      if (statement.name.kind === ts.SyntaxKind.StringLiteral) {
-        // `declare module "x"`: an import target, reached by importing it.
-        // Its members are never global.
-        continue;
-      }
-      if (statement.name.text === "global") {
-        if (statement.body && ts.isModuleBlock(statement.body)) {
-          // Inside `declare global` everything is global, module or not.
-          collectAmbientStatements(
-            statement.body.statements,
-            names,
-            false,
-            true,
-          );
-        }
-        continue;
-      }
-      // `declare namespace X { … }` emits no runtime object, so any value read
-      // through `X` must come from the environment. Only the root identifier
-      // needs declaring: everything below it is a property of that object.
-      // `declare namespace A.B.C` nests, so the outermost name is the root.
-      const declared =
-        implicitlyDeclared ||
-        (ts.canHaveModifiers(statement)
-          ? (ts.getModifiers(statement) ?? [])
-          : []
-        ).some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword);
-      if (declared && moduleDeclarationHasValues(statement)) {
-        names.add(statement.name.text);
-      }
+      collectAmbientModuleDeclaration(statement, names, implicitlyDeclared);
       continue;
     }
     if (moduleScoped) {
       continue;
     }
-    const modifiers = ts.canHaveModifiers(statement)
-      ? (ts.getModifiers(statement) ?? [])
-      : [];
-    const declared =
-      implicitlyDeclared ||
-      modifiers.some(
-        (modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword,
-      );
-    if (!declared) {
-      continue;
-    }
-    if (ts.isVariableStatement(statement)) {
-      for (const declaration of statement.declarationList.declarations) {
-        if (ts.isIdentifier(declaration.name)) {
-          names.add(declaration.name.text);
-        }
-      }
-      continue;
-    }
-    if (
-      (ts.isFunctionDeclaration(statement) ||
-        ts.isClassDeclaration(statement)) &&
-      statement.name
-    ) {
-      names.add(statement.name.text);
+    collectAmbientValueStatement(statement, names, implicitlyDeclared);
+  }
+}
+
+function collectAmbientModuleDeclaration(
+  statement: ts.ModuleDeclaration,
+  names: Set<string>,
+  implicitlyDeclared: boolean,
+) {
+  if (statement.name.kind === ts.SyntaxKind.StringLiteral) {
+    // `declare module "x"`: an import target, reached by importing it.
+    // Its members are never global.
+    return;
+  }
+  if (statement.name.text === "global") {
+    collectAmbientGlobalAugmentation(statement, names);
+    return;
+  }
+  // `declare namespace X { … }` emits no runtime object, so any value read
+  // through `X` must come from the environment. Only the root identifier
+  // needs declaring: everything below it is a property of that object.
+  // `declare namespace A.B.C` nests, so the outermost name is the root.
+  if (
+    (implicitlyDeclared || statementHasDeclareKeyword(statement)) &&
+    moduleDeclarationHasValues(statement)
+  ) {
+    names.add(statement.name.text);
+  }
+}
+
+function collectAmbientGlobalAugmentation(
+  statement: ts.ModuleDeclaration,
+  names: Set<string>,
+) {
+  if (statement.body && ts.isModuleBlock(statement.body)) {
+    // Inside `declare global` everything is global, module or not.
+    collectAmbientStatements(statement.body.statements, names, false, true);
+  }
+}
+
+function collectAmbientValueStatement(
+  statement: ts.Statement,
+  names: Set<string>,
+  implicitlyDeclared: boolean,
+) {
+  if (!(implicitlyDeclared || statementHasDeclareKeyword(statement))) {
+    return;
+  }
+  if (ts.isVariableStatement(statement)) {
+    addDeclaredVariableNames(statement, names);
+    return;
+  }
+  if (
+    (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) &&
+    statement.name
+  ) {
+    names.add(statement.name.text);
+  }
+}
+
+function statementHasDeclareKeyword(statement: ts.Statement): boolean {
+  const modifiers = ts.canHaveModifiers(statement)
+    ? (ts.getModifiers(statement) ?? [])
+    : [];
+  return modifiers.some(
+    (modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword,
+  );
+}
+
+function addDeclaredVariableNames(
+  statement: ts.VariableStatement,
+  names: Set<string>,
+) {
+  for (const declaration of statement.declarationList.declarations) {
+    if (ts.isIdentifier(declaration.name)) {
+      names.add(declaration.name.text);
     }
   }
 }

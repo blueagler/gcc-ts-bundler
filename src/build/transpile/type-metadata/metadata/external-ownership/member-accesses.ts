@@ -55,26 +55,7 @@ export function collectExternalOwnedMemberAccesses({
   ) {
     expression = unwrapExpression(expression);
     if (ts.isIdentifier(expression)) {
-      let symbol = checker.getSymbolAtLocation(expression);
-      if (symbol && (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
-        symbol = checker.getAliasedSymbol(symbol);
-      }
-      if (!symbol || followedSymbols.has(symbol)) return;
-      const nextSymbols = new Set(followedSymbols).add(symbol);
-      for (const declaration of symbol.declarations ?? []) {
-        if (
-          ts.isVariableDeclaration(declaration) &&
-          declaration.initializer &&
-          !visitedInitializers.has(declaration.initializer)
-        ) {
-          visitedInitializers.add(declaration.initializer);
-          markContextualValue(
-            declaration.initializer,
-            expectedType,
-            nextSymbols,
-          );
-        }
-      }
+      followIdentifierInitializers(expression, expectedType, followedSymbols);
       return;
     }
     if (ts.isConditionalExpression(expression)) {
@@ -83,71 +64,105 @@ export function collectExternalOwnedMemberAccesses({
       return;
     }
     if (ts.isCallExpression(expression)) {
-      const methodName = ts.isPropertyAccessExpression(expression.expression)
-        ? expression.expression.name.text
-        : null;
-      if (methodName === "map" || methodName === "flatMap") {
-        const elementType = checker.getIndexTypeOfType(
-          expectedType,
-          ts.IndexKind.Number,
-        );
-        const callback = expression.arguments[0];
-        if (
-          elementType &&
-          callback &&
-          (ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))
-        ) {
-          markFunctionReturns(
-            callback,
-            elementType,
-            methodName === "flatMap" ? expectedType : undefined,
-            followedSymbols,
-          );
-        }
-      }
+      markMappedCallbackReturns(expression, expectedType, followedSymbols);
       return;
     }
     if (ts.isArrayLiteralExpression(expression)) {
-      const elementType = checker.getIndexTypeOfType(
-        expectedType,
-        ts.IndexKind.Number,
-      );
-      for (const element of expression.elements) {
-        if (ts.isSpreadElement(element)) {
-          markContextualValue(
-            element.expression,
-            expectedType,
-            followedSymbols,
-          );
-        } else if (elementType) {
-          markContextualValue(element, elementType, followedSymbols);
-        }
-      }
+      markArrayLiteralElements(expression, expectedType, followedSymbols);
       return;
     }
     if (!ts.isObjectLiteralExpression(expression)) return;
     for (const property of expression.properties) {
-      if (ts.isSpreadAssignment(property)) {
-        markContextualValue(property.expression, expectedType, followedSymbols);
+      markObjectLiteralProperty(property, expectedType, followedSymbols);
+    }
+  }
+  function followIdentifierInitializers(
+    expression: ts.Identifier,
+    expectedType: ts.Type,
+    followedSymbols: Set<ts.Symbol>,
+  ) {
+    let symbol = checker.getSymbolAtLocation(expression);
+    if (symbol && (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
+      symbol = checker.getAliasedSymbol(symbol);
+    }
+    if (!symbol || followedSymbols.has(symbol)) return;
+    const nextSymbols = new Set(followedSymbols).add(symbol);
+    for (const declaration of symbol.declarations ?? []) {
+      if (
+        !ts.isVariableDeclaration(declaration) ||
+        !declaration.initializer ||
+        visitedInitializers.has(declaration.initializer)
+      ) {
         continue;
       }
-      if (property.name) markKey(property.name);
-      if (!ts.isPropertyAssignment(property)) continue;
-      const name = getStaticPropertyName(property.name);
-      const propertySymbol = name
-        ? checker.getPropertyOfType(expectedType, name)
-        : undefined;
-      const propertyType = propertySymbol
-        ? checker.getTypeOfSymbolAtLocation(propertySymbol, property.name)
-        : undefined;
-      if (propertyType) {
-        markContextualValue(
-          property.initializer,
-          propertyType,
-          followedSymbols,
-        );
+      visitedInitializers.add(declaration.initializer);
+      markContextualValue(declaration.initializer, expectedType, nextSymbols);
+    }
+  }
+  function markMappedCallbackReturns(
+    expression: ts.CallExpression,
+    expectedType: ts.Type,
+    followedSymbols: Set<ts.Symbol>,
+  ) {
+    const methodName = ts.isPropertyAccessExpression(expression.expression)
+      ? expression.expression.name.text
+      : null;
+    if (methodName !== "map" && methodName !== "flatMap") return;
+    const elementType = checker.getIndexTypeOfType(
+      expectedType,
+      ts.IndexKind.Number,
+    );
+    const callback = expression.arguments[0];
+    if (
+      elementType &&
+      callback &&
+      (ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))
+    ) {
+      markFunctionReturns(
+        callback,
+        elementType,
+        methodName === "flatMap" ? expectedType : undefined,
+        followedSymbols,
+      );
+    }
+  }
+  function markArrayLiteralElements(
+    expression: ts.ArrayLiteralExpression,
+    expectedType: ts.Type,
+    followedSymbols: Set<ts.Symbol>,
+  ) {
+    const elementType = checker.getIndexTypeOfType(
+      expectedType,
+      ts.IndexKind.Number,
+    );
+    for (const element of expression.elements) {
+      if (ts.isSpreadElement(element)) {
+        markContextualValue(element.expression, expectedType, followedSymbols);
+      } else if (elementType) {
+        markContextualValue(element, elementType, followedSymbols);
       }
     }
+  }
+  function markObjectLiteralProperty(
+    property: ts.ObjectLiteralElementLike,
+    expectedType: ts.Type,
+    followedSymbols: Set<ts.Symbol>,
+  ) {
+    if (ts.isSpreadAssignment(property)) {
+      markContextualValue(property.expression, expectedType, followedSymbols);
+      return;
+    }
+    if (property.name) markKey(property.name);
+    if (!ts.isPropertyAssignment(property)) return;
+    const name = getStaticPropertyName(property.name);
+    const propertySymbol = name
+      ? checker.getPropertyOfType(expectedType, name)
+      : undefined;
+    const propertyType = propertySymbol
+      ? checker.getTypeOfSymbolAtLocation(propertySymbol, property.name)
+      : undefined;
+    if (!propertyType) return;
+    markContextualValue(property.initializer, propertyType, followedSymbols);
   }
   function markFunctionReturns(
     callback: ts.ArrowFunction | ts.FunctionExpression,
@@ -178,46 +193,55 @@ export function collectExternalOwnedMemberAccesses({
     };
     visitReturn(callback.body);
   }
+  function markBoundaryObjectLiteralKeys(node: ts.ObjectLiteralExpression) {
+    const contextualType = checker.getContextualType(node);
+    const ownType = checker.getTypeAtLocation(node);
+    const boundaryType =
+      isBoundaryType(ownType) || isBoundaryType(contextualType);
+    for (const property of node.properties) {
+      if (!property.name) continue;
+      const name = getStaticPropertyName(property.name);
+      if (
+        boundaryType ||
+        (name !== null &&
+          ((contextualType && hasBoundaryProperty(contextualType, name)) ||
+            hasBoundaryProperty(ownType, name)))
+      ) {
+        markKey(property.name);
+      }
+    }
+  }
+  function markBoundaryPropertyAccess(node: ts.PropertyAccessExpression) {
+    const receiverType = checker.getTypeAtLocation(node.expression);
+    if (
+      isBoundaryType(receiverType) ||
+      hasBoundaryProperty(receiverType, node.name.text)
+    ) {
+      starts.add(toUtf8Offset(sourceFile, node.name.getStart(sourceFile)));
+    }
+  }
+  function markBoundaryBindingElement(node: ts.BindingElement) {
+    const receiverType = checker.getTypeAtLocation(node.parent);
+    const key = node.propertyName ?? node.name;
+    const name =
+      ts.isIdentifier(key) || ts.isStringLiteralLike(key) ? key.text : null;
+    if (
+      isBoundaryType(receiverType) ||
+      (name !== null && hasBoundaryProperty(receiverType, name))
+    ) {
+      markKey(key);
+    }
+  }
   const visit = (node: ts.Node) => {
     if (ts.isObjectLiteralExpression(node)) {
-      const contextualType = checker.getContextualType(node);
-      const ownType = checker.getTypeAtLocation(node);
-      const boundaryType =
-        isBoundaryType(ownType) || isBoundaryType(contextualType);
-      for (const property of node.properties) {
-        if (!property.name) continue;
-        const name = getStaticPropertyName(property.name);
-        if (
-          boundaryType ||
-          (name !== null &&
-            ((contextualType && hasBoundaryProperty(contextualType, name)) ||
-              hasBoundaryProperty(ownType, name)))
-        ) {
-          markKey(property.name);
-        }
-      }
+      markBoundaryObjectLiteralKeys(node);
     } else if (ts.isPropertyAccessExpression(node)) {
-      const receiverType = checker.getTypeAtLocation(node.expression);
-      if (
-        isBoundaryType(receiverType) ||
-        hasBoundaryProperty(receiverType, node.name.text)
-      ) {
-        starts.add(toUtf8Offset(sourceFile, node.name.getStart(sourceFile)));
-      }
+      markBoundaryPropertyAccess(node);
     } else if (
       ts.isBindingElement(node) &&
       ts.isObjectBindingPattern(node.parent)
     ) {
-      const receiverType = checker.getTypeAtLocation(node.parent);
-      const key = node.propertyName ?? node.name;
-      const name =
-        ts.isIdentifier(key) || ts.isStringLiteralLike(key) ? key.text : null;
-      if (
-        isBoundaryType(receiverType) ||
-        (name !== null && hasBoundaryProperty(receiverType, name))
-      ) {
-        markKey(key);
-      }
+      markBoundaryBindingElement(node);
     } else if (
       ts.isVariableDeclaration(node) &&
       node.initializer &&

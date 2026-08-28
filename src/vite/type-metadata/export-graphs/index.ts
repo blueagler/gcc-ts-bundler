@@ -107,81 +107,20 @@ export function parseRuntimeExportGraph(
 
   for (const statement of sourceFile.statements) {
     if (ts.isExportAssignment(statement) && !statement.isExportEquals) {
-      facts.push({
-        exportName: "default",
-        kind: "local",
-        localName: ts.isIdentifier(statement.expression)
-          ? statement.expression.text
-          : undefined,
-      });
+      collectDefaultExportFact(statement, facts);
       continue;
     }
     if (ts.isExportDeclaration(statement)) {
-      if (statement.isTypeOnly) {
-        continue;
-      }
-      const targetSpecifier =
-        statement.moduleSpecifier &&
-        ts.isStringLiteralLike(statement.moduleSpecifier)
-          ? statement.moduleSpecifier.text
-          : undefined;
-      if (!statement.exportClause) {
-        if (targetSpecifier) {
-          facts.push({ kind: "star", targetSpecifier });
-        }
-        continue;
-      }
-      if (ts.isNamespaceExport(statement.exportClause)) {
-        if (targetSpecifier) {
-          facts.push({
-            exportName: statement.exportClause.name.text,
-            importedName: "*",
-            kind: "reexport",
-            targetSpecifier,
-          });
-        }
-        continue;
-      }
-      for (const element of statement.exportClause.elements) {
-        if (element.isTypeOnly) {
-          continue;
-        }
-        const exportName = element.name.text;
-        const importedName = (element.propertyName ?? element.name).text;
-        facts.push(
-          targetSpecifier
-            ? { exportName, importedName, kind: "reexport", targetSpecifier }
-            : { exportName, kind: "local", localName: importedName },
-        );
-      }
+      collectExportDeclarationFacts(statement, facts);
       continue;
     }
     if (hasModifier(statement, ts.SyntaxKind.ExportKeyword)) {
-      if (
-        (ts.isClassDeclaration(statement) ||
-          ts.isFunctionDeclaration(statement)) &&
-        statement.name
-      ) {
-        facts.push({
-          exportName: hasModifier(statement, ts.SyntaxKind.DefaultKeyword)
-            ? "default"
-            : statement.name.text,
-          kind: "local",
-          localName: statement.name.text,
-        });
-      } else if (ts.isVariableStatement(statement)) {
-        for (const declaration of statement.declarationList.declarations) {
-          for (const name of collectBindingNames(declaration.name)) {
-            facts.push({ exportName: name, kind: "local", localName: name });
-          }
-        }
-      }
+      collectExportedStatementFacts(statement, facts);
       continue;
     }
-    if (!ts.isExpressionStatement(statement)) {
-      continue;
+    if (ts.isExpressionStatement(statement)) {
+      collectCommonJsExportFacts(statement.expression, facts);
     }
-    collectCommonJsExportFacts(statement.expression, facts);
   }
 
   return dedupeBy(facts, (fact) => JSON.stringify(fact));
@@ -359,6 +298,89 @@ export function joinDeclarationAndRuntimeExports(input: {
     });
   }
   return { diagnostics, facts };
+}
+
+function collectDefaultExportFact(
+  statement: ts.ExportAssignment,
+  facts: RuntimeExportFact[],
+): void {
+  facts.push({
+    exportName: "default",
+    kind: "local",
+    localName: ts.isIdentifier(statement.expression)
+      ? statement.expression.text
+      : undefined,
+  });
+}
+
+function collectExportDeclarationFacts(
+  statement: ts.ExportDeclaration,
+  facts: RuntimeExportFact[],
+): void {
+  if (statement.isTypeOnly) {
+    return;
+  }
+  const targetSpecifier =
+    statement.moduleSpecifier &&
+    ts.isStringLiteralLike(statement.moduleSpecifier)
+      ? statement.moduleSpecifier.text
+      : undefined;
+  if (!statement.exportClause) {
+    if (targetSpecifier) {
+      facts.push({ kind: "star", targetSpecifier });
+    }
+    return;
+  }
+  if (ts.isNamespaceExport(statement.exportClause)) {
+    if (targetSpecifier) {
+      facts.push({
+        exportName: statement.exportClause.name.text,
+        importedName: "*",
+        kind: "reexport",
+        targetSpecifier,
+      });
+    }
+    return;
+  }
+  for (const element of statement.exportClause.elements) {
+    if (element.isTypeOnly) {
+      continue;
+    }
+    const exportName = element.name.text;
+    const importedName = (element.propertyName ?? element.name).text;
+    facts.push(
+      targetSpecifier
+        ? { exportName, importedName, kind: "reexport", targetSpecifier }
+        : { exportName, kind: "local", localName: importedName },
+    );
+  }
+}
+
+function collectExportedStatementFacts(
+  statement: ts.Statement,
+  facts: RuntimeExportFact[],
+): void {
+  if (
+    (ts.isClassDeclaration(statement) || ts.isFunctionDeclaration(statement)) &&
+    statement.name
+  ) {
+    facts.push({
+      exportName: hasModifier(statement, ts.SyntaxKind.DefaultKeyword)
+        ? "default"
+        : statement.name.text,
+      kind: "local",
+      localName: statement.name.text,
+    });
+    return;
+  }
+  if (!ts.isVariableStatement(statement)) {
+    return;
+  }
+  for (const declaration of statement.declarationList.declarations) {
+    for (const name of collectBindingNames(declaration.name)) {
+      facts.push({ exportName: name, kind: "local", localName: name });
+    }
+  }
 }
 
 function collectCommonJsExportFacts(

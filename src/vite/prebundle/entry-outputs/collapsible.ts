@@ -10,6 +10,12 @@ export interface CollapsibleBundleEntryOutput {
   sideEffectImportFilePaths: string[];
 }
 
+interface CollapsibleAnalysisState {
+  directTargetFilePath: string | null;
+  importedBindingNames: Set<string>;
+  sideEffectImportFilePaths: Set<string>;
+}
+
 export async function collectCollapsibleBundleEntryOutputs(
   outputFilePaths: string[],
 ) {
@@ -34,118 +40,165 @@ async function analyzeCollapsibleBundleEntryOutput(outputFilePath: string) {
     true,
     ts.ScriptKind.JS,
   );
-  const sideEffectImportFilePaths = new Set<string>();
-  const importedBindingNames = new Set<string>();
-  let directTargetFilePath: string | null = null;
+  const state: CollapsibleAnalysisState = {
+    directTargetFilePath: null,
+    importedBindingNames: new Set(),
+    sideEffectImportFilePaths: new Set(),
+  };
 
   const resolveTarget = (specifier: string) =>
     normalizePath(path.resolve(path.dirname(outputFilePath), specifier));
 
-  const setDirectTarget = (nextTargetFilePath: string) => {
-    if (
-      directTargetFilePath !== null &&
-      directTargetFilePath !== nextTargetFilePath
-    ) {
-      return false;
-    }
-    directTargetFilePath = nextTargetFilePath;
-    return true;
-  };
-
   for (const statement of sourceFile.statements) {
-    if (
-      ts.isImportDeclaration(statement) &&
-      statement.moduleSpecifier &&
-      ts.isStringLiteralLike(statement.moduleSpecifier)
-    ) {
-      const targetFilePath = resolveTarget(statement.moduleSpecifier.text);
-      if (!statement.importClause) {
-        sideEffectImportFilePaths.add(targetFilePath);
-        continue;
-      }
-      if (!setDirectTarget(targetFilePath)) {
-        return null;
-      }
-      if (statement.importClause.name) {
-        importedBindingNames.add(statement.importClause.name.text);
-      }
-      if (statement.importClause.namedBindings) {
-        if (ts.isNamespaceImport(statement.importClause.namedBindings)) {
-          importedBindingNames.add(
-            statement.importClause.namedBindings.name.text,
-          );
-        } else {
-          for (const element of statement.importClause.namedBindings.elements) {
-            importedBindingNames.add(element.name.text);
-          }
-        }
-      }
-      continue;
+    if (!analyzeEntryStatement(statement, state, resolveTarget)) {
+      return null;
     }
-
-    if (
-      ts.isExportDeclaration(statement) &&
-      statement.moduleSpecifier &&
-      ts.isStringLiteralLike(statement.moduleSpecifier)
-    ) {
-      if (
-        statement.exportClause &&
-        ts.isNamespaceExport(statement.exportClause)
-      ) {
-        return null;
-      }
-      if (
-        statement.exportClause &&
-        ts.isNamedExports(statement.exportClause) &&
-        statement.exportClause.elements.some(
-          (element) =>
-            element.propertyName &&
-            element.propertyName.text !== element.name.text,
-        )
-      ) {
-        return null;
-      }
-      if (!setDirectTarget(resolveTarget(statement.moduleSpecifier.text))) {
-        return null;
-      }
-      continue;
-    }
-
-    if (ts.isExportDeclaration(statement)) {
-      if (
-        !statement.exportClause ||
-        !ts.isNamedExports(statement.exportClause) ||
-        directTargetFilePath === null
-      ) {
-        return null;
-      }
-      for (const element of statement.exportClause.elements) {
-        if (
-          element.propertyName &&
-          element.propertyName.text !== element.name.text
-        ) {
-          return null;
-        }
-        const localName = (element.propertyName ?? element.name).text;
-        if (!importedBindingNames.has(localName)) {
-          return null;
-        }
-      }
-      continue;
-    }
-
-    return null;
   }
 
+  const directTargetFilePath = state.directTargetFilePath;
   if (directTargetFilePath === null) {
     return null;
   }
 
-  sideEffectImportFilePaths.delete(directTargetFilePath);
+  state.sideEffectImportFilePaths.delete(directTargetFilePath);
   return {
     directTargetFilePath,
-    sideEffectImportFilePaths: [...sideEffectImportFilePaths].sort(
+    sideEffectImportFilePaths: [...state.sideEffectImportFilePaths].sort(
       (left, right) => left.localeCompare(right),
     ),
   } satisfies CollapsibleBundleEntryOutput;
+}
+
+/** Returns false when the statement rules out collapsing the entry output. */
+function analyzeEntryStatement(
+  statement: ts.Statement,
+  state: CollapsibleAnalysisState,
+  resolveTarget: (specifier: string) => string,
+): boolean {
+  if (
+    ts.isImportDeclaration(statement) &&
+    statement.moduleSpecifier &&
+    ts.isStringLiteralLike(statement.moduleSpecifier)
+  ) {
+    return analyzeEntryImport(
+      statement,
+      resolveTarget(statement.moduleSpecifier.text),
+      state,
+    );
+  }
+  if (
+    ts.isExportDeclaration(statement) &&
+    statement.moduleSpecifier &&
+    ts.isStringLiteralLike(statement.moduleSpecifier)
+  ) {
+    return analyzeEntryReexport(
+      statement,
+      resolveTarget(statement.moduleSpecifier.text),
+      state,
+    );
+  }
+  if (ts.isExportDeclaration(statement)) {
+    return analyzeEntryLocalExport(statement, state);
+  }
+  return false;
+}
+
+function analyzeEntryImport(
+  statement: ts.ImportDeclaration,
+  targetFilePath: string,
+  state: CollapsibleAnalysisState,
+): boolean {
+  if (!statement.importClause) {
+    state.sideEffectImportFilePaths.add(targetFilePath);
+    return true;
+  }
+  if (!setDirectTarget(state, targetFilePath)) {
+    return false;
+  }
+  if (statement.importClause.name) {
+    state.importedBindingNames.add(statement.importClause.name.text);
+  }
+  collectImportedBindingNames(
+    statement.importClause.namedBindings,
+    state.importedBindingNames,
+  );
+  return true;
+}
+
+function collectImportedBindingNames(
+  namedBindings: ts.NamedImportBindings | undefined,
+  importedBindingNames: Set<string>,
+) {
+  if (!namedBindings) {
+    return;
+  }
+  if (ts.isNamespaceImport(namedBindings)) {
+    importedBindingNames.add(namedBindings.name.text);
+    return;
+  }
+  for (const element of namedBindings.elements) {
+    importedBindingNames.add(element.name.text);
+  }
+}
+
+function analyzeEntryReexport(
+  statement: ts.ExportDeclaration,
+  targetFilePath: string,
+  state: CollapsibleAnalysisState,
+): boolean {
+  const exportClause = statement.exportClause;
+  if (exportClause && ts.isNamespaceExport(exportClause)) {
+    return false;
+  }
+  if (
+    exportClause &&
+    ts.isNamedExports(exportClause) &&
+    exportClause.elements.some(
+      (element) =>
+        element.propertyName && element.propertyName.text !== element.name.text,
+    )
+  ) {
+    return false;
+  }
+  return setDirectTarget(state, targetFilePath);
+}
+
+function analyzeEntryLocalExport(
+  statement: ts.ExportDeclaration,
+  state: CollapsibleAnalysisState,
+): boolean {
+  if (
+    !statement.exportClause ||
+    !ts.isNamedExports(statement.exportClause) ||
+    state.directTargetFilePath === null
+  ) {
+    return false;
+  }
+  for (const element of statement.exportClause.elements) {
+    if (
+      element.propertyName &&
+      element.propertyName.text !== element.name.text
+    ) {
+      return false;
+    }
+    const localName = (element.propertyName ?? element.name).text;
+    if (!state.importedBindingNames.has(localName)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function setDirectTarget(
+  state: CollapsibleAnalysisState,
+  nextTargetFilePath: string,
+): boolean {
+  if (
+    state.directTargetFilePath !== null &&
+    state.directTargetFilePath !== nextTargetFilePath
+  ) {
+    return false;
+  }
+  state.directTargetFilePath = nextTargetFilePath;
+  return true;
 }

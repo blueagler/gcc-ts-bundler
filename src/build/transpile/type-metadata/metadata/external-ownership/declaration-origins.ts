@@ -225,72 +225,7 @@ function collectBoundaryTypeSymbols(
     if (sourceFile.isDeclarationFile) continue;
     const visit = (node: ts.Node) => {
       if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
-        if (ts.isCallExpression(node)) {
-          if (
-            isSourceFunctionCall(node, "writeJson", "shared/cache-store.ts")
-          ) {
-            const value = node.arguments[1];
-            if (!value) {
-              throw new Error(
-                `Serialized write is missing its value at ${sourceFile.fileName}:${node.getStart(sourceFile)}`,
-              );
-            }
-            collectType(
-              checker.getTypeAtLocation(value),
-              `serialized write ${sourceFile.fileName}:${node.getStart(sourceFile)}`,
-            );
-          }
-          if (
-            isSourceFunctionCall(node, "isObjectOf", "shared/validation.ts")
-          ) {
-            const schema = node.arguments[0];
-            if (schema) {
-              collectType(
-                checker.getTypeAtLocation(schema),
-                `validated object schema ${sourceFile.fileName}:${node.getStart(sourceFile)}`,
-              );
-            }
-            const validatedType = node.typeArguments?.[0];
-            if (validatedType) {
-              collectType(
-                checker.getTypeFromTypeNode(validatedType),
-                `validated object ${sourceFile.fileName}:${node.getStart(sourceFile)}`,
-              );
-            }
-          }
-        }
-        const signature = checker.getResolvedSignature(node);
-        const syntacticExternal = expressionOriginatesFromExternalValue(
-          node.expression,
-          checker,
-          origins,
-        );
-        if (
-          syntacticExternal ||
-          (signature &&
-            declarationOriginatesFromRuntimeBoundary(
-              signature.getDeclaration(),
-              origins,
-            ))
-        ) {
-          if (signature) {
-            collectType(signature.getReturnType());
-            for (const parameter of signature.getParameters()) {
-              const declaration =
-                parameter.valueDeclaration ?? parameter.declarations?.[0];
-              if (declaration) {
-                collectType(
-                  checker.getTypeOfSymbolAtLocation(parameter, declaration),
-                );
-              }
-            }
-          }
-          if (syntacticExternal) {
-            for (const argument of node.arguments ?? []) {
-              collectType(checker.getTypeAtLocation(argument));
-            }
-          }
-        }
+        collectCallOrConstructBoundaryTypes(sourceFile, node);
       }
       ts.forEachChild(node, visit);
     };
@@ -319,6 +254,96 @@ function collectBoundaryTypeSymbols(
     );
   }
   return symbols;
+
+  function collectSerializedWriteValue(
+    sourceFile: ts.SourceFile,
+    node: ts.CallExpression,
+  ) {
+    if (!isSourceFunctionCall(node, "writeJson", "shared/cache-store.ts"))
+      return;
+    const value = node.arguments[1];
+    if (!value) {
+      throw new Error(
+        `Serialized write is missing its value at ${sourceFile.fileName}:${node.getStart(sourceFile)}`,
+      );
+    }
+    collectType(
+      checker.getTypeAtLocation(value),
+      `serialized write ${sourceFile.fileName}:${node.getStart(sourceFile)}`,
+    );
+  }
+
+  function collectValidatedObjectSchema(
+    sourceFile: ts.SourceFile,
+    node: ts.CallExpression,
+  ) {
+    if (!isSourceFunctionCall(node, "isObjectOf", "shared/validation.ts"))
+      return;
+    const schema = node.arguments[0];
+    if (schema) {
+      collectType(
+        checker.getTypeAtLocation(schema),
+        `validated object schema ${sourceFile.fileName}:${node.getStart(sourceFile)}`,
+      );
+    }
+    const validatedType = node.typeArguments?.[0];
+    if (validatedType) {
+      collectType(
+        checker.getTypeFromTypeNode(validatedType),
+        `validated object ${sourceFile.fileName}:${node.getStart(sourceFile)}`,
+      );
+    }
+  }
+
+  function collectExternalCallSurfaces(
+    node: ts.CallExpression | ts.NewExpression,
+  ) {
+    const signature = checker.getResolvedSignature(node);
+    const syntacticExternal = expressionOriginatesFromExternalValue(
+      node.expression,
+      checker,
+      origins,
+    );
+    if (
+      !syntacticExternal &&
+      !(
+        signature &&
+        declarationOriginatesFromRuntimeBoundary(
+          signature.getDeclaration(),
+          origins,
+        )
+      )
+    ) {
+      return;
+    }
+    if (signature) {
+      collectType(signature.getReturnType());
+      for (const parameter of signature.getParameters()) {
+        const declaration =
+          parameter.valueDeclaration ?? parameter.declarations?.[0];
+        if (declaration) {
+          collectType(
+            checker.getTypeOfSymbolAtLocation(parameter, declaration),
+          );
+        }
+      }
+    }
+    if (!syntacticExternal) return;
+    for (const argument of node.arguments ?? []) {
+      collectType(checker.getTypeAtLocation(argument));
+    }
+  }
+
+  function collectCallOrConstructBoundaryTypes(
+    sourceFile: ts.SourceFile,
+    node: ts.CallExpression | ts.NewExpression,
+  ) {
+    if (ts.isCallExpression(node)) {
+      collectSerializedWriteValue(sourceFile, node);
+      collectValidatedObjectSchema(sourceFile, node);
+    }
+    collectExternalCallSurfaces(node);
+  }
 
   function isSourceFunctionCall(
     node: ts.CallExpression,
@@ -355,68 +380,80 @@ function collectBoundaryTypeSymbols(
     }
   }
 
+  function collectPreservedModuleExports(sourceFile: ts.SourceFile) {
+    const moduleSymbol = checker.getSymbolAtLocation(sourceFile);
+    if (!moduleSymbol) return;
+    for (const exported of checker.getExportsOfModule(moduleSymbol)) {
+      collectPreservedExport(sourceFile, exported);
+    }
+  }
+
+  function collectPreservedExport(
+    sourceFile: ts.SourceFile,
+    exported: ts.Symbol,
+  ) {
+    const symbol =
+      (exported.flags & ts.SymbolFlags.Alias) !== 0
+        ? checker.getAliasedSymbol(exported)
+        : exported;
+    const declaration =
+      symbol.valueDeclaration ??
+      symbol.declarations?.[0] ??
+      exported.valueDeclaration ??
+      exported.declarations?.[0];
+    if (!declaration) return;
+    const exportedType = checker.getTypeOfSymbolAtLocation(symbol, declaration);
+    const signatures = [
+      ...exportedType.getCallSignatures(),
+      ...exportedType.getConstructSignatures(),
+    ];
+    const requiredBy = `preserved export ${sourceFile.fileName}#${exported.getName()}`;
+    if (signatures.length === 0) {
+      collectType(exportedType, requiredBy);
+      return;
+    }
+    for (const signature of signatures) {
+      collectSignature(signature, requiredBy);
+    }
+  }
+
+  function collectNativeBindingSurfaces(sourceFile: ts.SourceFile) {
+    for (const statement of sourceFile.statements) {
+      if (
+        !ts.isInterfaceDeclaration(statement) ||
+        statement.name.text !== "NativeBinding"
+      ) {
+        continue;
+      }
+      for (const member of statement.members) {
+        collectNativeBindingMethod(sourceFile, member);
+      }
+    }
+  }
+
+  function collectNativeBindingMethod(
+    sourceFile: ts.SourceFile,
+    member: ts.TypeElement,
+  ) {
+    if (!ts.isMethodSignature(member)) return;
+    const signature = checker.getSignatureFromDeclaration(member);
+    if (!signature) {
+      throw new Error(
+        `Unable to inspect native binding method ${member.name.getText(sourceFile)}`,
+      );
+    }
+    collectSignature(
+      signature,
+      `native binding ${member.name.getText(sourceFile)}`,
+    );
+  }
+
   function collectRequiredRuntimeBoundarySurfaces() {
     for (const sourceFile of program.getSourceFiles()) {
       if (!origins.moduleFiles.has(path.normalize(sourceFile.fileName)))
         continue;
-      const moduleSymbol = checker.getSymbolAtLocation(sourceFile);
-      if (moduleSymbol) {
-        for (const exported of checker.getExportsOfModule(moduleSymbol)) {
-          const symbol =
-            (exported.flags & ts.SymbolFlags.Alias) !== 0
-              ? checker.getAliasedSymbol(exported)
-              : exported;
-          const declaration =
-            symbol.valueDeclaration ??
-            symbol.declarations?.[0] ??
-            exported.valueDeclaration ??
-            exported.declarations?.[0];
-          if (!declaration) continue;
-          const exportedType = checker.getTypeOfSymbolAtLocation(
-            symbol,
-            declaration,
-          );
-          const signatures = [
-            ...exportedType.getCallSignatures(),
-            ...exportedType.getConstructSignatures(),
-          ];
-          if (signatures.length === 0) {
-            collectType(
-              exportedType,
-              `preserved export ${sourceFile.fileName}#${exported.getName()}`,
-            );
-          } else {
-            for (const signature of signatures) {
-              collectSignature(
-                signature,
-                `preserved export ${sourceFile.fileName}#${exported.getName()}`,
-              );
-            }
-          }
-        }
-      }
-
-      for (const statement of sourceFile.statements) {
-        if (
-          !ts.isInterfaceDeclaration(statement) ||
-          statement.name.text !== "NativeBinding"
-        ) {
-          continue;
-        }
-        for (const member of statement.members) {
-          if (!ts.isMethodSignature(member)) continue;
-          const signature = checker.getSignatureFromDeclaration(member);
-          if (!signature) {
-            throw new Error(
-              `Unable to inspect native binding method ${member.name.getText(sourceFile)}`,
-            );
-          }
-          collectSignature(
-            signature,
-            `native binding ${member.name.getText(sourceFile)}`,
-          );
-        }
-      }
+      collectPreservedModuleExports(sourceFile);
+      collectNativeBindingSurfaces(sourceFile);
     }
   }
 }
@@ -478,49 +515,56 @@ function collectContextualOwnedProperties(
   owned: Map<string, Set<string>>,
 ) {
   const seen = new Map<ts.Type, Set<ts.Type>>();
-  const alignTypes = (actual: ts.Type, expected: ts.Type) => {
+  const alreadyAligned = (actual: ts.Type, expected: ts.Type) => {
     let expectedTypes = seen.get(actual);
     if (!expectedTypes) {
       expectedTypes = new Set();
       seen.set(actual, expectedTypes);
     }
-    if (expectedTypes.has(expected)) return;
+    if (expectedTypes.has(expected)) return true;
     expectedTypes.add(expected);
-
-    if (actual.isUnionOrIntersection()) {
-      for (const member of actual.types) alignTypes(member, expected);
-      return;
-    }
-    if (expected.isUnionOrIntersection()) {
-      for (const member of expected.types) alignTypes(actual, member);
-      return;
-    }
-    if (isTypeReference(actual) && isTypeReference(expected)) {
-      const actualArguments = checker.getTypeArguments(actual);
-      const expectedArguments = checker.getTypeArguments(expected);
-      if (
-        actualArguments.length === expectedArguments.length &&
-        (checker.isArrayType(actual) ||
-          checker.isTupleType(actual) ||
-          typeOwnerSymbols(expected).some((symbol) =>
-            symbol.declarations?.some((declaration) =>
-              origins.defaultLibraryFiles.has(
-                path.normalize(declaration.getSourceFile().fileName),
-              ),
+    return false;
+  };
+  const alignContainerTypeArguments = (
+    actual: ts.TypeReference,
+    expected: ts.TypeReference,
+  ) => {
+    const actualArguments = checker.getTypeArguments(actual);
+    const expectedArguments = checker.getTypeArguments(expected);
+    if (
+      actualArguments.length !== expectedArguments.length ||
+      !(
+        checker.isArrayType(actual) ||
+        checker.isTupleType(actual) ||
+        typeOwnerSymbols(expected).some((symbol) =>
+          symbol.declarations?.some((declaration) =>
+            origins.defaultLibraryFiles.has(
+              path.normalize(declaration.getSourceFile().fileName),
             ),
-          ))
-      ) {
-        for (let index = 0; index < actualArguments.length; index += 1) {
-          const actualArgument = actualArguments[index];
-          const expectedArgument = expectedArguments[index];
-          if (actualArgument && expectedArgument) {
-            alignTypes(actualArgument, expectedArgument);
-          }
-        }
-        return;
+          ),
+        )
+      )
+    ) {
+      return false;
+    }
+    for (let index = 0; index < actualArguments.length; index += 1) {
+      const actualArgument = actualArguments[index];
+      const expectedArgument = expectedArguments[index];
+      if (actualArgument && expectedArgument) {
+        alignTypes(actualArgument, expectedArgument);
       }
     }
-
+    return true;
+  };
+  const recordOwnedProperty = (identity: string, name: string) => {
+    let names = owned.get(identity);
+    if (!names) {
+      names = new Set();
+      owned.set(identity, names);
+    }
+    names.add(name);
+  };
+  const alignSharedProperties = (actual: ts.Type, expected: ts.Type) => {
     const actualOwners = typeIdentityKeys(actual).filter(
       (identity) => !identity.startsWith("<default-lib>"),
     );
@@ -529,27 +573,40 @@ function collectContextualOwnedProperties(
       const actualProperty = checker.getPropertyOfType(actual, name);
       if (!actualProperty) continue;
       for (const identity of actualOwners) {
-        let names = owned.get(identity);
-        if (!names) {
-          names = new Set();
-          owned.set(identity, names);
-        }
-        names.add(name);
+        recordOwnedProperty(identity, name);
       }
       const actualDeclaration =
         actualProperty.valueDeclaration ?? actualProperty.declarations?.[0];
       const expectedDeclaration =
         expectedProperty.valueDeclaration ?? expectedProperty.declarations?.[0];
-      if (actualDeclaration && expectedDeclaration) {
-        alignTypes(
-          checker.getTypeOfSymbolAtLocation(actualProperty, actualDeclaration),
-          checker.getTypeOfSymbolAtLocation(
-            expectedProperty,
-            expectedDeclaration,
-          ),
-        );
-      }
+      if (!actualDeclaration || !expectedDeclaration) continue;
+      alignTypes(
+        checker.getTypeOfSymbolAtLocation(actualProperty, actualDeclaration),
+        checker.getTypeOfSymbolAtLocation(
+          expectedProperty,
+          expectedDeclaration,
+        ),
+      );
     }
+  };
+  const alignTypes = (actual: ts.Type, expected: ts.Type) => {
+    if (alreadyAligned(actual, expected)) return;
+    if (actual.isUnionOrIntersection()) {
+      for (const member of actual.types) alignTypes(member, expected);
+      return;
+    }
+    if (expected.isUnionOrIntersection()) {
+      for (const member of expected.types) alignTypes(actual, member);
+      return;
+    }
+    if (
+      isTypeReference(actual) &&
+      isTypeReference(expected) &&
+      alignContainerTypeArguments(actual, expected)
+    ) {
+      return;
+    }
+    alignSharedProperties(actual, expected);
   };
 
   for (const sourceFile of program.getSourceFiles()) {

@@ -94,108 +94,200 @@ export async function renderBundleEntrySource(input: {
   ) => Promise<{ imported: string; targetFilePath: string } | null>;
 }) {
   const lines: string[] = [];
+  const { entryPoint, resolveDeepExport } = input;
 
   for (const [requestIndex, request] of input.requests.entries()) {
     const importPath = toRelativeImportSpecifier(
-      input.entryPoint,
+      entryPoint,
       request.targetFilePath,
     );
-    if (
-      request.needsSideEffectOnly &&
-      !request.needsDefault &&
-      !request.needsExportAll &&
-      request.usedNamedExports.size === 0
-    ) {
-      lines.push(`import ${JSON.stringify(importPath)};`);
-    }
+    pushSideEffectOnlyImport(lines, request, importPath);
+    pushExportAll(lines, request, importPath);
 
-    if (request.needsExportAll) {
-      lines.push(`export * from ${JSON.stringify(importPath)};`);
-    }
-
-    const derivedNamedExports = new Set(
-      request.commonJsFacadeNamedExports.filter(
-        (name) => request.needsExportAll || request.usedNamedExports.has(name),
-      ),
-    );
-    const exportSpecifiers = new Set<string>();
+    const derivedNamedExports = collectDerivedNamedExports(request);
     const needsDefault =
       request.hasDefaultExport &&
       (request.needsDefault || request.needsExportAll);
-    if (needsDefault && derivedNamedExports.size === 0) {
-      exportSpecifiers.add("default");
-    }
-    for (const namedExport of request.usedNamedExports) {
-      if (!derivedNamedExports.has(namedExport)) {
-        exportSpecifiers.add(namedExport);
-      }
-    }
+    const exportSpecifiers = collectExportSpecifiers(
+      request,
+      derivedNamedExports,
+      needsDefault,
+    );
 
-    if (derivedNamedExports.size > 0) {
-      const facadeLocal = `__gcc_cjs_facade_${requestIndex}`;
-      lines.push(`import ${facadeLocal} from ${JSON.stringify(importPath)};`);
-      const derivedSpecifiers: string[] = [];
-      let exportIndex = 0;
-      for (const exportName of [...derivedNamedExports].sort((left, right) =>
-        left.localeCompare(right),
-      )) {
-        const localName = `__gcc_cjs_named_${requestIndex}_${exportIndex++}`;
-        lines.push(
-          `const ${localName} = ${facadeLocal}[${JSON.stringify(exportName)}];`,
-        );
-        derivedSpecifiers.push(`${localName} as ${exportName}`);
-      }
-      if (needsDefault) {
-        derivedSpecifiers.push(`${facadeLocal} as default`);
-      }
-      lines.push(`export { ${derivedSpecifiers.join(", ")} };`);
-    }
+    pushDerivedFacadeExports(
+      lines,
+      derivedNamedExports,
+      needsDefault,
+      importPath,
+      requestIndex,
+    );
 
-    // Resolve names through pure barrel modules to their defining modules so
-    // esbuild splitting can place per-region code into per-region bundles.
-    const passthroughSpecifiers: string[] = [];
-    const deepSpecifiersByTarget = new Map<string, string[]>();
-    for (const exportName of [...exportSpecifiers].sort((left, right) =>
-      left.localeCompare(right),
-    )) {
-      const resolved = input.resolveDeepExport
-        ? await input.resolveDeepExport(request.targetFilePath, exportName)
-        : null;
-      if (!resolved) {
-        passthroughSpecifiers.push(exportName);
-        continue;
-      }
-      const deepImportPath = toRelativeImportSpecifier(
-        input.entryPoint,
-        resolved.targetFilePath,
+    const { deepSpecifiersByTarget, passthroughSpecifiers } =
+      await resolveExportSpecifierTargets(
+        entryPoint,
+        resolveDeepExport,
+        request.targetFilePath,
+        exportSpecifiers,
       );
-      const specifier =
-        resolved.imported === exportName
-          ? exportName
-          : `${resolved.imported} as ${exportName}`;
-      const bucket = deepSpecifiersByTarget.get(deepImportPath);
-      if (bucket) {
-        bucket.push(specifier);
-      } else {
-        deepSpecifiersByTarget.set(deepImportPath, [specifier]);
-      }
-    }
 
-    if (passthroughSpecifiers.length > 0) {
-      lines.push(
-        `export { ${passthroughSpecifiers.join(", ")} } from ${JSON.stringify(importPath)};`,
-      );
-    }
-    for (const [deepImportPath, specifiers] of [
-      ...deepSpecifiersByTarget.entries(),
-    ].sort(([left], [right]) => left.localeCompare(right))) {
-      lines.push(
-        `export { ${specifiers.join(", ")} } from ${JSON.stringify(deepImportPath)};`,
-      );
-    }
+    pushPassthroughExports(lines, passthroughSpecifiers, importPath);
+    pushDeepExports(lines, deepSpecifiersByTarget);
   }
 
   return `${lines.join("\n")}\n`;
+}
+
+function pushSideEffectOnlyImport(
+  lines: string[],
+  request: RegionBundleRequest,
+  importPath: string,
+): void {
+  const isSideEffectOnly =
+    request.needsSideEffectOnly &&
+    !request.needsDefault &&
+    !request.needsExportAll &&
+    request.usedNamedExports.size === 0;
+  if (!isSideEffectOnly) {
+    return;
+  }
+  lines.push(`import ${JSON.stringify(importPath)};`);
+}
+
+function pushExportAll(
+  lines: string[],
+  request: RegionBundleRequest,
+  importPath: string,
+): void {
+  if (!request.needsExportAll) {
+    return;
+  }
+  lines.push(`export * from ${JSON.stringify(importPath)};`);
+}
+
+function collectDerivedNamedExports(request: RegionBundleRequest): Set<string> {
+  return new Set(
+    request.commonJsFacadeNamedExports.filter(
+      (name) => request.needsExportAll || request.usedNamedExports.has(name),
+    ),
+  );
+}
+
+function collectExportSpecifiers(
+  request: RegionBundleRequest,
+  derivedNamedExports: Set<string>,
+  needsDefault: boolean,
+): Set<string> {
+  const exportSpecifiers = new Set<string>();
+  if (needsDefault && derivedNamedExports.size === 0) {
+    exportSpecifiers.add("default");
+  }
+  for (const namedExport of request.usedNamedExports) {
+    if (!derivedNamedExports.has(namedExport)) {
+      exportSpecifiers.add(namedExport);
+    }
+  }
+  return exportSpecifiers;
+}
+
+function pushDerivedFacadeExports(
+  lines: string[],
+  derivedNamedExports: Set<string>,
+  needsDefault: boolean,
+  importPath: string,
+  requestIndex: number,
+): void {
+  if (derivedNamedExports.size === 0) {
+    return;
+  }
+  const facadeLocal = `__gcc_cjs_facade_${requestIndex}`;
+  lines.push(`import ${facadeLocal} from ${JSON.stringify(importPath)};`);
+  const derivedSpecifiers: string[] = [];
+  let exportIndex = 0;
+  for (const exportName of [...derivedNamedExports].sort((left, right) =>
+    left.localeCompare(right),
+  )) {
+    const localName = `__gcc_cjs_named_${requestIndex}_${exportIndex++}`;
+    lines.push(
+      `const ${localName} = ${facadeLocal}[${JSON.stringify(exportName)}];`,
+    );
+    derivedSpecifiers.push(`${localName} as ${exportName}`);
+  }
+  if (needsDefault) {
+    derivedSpecifiers.push(`${facadeLocal} as default`);
+  }
+  lines.push(`export { ${derivedSpecifiers.join(", ")} };`);
+}
+
+async function resolveExportSpecifierTargets(
+  entryPoint: string,
+  resolveDeepExport:
+    | ((
+        targetFilePath: string,
+        exportName: string,
+      ) => Promise<{ imported: string; targetFilePath: string } | null>)
+    | undefined,
+  targetFilePath: string,
+  exportSpecifiers: Set<string>,
+): Promise<{
+  deepSpecifiersByTarget: Map<string, string[]>;
+  passthroughSpecifiers: string[];
+}> {
+  // Resolve names through pure barrel modules to their defining modules so
+  // esbuild splitting can place per-region code into per-region bundles.
+  const passthroughSpecifiers: string[] = [];
+  const deepSpecifiersByTarget = new Map<string, string[]>();
+  for (const exportName of [...exportSpecifiers].sort((left, right) =>
+    left.localeCompare(right),
+  )) {
+    const resolved = resolveDeepExport
+      ? await resolveDeepExport(targetFilePath, exportName)
+      : null;
+    if (!resolved) {
+      passthroughSpecifiers.push(exportName);
+      continue;
+    }
+    const deepImportPath = toRelativeImportSpecifier(
+      entryPoint,
+      resolved.targetFilePath,
+    );
+    const specifier =
+      resolved.imported === exportName
+        ? exportName
+        : `${resolved.imported} as ${exportName}`;
+    const bucket = deepSpecifiersByTarget.get(deepImportPath);
+    if (bucket) {
+      bucket.push(specifier);
+    } else {
+      deepSpecifiersByTarget.set(deepImportPath, [specifier]);
+    }
+  }
+  return { deepSpecifiersByTarget, passthroughSpecifiers };
+}
+
+function pushPassthroughExports(
+  lines: string[],
+  passthroughSpecifiers: string[],
+  importPath: string,
+): void {
+  if (passthroughSpecifiers.length === 0) {
+    return;
+  }
+  lines.push(
+    `export { ${passthroughSpecifiers.join(", ")} } from ${JSON.stringify(importPath)};`,
+  );
+}
+
+function pushDeepExports(
+  lines: string[],
+  deepSpecifiersByTarget: Map<string, string[]>,
+): void {
+  for (const [deepImportPath, specifiers] of [
+    ...deepSpecifiersByTarget.entries(),
+  ].sort(([left], [right]) => left.localeCompare(right))) {
+    lines.push(
+      `export { ${specifiers.join(", ")} } from ${JSON.stringify(deepImportPath)};`,
+    );
+  }
 }
 
 export function groupBundleRequests(requests: RegionBundleRequest[]) {

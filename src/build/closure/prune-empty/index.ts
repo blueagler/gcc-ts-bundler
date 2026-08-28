@@ -6,6 +6,11 @@ import { replaceRuntimeInitManifest } from "../runtime-manifest/init";
 import type { ChunkPlanChunk } from "../../types";
 import { isScaffoldingOnly } from "./is-scaffolding-only";
 import { findRuntimeBaseChunk, pruneChunkMapFile } from "./parse";
+
+/** `[dependencyIndices, url, cssHrefs]`, or `0` once pruned. */
+type RuntimeChunkRow = [number[], string, string[]];
+type ChunkRows = (RuntimeChunkRow | 0)[];
+
 /**
  * Post-Closure pruning of chunks that survive the plan but carry no code.
  *
@@ -39,11 +44,7 @@ export async function pruneEmptyChunks(input: {
     return [...input.outputFiles];
   }
 
-  const sources = new Map<string, string>();
-  for (const filePath of jsOutputs) {
-    sources.set(filePath, await fs.readFile(filePath, "utf8"));
-  }
-
+  const sources = await readJsSources(jsOutputs);
   const base = findRuntimeBaseChunk(sources);
   if (!base) {
     return [...input.outputFiles];
@@ -51,6 +52,61 @@ export async function pruneEmptyChunks(input: {
   const { baseFilePath, manifest } = base;
   const [baseIndex, chunkRows, moduleChunks] = manifest;
 
+  const fileByChunkIndex = indexFilesByChunk(chunkRows, baseIndex, jsOutputs);
+  const prunedIndices = collectPrunedIndices(
+    input.chunkPlan,
+    fileByChunkIndex,
+    sources,
+  );
+  if (prunedIndices.size === 0) {
+    return [...input.outputFiles];
+  }
+
+  const prunedFileNames = emptyPrunedRows(
+    chunkRows,
+    fileByChunkIndex,
+    prunedIndices,
+  );
+  rewireChunkGraph(chunkRows, moduleChunks, prunedIndices, baseIndex);
+
+  sources.set(
+    baseFilePath,
+    replaceRuntimeInitManifest(sources.get(baseFilePath) ?? "", manifest),
+  );
+  stripPrunedImportsFromSources(sources, prunedFileNames);
+
+  const survivingOutputs = await writeSurvivingOutputs(
+    input.outputFiles,
+    jsOutputs,
+    prunedFileNames,
+    sources,
+  );
+
+  if (input.manifestFilePath) {
+    await pruneChunkMapFile(input.manifestFilePath, prunedFileNames);
+  }
+  logInternalDetail(
+    "closure:pruned-empty-chunks",
+    [...prunedFileNames].sort().join(",") || "none",
+  );
+  return survivingOutputs;
+}
+
+async function readJsSources(
+  jsOutputs: readonly string[],
+): Promise<Map<string, string>> {
+  const sources = new Map<string, string>();
+  for (const filePath of jsOutputs) {
+    sources.set(filePath, await fs.readFile(filePath, "utf8"));
+  }
+  return sources;
+}
+
+function indexFilesByChunk(
+  chunkRows: ChunkRows,
+  baseIndex: number,
+  jsOutputs: readonly string[],
+): Map<number, string> {
   const fileByChunkIndex = new Map<number, string>();
   for (const [index, row] of chunkRows.entries()) {
     if (index === baseIndex || typeof row === "number") {
@@ -68,10 +124,17 @@ export async function pruneEmptyChunks(input: {
       fileByChunkIndex.set(index, filePath);
     }
   }
+  return fileByChunkIndex;
+}
 
+function collectPrunedIndices(
+  chunkPlan: readonly ChunkPlanChunk[],
+  fileByChunkIndex: ReadonlyMap<number, string>,
+  sources: ReadonlyMap<string, string>,
+): Set<number> {
   const prunedIndices = new Set<number>();
   for (const [index, filePath] of fileByChunkIndex) {
-    const plan = input.chunkPlan[index];
+    const plan = chunkPlan[index];
     // Never a dynamic root: `import()` has to resolve to that chunk even when
     // Closure emptied it.
     if (
@@ -85,23 +148,14 @@ export async function pruneEmptyChunks(input: {
       prunedIndices.add(index);
     }
   }
-  if (prunedIndices.size === 0) {
-    return [...input.outputFiles];
-  }
+  return prunedIndices;
+}
 
-  const survivorOf = (index: number): number => {
-    const seen = new Set<number>();
-    let current = index;
-    while (prunedIndices.has(current) && !seen.has(current)) {
-      seen.add(current);
-      const row = chunkRows[current];
-      const deps = row === undefined || typeof row === "number" ? [] : row[0];
-      const next = deps.find((dependency) => !prunedIndices.has(dependency));
-      current = next ?? baseIndex;
-    }
-    return prunedIndices.has(current) ? baseIndex : current;
-  };
-
+function emptyPrunedRows(
+  chunkRows: ChunkRows,
+  fileByChunkIndex: ReadonlyMap<number, string>,
+  prunedIndices: ReadonlySet<number>,
+): Set<string> {
   const prunedFileNames = new Set<string>();
   for (const index of prunedIndices) {
     const filePath = fileByChunkIndex.get(index);
@@ -110,6 +164,15 @@ export async function pruneEmptyChunks(input: {
     }
     chunkRows[index] = 0;
   }
+  return prunedFileNames;
+}
+
+function rewireChunkGraph(
+  chunkRows: ChunkRows,
+  moduleChunks: number[],
+  prunedIndices: ReadonlySet<number>,
+  baseIndex: number,
+): void {
   for (const row of chunkRows) {
     if (typeof row === "number") {
       continue;
@@ -118,23 +181,59 @@ export async function pruneEmptyChunks(input: {
   }
   for (const [moduleIndex, chunkIndex] of moduleChunks.entries()) {
     if (prunedIndices.has(chunkIndex)) {
-      moduleChunks[moduleIndex] = survivorOf(chunkIndex);
+      moduleChunks[moduleIndex] = survivorOf(
+        chunkIndex,
+        chunkRows,
+        prunedIndices,
+        baseIndex,
+      );
     }
   }
+}
 
-  sources.set(
-    baseFilePath,
-    replaceRuntimeInitManifest(sources.get(baseFilePath) ?? "", manifest),
-  );
+/**
+ * Walk pruned-chunk dependency edges until a surviving chunk (or the base).
+ * Called after pruned rows are emptied to `0`, so a pruned current always
+ * falls through to `baseIndex` unless a cycle is detected first.
+ */
+function survivorOf(
+  index: number,
+  chunkRows: ChunkRows,
+  prunedIndices: ReadonlySet<number>,
+  baseIndex: number,
+): number {
+  const seen = new Set<number>();
+  let current = index;
+  while (prunedIndices.has(current) && !seen.has(current)) {
+    seen.add(current);
+    const row = chunkRows[current];
+    const deps = row === undefined || typeof row === "number" ? [] : row[0];
+    const next = deps.find((dependency) => !prunedIndices.has(dependency));
+    current = next ?? baseIndex;
+  }
+  return prunedIndices.has(current) ? baseIndex : current;
+}
+
+function stripPrunedImportsFromSources(
+  sources: Map<string, string>,
+  prunedFileNames: Set<string>,
+): void {
   for (const [filePath, sourceText] of sources) {
     const stripped = stripImportsOf(sourceText, prunedFileNames);
     if (stripped !== sourceText) {
       sources.set(filePath, stripped);
     }
   }
+}
 
+async function writeSurvivingOutputs(
+  outputFiles: readonly string[],
+  jsOutputs: readonly string[],
+  prunedFileNames: ReadonlySet<string>,
+  sources: ReadonlyMap<string, string>,
+): Promise<string[]> {
   const survivingOutputs: string[] = [];
-  for (const filePath of input.outputFiles) {
+  for (const filePath of outputFiles) {
     if (
       jsOutputs.includes(filePath) &&
       prunedFileNames.has(path.basename(filePath))
@@ -148,14 +247,6 @@ export async function pruneEmptyChunks(input: {
       await fs.writeFile(filePath, sourceText, "utf8");
     }
   }
-
-  if (input.manifestFilePath) {
-    await pruneChunkMapFile(input.manifestFilePath, prunedFileNames);
-  }
-  logInternalDetail(
-    "closure:pruned-empty-chunks",
-    [...prunedFileNames].sort().join(",") || "none",
-  );
   return survivingOutputs;
 }
 

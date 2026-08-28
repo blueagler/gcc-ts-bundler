@@ -120,6 +120,13 @@ export function createBarrelFlattener(input: { moduleFilePaths: Set<string> }) {
   }
 }
 
+interface BarrelParseState {
+  localExports: Set<string>;
+  pure: boolean;
+  reexports: Map<string, BarrelReexport>;
+  starTargets: string[];
+}
+
 async function parseBarrelModule(
   filePath: string,
   moduleFilePaths: Set<string>,
@@ -144,75 +151,125 @@ async function parseBarrelModule(
     true,
     ts.ScriptKind.JS,
   );
-  const localExports = new Set<string>();
-  const reexports = new Map<string, BarrelReexport>();
-  const starTargets: string[] = [];
-  let pure = true;
+  const state: BarrelParseState = {
+    localExports: new Set(),
+    pure: true,
+    reexports: new Map(),
+    starTargets: [],
+  };
 
   for (const statement of sourceFile.statements) {
     if (ts.isEmptyStatement(statement)) {
       continue;
     }
-    if (ts.isExportDeclaration(statement)) {
-      if (statement.isTypeOnly) {
-        continue;
-      }
-      if (
-        statement.moduleSpecifier &&
-        ts.isStringLiteralLike(statement.moduleSpecifier)
-      ) {
-        const targetFilePath = normalizePath(
-          path.resolve(path.dirname(filePath), statement.moduleSpecifier.text),
-        );
-        if (!moduleFilePaths.has(targetFilePath)) {
-          return impure;
-        }
-        if (!statement.exportClause) {
-          starTargets.push(targetFilePath);
-          continue;
-        }
-        if (!ts.isNamedExports(statement.exportClause)) {
-          return impure;
-        }
-        for (const specifier of statement.exportClause.elements) {
-          const exportedName = specifier.name.text;
-          const importedName = specifier.propertyName?.text ?? exportedName;
-          reexports.set(exportedName, {
-            imported: importedName,
-            targetFilePath,
-          });
-        }
-        continue;
-      }
-      pure = false;
-      if (statement.exportClause && ts.isNamedExports(statement.exportClause)) {
-        for (const specifier of statement.exportClause.elements) {
-          localExports.add(specifier.name.text);
-        }
-      }
-      continue;
+    if (!recordBarrelStatement(statement, filePath, moduleFilePaths, state)) {
+      return impure;
     }
-    if (ts.isExportAssignment(statement)) {
-      pure = false;
-      if (!statement.isExportEquals) {
-        localExports.add("default");
-      }
-      continue;
-    }
-    if (
-      ts.canHaveModifiers(statement) &&
-      ts
-        .getModifiers(statement)
-        ?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)
-    ) {
-      pure = false;
-      collectExportedDeclarationNames(statement, localExports);
-      continue;
-    }
-    pure = false;
   }
 
-  return { localExports, pure, reexports, starTargets };
+  return {
+    localExports: state.localExports,
+    pure: state.pure,
+    reexports: state.reexports,
+    starTargets: state.starTargets,
+  };
+}
+
+/** Returns false when the module is not a known in-graph re-export target. */
+function recordBarrelStatement(
+  statement: ts.Statement,
+  filePath: string,
+  moduleFilePaths: Set<string>,
+  state: BarrelParseState,
+): boolean {
+  if (ts.isExportDeclaration(statement)) {
+    return recordBarrelExportDeclaration(
+      statement,
+      filePath,
+      moduleFilePaths,
+      state,
+    );
+  }
+  if (ts.isExportAssignment(statement)) {
+    state.pure = false;
+    if (!statement.isExportEquals) {
+      state.localExports.add("default");
+    }
+    return true;
+  }
+  if (
+    ts.canHaveModifiers(statement) &&
+    ts
+      .getModifiers(statement)
+      ?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)
+  ) {
+    state.pure = false;
+    collectExportedDeclarationNames(statement, state.localExports);
+    return true;
+  }
+  state.pure = false;
+  return true;
+}
+
+function recordBarrelExportDeclaration(
+  statement: ts.ExportDeclaration,
+  filePath: string,
+  moduleFilePaths: Set<string>,
+  state: BarrelParseState,
+): boolean {
+  if (statement.isTypeOnly) {
+    return true;
+  }
+  if (
+    statement.moduleSpecifier &&
+    ts.isStringLiteralLike(statement.moduleSpecifier)
+  ) {
+    return recordBarrelFromExport(
+      statement,
+      statement.moduleSpecifier.text,
+      filePath,
+      moduleFilePaths,
+      state,
+    );
+  }
+  state.pure = false;
+  if (statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+    for (const specifier of statement.exportClause.elements) {
+      state.localExports.add(specifier.name.text);
+    }
+  }
+  return true;
+}
+
+function recordBarrelFromExport(
+  statement: ts.ExportDeclaration,
+  specifierText: string,
+  filePath: string,
+  moduleFilePaths: Set<string>,
+  state: BarrelParseState,
+): boolean {
+  const targetFilePath = normalizePath(
+    path.resolve(path.dirname(filePath), specifierText),
+  );
+  if (!moduleFilePaths.has(targetFilePath)) {
+    return false;
+  }
+  if (!statement.exportClause) {
+    state.starTargets.push(targetFilePath);
+    return true;
+  }
+  if (!ts.isNamedExports(statement.exportClause)) {
+    return false;
+  }
+  for (const specifier of statement.exportClause.elements) {
+    const exportedName = specifier.name.text;
+    const importedName = specifier.propertyName?.text ?? exportedName;
+    state.reexports.set(exportedName, {
+      imported: importedName,
+      targetFilePath,
+    });
+  }
+  return true;
 }
 
 function collectExportedDeclarationNames(

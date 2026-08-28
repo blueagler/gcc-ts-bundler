@@ -41,126 +41,155 @@ export function collectClosureDocsForSourceFile(
     features.docEligibility.hasJsDocText;
   const shouldAnnotateTypeScript = features.docEligibility.isTypeScriptLike;
 
-  const visit = (node: ts.Node) => {
-    if (ts.isFunctionDeclaration(node) && node.name) {
-      if (shouldAnnotateTypeScript || shouldAnnotateJs) {
-        const jsdoc = buildFunctionJsDoc(node, checker, renderContext);
-        if (jsdoc) {
-          pushAnnotation(jsdoc, {
-            bindingName: node.name.text,
-            kind: "binding",
-          });
-        }
-      }
-      ts.forEachChild(node, visit);
+  const annotateFunctionDeclaration = (
+    node: ts.FunctionDeclaration,
+    name: ts.Identifier,
+  ) => {
+    if (!shouldAnnotateTypeScript && !shouldAnnotateJs) {
       return;
     }
-
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
-      if (shouldAnnotateTypeScript || shouldAnnotateJs) {
-        const jsdoc = buildVariableJsDoc({
-          checker,
-          context: renderContext,
-          initializer: node.initializer,
-          typeNode: node.type,
-        });
-        if (jsdoc) {
-          pushAnnotation(jsdoc, {
-            bindingName: node.name.text,
-            kind: "binding",
-          });
-        }
-        if (
-          node.initializer &&
-          ts.isObjectLiteralExpression(node.initializer)
-        ) {
-          for (const member of node.initializer.properties) {
-            const memberName = getObjectPropertyName(member);
-            if (!memberName) {
-              continue;
-            }
-            const memberDoc = buildObjectMemberDoc({
-              checker,
-              context: renderContext,
-              member,
-            });
-            if (memberDoc) {
-              pushAnnotation(memberDoc, {
-                kind: "member",
-                memberKind: objectMemberKind(member),
-                memberName,
-                ownerBindingName: node.name.text,
-                static: false,
-              });
-            }
-          }
-        }
-      }
-      ts.forEachChild(node, visit);
-      return;
-    }
-
-    if (ts.isClassDeclaration(node) && node.name) {
-      const className = node.name.text;
-      const jsdoc = ensureClassConstructorStruct(
-        buildClassJsDoc(node, checker, renderContext),
-      );
+    const jsdoc = buildFunctionJsDoc(node, checker, renderContext);
+    if (jsdoc) {
       pushAnnotation(jsdoc, {
-        bindingName: className,
+        bindingName: name.text,
         kind: "binding",
       });
+    }
+  };
 
-      for (const member of node.members) {
-        const memberName = getClassMemberName(member);
-        if (!memberName) {
-          continue;
-        }
-        const memberDoc = buildClassMemberDoc({
-          checker,
-          context: renderContext,
-          member,
-        });
-        if (memberDoc) {
-          pushAnnotation(memberDoc, {
-            kind: "member",
-            memberKind: classMemberKind(member),
-            memberName,
-            ownerBindingName: className,
-            static: hasModifier(member, ts.SyntaxKind.StaticKeyword),
-          });
-        }
+  const annotateObjectLiteralMembers = (
+    objectLiteral: ts.ObjectLiteralExpression,
+    ownerBindingName: string,
+  ) => {
+    for (const member of objectLiteral.properties) {
+      const memberName = getObjectPropertyName(member);
+      if (!memberName) {
+        continue;
       }
-      ts.forEachChild(node, visit);
+      const memberDoc = buildObjectMemberDoc({
+        checker,
+        context: renderContext,
+        member,
+      });
+      if (memberDoc) {
+        pushAnnotation(memberDoc, {
+          kind: "member",
+          memberKind: objectMemberKind(member),
+          memberName,
+          ownerBindingName,
+          static: false,
+        });
+      }
+    }
+  };
+
+  const annotateVariableDeclaration = (
+    node: ts.VariableDeclaration,
+    name: ts.Identifier,
+  ) => {
+    if (!shouldAnnotateTypeScript && !shouldAnnotateJs) {
       return;
     }
+    const jsdoc = buildVariableJsDoc({
+      checker,
+      context: renderContext,
+      initializer: node.initializer,
+      typeNode: node.type,
+    });
+    if (jsdoc) {
+      pushAnnotation(jsdoc, {
+        bindingName: name.text,
+        kind: "binding",
+      });
+    }
+    if (node.initializer && ts.isObjectLiteralExpression(node.initializer)) {
+      annotateObjectLiteralMembers(node.initializer, name.text);
+    }
+  };
 
-    if (
-      (ts.isMethodDeclaration(node) ||
-        ts.isGetAccessorDeclaration(node) ||
-        ts.isSetAccessorDeclaration(node)) &&
-      !ts.isClassDeclaration(node.parent) &&
-      !ts.isClassExpression(node.parent) &&
-      !ts.isObjectLiteralExpression(node.parent) &&
-      shouldAnnotateTypeScript
-    ) {
-      const name =
-        "name" in node && node.name && ts.isIdentifier(node.name)
-          ? node.name.text
-          : null;
-      if (name) {
-        const jsdoc = buildFunctionLikeDoc(node, checker, renderContext);
-        if (jsdoc) {
-          pushAnnotation(jsdoc, { bindingName: name, kind: "binding" });
-        }
+  const annotateClassDeclaration = (
+    node: ts.ClassDeclaration,
+    name: ts.Identifier,
+  ) => {
+    const className = name.text;
+    const jsdoc = ensureClassConstructorStruct(
+      buildClassJsDoc(node, checker, renderContext),
+    );
+    pushAnnotation(jsdoc, {
+      bindingName: className,
+      kind: "binding",
+    });
+
+    for (const member of node.members) {
+      const memberName = getClassMemberName(member);
+      if (!memberName) {
+        continue;
+      }
+      const memberDoc = buildClassMemberDoc({
+        checker,
+        context: renderContext,
+        member,
+      });
+      if (memberDoc) {
+        pushAnnotation(memberDoc, {
+          kind: "member",
+          memberKind: classMemberKind(member),
+          memberName,
+          ownerBindingName: className,
+          static: hasModifier(member, ts.SyntaxKind.StaticKeyword),
+        });
       }
     }
+  };
 
+  const annotateStandaloneMethodOrAccessor = (
+    node:
+      | ts.MethodDeclaration
+      | ts.GetAccessorDeclaration
+      | ts.SetAccessorDeclaration,
+  ) => {
+    if (!ts.isIdentifier(node.name)) {
+      return;
+    }
+    const jsdoc = buildFunctionLikeDoc(node, checker, renderContext);
+    if (jsdoc) {
+      pushAnnotation(jsdoc, { bindingName: node.name.text, kind: "binding" });
+    }
+  };
+
+  const visit = (node: ts.Node) => {
+    if (ts.isFunctionDeclaration(node) && node.name) {
+      annotateFunctionDeclaration(node, node.name);
+    } else if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+      annotateVariableDeclaration(node, node.name);
+    } else if (ts.isClassDeclaration(node) && node.name) {
+      annotateClassDeclaration(node, node.name);
+    } else if (isStandaloneMethodOrAccessor(node) && shouldAnnotateTypeScript) {
+      annotateStandaloneMethodOrAccessor(node);
+    }
     ts.forEachChild(node, visit);
   };
 
   visit(sourceFile);
 
   return annotations;
+}
+
+/** Method or accessor whose owner is not a class body or object literal. */
+function isStandaloneMethodOrAccessor(
+  node: ts.Node,
+): node is
+  | ts.MethodDeclaration
+  | ts.GetAccessorDeclaration
+  | ts.SetAccessorDeclaration {
+  return (
+    (ts.isMethodDeclaration(node) ||
+      ts.isGetAccessorDeclaration(node) ||
+      ts.isSetAccessorDeclaration(node)) &&
+    !ts.isClassDeclaration(node.parent) &&
+    !ts.isClassExpression(node.parent) &&
+    !ts.isObjectLiteralExpression(node.parent)
+  );
 }
 
 function objectMemberKind(
