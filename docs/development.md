@@ -193,6 +193,24 @@ bun run lint
 
 The lint script checks Rust formatting and Clippy, then runs the TypeScript formatting and Oxlint checks.
 
+### Runtime coverage for fallow
+
+`bun run coverage` runs the JS test suite instrumented and writes
+`.coverage/coverage-final.json` (Istanbul format). Feed it to fallow so CRAP
+scores use measured per-function coverage instead of the static "untested"
+estimate:
+
+```sh
+bun run coverage
+fallow health --coverage .coverage/coverage-final.json --format json --quiet
+```
+
+Bun's lcov reporter emits line hits only - no per-function records - so
+`scripts/coverage-istanbul.mjs` parses each covered source file with the
+TypeScript compiler and attaches the measured line hits to real function
+ranges. Functions in `scripts/` stay "estimated": the test suite does not
+execute them, and that is the correct signal.
+
 ## Type-safety rules
 
 The TypeScript configuration enables exact optional properties, unchecked index protection, unused-symbol checks, isolated modules, and verbatim module syntax. Oxlint rejects explicit `any`, type assertions, non-null assertions, unsafe `any` flow, and value imports used only as types.

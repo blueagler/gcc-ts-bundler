@@ -24,4 +24,5 @@ examples/**/node_modules/
 examples/**/.gcc-debug/
 examples/**/.investigate-cache/
 examples/**/.investigate-dist/
+.coverage/
 examples/**/*.generated.externs.js

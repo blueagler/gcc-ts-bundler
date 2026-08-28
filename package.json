@@ -87,6 +87,7 @@
     "verify:package": "node ./scripts/check-install-sanity.mjs && node ./scripts/verify-package.mjs",
     "verify:examples": "node ./scripts/verify-example-dists.mjs",
     "verify:selfbuild": "GCC_SELFBUILD_STAGES=2 node ./scripts/build-self.mjs",
+    "coverage": "bun test ./test --coverage --coverage-reporter=lcov --coverage-dir=.coverage && node ./scripts/coverage-istanbul.mjs .coverage/lcov.info .coverage/coverage-final.json",
     "size-gate": "bun ./scripts/size-gate.mjs",
     "prepublishOnly": "bun run verify:package && bun run verify:selfbuild",
     "publish:npm": "node ./scripts/publish-npm.mjs"
