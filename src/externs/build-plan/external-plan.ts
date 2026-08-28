@@ -323,17 +323,27 @@ function stripUntypedBoundaryDeclarations(
     const trimmed = line.trim();
     const untypedVar = untypedVarDeclarationName(trimmed);
     if (untypedVar !== undefined && names.has(untypedVar)) continue;
-    const next = lines[index + 1];
-    if (trimmed === "/** @type {?} */" && next !== undefined) {
-      const nextName = bareVarDeclarationName(next.trim());
-      if (nextName !== undefined && names.has(nextName)) {
-        index += 1;
-        continue;
-      }
+    if (startsStrippedBoundaryPair(trimmed, lines[index + 1], names)) {
+      index += 1;
+      continue;
     }
     kept.push(line);
   }
   return kept.join("\n");
+}
+/**
+ * True when `trimmed` is a bare unknown-type JSDoc line whose following line
+ * declares a boundary var being stripped. The declaration spans two lines, so
+ * the caller consumes both.
+ */
+function startsStrippedBoundaryPair(
+  trimmed: string,
+  next: string | undefined,
+  names: ReadonlySet<string>,
+) {
+  if (trimmed !== "/** @type {?} */" || next === undefined) return false;
+  const nextName = bareVarDeclarationName(next.trim());
+  return nextName !== undefined && names.has(nextName);
 }
 
 function untypedVarDeclarationName(trimmed: string) {
