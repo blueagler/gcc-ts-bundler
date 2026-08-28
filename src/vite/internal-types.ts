@@ -87,7 +87,7 @@ export interface CompiledCoreOutputSet {
 export type {
   GccRuntimeManifest,
   GccRuntimeManifestChunk,
-} from "../build/closure/runtime-manifest";
+} from "../build/closure/runtime-manifest/parse";
 
 /**
  * Resolved shape of `chunks.outputType`, after gating. `"script"` keeps the

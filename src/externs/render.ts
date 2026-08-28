@@ -3,7 +3,7 @@ import { analyzeRuntimeUsage } from "./runtime";
 import {
   collectBoundaryAwareExternLines,
   collectBoundaryAwareUsageMemberNames,
-} from "./contracts";
+} from "./contracts/usage";
 import { renderStructuralExternLine } from "./barriers";
 
 /** How the app reads members, split by the syntax Closure sees. */

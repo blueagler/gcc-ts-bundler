@@ -10,10 +10,10 @@ import { buildRuntimeModuleIdMap } from "../chunk-modules";
 import { joinPublicPath, stripPublicPathPrefix } from "../output";
 import {
   extractRuntimeInitManifest,
-  parseGccRuntimeManifest,
   replaceRuntimeInitManifest,
   type RuntimeManifestValue,
-} from "../../build/closure/runtime-manifest";
+} from "../../build/closure/runtime-manifest/init";
+import { parseGccRuntimeManifest } from "../../build/closure/runtime-manifest/parse";
 import { isRuntimeModuleSourceMap } from "../naming/runtime";
 import { normalizePathForLookup } from "./ownership";
 

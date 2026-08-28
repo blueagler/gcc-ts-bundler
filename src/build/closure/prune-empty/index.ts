@@ -2,7 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 
 import { logInternalDetail } from "../../../shared/timing";
-import { replaceRuntimeInitManifest } from "../runtime-manifest";
+import { replaceRuntimeInitManifest } from "../runtime-manifest/init";
 import type { ChunkPlanChunk } from "../../types";
 import { isScaffoldingOnly } from "./is-scaffolding-only";
 import { findRuntimeBaseChunk, pruneChunkMapFile } from "./parse";

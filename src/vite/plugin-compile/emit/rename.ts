@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 
-import { parseGccRuntimeManifest } from "../../../build/closure/runtime-manifest";
+import { parseGccRuntimeManifest } from "../../../build/closure/runtime-manifest/parse";
 import { logInternalDetail } from "../../../shared/timing";
 import { resolveBaseChunkName } from "../../config";
 import { augmentCompiledViteCss } from "../../css";

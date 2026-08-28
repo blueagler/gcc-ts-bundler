@@ -1,7 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 
-import { extractRuntimeInitManifest } from "../runtime-manifest";
+import { extractRuntimeInitManifest } from "../runtime-manifest/init";
 
 /**
  * `[baseChunkIndex, chunkRows, moduleToChunk, publicPath]`. A chunk row is

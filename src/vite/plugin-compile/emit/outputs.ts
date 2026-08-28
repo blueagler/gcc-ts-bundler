@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 
-import { parseGccRuntimeManifest } from "../../../build/closure/runtime-manifest";
+import { parseGccRuntimeManifest } from "../../../build/closure/runtime-manifest/parse";
 import type { OutputBundle, PluginContext } from "../../internal-types";
 import { preserveCompiledChunkIdentities } from "../../naming";
 import { logOutputStats } from "../../output";

@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 
-import { parseGccRuntimeManifest } from "../../build/closure/runtime-manifest";
+import { parseGccRuntimeManifest } from "../../build/closure/runtime-manifest/parse";
 import type { NormalizedOutputOptions } from "../internal-types";
 import { assignEsmRenameMap, rewriteEsmChunkContents } from "./esm-apply";
 import { listEsmChunks, requireBaseEsmChunk } from "./esm-chunks";

@@ -11,7 +11,7 @@ import type {
 } from "../internal-types";
 import { buildChunkModuleIdLookup } from "../chunk-modules";
 import { joinPublicPath, stripPublicPathPrefix } from "../output";
-import { parseGccRuntimeManifest } from "../../build/closure/runtime-manifest";
+import { parseGccRuntimeManifest } from "../../build/closure/runtime-manifest/parse";
 import type { BaseOutputSeed, DeferredChunkSeed } from "./helpers";
 import {
   applyFileRenames,

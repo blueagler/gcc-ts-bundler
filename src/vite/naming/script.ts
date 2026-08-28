@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 
 import type { NormalizedOutputOptions } from "../internal-types";
 import { joinPublicPath, stripPublicPathPrefix } from "../output";
-import { parseGccRuntimeManifest } from "../../build/closure/runtime-manifest";
+import { parseGccRuntimeManifest } from "../../build/closure/runtime-manifest/parse";
 import type { BaseOutputSeed } from "./helpers";
 import {
   applyFileRenames,

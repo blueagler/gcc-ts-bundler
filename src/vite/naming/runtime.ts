@@ -3,7 +3,7 @@ import { isString, recordOf } from "../../shared/validation";
 import {
   extractRuntimeInitManifest,
   replaceRuntimeInitManifest,
-} from "../../build/closure/runtime-manifest";
+} from "../../build/closure/runtime-manifest/init";
 
 export const isRuntimeModuleSourceMap: Validator<Record<string, string>> =
   recordOf<string>(isString);
