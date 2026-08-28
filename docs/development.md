@@ -136,6 +136,16 @@ stayed byte-identical, all five example dists stayed byte-for-byte, and the
 self-build's own output got slightly smaller (`dist/vite/index.mjs` 150,465 to
 149,580 raw bytes) because fewer property names are pinned.
 
+#### Per-name property policy
+
+`bun run ledger --json` reports per-name channels, cost, and suspects. When a
+name is pinned only as a structural `Object.prototype.*` barrier and that
+evidence says it is safe to rename, `GenerateExternsOptions.propertyPolicy`
+asserts that renameability and the pin line is dropped. Unmatched names and
+`__gcc*` runtime-protocol names fail closed. Typed owner-qualified pins are
+untouched. The self-build's `assertCompletePublicExterns` still gates the
+published API.
+
 #### One declaration per boundary variable
 
 The native emitter deliberately gives the same external export the same

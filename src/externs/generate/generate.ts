@@ -15,6 +15,7 @@ import {
   createExternAnalysisContext,
   type ExternAnalysisContext,
 } from "../context";
+import { applyPropertyPolicy } from "../property-policy";
 import {
   renderBoundaryAwareExterns,
   renderRuntimeAwareExterns,
@@ -272,15 +273,21 @@ async function renderBarriers(
       !options.externalModules.some((module) => module.specifier === specifier),
   );
   if (compiledModules.length === 0) {
+    applyPropertyPolicy(new Set(), options.propertyPolicy);
     return ["/** @externs */", "// No proven rename barriers.", ""].join("\n");
   }
   switch (options.mode) {
     case "boundary-aware":
-      return renderBoundaryAwareExterns({ analysis, modules: compiledModules });
+      return renderBoundaryAwareExterns({
+        analysis,
+        modules: compiledModules,
+        propertyPolicy: options.propertyPolicy,
+      });
     case "runtime-aware":
       return renderRuntimeAwareExterns({
         analysis,
         modules: compiledModules,
+        propertyPolicy: options.propertyPolicy,
         protocolHelpers: options.protocolHelpers,
         runtimeEntryFiles: options.runtimeEntryFiles,
       });

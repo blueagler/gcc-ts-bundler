@@ -32,4 +32,5 @@ export type {
   GenerateExternsMode,
   GenerateExternsOptions,
   GenerateExternsResult,
+  PropertyPolicy,
 } from "./externs";

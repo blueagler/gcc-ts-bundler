@@ -15,5 +15,6 @@ export {
   type GenerateExternsMode,
   type GenerateExternsOptions,
   type GenerateExternsResult,
+  type PropertyPolicy,
 } from "./generate/options";
 export { generateExterns } from "./generate/generate";

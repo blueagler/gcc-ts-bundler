@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { generateExterns } from "../../externs";
+import { resolvePropertyPolicy } from "../../externs/property-policy";
 import { writeFileIfChanged } from "../../shared/files";
 import { generateViteRuntimeAwareExterns } from "./runtime";
 import type { MaterializedGraph } from "../internal-types";
@@ -51,6 +52,9 @@ async function writeGeneratedExternFile(input: {
       ...(input.generateOptions.protocolHelpers?.keyReadCallees ?? []),
     ],
   };
+  const propertyPolicy = resolvePropertyPolicy(
+    input.generateOptions.propertyPolicy,
+  );
   if ((input.generateOptions.mode ?? "runtime-aware") === "runtime-aware") {
     await generateViteRuntimeAwareExterns({
       captureRoot: input.captureRoot,
@@ -58,6 +62,7 @@ async function writeGeneratedExternFile(input: {
       modules: [...input.generateOptions.modules],
       options: input.options,
       postPrebundleMaterialized: input.postPrebundleMaterialized,
+      propertyPolicy,
       protocolHelpers,
     });
     return;
@@ -69,6 +74,7 @@ async function writeGeneratedExternFile(input: {
     modules: [...input.generateOptions.modules],
     outputFile: input.generatedExternFile,
     projectRoot: input.projectRoot,
+    propertyPolicy,
     protocolHelpers,
     runtimeEntryFiles: input.materialized.runtimeEntries,
     srcDir: input.materialized.srcDir,

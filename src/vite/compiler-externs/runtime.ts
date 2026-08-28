@@ -4,6 +4,11 @@ import path from "node:path";
 import { getPackageSignature } from "../../build/resolve/signatures";
 import { analyzeCssVariableProtocol } from "../../externs/css-variable-protocol";
 import {
+  applyPropertyPolicy,
+  resolvePropertyPolicy,
+  type PropertyPolicy,
+} from "../../externs/property-policy";
+import {
   collectRuntimeUsageExternLines,
   createEmptyAppUsageMembers,
   renderExternText,
@@ -28,11 +33,13 @@ export async function generateViteRuntimeAwareExterns(input: {
   modules: string[];
   options: GccTsBundlerVitePluginOptions;
   postPrebundleMaterialized: Promise<MaterializedGraph>;
+  propertyPolicy?: PropertyPolicy | undefined;
   protocolHelpers: {
     keyExclusionListCallees: string[];
     keyReadCallees: string[];
   };
 }) {
+  const propertyPolicy = resolvePropertyPolicy(input.propertyPolicy);
   const packageSignature = await getPackageSignature();
   const cacheRoot = resolvePackageExternCacheRoot({
     captureRoot: input.captureRoot,
@@ -95,6 +102,7 @@ export async function generateViteRuntimeAwareExterns(input: {
   }
   const appUsage = createEmptyAppUsageMembers();
   const emittedLines = collectRuntimeUsageExternLines(runtimeUsage, appUsage);
+  applyPropertyPolicy(emittedLines, propertyPolicy);
 
   logInternalDetail(
     "vite:extern-package-cache",

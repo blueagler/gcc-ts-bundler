@@ -5,6 +5,7 @@ import {
   collectBoundaryAwareExternLines,
   collectBoundaryAwareUsageMemberNames,
 } from "./contracts/usage";
+import { applyPropertyPolicy, type PropertyPolicy } from "./property-policy";
 import { renderStructuralExternLine } from "./barriers";
 
 /** How the app reads members, split by the syntax Closure sees. */
@@ -208,12 +209,16 @@ function matchesConstructedKeyFragment(
 export function renderBoundaryAwareExterns({
   analysis,
   modules,
+  propertyPolicy,
 }: {
   analysis: ExternAnalysisContext;
   modules: string[];
+  propertyPolicy?: PropertyPolicy | undefined;
 }) {
+  const emittedLines = collectBoundaryAwareExternLines(analysis);
+  applyPropertyPolicy(emittedLines, propertyPolicy);
   return renderExternText({
-    emittedLines: collectBoundaryAwareExternLines(analysis),
+    emittedLines,
     mode: "boundary-aware",
     modules,
     scannedFiles: analysis.scannedFiles,
@@ -223,11 +228,13 @@ export function renderBoundaryAwareExterns({
 export async function renderRuntimeAwareExterns({
   analysis,
   modules,
+  propertyPolicy,
   protocolHelpers,
   runtimeEntryFiles,
 }: {
   analysis: ExternAnalysisContext;
   modules: string[];
+  propertyPolicy?: PropertyPolicy | undefined;
   protocolHelpers: {
     keyExclusionListCallees: string[];
     keyReadCallees: string[];
@@ -248,6 +255,7 @@ export async function renderRuntimeAwareExterns({
     protocolHelpers,
   );
   const emittedLines = collectRuntimeUsageExternLines(runtimeUsage, appUsage);
+  applyPropertyPolicy(emittedLines, propertyPolicy);
 
   return renderExternText({
     emittedLines,

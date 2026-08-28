@@ -1465,3 +1465,77 @@ test.serial(
     ).toBe(true);
   },
 );
+
+test.serial(
+  "generateExterns propertyPolicy omits a pinned renameable name",
+  async () => {
+    const fixture = await createExternFixture();
+    const result = await generateExternsFromSource({
+      appEntryFiles: ["./main.ts"],
+      includeDependencies: true,
+      modules: ["contract-pkg"],
+      mode: "boundary-aware",
+      projectRoot: fixture.projectRoot,
+      propertyPolicy: { renameable: ["addController"] },
+      srcDir: fixture.srcDir,
+    });
+
+    expect(result.text).not.toContain("Object.prototype.addController;");
+    expect(result.renameBarriers.propertyNames).not.toContain("addController");
+    expect(result.text).toContain("Object.prototype.removeController;");
+  },
+);
+
+test.serial(
+  "generateExterns propertyPolicy fails closed on an unpinned name",
+  async () => {
+    const fixture = await createExternFixture();
+    await expect(
+      generateExternsFromSource({
+        appEntryFiles: ["./main.ts"],
+        includeDependencies: true,
+        modules: ["contract-pkg"],
+        mode: "boundary-aware",
+        projectRoot: fixture.projectRoot,
+        propertyPolicy: { renameable: ["notAPinnedProperty"] },
+        srcDir: fixture.srcDir,
+      }),
+    ).rejects.toThrow(/notAPinnedProperty/);
+  },
+);
+
+test.serial(
+  "generateExterns propertyPolicy rejects __gcc-prefixed names",
+  async () => {
+    const fixture = await createExternFixture();
+    await expect(
+      generateExternsFromSource({
+        appEntryFiles: ["./main.ts"],
+        includeDependencies: true,
+        modules: ["contract-pkg"],
+        mode: "boundary-aware",
+        projectRoot: fixture.projectRoot,
+        propertyPolicy: { renameable: ["__gccExternalRuntimeLoad"] },
+        srcDir: fixture.srcDir,
+      }),
+    ).rejects.toThrow(/__gcc/);
+  },
+);
+
+test.serial(
+  "generateExterns without propertyPolicy keeps pinned names",
+  async () => {
+    const fixture = await createExternFixture();
+    const result = await generateExternsFromSource({
+      appEntryFiles: ["./main.ts"],
+      includeDependencies: true,
+      modules: ["contract-pkg"],
+      mode: "boundary-aware",
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+
+    expect(result.text).toContain("Object.prototype.addController;");
+    expect(result.renameBarriers.propertyNames).toContain("addController");
+  },
+);

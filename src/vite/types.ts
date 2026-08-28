@@ -7,6 +7,7 @@ export interface GccTsBundlerGeneratedExternsOptions {
   mode?: GenerateExternsMode | undefined;
   modules: readonly string[];
   outputFile?: string | undefined;
+  propertyPolicy?: { renameable: readonly string[] } | undefined;
   protocolHelpers?: ExternsProtocolHelpers | undefined;
 }
 

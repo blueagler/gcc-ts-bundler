@@ -289,6 +289,8 @@ Generated Vite externs are rename barriers only because Vite materializes ordina
 
 `appendLines` adds explicit extern statements after generated content. Use it only for contracts that cannot be discovered from declarations, runtime code, or application usage.
 
+`propertyPolicy.renameable` drops matching structural `Object.prototype.*` pins after generation. Every listed name must have been pinned (typo guard); names beginning with `__gcc` are rejected because the runtime bridge depends on them. Typed owner-qualified pins are not filtered. Evidence for which names to list comes from `bun run ledger --json`.
+
 #### What gets externed, and the multi-entry trade
 
 A member only earns an extern when its definition and its reads cannot rename

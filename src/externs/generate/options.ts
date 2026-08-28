@@ -6,6 +6,7 @@ import {
   resolveAnalysisEntryFiles,
 } from "../compiler";
 import type { TypeWorld } from "../context";
+import { resolvePropertyPolicy, type PropertyPolicy } from "../property-policy";
 import type { TargetName } from "../../api/targets";
 import type {
   ExternBarrierWarning,
@@ -14,6 +15,8 @@ import type {
   GeneratedRenameBarrierArtifact,
   GeneratedTypedExternArtifact,
 } from "../types";
+
+export type { PropertyPolicy } from "../property-policy";
 
 export const EXTERN_MODES = defineValues("boundary-aware", "runtime-aware");
 export type GenerateExternsMode = (typeof EXTERN_MODES)[number];
@@ -39,6 +42,13 @@ export interface GenerateExternsOptions {
   modules: readonly (string | ExternModuleInput)[];
   outputFile?: string | undefined;
   projectRoot?: string | undefined;
+  /**
+   * Structural `Object.prototype.*` pins the caller asserts are renameable.
+   * Each name must match a generated barrier line or generation fails closed.
+   * Names beginning with `__gcc` are rejected: the runtime bridge depends on
+   * them. Typed owner-qualified pins are not filtered.
+   */
+  propertyPolicy?: PropertyPolicy | undefined;
   protocolHelpers?: ExternsProtocolHelpers | undefined;
   runtimeEntryFiles?: readonly string[] | undefined;
   srcDir?: string | undefined;
@@ -79,6 +89,7 @@ export type ResolvedExternOptions = {
   modules: string[];
   outputFile: string | undefined;
   projectRoot: string;
+  propertyPolicy: PropertyPolicy | undefined;
   protocolHelpers: {
     keyExclusionListCallees: string[];
     keyReadCallees: string[];
@@ -140,6 +151,7 @@ export async function resolveExternOptions(
     runtimeEntryFiles,
     externalModules.length > 0,
   );
+  const propertyPolicy = resolvePropertyPolicy(options.propertyPolicy);
   const outputFile =
     options.outputFile === undefined
       ? undefined
@@ -165,6 +177,7 @@ export async function resolveExternOptions(
     modules,
     outputFile,
     projectRoot,
+    propertyPolicy,
     protocolHelpers: {
       keyExclusionListCallees: [
         ...(options.protocolHelpers?.keyExclusionListCallees ?? []),
