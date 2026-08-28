@@ -25,7 +25,7 @@ import {
 } from "../../src/vite/naming/index.ts";
 import { prebundleMaterializedDependencies } from "../../src/vite/prebundle/index.ts";
 import { createModuleParser } from "../../src/vite/prebundle/parse.ts";
-import { extractRuntimeInitManifest } from "../../src/build/closure/runtime-manifest.ts";
+import { extractRuntimeInitManifest } from "../../src/build/closure/runtime-manifest/init.ts";
 import {
   applyViteBuildGuards,
   createCompilerOptions,

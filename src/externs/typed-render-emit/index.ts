@@ -12,7 +12,7 @@ import {
 } from "./kinds";
 import type { RenderState } from "../typed-render";
 
-export { reserveSeedSymbol, reserveSymbol } from "./reserve";
+export { reserveSeedSymbol } from "./reserve";
 
 export function emitSymbol(symbol: ts.Symbol, state: RenderState) {
   const name = state.nameForSymbol.get(symbol);

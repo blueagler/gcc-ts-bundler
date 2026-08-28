@@ -54,22 +54,7 @@ export async function fileContentSnapshotMatches(
     return false;
   }
 
-  const states = collectFileStates(expected);
-  if (
-    states.some((state) => {
-      const identity = snapshot[state.filePath];
-      return !identity || !state.exists || state.size !== identity.size;
-    })
-  ) {
-    return false;
-  }
-
-  const digests = await Promise.all(
-    expected.map((filePath) => hashFile(filePath).catch(() => null)),
-  );
-  return expected.every(
-    (filePath, index) => digests[index] === snapshot[filePath]?.digest,
-  );
+  return fileStatesMatchSnapshot(expected, snapshot);
 }
 
 export async function collectTrackedFiles(
@@ -98,22 +83,7 @@ export async function trackedFilesMatch(
   trackedFiles: Record<string, FileStateSnapshot>,
 ): Promise<boolean> {
   const expected = uniqueSortedStrings(Object.keys(trackedFiles));
-  const states = collectFileStates(expected);
-  if (
-    states.some((state) => {
-      const identity = trackedFiles[state.filePath];
-      return !identity || !state.exists || state.size !== identity.size;
-    })
-  ) {
-    return false;
-  }
-
-  const digests = await Promise.all(
-    expected.map((filePath) => hashFile(filePath).catch(() => null)),
-  );
-  return expected.every(
-    (filePath, index) => digests[index] === trackedFiles[filePath]?.digest,
-  );
+  return fileStatesMatchSnapshot(expected, trackedFiles);
 }
 
 export async function filesExist(filePaths: string[]): Promise<boolean> {
@@ -181,6 +151,28 @@ export async function collectPublishedOutputStats(
     throw new Error("Published output file names must be unique.");
   }
   return outputs.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+async function fileStatesMatchSnapshot(
+  expected: string[],
+  snapshot: Record<string, ContentIdentity>,
+): Promise<boolean> {
+  const states = collectFileStates(expected);
+  if (
+    states.some((state) => {
+      const identity = snapshot[state.filePath];
+      return !identity || !state.exists || state.size !== identity.size;
+    })
+  ) {
+    return false;
+  }
+
+  const digests = await Promise.all(
+    expected.map((filePath) => hashFile(filePath).catch(() => null)),
+  );
+  return expected.every(
+    (filePath, index) => digests[index] === snapshot[filePath]?.digest,
+  );
 }
 
 async function hashFile(filePath: string) {

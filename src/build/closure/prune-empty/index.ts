@@ -6,9 +6,6 @@ import { replaceRuntimeInitManifest } from "../runtime-manifest/init";
 import type { ChunkPlanChunk } from "../../types";
 import { isScaffoldingOnly } from "./is-scaffolding-only";
 import { findRuntimeBaseChunk, pruneChunkMapFile } from "./parse";
-
-export { isScaffoldingOnly };
-
 /**
  * Post-Closure pruning of chunks that survive the plan but carry no code.
  *

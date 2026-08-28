@@ -1,4 +1,5 @@
 import type { ExternAnalysisContext } from "./context";
+import type { GenerateExternsMode } from "./generate/options";
 import { analyzeRuntimeUsage } from "./runtime";
 import {
   collectBoundaryAwareExternLines,
@@ -204,8 +205,6 @@ function matchesConstructedKeyFragment(
   return false;
 }
 
-export type GenerateExternsMode = "boundary-aware" | "runtime-aware";
-
 export function renderBoundaryAwareExterns({
   analysis,
   modules,
@@ -284,7 +283,7 @@ export function renderExternText({
   ].join("\n");
 }
 
-export function renderExternHeaderLines({
+function renderExternHeaderLines({
   mode,
   modules,
   runtimeEntryFiles = [],
