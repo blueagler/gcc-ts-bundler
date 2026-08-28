@@ -47,7 +47,6 @@ export async function compilePreparedClosureJobs({
   usesPersistentCache,
 }: {
   closureCompilerEnvironment: ClosureCompilerEnvironment;
-  chunkMode: string;
   platformExterns: string;
   target: ResolvedBuildOptions["target"];
   packageRoot: string;

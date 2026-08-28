@@ -4,7 +4,7 @@ import path from "node:path";
 import type { Metafile } from "esbuild";
 
 import type { CapturedRuntimeModule } from "../../internal-types";
-import { parseRuntimeExportGraph } from "../../type-metadata";
+import { parseRuntimeExportGraph } from "../../type-metadata/export-graphs";
 import type { PrebundleExportFacade } from "../../type-metadata";
 import { normalizePath } from "../shared";
 import type { DependencyBundleSet } from "../types";

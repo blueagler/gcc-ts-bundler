@@ -1,5 +1,6 @@
 import { build, cleanCache, generateExterns } from "../api/build";
-import { parseCliArgs, parseExternsCliArgs } from "./parse";
+import { parseExternsCliArgs } from "./parse/externs";
+import { parseCliArgs } from "./parse/options";
 import { usage } from "./usage";
 
 export async function runCli(args: string[]): Promise<number> {

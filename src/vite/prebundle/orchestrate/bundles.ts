@@ -4,6 +4,7 @@ import type { Plugin } from "esbuild";
 
 import { closureCompilerCapabilities } from "../../../native/load";
 import { syncDirectoryEntries } from "../../../shared/files";
+import { hashContent } from "../../../shared/hash";
 import { createBarrelFlattener } from "../barrels";
 import {
   canonicalizeDuplicateLazyEntryOutputs,
@@ -25,7 +26,6 @@ import {
   DEP_BUNDLE_INPUT_DIR,
   DEP_BUNDLE_OUTPUT_DIR,
   EAGER_REGION_LABEL,
-  hashText,
   toPathIndependentKey,
 } from "../shared";
 import type { DependencyBundleSet, PrebundleContext } from "../types";
@@ -66,7 +66,7 @@ export async function buildDependencyBundles(
     // materialized path must not decide the bundle's output file name, or
     // the same project built from two directories gets different dep-bundle
     // names (and with them different runtime module ids and chunk hashes).
-    const fileName = `${sanitizeEntryName(groupedRequest)}-${hashText(
+    const fileName = `${sanitizeEntryName(groupedRequest)}-${hashContent(
       toPathIndependentKey(groupedRequest.requestKey, materialized.srcDir),
     ).slice(0, 8)}.js`;
     const entryPoint = path.join(regionDir, fileName);

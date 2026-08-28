@@ -1,17 +1,19 @@
 export type {
   ClosureCompilerEnvironment,
   ClosureCompilerOptions,
-} from "./compiler/environment";
+} from "./compiler/environment-resolve";
+export {
+  configureClosureCompilerOptions,
+  resolveClosureCompilerEnvironment,
+} from "./compiler/environment-resolve";
 export {
   TYPE_INFERENCE_OPTIONS,
   applyTypeInferenceOptions,
-  configureClosureCompilerOptions,
   hasStrictCheckTypes,
   omitEmptyHideWarningsFor,
-  resolveClosureCompilerEnvironment,
   shouldEnableTypeInference,
   withExplicitHideWarningsFor,
-} from "./compiler/environment";
+} from "./compiler/environment-type-inference";
 export {
   resolveClosureCompilerVersionTag,
   runClosureCompiler,

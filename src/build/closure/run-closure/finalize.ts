@@ -6,7 +6,7 @@ import { withInternalTiming } from "../../../shared/timing";
 import { finalizeJavaScriptOutputs } from "../final-minify";
 import { runClosurePostprocess } from "../postprocess";
 import { stripUnusedSharedChunkImports } from "../postprocess/strip-unused-shared-imports";
-import { pruneEmptyChunks } from "../prune-empty-chunks";
+import { pruneEmptyChunks } from "../prune-empty";
 import {
   emitPreservedModules,
   prependEntryShebangs,

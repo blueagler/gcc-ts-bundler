@@ -23,7 +23,7 @@ bun test ./test
 
 `bun run build` runs `scripts/build-self.mjs`: it builds the host native addon, then the bootstrap JavaScript bundle, then compiles the bundler with itself once (stage 1) and publishes that into `dist/` and `bin/`. The native build also creates a platform package under `npm/`. The two-stage byte-identity proof lives in `bun run verify:selfbuild` and in prepublish/CI, not in the default build.
 
-`bun run build:js` runs that same self-build script, so both commands replace `dist/` and `bin/` with the Closure-compiled artifact. `bun run build:js:bootstrap` (`node ./scripts/build-js.mjs`) is the only command that produces the plain bootstrap bundle.
+`bun run build:js:bootstrap` (`node ./scripts/build-js.mjs`) is the only command that produces the plain bootstrap bundle.
 
 ### Build cost and the inner-loop lane
 
@@ -37,7 +37,7 @@ A two-stage `bun run verify:selfbuild` (`GCC_SELFBUILD_STAGES=2`) is measured at
 
 So about 70% of that lane is inside the Closure compiler, and stage 2 exists
 only to prove the fixpoint. The published bytes are always stage 1, so the
-default `bun run build` / `build:js` is now stage-1 only — it roughly halves
+default `bun run build` is now stage-1 only — it roughly halves
 the lane by dropping the second ADVANCED compile. The two-stage byte-identity
 proof lives in `bun run verify:selfbuild` and in prepublish/CI.
 
@@ -207,7 +207,6 @@ Prefer types derived from value tuples, `satisfies`, and exact internal contract
 
 | Command                                        | Purpose                                                          |
 | ---------------------------------------------- | ---------------------------------------------------------------- |
-| `bun run build:js`                             | Run the same self-build as `bun run build`.                      |
 | `bun run build:js:bootstrap`                   | Build the plain bootstrap ESM, CLI, and declaration outputs into `dist/` and `bin/`. |
 | `bun run build:native`                         | Build the host Rust addon and its platform package.              |
 | `bun run build:native:cross`                   | Build Linux x64 GNU and Windows x64 MSVC targets.                |
@@ -311,4 +310,4 @@ These paths are build products and should not be edited by hand:
 - `.gcc-debug/` and `.investigate-*` capture directories;
 - the Vite capture workspace under the persistent cache store (`vite-capture/`), or a tmpdir when cache is off.
 
-Make source changes under `src/` or `native/src/`, then rebuild before running integration tests that import package outputs from `dist/`. Use `bun run build:js:bootstrap` when those tests should see `src/` as authored; `bun run build` and `bun run build:js` replace `dist/` with the Closure-compiled self-build.
+Make source changes under `src/` or `native/src/`, then rebuild before running integration tests that import package outputs from `dist/`. Use `bun run build:js:bootstrap` when those tests should see `src/` as authored; `bun run build` replaces `dist/` with the Closure-compiled self-build.

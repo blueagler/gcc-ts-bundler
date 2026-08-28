@@ -1,17 +1,12 @@
 import fs from "node:fs/promises";
 
-import type { Validator } from "../../shared/validation";
-import {
-  isString,
-  isUnknownArray,
-  parseJson,
-  recordOf,
-} from "../../shared/validation";
+import { isString, isUnknownArray, parseJson } from "../../shared/validation";
 import type {
   GccRuntimeManifest,
   MaterializedGraph,
   ViteCssOwnership,
 } from "../internal-types";
+import { buildRuntimeModuleIdMap } from "../chunk-modules";
 import { joinPublicPath, stripPublicPathPrefix } from "../output";
 import {
   extractRuntimeInitManifest,
@@ -19,6 +14,7 @@ import {
   replaceRuntimeInitManifest,
   type RuntimeManifestValue,
 } from "../../build/closure/runtime-manifest";
+import { isRuntimeModuleSourceMap } from "../naming/runtime";
 import { normalizePathForLookup } from "./ownership";
 
 export async function augmentCompiledViteCss(input: {
@@ -102,14 +98,17 @@ function collectRuntimeChunkCss(input: {
   moduleCssById: Map<string, string[]>;
   runtimeModuleSourceMap: Record<string, string>;
 }) {
-  const moduleCssByMaterializedFilePath = new Map<string, string[]>();
-  const moduleCssByRelativePath = new Map<string, string[]>();
+  const runtimeModuleIdToOriginalIds = buildRuntimeModuleIdMap({
+    materialized: input.materialized,
+    runtimeModuleSourceMap: input.runtimeModuleSourceMap,
+  });
   const normalizedPathCache = new Map<string, string>();
-  for (const module of input.materialized.modules) {
+  const moduleCssByRuntimeModuleId = new Map<string, string[]>();
+  for (const [runtimeModuleId, originalIds] of runtimeModuleIdToOriginalIds) {
     const cssFiles = new Set<string>();
-    for (const sourceModuleId of module.sourceModuleIds) {
+    for (const originalId of originalIds) {
       const ownedCssFiles = input.moduleCssById.get(
-        normalizePathForLookup(sourceModuleId, normalizedPathCache),
+        normalizePathForLookup(originalId, normalizedPathCache),
       );
       if (!ownedCssFiles) {
         continue;
@@ -121,35 +120,7 @@ function collectRuntimeChunkCss(input: {
     if (cssFiles.size === 0) {
       continue;
     }
-    const sortedCssFiles = [...cssFiles].sort();
-    moduleCssByMaterializedFilePath.set(
-      normalizePathForLookup(module.filePath, normalizedPathCache),
-      sortedCssFiles,
-    );
-    moduleCssByRelativePath.set(
-      normalizePathForLookup(module.relativePath, normalizedPathCache),
-      sortedCssFiles,
-    );
-  }
-
-  const moduleCssByRuntimeModuleId = new Map<string, string[]>();
-  for (const [runtimeModuleId, sourceFilePath] of Object.entries(
-    input.runtimeModuleSourceMap,
-  )) {
-    const normalizedSourceFilePath = normalizePathForLookup(
-      sourceFilePath,
-      normalizedPathCache,
-    );
-    const cssFiles =
-      moduleCssByMaterializedFilePath.get(normalizedSourceFilePath) ??
-      findCssByRelativePathSuffix(
-        normalizedSourceFilePath,
-        moduleCssByRelativePath,
-      );
-    if (!cssFiles || cssFiles.length === 0) {
-      continue;
-    }
-    moduleCssByRuntimeModuleId.set(runtimeModuleId, cssFiles);
+    moduleCssByRuntimeModuleId.set(runtimeModuleId, [...cssFiles].sort());
   }
 
   const runtimeCssByChunkId = new Map<string, string[]>();
@@ -234,9 +205,6 @@ function applyRuntimeCssRows(input: {
   return runtimeInitCall.manifest;
 }
 
-const isRuntimeModuleSourceMap: Validator<Record<string, string>> =
-  recordOf<string>(isString);
-
 function arraysEqual(left: string[], right: string[]) {
   if (left.length !== right.length) {
     return false;
@@ -247,19 +215,4 @@ function arraysEqual(left: string[], right: string[]) {
     }
   }
   return true;
-}
-
-function findCssByRelativePathSuffix(
-  sourceFilePath: string,
-  moduleCssByRelativePath: Map<string, string[]>,
-) {
-  for (const [relativePath, cssFiles] of moduleCssByRelativePath.entries()) {
-    if (
-      sourceFilePath === relativePath ||
-      sourceFilePath.endsWith(`/${relativePath}`)
-    ) {
-      return cssFiles;
-    }
-  }
-  return undefined;
 }

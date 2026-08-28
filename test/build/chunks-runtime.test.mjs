@@ -10,7 +10,7 @@ import {
   resolveVendorChunk,
 } from "../../src/build/resolve/options.ts";
 import { getOptionsSignature } from "../../src/build/resolve/signatures.ts";
-import { isScaffoldingOnly } from "../../src/build/closure/prune-empty-chunks.ts";
+import { isScaffoldingOnly } from "../../src/build/closure/prune-empty/is-scaffolding-only.ts";
 import {
   createFixture,
   findFilesNamed,

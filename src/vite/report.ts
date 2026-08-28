@@ -1,8 +1,9 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { gzipSync } from "node:zlib";
 
+import { accountBarriers } from "../externs/barriers";
+import { gzipByteLength } from "../shared/lifecycle-size";
 import type { CompilerExternArtifacts } from "./compiler-externs";
 import type {
   CapturedModule,
@@ -22,17 +23,13 @@ export function resolveViteBuildReportFile(
   return path.resolve(projectRoot, options.report.file ?? "gcc-report.json");
 }
 
-const PINNED_PROPERTY_LINE = /^Object\.prototype\.([$A-Za-z_][$\w]*);/u;
-
 async function collectPinnedProperties(renameBarrierFiles: string[]) {
   const pinned = new Set<string>();
   for (const filePath of renameBarrierFiles) {
     const text = await fs.readFile(filePath, "utf8").catch(() => "");
-    for (const line of text.split("\n")) {
-      const match = PINNED_PROPERTY_LINE.exec(line.trim());
-      if (match?.[1] !== undefined) {
-        pinned.add(match[1]);
-      }
+    for (const name of accountBarriers({ label: filePath, text })
+      .propertyNames) {
+      pinned.add(name);
     }
   }
   return [...pinned].sort((left, right) => left.localeCompare(right));
@@ -43,7 +40,7 @@ function measureJsBytes(sources: string[]) {
   let gzipBytes = 0;
   for (const source of sources) {
     rawBytes += Buffer.byteLength(source);
-    gzipBytes += gzipSync(source, { level: 9 }).length;
+    gzipBytes += gzipByteLength(source);
   }
   return { gzipBytes, rawBytes };
 }

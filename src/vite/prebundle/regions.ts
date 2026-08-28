@@ -1,15 +1,11 @@
 import path from "node:path";
 
+import { hashContent } from "../../shared/hash";
 import { classifyModuleId, toRelativeImportSpecifier } from "../capture";
 import type { CapturedRuntimeModule } from "../internal-types";
 import type { EsbuildBuild } from "./esbuild";
 import type { ParsedMaterializedModule } from "./shared";
-import {
-  ATOM_REGION_LABEL,
-  EAGER_REGION_LABEL,
-  hashText,
-  normalizePath,
-} from "./shared";
+import { ATOM_REGION_LABEL, EAGER_REGION_LABEL, normalizePath } from "./shared";
 
 export interface RegionBundleRequest {
   commonJsFacadeNamedExports: string[];
@@ -367,7 +363,7 @@ export function sanitizeRegionKey(regionKey: string) {
     .replace(/[^\w.-]+/gu, "-");
   return sanitized.length <= 96
     ? sanitized
-    : `${sanitized.slice(0, 72)}-${hashText(regionKey).slice(0, 12)}`;
+    : `${sanitized.slice(0, 72)}-${hashContent(regionKey).slice(0, 12)}`;
 }
 
 export function isPureLazyRegionKey(regionKey: string | undefined) {

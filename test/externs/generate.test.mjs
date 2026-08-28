@@ -13,7 +13,7 @@ import {
   isNodeBuiltin,
   isPlatformBuiltin,
   loadExternCompilerOptions,
-} from "../../src/externs/compiler.ts";
+} from "../../src/externs/compiler/index.ts";
 import { createTypeWorld } from "../../src/externs/context.ts";
 import { mergeRuntimeHazards } from "../../src/externs/runtime/index.ts";
 import {

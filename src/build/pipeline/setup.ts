@@ -1,9 +1,7 @@
 import type { BuildFailure, BuildResult } from "../../api/types";
-import {
-  createBuildTypeWorld,
-  deriveExternalExternPlan,
-} from "../../externs/build-plan";
-import type { ExternalExternPlan } from "../../externs/build-plan";
+import { createBuildTypeWorld } from "../../externs/build-plan/create-type-world";
+import { deriveExternalExternPlan } from "../../externs/build-plan/external-plan";
+import type { ExternalExternPlan } from "../../externs/build-plan/external-plan";
 import type { TypeWorld } from "../../externs/context";
 import { acquireProjectCacheLock } from "../../shared/cache-store";
 import type { FileContentSnapshot } from "../../shared/file-state";

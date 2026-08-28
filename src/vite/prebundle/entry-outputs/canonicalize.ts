@@ -3,10 +3,11 @@ import path from "node:path";
 
 import { firstOrUndefined } from "../../../shared/arrays";
 import { syncDirectoryEntries } from "../../../shared/files";
+import { hashContent } from "../../../shared/hash";
 import type { CapturedRuntimeModule } from "../../internal-types";
 import type { WrittenRegionBundleRequest } from "../regions";
 import { isPureLazyRegionKey } from "../regions";
-import { hashText, normalizePath } from "../shared";
+import { normalizePath } from "../shared";
 
 export interface CanonicalizedLazyEntryOutputs {
   canonicalModules: CapturedRuntimeModule[];
@@ -31,7 +32,7 @@ export async function canonicalizeDuplicateLazyEntryOutputs(input: {
       continue;
     }
     const sourceText = await fs.readFile(outputFilePath, "utf8");
-    const contentHash = hashText(sourceText);
+    const contentHash = hashContent(sourceText);
     const bucket = requestKeysByContentHash.get(contentHash);
     if (bucket) {
       bucket.push(requestKey);

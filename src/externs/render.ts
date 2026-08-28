@@ -12,7 +12,7 @@ export interface AppUsageMembers {
   stringLiteralRead: ReadonlySet<string>;
 }
 
-function createEmptyAppUsageMembers(): AppUsageMembers {
+export function createEmptyAppUsageMembers(): AppUsageMembers {
   return { dotAccessed: new Set(), stringLiteralRead: new Set() };
 }
 
@@ -204,7 +204,7 @@ function matchesConstructedKeyFragment(
   return false;
 }
 
-type GenerateExternsMode = "boundary-aware" | "runtime-aware";
+export type GenerateExternsMode = "boundary-aware" | "runtime-aware";
 
 export function renderBoundaryAwareExterns({
   analysis,
@@ -259,7 +259,7 @@ export async function renderRuntimeAwareExterns({
   });
 }
 
-function renderExternText({
+export function renderExternText({
   emittedLines,
   mode,
   modules,
@@ -272,6 +272,29 @@ function renderExternText({
   runtimeEntryFiles?: string[];
   scannedFiles: string[];
 }) {
+  return [
+    ...renderExternHeaderLines({
+      mode,
+      modules,
+      runtimeEntryFiles,
+      scannedFiles,
+    }),
+    ...[...emittedLines].sort((left, right) => left.localeCompare(right)),
+    "",
+  ].join("\n");
+}
+
+export function renderExternHeaderLines({
+  mode,
+  modules,
+  runtimeEntryFiles = [],
+  scannedFiles,
+}: {
+  mode: GenerateExternsMode;
+  modules: string[];
+  runtimeEntryFiles?: string[];
+  scannedFiles: string[];
+}): string[] {
   const scannedSummary =
     mode === "runtime-aware"
       ? `// Scanned ${scannedFiles.length} type file${scannedFiles.length === 1 ? "" : "s"} and ${runtimeEntryFiles.length} runtime file${runtimeEntryFiles.length === 1 ? "" : "s"}.`
@@ -283,7 +306,5 @@ function renderExternText({
     `// Mode: ${mode}`,
     scannedSummary,
     "",
-    ...[...emittedLines].sort((left, right) => left.localeCompare(right)),
-    "",
-  ].join("\n");
+  ];
 }

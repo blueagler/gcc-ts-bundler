@@ -26,7 +26,6 @@ export async function runClosureStage(
         input.closureCompilerEnvironment,
         input.options.hideWarningsFor,
       ),
-      chunkMode: input.options.chunks.mode,
       platformExterns: input.options.platformExterns,
       target: input.options.target,
       packageRoot: input.packageRoot,

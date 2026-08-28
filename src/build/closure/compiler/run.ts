@@ -1,8 +1,9 @@
 import * as closureCompilerPackage from "google-closure-compiler";
 import { getNativeImagePath } from "google-closure-compiler/lib/utils.js";
 
-import { isDriverForcedOff, runResidentClosureJob } from "../driver";
-import type { ClosureCompilerOptions } from "./environment";
+import { isDriverForcedOff } from "../driver/probe";
+import { runResidentClosureJob } from "../driver/resident";
+import type { ClosureCompilerOptions } from "./environment-resolve";
 
 type ClosureCompilerInstance = InstanceType<
   typeof closureCompilerPackage.compiler

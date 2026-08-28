@@ -22,6 +22,47 @@ export function buildChunkModuleIdLookup(input: {
   materialized: MaterializedGraph;
   runtimeModuleSourceMap: Record<string, string>;
 }) {
+  const runtimeModuleIdToOriginalIds = buildRuntimeModuleIdMap({
+    materialized: input.materialized,
+    runtimeModuleSourceMap: input.runtimeModuleSourceMap,
+  });
+
+  const chunkModuleIds = new Map<string, Set<string>>();
+  for (const [chunkId, chunk] of Object.entries(input.manifest.chunks)) {
+    const moduleIds = new Set<string>();
+    for (const runtimeModuleId of chunk.modules) {
+      const originalIds = runtimeModuleIdToOriginalIds.get(runtimeModuleId);
+      if (!originalIds) {
+        continue;
+      }
+      for (const originalId of originalIds) {
+        moduleIds.add(originalId);
+      }
+    }
+    chunkModuleIds.set(chunkId, moduleIds);
+  }
+
+  const entryChunk = input.jsChunks.find((chunk) => chunk.isEntry);
+  if (entryChunk && chunkModuleIds.get(input.manifest.baseChunk)?.size === 0) {
+    chunkModuleIds.set(
+      input.manifest.baseChunk,
+      new Set(Object.keys(entryChunk.modules)),
+    );
+  }
+
+  return chunkModuleIds;
+}
+
+/**
+ * Joins each runtime module id Closure emitted back to the Rollup module ids
+ * it was captured from, via the materialized file in between. Exact
+ * materialized file paths win; otherwise the relative-path suffix rule above
+ * closes the workspace-symlink gap.
+ */
+export function buildRuntimeModuleIdMap(input: {
+  materialized: MaterializedGraph;
+  runtimeModuleSourceMap: Record<string, string>;
+}) {
   const normalizedMaterializedByFilePath = new Map<string, string[]>();
   const normalizedMaterializedByRelativePath = new Map<string, string[]>();
   for (const module of input.materialized.modules) {
@@ -52,30 +93,7 @@ export function buildChunkModuleIdLookup(input: {
     }
   }
 
-  const chunkModuleIds = new Map<string, Set<string>>();
-  for (const [chunkId, chunk] of Object.entries(input.manifest.chunks)) {
-    const moduleIds = new Set<string>();
-    for (const runtimeModuleId of chunk.modules) {
-      const originalIds = runtimeModuleIdToOriginalIds.get(runtimeModuleId);
-      if (!originalIds) {
-        continue;
-      }
-      for (const originalId of originalIds) {
-        moduleIds.add(originalId);
-      }
-    }
-    chunkModuleIds.set(chunkId, moduleIds);
-  }
-
-  const entryChunk = input.jsChunks.find((chunk) => chunk.isEntry);
-  if (entryChunk && chunkModuleIds.get(input.manifest.baseChunk)?.size === 0) {
-    chunkModuleIds.set(
-      input.manifest.baseChunk,
-      new Set(Object.keys(entryChunk.modules)),
-    );
-  }
-
-  return chunkModuleIds;
+  return runtimeModuleIdToOriginalIds;
 }
 
 function findModuleIdByRelativeSuffix(

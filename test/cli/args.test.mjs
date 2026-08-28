@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
-import { parseCliArgs, parseExternsCliArgs } from "../../src/cli/parse/index.ts";
+import { parseExternsCliArgs } from "../../src/cli/parse/externs.ts";
+import { parseCliArgs } from "../../src/cli/parse/options.ts";
 
 test("rejects deprecated build flag aliases", () => {
   expect(() =>

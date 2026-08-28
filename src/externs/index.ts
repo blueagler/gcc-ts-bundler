@@ -11,9 +11,9 @@ export type {
 export { auditExternFiles } from "./barriers";
 export {
   EXTERN_MODES,
-  generateExterns,
   type ExternsProtocolHelpers,
   type GenerateExternsMode,
   type GenerateExternsOptions,
   type GenerateExternsResult,
-} from "./generate";
+} from "./generate/options";
+export { generateExterns } from "./generate/generate";

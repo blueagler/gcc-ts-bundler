@@ -97,6 +97,6 @@ function countRegisteredModuleFactories(sourceText: string) {
   return [...sourceText.matchAll(/\((\d+),function\(/gu)].length;
 }
 
-function gzipByteLength(sourceText: string) {
+export function gzipByteLength(sourceText: string) {
   return zlib.gzipSync(Buffer.from(sourceText), { level: 9 }).byteLength;
 }

@@ -3,7 +3,10 @@ import { hashContent } from "../../../shared/hash";
 import { logInternalDetail } from "../../../shared/timing";
 import { getErrorMessage } from "../../../shared/validation";
 import { loadPlatformExternArchive } from "./archive";
-import { getPlatformExternIndex, platformExternParserDigest } from "./parser";
+import {
+  getPlatformExternIndex,
+  platformExternParserDigest,
+} from "./parser/load";
 import {
   collectPlatformExternSeeds,
   windowGlobalPropertyAliases,

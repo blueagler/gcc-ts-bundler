@@ -2,4 +2,7 @@ export {
   generatePlatformExternsText,
   isMissingPlatformExternFailure,
 } from "./generate";
-export { getPlatformExternIndex, platformExternParserDigest } from "./parser";
+export {
+  getPlatformExternIndex,
+  platformExternParserDigest,
+} from "./parser/load";

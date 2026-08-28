@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { writeJson } from "../../../shared/cache-store";
 import { syncDirectoryEntries } from "../../../shared/files";
+import { hashContent } from "../../../shared/hash";
 import type { MaterializedGraph } from "../../internal-types";
 import { withOneToOneTypeProvenance } from "../../type-metadata";
 import {
@@ -11,7 +12,7 @@ import {
 } from "./collect-bundled-modules";
 import { rewriteDirectDependencyModules } from "../entry-outputs";
 import { remapRuntimeModuleToSrcDir } from "./remap-runtime-module";
-import { DEP_BUNDLE_OUTPUT_DIR, hashText, normalizePath } from "../shared";
+import { DEP_BUNDLE_OUTPUT_DIR, normalizePath } from "../shared";
 import type { DependencyBundleSet, PrebundleContext } from "../types";
 
 const MATERIALIZED_DEPENDENCY_BUNDLE_MARKER =
@@ -32,7 +33,7 @@ async function writeMaterializedDependencyBundleMarker(input: {
       .sort((left, right) => left.localeCompare(right))
       .map(async (filePath) => ({
         path: path.relative(input.bundleDir, filePath).replace(/\\/g, "/"),
-        sha256: hashText(await fs.readFile(filePath, "utf8")),
+        sha256: hashContent(await fs.readFile(filePath, "utf8")),
       })),
   );
   await writeJson(

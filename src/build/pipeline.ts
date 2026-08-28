@@ -13,7 +13,7 @@ import type {
   InternalBuildOptions,
   ResolvedBuild,
 } from "./types";
-import { appendExternalTypedExterns } from "../externs/build-plan";
+import { appendExternalTypedExterns } from "../externs/build-plan/external-plan";
 import { runClosureStage } from "./closure/run-closure";
 import { emitNativeStage } from "./transpile/emit";
 import {

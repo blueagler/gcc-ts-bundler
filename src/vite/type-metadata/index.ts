@@ -2,7 +2,6 @@ export { collectViteTypeMetadata } from "./collect";
 export { resolveDeclarationOverlay } from "./declaration-overlay";
 export {
   joinDeclarationAndRuntimeExports,
-  parseRuntimeExportGraph,
   resolveRuntimeExportGraph,
 } from "./export-graphs";
 export { resolveRuntimeResolutionIdentity } from "./provenance";
