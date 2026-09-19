@@ -13,19 +13,37 @@ use super::externs::{is_valid_js_identifier, render_generated_externs};
 use super::napi::{PreservedImportOutput, TranspileChunkInput, TranspileOutput};
 use super::transpile_plan::{plan_shared_helper_placement, transform_source_file};
 
+pub(super) struct TranspileWriteInput<'a> {
+    pub(super) compiled_file_names: &'a [String],
+    pub(super) context: &'a TranspileContext,
+    pub(super) chunk_graph: &'a [TranspileChunkInput],
+    pub(super) out_dir: &'a Path,
+    pub(super) program_declared_names: &'a HashSet<String>,
+    pub(super) explicit_extern_property_count: u32,
+    pub(super) externs_path: String,
+    pub(super) runtime_module_source_map_file: Option<&'a str>,
+    pub(super) package_json_files: &'a [String],
+}
+
 /// Transform compiled sources, place pooled helpers, and write artifacts.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn emit_and_write_transpile_outputs(
-    compiled_file_names: &[String],
-    context: &TranspileContext,
-    chunk_graph: &[TranspileChunkInput],
-    out_dir: &Path,
-    program_declared_names: &HashSet<String>,
-    explicit_extern_property_count: u32,
-    externs_path: String,
-    runtime_module_source_map_file: Option<String>,
-    package_json_files: &[String],
+pub(super) fn emit_and_write_transpile_outputs(
+    input: TranspileWriteInput<'_>,
 ) -> std::result::Result<TranspileOutput, String> {
+    let TranspileWriteInput {
+        compiled_file_names,
+        context,
+        chunk_graph,
+        out_dir,
+        program_declared_names,
+        explicit_extern_property_count,
+        externs_path,
+        runtime_module_source_map_file,
+        package_json_files,
+    } = input;
+    fs::create_dir_all(out_dir).map_err(|error| error.to_string())?;
+    if let Some(parent) = Path::new(&externs_path).parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
     let workspace_dir = &context.workspace_dir;
     let emitted_outputs = compiled_file_names
         .par_iter()
@@ -48,6 +66,24 @@ pub(crate) fn emit_and_write_transpile_outputs(
     let mut preserved_property_names = context.preserved_property_names.clone();
     for (_, _, emitted) in &emitted_outputs {
         preserved_property_names.extend(emitted.reflective_property_names.iter().cloned());
+    }
+    // Only modules with a public namespace facade expose export names as data.
+    // Namespace reexports can reach ordinary dot reads outside namespace-flow
+    // lowering, so those reads and the facade must retain the same public keys.
+    for (module_id, slots) in &context.bundler_module_slots {
+        if context.lazy_target_module_ids.contains(module_id)
+            || context
+                .hoist_plan
+                .as_ref()
+                .is_some_and(|plan| plan.is_namespace_object_module(module_id))
+        {
+            preserved_property_names.extend(
+                slots
+                    .export_names()
+                    .filter(|name| name.as_str() != "__cjsExports")
+                    .cloned(),
+            );
+        }
     }
     // Ambient globals ride the metadata channel: an ambient `.d.ts` that
     // nothing imports never enters the module graph, so this is the only place
@@ -101,14 +137,14 @@ pub(crate) fn emit_and_write_transpile_outputs(
         if let Some(parent) = output_path.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
-        preserved_imports.extend(emitted.preserved_imports.iter().map(|import| {
+        preserved_imports.extend(emitted.preserved_imports.into_iter().map(|import| {
             PreservedImportOutput {
-                boundaryExports: import.boundary_exports.clone(),
-                boundaryNames: import.boundary_names.clone(),
-                externalSpecifier: import.external_specifier.clone(),
-                importClause: import.import_clause.clone(),
-                importerFilePath: file_path.to_string_lossy().to_string(),
-                targetModuleId: import.target_module_id.clone(),
+                boundary_exports: import.boundary_exports,
+                boundary_names: import.boundary_names,
+                external_specifier: import.external_specifier,
+                import_clause: import.import_clause,
+                importer_file_path: file_path.to_string_lossy().to_string(),
+                target_module_id: import.target_module_id,
             }
         }));
         let code = match shared_helper_prefixes.get(&output_path) {
@@ -135,7 +171,7 @@ pub(crate) fn emit_and_write_transpile_outputs(
     }
 
     if let Some(mapping_file) = runtime_module_source_map_file {
-        let mapping_path = if Path::new(&mapping_file).is_absolute() {
+        let mapping_path = if Path::new(mapping_file).is_absolute() {
             PathBuf::from(mapping_file)
         } else {
             out_dir.join(mapping_file)
@@ -149,13 +185,13 @@ pub(crate) fn emit_and_write_transpile_outputs(
     }
 
     emitted_files.sort();
-    emitted_type_metadata.sort_by(|left, right| left.emittedFile.cmp(&right.emittedFile));
+    emitted_type_metadata.sort_by(|left, right| left.emitted_file.cmp(&right.emitted_file));
     preserved_imports.sort_by(|left, right| {
-        left.importerFilePath
-            .cmp(&right.importerFilePath)
-            .then(left.targetModuleId.cmp(&right.targetModuleId))
-            .then(left.importClause.cmp(&right.importClause))
-            .then(left.boundaryNames.cmp(&right.boundaryNames))
+        left.importer_file_path
+            .cmp(&right.importer_file_path)
+            .then(left.target_module_id.cmp(&right.target_module_id))
+            .then(left.import_clause.cmp(&right.import_clause))
+            .then(left.boundary_names.cmp(&right.boundary_names))
     });
     let support_files = emit_package_support_files(
         out_dir,
@@ -165,12 +201,12 @@ pub(crate) fn emit_and_write_transpile_outputs(
         package_json_files,
     )?;
     Ok(TranspileOutput {
-        emittedFiles: emitted_files,
-        explicitExternPropertyCount: explicit_extern_property_count,
-        externsPath: externs_path,
-        preservedImports: preserved_imports,
-        supportFiles: support_files,
-        typeMetadata: emitted_type_metadata,
+        emitted_files,
+        explicit_extern_property_count,
+        externs_path,
+        preserved_imports,
+        support_files,
+        type_metadata: emitted_type_metadata,
         warnings: reification_warnings.into_values().collect(),
     })
 }

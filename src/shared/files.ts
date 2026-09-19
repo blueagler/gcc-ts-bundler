@@ -1,10 +1,9 @@
 import fs from "fs/promises";
 import path from "path";
 
+import { runWithConcurrency } from "./concurrency";
 import { hashContent } from "./hash";
 import { hasErrorCode, isString } from "./validation";
-
-const fileInputHashCache = new Map<string, Promise<string>>();
 
 export function uniqueSortedStrings(values: string[]) {
   return [...new Set(values)].sort((left, right) => left.localeCompare(right));
@@ -19,18 +18,7 @@ export async function ensureParentDirectory(filePath: string) {
 }
 
 export async function hashFileInput(filePath: string) {
-  const stat = await fs.stat(filePath);
-  const cacheKey = `${filePath}:${stat.size}:${stat.mtimeMs}`;
-  const cached = fileInputHashCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
-  const pending = fs
-    .readFile(filePath, "utf-8")
-    .then((contents) => hashContent(contents));
-  fileInputHashCache.set(cacheKey, pending);
-  return pending;
+  return hashContent(await fs.readFile(filePath, "utf-8"));
 }
 
 export interface DirectoryEntry {
@@ -45,40 +33,91 @@ export async function syncDirectoryEntries(
     preserve?: (relativePath: string) => boolean;
   } = {},
 ) {
-  const expectedEntries = new Map(
-    entries.map((entry) => {
-      const relativePath = normalizeRelativePath(entry.relativePath);
-      return [
-        relativePath,
-        {
-          content: entry.content,
-          filePath: resolveContainedEntryPath(rootDir, relativePath),
-        },
-      ] as const;
-    }),
-  );
+  const expectedEntries = new Map<string, DirectoryEntry["content"]>();
+  for (const entry of entries) {
+    const relativePath = path.posix.normalize(
+      normalizeRelativePath(entry.relativePath),
+    );
+    if (
+      path.isAbsolute(entry.relativePath) ||
+      path.win32.isAbsolute(entry.relativePath) ||
+      relativePath === "." ||
+      expectedEntries.has(relativePath)
+    ) {
+      throw new Error(
+        `Invalid or duplicate directory entry: ${entry.relativePath}`,
+      );
+    }
+    resolveContainedEntryPath(rootDir, relativePath);
+    expectedEntries.set(relativePath, entry.content);
+  }
+  for (const relativePath of expectedEntries.keys()) {
+    let parent = path.posix.dirname(relativePath);
+    while (parent !== ".") {
+      if (expectedEntries.has(parent)) {
+        throw new Error(
+          `Directory entries conflict: ${parent} and ${relativePath}`,
+        );
+      }
+      parent = path.posix.dirname(parent);
+    }
+  }
+
+  // These are owned staging trees, not a sandbox against concurrent filesystem
+  // mutation. Ancestor aliases (linked checkouts or TMPDIR) are legitimate;
+  // only the selected root itself and components inside it must not be links.
+  await assertNoSymlinkComponents(rootDir, ".");
   await ensureDirectory(rootDir);
+  rootDir = await fs.realpath(rootDir);
+  for (const relativePath of expectedEntries.keys()) {
+    await assertNoSymlinkComponents(rootDir, relativePath);
+  }
   const existingFiles = await listRelativeFiles(rootDir);
 
-  await Promise.all(
-    existingFiles
-      .filter(
-        (relativePath) =>
-          !expectedEntries.has(relativePath) &&
-          !(options.preserve?.(relativePath) ?? false),
-      )
-      .map((relativePath) =>
-        fs.rm(path.join(rootDir, relativePath), { force: true }),
-      ),
+  await runWithConcurrency(
+    existingFiles.filter(
+      (relativePath) =>
+        !expectedEntries.has(relativePath) &&
+        !(options.preserve?.(relativePath) ?? false),
+    ),
+    16,
+    (relativePath) => fs.rm(path.join(rootDir, relativePath), { force: true }),
   );
   await removeEmptyDirectories(rootDir);
 
-  await Promise.all(
-    [...expectedEntries.values()].map(async ({ content, filePath }) => {
+  await runWithConcurrency(
+    [...expectedEntries],
+    16,
+    async ([relativePath, content]) => {
+      const filePath = path.join(rootDir, relativePath);
       await ensureParentDirectory(filePath);
       await writeFileIfChanged(filePath, content);
-    }),
+    },
   );
+}
+
+async function assertNoSymlinkComponents(
+  rootDir: string,
+  relativePath: string,
+) {
+  let currentPath = rootDir;
+  for (const component of relativePath.split("/")) {
+    currentPath = path.join(currentPath, component);
+    let stat;
+    try {
+      stat = await fs.lstat(currentPath);
+    } catch (error) {
+      if (hasErrorCode(error, "ENOENT") || hasErrorCode(error, "ENOTDIR")) {
+        return;
+      }
+      throw error;
+    }
+    if (stat.isSymbolicLink()) {
+      throw new Error(
+        `Directory synchronization refuses symbolic link: ${currentPath}`,
+      );
+    }
+  }
 }
 
 /**
@@ -113,7 +152,7 @@ export async function writeFileIfChanged(
   try {
     currentContent = await fs.readFile(
       filePath,
-      isString(content) ? "utf8" : undefined,
+      isString(content) ? "utf8" : null,
     );
   } catch (error) {
     if (!hasErrorCode(error, "ENOENT")) {
@@ -187,26 +226,26 @@ async function removeEmptyDirectories(rootDir: string, currentDir = rootDir) {
     throw error;
   }
 
-  await Promise.all(
-    entries
-      .filter((entry) => entry.isDirectory())
-      .map(async (entry) => {
-        const entryPath = path.join(currentDir, entry.name);
-        await removeEmptyDirectories(rootDir, entryPath);
-        const nestedEntries = await fs.readdir(entryPath).catch((error) => {
-          if (hasErrorCode(error, "ENOENT")) {
-            return [];
-          }
-          throw error;
-        });
-        if (nestedEntries.length === 0 && entryPath !== rootDir) {
-          await fs.rmdir(entryPath).catch((error) => {
-            if (!hasErrorCode(error, "ENOENT")) {
-              throw error;
-            }
-          });
+  await runWithConcurrency(
+    entries.filter((entry) => entry.isDirectory()),
+    16,
+    async (entry) => {
+      const entryPath = path.join(currentDir, entry.name);
+      await removeEmptyDirectories(rootDir, entryPath);
+      const nestedEntries = await fs.readdir(entryPath).catch((error) => {
+        if (hasErrorCode(error, "ENOENT")) {
+          return [];
         }
-      }),
+        throw error;
+      });
+      if (nestedEntries.length === 0 && entryPath !== rootDir) {
+        await fs.rmdir(entryPath).catch((error) => {
+          if (!hasErrorCode(error, "ENOENT")) {
+            throw error;
+          }
+        });
+      }
+    },
   );
 }
 

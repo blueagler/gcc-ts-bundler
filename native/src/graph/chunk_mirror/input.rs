@@ -7,14 +7,16 @@ use napi_derive::napi;
 /// materialized source files relative to the build source root, already joined
 /// from Rollup module ids by the plugin; modules with no materialized file
 /// (CSS, assets, anything Rollup dropped) are absent.
-#[allow(non_snake_case)]
 #[napi(object)]
 #[derive(Clone, Debug)]
 pub struct RollupChunkInput {
-    pub dynamicImportedChunkFileNames: Vec<String>,
-    pub fileName: String,
-    pub importedChunkFileNames: Vec<String>,
-    pub isEntry: bool,
-    pub moduleFiles: Vec<String>,
+    #[napi(js_name = "fileName")]
+    pub file_name: String,
+    #[napi(js_name = "importedChunkFileNames")]
+    pub imported_chunk_file_names: Vec<String>,
+    #[napi(js_name = "isEntry")]
+    pub is_entry: bool,
+    #[napi(js_name = "moduleFiles")]
+    pub module_files: Vec<String>,
     pub name: String,
 }

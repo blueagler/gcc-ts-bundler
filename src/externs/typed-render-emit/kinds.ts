@@ -135,14 +135,22 @@ export function emitFunction(
   state.lines.push(...lines);
 }
 
-export function emitNamespace(
+export function emitNamespaceMembers(
   name: string,
   symbol: ts.Symbol,
   state: RenderState,
   module: ModuleSeed,
 ) {
-  state.lines.push("/** @const */", `${name} = {};`);
   for (const exported of state.checker.getExportsOfModule(symbol)) {
+    // Merged namespaces share the export table with their class or enum.
+    // Those primary declarations already emitted their own static members.
+    if (
+      exported.flags & (ts.SymbolFlags.Prototype | ts.SymbolFlags.EnumMember) ||
+      exported.declarations?.some((declaration) =>
+        ts.isClassDeclaration(declaration.parent),
+      )
+    )
+      continue;
     const child = resolveAliasedSymbol(exported, state.checker);
     if (!child) continue;
     const childName = reserveSymbol(child, module, state);
@@ -406,11 +414,12 @@ function emitMember(
   inherited?: ts.Symbol | undefined,
 ) {
   const reservationMark = state.pending.length;
+  const dependencyMark = state.projection?.currentDependencies?.length;
   const rendering = renderMemberTags(member, state, module);
   if (inherited) {
     const base = renderInheritedMember(inherited, state, module);
     if (base && contradictsInherited(rendering, base)) {
-      releaseReservations(state, reservationMark);
+      releaseReservations(state, reservationMark, dependencyMark);
       diagnostic(
         state,
         module,
@@ -502,6 +511,7 @@ function renderInheritedMember(
 
 type RenderEffectCapture = {
   reservationMark: number;
+  dependencyMark: number | undefined;
   diagnosticMark: number;
   degradedMark: number;
   symbol: ts.Symbol | undefined;
@@ -515,6 +525,7 @@ function captureRenderEffects(state: RenderState): RenderEffectCapture {
   const symbol = state.currentSymbol;
   return {
     reservationMark,
+    dependencyMark: state.projection?.currentDependencies?.length,
     diagnosticMark,
     degradedMark,
     symbol,
@@ -526,7 +537,7 @@ function revertRenderEffects(
   state: RenderState,
   captured: RenderEffectCapture,
 ) {
-  releaseReservations(state, captured.reservationMark);
+  releaseReservations(state, captured.reservationMark, captured.dependencyMark);
   state.diagnostics.length = captured.diagnosticMark;
   state.degradedOccurrences = captured.degradedMark;
   if (captured.symbol && !captured.wasDegraded) {
@@ -540,10 +551,22 @@ function revertRenderEffects(
  * name left behind would be handed to a later reference while the symbol it
  * names is never emitted.
  */
-function releaseReservations(state: RenderState, mark: number) {
+function releaseReservations(
+  state: RenderState,
+  mark: number,
+  dependencyMark: number | undefined,
+) {
+  // Dependencies are append-only during one symbol's emission. Truncating the
+  // speculative suffix also removes edges to already-reserved symbols without
+  // losing a real reference made earlier in that same symbol.
+  const dependencies = state.projection?.currentDependencies;
+  if (dependencies && dependencyMark !== undefined) {
+    dependencies.length = dependencyMark;
+  }
   for (const symbol of state.pending.splice(mark)) {
     state.moduleForSymbol.delete(symbol);
     state.nameForSymbol.delete(symbol);
+    state.projection?.symbols.delete(symbol);
   }
 }
 

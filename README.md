@@ -1,259 +1,98 @@
 # GCC-TS-Bundler
 
-GCC-TS-Bundler is a TypeScript bundler built around Google Closure Compiler. A native Rust front-end handles graph resolution, entry shims, TypeScript stripping, and export rewriting. Closure remains the final optimizer.
+A TypeScript/JavaScript bundler using a Rust/Oxc front end and Google Closure
+Compiler for whole-program optimization and property renaming. Use the core
+API or CLI for code-only builds; use the Vite plugin for applications that need
+framework transforms, assets, CSS, or `import.meta.glob`.
 
-The npm package uses a JS loader plus platform-specific optional native packages. That keeps the main package smaller and allows publishing separate Rust binaries per OS/architecture instead of one bundled addon for every install.
-
-## Features
-
-- Bundles TypeScript code using Google Closure Compiler with a native Rust front-end.
-- Utilizes Closure Compiler's advanced optimizations and dead code elimination.
-- Uses native graph resolution, shim emission, and TypeScript stripping.
-- Resolves browser-safe ESM and statically analyzable CommonJS dependencies from `node_modules`.
-- Generates Closure-ready JS and extern placeholders.
-- Renames properties during Closure optimization.
-
-## Build scope
-
-The standalone/native CLI and API support **BASIC** builds: TypeScript to optimized JavaScript, chunks, and externs. Target policies include `browser`, `node`, `bun`, `workerd`, and `webworker`. Vite owns workers, WebAssembly, assets, `import.meta.glob`, and CSS transforms.
-
-> **Vite limitation:** Worker entry graphs are unsupported. `?worker` and `?worker&inline` remain outside the Vite plugin pipeline.
-
-## Install From NPM using bun
+## Install
 
 ```sh
 bun install gcc-ts-bundler
 ```
 
-Requires Node.js 18 or newer. Vite is an optional peer dependency and is only needed when importing `gcc-ts-bundler/vite`.
-The peer range is pinned to the tested Vite line (`^8.2.0`): the plugin
-replaces the output of Vite's bundler while byte-preserving its module graph
-and naming, so each new Vite minor is validated and adopted deliberately
-rather than assumed compatible.
+The core package declares Node.js 18 or newer and loads a platform-specific
+native addon from optional dependencies. The optional Vite integration has a
+higher Node requirement: Vite 8.3.0 declares `^20.19.0 || >=22.12.0`. Check Vite's
+engines when upgrading; the bundler declares the peer range `^8.3.0`.
 
-## Documentation
+## Standalone quickstart
 
-- [Architecture](docs/architecture.md)
-- [Programmatic API](docs/api.md)
-- [Vite integration](docs/vite.md)
-- [Development](docs/development.md)
-
-## Native Closure-Core API
-
-The package exposes a programmatic API backed by the native Rust front-end and Closure Compiler.
+Given `src/index.ts` and a project `tsconfig.json`:
 
 ```ts
-import { build, cleanCache } from "gcc-ts-bundler";
+import { build } from "gcc-ts-bundler";
 
 const result = await build({
   entries: ["./index.ts"],
-  outDir: "./dist",
-  projectRoot: process.cwd(),
   srcDir: "./src",
+  outDir: "./dist",
 });
 
 if (!result.ok) {
-  process.exit(1);
+  for (const diagnostic of result.diagnostics) {
+    console.error(diagnostic.message);
+  }
+  process.exitCode = 1;
 }
-
-await cleanCache({ projectRoot: process.cwd() });
 ```
 
-You can also generate Closure externs from package TypeScript hints:
-
-```ts
-import { generateExterns } from "gcc-ts-bundler";
-
-const result = await generateExterns({
-  appEntryFiles: ["./main.ts"],
-  mode: "boundary-aware",
-  modules: ["lit", "@lit-labs/router", "@lit-labs/motion"],
-  outputFile: "./closure-externs/lit.generated.js",
-  projectRoot: process.cwd(),
-  srcDir: "./src",
-});
-
-console.log(result.scannedFiles);
-// Pass result.renameBarriers.outputFile through build.externs.
-// Pass result.typedDeclarations.outputFile through build.typedExterns only for
-// runtimes intentionally kept outside the Closure job.
-```
-
-Programmatic options:
-
-- `projectRoot`
-- `srcDir`
-- `entries`
-- `outDir`
-- `externals` (runtime-owned ESM specifiers)
-- `preserveModules` (project-relative authored modules shipped without optimization or identifier renaming)
-- `packages`
-- `languageOut`
-- `compilationLevel`
-- `chunks`
-- `cache`
-- `compat`
-- `platformExterns`
-- `target`
-- `diagnostics`
-- `externs` (legacy explicit externs: Closure + native rename-barrier scan)
-- `typedExterns` (Closure-only typed external declarations)
-- `js`
-
-Defaults:
-
-- `cache.mode = "persistent"`
-- `chunks.mode = "off"`
-- `chunks.manifestFile` is off by default
-- `chunks.outputType = "auto"` (off-mode standalone builds resolve `auto` to classic script output)
-- `chunks.vendorChunk = false`
-- `platformExterns = "minimal"`
-- `packages = "esm-only"`
-- persistent cache lives outside the user project
-- `diagnostics.preflight = "errors-only"`
-
-The runtime path uses a native Rust addon for graph resolution, shim emission, and GCC export rewriting. Closure Compiler remains the final optimizer.
-
-`packages = "esm-only"` supports browser-safe ESM dependencies from `node_modules`, plus statically analyzable CommonJS package entrypoints and internal package modules. Browser builds reject Node builtins; Node/Bun ESM builds preserve builtins and configured `externals` as runtime imports. Dynamic `require()` remains rejected in compiled modules and is permitted only inside configured `preserveModules`; preserved paths are canonicalized, escaping symlink targets fail closed, and even in-tree symlink aliases are rejected explicitly rather than published under an ambiguous path. Preserved output keeps runtime semantics and the stable module API without Closure optimization or identifier renaming, but Oxc removes comments and unnecessary whitespace (and still erases TypeScript types), so authored bytes are not retained. JSON modules and native addons are still rejected.
-
-`chunks.mode = "split"` compiles one Closure chunk graph for the strongest cross-module optimization. `chunks.mode = "bundler-runtime"` compiles the planned application chunks in one Closure job and loads them through its runtime. Both modes treat entries as bootstrap scripts rather than exported library bundles.
-
-Use native `import()` for explicit lazy loading:
-
-```ts
-const loadFeature = () => import("./feature");
-```
-
-The specifier must be a string literal. `chunks.outputType = "script"` loads lazy chunks by injecting classic scripts; `"esm"` uses native dynamic `import()`. In chunked standalone builds, `"auto"` resolves to `"esm"` unless a language or worker gate forces script; off-mode `"auto"` resolves to script. The Vite integration selects the mapped output level from `build.target`. No manifest file is emitted unless `chunks.manifestFile` or `--chunk-manifest` is explicitly set, and safe nested relative paths are preserved inside `outDir`.
-
-Compatibility stays generic and syntax-driven. The bundler preserves runtime contracts that are discoverable from emitted JavaScript patterns, and the core has no framework-specific special cases. Framework runtime knowledge lives in opt-in React, Svelte, and Vue presets (`gcc-ts-bundler/presets/react`, `gcc-ts-bundler/presets/svelte`, and `gcc-ts-bundler/presets/vue`) that configure two generic mechanisms: `compat.classMapCalls` (object-literal keys that must survive renaming at specific calls) and externs `protocolHelpers` (helpers that read or exclude property keys by string). See `docs/vite.md`.
-There is no separate lazy-loading helper package surface; chunked lazy loading is `import()`-driven.
-
-## CLI
-
-Use subcommands:
+Or from the CLI:
 
 ```sh
 gcc-ts-bundler build --project-root=. --src-dir=./src --entry=./index.ts --out-dir=./dist
-gcc-ts-bundler clean-cache --project-root=.
-gcc-ts-bundler externs --project-root=. --src-dir=./src --entry=./main.ts --module=lit --module=@lit-labs/router --output-file=./closure-externs/lit.generated.js
 ```
 
-### Build Flags
+**Use a dedicated output directory.** Compilation and cache restoration can
+replace its entire contents, including unrelated files. See the
+[API contract](docs/reference/api.md#paths) for output ownership, module
+boundaries, and error handling; see the [CLI reference](docs/reference/cli.md)
+for commands and flags.
 
-- `--project-root`: Project root used to resolve tsconfig.json and relative paths
-- `--src-dir`: The source directory
-- `--entry`: Entry file relative to `--src-dir`. May be repeated
-- `--out-dir`: Output directory for generated JS
-- `--language-out`: ECMASCRIPT3 | ECMASCRIPT5 | ECMASCRIPT6 | ECMASCRIPT_2015 | ECMASCRIPT_2016 | ECMASCRIPT_2017 | ECMASCRIPT_2018 | ECMASCRIPT_2019 | ECMASCRIPT_2020 | ECMASCRIPT_2021 | STABLE | ECMASCRIPT_NEXT
-- `--compilation-level`: WHITESPACE_ONLY | SIMPLE | ADVANCED
-- `--packages`: `off | esm-only`
-- `--platform-externs`: `minimal | full`. Default `minimal` applies a typed, dependency-closed browser extern slice only to ADVANCED jobs with delivered type metadata, with safe full-browser fallback
-- `--extern`: Explicit extern file consumed by Closure and scanned by native for rename barriers. May be repeated
-- `--typed-extern`: Closure-only typed external declaration file. May be repeated
-- `--js`: Additional Closure JavaScript input. May be repeated
-- `--chunks`: `off | split | bundler-runtime`
-- `--chunk-public-path`: public URL prefix used to load chunk files
-- `--chunk-base-name`: base chunk output name
-- `--chunk-manifest`: safe relative path for the generated chunk manifest
-- `--cache-mode`: `off | temp | persistent`
-- `--cache-dir`: Explicit cache directory
-- `--preflight`: `off | errors-only | full`
-- `--verbose`: Print diagnostics to the console.
-- `-h, --help`: Show this help message.
+## Vite quickstart
 
-Only the documented dashed CLI flags are supported. Unknown flags and deprecated underscore or camelCase aliases fail fast.
+```ts
+import { defineConfig } from "vite";
+import { gccTsBundler } from "gcc-ts-bundler/vite";
 
-### Extern Generation Flags
-
-- `--project-root`: Project root used to resolve `node_modules` and `tsconfig.json`
-- `--src-dir`: Source directory used to resolve application and runtime entries
-- `--entry`: Application entry for boundary-aware usage analysis. May be repeated
-- `--runtime-entry`: Runtime JS entry for runtime-aware analysis. May be repeated
-- `--module`: Package or package subpath to scan. May be repeated
-- `--mode`: `boundary-aware | runtime-aware`
-- `--output-file`: Write generated externs to a file instead of stdout
-- `--include-dependencies`: Follow imported declaration files across dependent packages
-- `--tsconfig`: Explicit tsconfig path relative to `--project-root`
-
-## Examples
-
-Every example is the **official framework starter, unmodified**, with only
-`gccTsBundler()` added to `vite.config.ts`. That is the point: they prove the
-plugin works on stock templates rather than on app code shaped to suit it. Each
-one also ships `vite.pure.config.ts`, the identical build without the plugin, so
-any size or behaviour claim can be reproduced against a plain Vite baseline.
-
-Scaffolded with `npm create vite@latest -- --template <t>` (and `create-vue` for
-Vue), then `bun install && bunx vite build`.
-
-Each example's committed `dist/` is the plugin-built output, so the compiled
-quality is inspectable in the repo. To run one locally, build then preview so
-the server never serves a stale bundle:
-
-```sh
-cd examples/react-vite-official
-bun run build    # tsc + vite build with gccTsBundler() -> dist/
-bun run preview  # serve dist/
+export default defineConfig({
+  build: { target: "esnext" },
+  plugins: [gccTsBundler()],
+});
 ```
 
-Or from the repo root, `bun run preview:examples react` (any unique prefix of
-an example dir name works) — it builds the package and the example first if
-their `dist/` is missing, then starts `vite preview`. The `build:pure` baseline
-writes to `dist-pure/` and never touches the plugin-built `dist/`.
-
-- `examples/react-vite-official` — `react-ts` template plus `reactPreset()`.
-- `examples/svelte-vite-official` — `svelte-ts` template plus `sveltePreset()`.
-- `examples/lit-vite-official` — `lit-ts` template, no preset. Covers decorator
-  metadata: `@property count` reaches the runtime as a string literal, so the
-  matching field must survive renaming.
-- `examples/jquery-vite-official` — `vanilla-ts` template with jQuery installed
-  the way the jQuery docs recommend. Carries the extern-generation story:
-  jQuery builds part of its own API from strings (`deferred[tuple[0] + "With"]`)
-  and reads its handler store back by string key (`dataPriv.get(this,
-"events")`), so `runtime-aware` generation plus key-reading protocol helpers
-  are what keep the page alive. Every pinned name is exercised by a real click.
-- `examples/vue-vapor-vite-official` — `create-vue` template on Vue 3.6 with
-  Vapor SFCs plus `vuePreset()`. Covers the template-only SFC ABI, where
-  plugin-vue attaches `render` through a string key.
+Place framework plugins before this build-only plugin. React, Svelte, and Vue
+applications should use their [framework preset](docs/reference/vite.md#framework-presets).
+Development-server execution remains Vite's. Worker entry graphs, SSR, library
+mode, and sourcemaps are outside the supported integration; see
+[Vite build constraints](docs/reference/vite.md#supported-build-shape).
 
 ## Results and limits
 
-Every number is reproducible from the committed examples: each ships the
-plugin build (`dist/`) next to the identical stock Vite build
-(`vite.pure.config.ts` -> `dist-pure/`). JavaScript deltas of the committed
-trees, plugin vs stock:
+ADVANCED is not a promise of smaller gzip output or faster builds. Compare a
+separate plain-Vite build with the plugin build and exercise application
+behavior. The opt-in [build report](docs/reference/vite.md#build-report) is an
+in-build byte comparison and graph diagnostic—not proof that source is safe
+to delete. Cache hits can avoid compilation; changed builds and stable chunk
+names are not guaranteed.
 
-| Example             |    Raw |   Gzip |
-| ------------------- | -----: | -----: |
-| jquery (vanilla-ts) | -13.8% | -12.3% |
-| lit                 | -12.2% | -10.0% |
-| react               | -11.5% |  -4.4% |
-| svelte              |  +5.3% |  -1.9% |
-| vue-vapor           |  -6.7% |  +0.5% |
+The repository includes React, Svelte, Lit, jQuery, and Vue Vapor examples
+with plugin and plain-Vite configurations. They are starter-based runtime
+examples, not universally untouched templates. Dependency upgrades alone do
+not establish that their tracked outputs are reproducible or their browser
+behavior has been verified with the upgraded toolchain. See the
+[example workflow](https://github.com/blueagler/gcc-ts-bundler/blob/HEAD/docs/development/workflows.md#build-and-preview-an-example)
+for local reproduction. Historical measurements remain in
+[research documents](https://github.com/blueagler/gcc-ts-bundler/blob/HEAD/docs/README.md#evidence-and-proposals).
 
-The wins concentrate where code is authored-dominant: libraries, design
-systems, and low-dependency apps whose bytes are their own classes and
-functions. As dependency share grows the advantage decays monotonically — a
-2,352-module dependency-dominated app measured +4% gzip against stock Vite.
-If most of your bundle is `node_modules`, use stock Vite; Closure ADVANCED
-cannot rename or delete what third-party code shapes at runtime.
+## Working on the bundler
 
-`bun run verify:examples` rebuilds every example byte-for-byte and enforces
-the authored-dominant wins as a regression gate (jquery >= 10% gzip, lit >=
-8% gzip). Those floors are the product's kill criteria, not build checks.
-
-To measure the same delta on your own app, set `report: { file: "gcc-report.json" }`
-on the Vite plugin: every build then writes an evidence report with the JS
-byte delta vs the Vite chunks it replaced, the modules the whole-program link
-proved dead, and the property names pinned as rename barriers. See
-`docs/vite.md`.
-
-Cold builds cost roughly 10x stock Vite (Closure ADVANCED is a whole-program
-optimizer); warm builds reuse the persistent cache and renaming maps, keeping
-unchanged chunks byte-identical and skipping Closure entirely. Vite worker
-entry graphs are unsupported.
+Use the repository's [documentation map](https://github.com/blueagler/gcc-ts-bundler/blob/HEAD/docs/README.md)
+to choose a guide. [Change routes](https://github.com/blueagler/gcc-ts-bundler/blob/HEAD/docs/development/changes.md)
+connect common edits to source owners, failure modes, and focused verification.
+Contributor and research documents are repository-only; the installed package
+includes the public API, CLI, and Vite references.
 
 ## License
 
-This project is licensed under the Apache License, Version 2.0. See the [LICENSE](LICENSE) file for details.
+[Apache-2.0](LICENSE).

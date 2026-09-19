@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 
+import { parseCleanCacheCliArgs } from "../../src/cli/parse/clean-cache.ts";
 import { parseExternsCliArgs } from "../../src/cli/parse/externs.ts";
 import { parseCliArgs } from "../../src/cli/parse/options.ts";
 
@@ -51,4 +52,12 @@ test("rejects invalid option values during parsing", () => {
   expect(() =>
     parseCliArgs(["--entry", "./main.ts", "--cache-mode", "forever"]),
   ).toThrow(/--cache-mode must be one of/);
+});
+
+test("clean-cache rejects build options even when help is requested", () => {
+  expect(() =>
+    parseCleanCacheCliArgs(["--help", "--entry", "./main.ts"]),
+  ).toThrow();
+  expect(() => parseCleanCacheCliArgs(["--cache-mode", "off"])).toThrow();
+  expect(() => parseCleanCacheCliArgs(["unexpected-project"])).toThrow();
 });

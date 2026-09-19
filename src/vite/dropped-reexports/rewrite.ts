@@ -5,7 +5,11 @@ import ts from "@typescript/typescript6";
 import { applyTextEdits } from "../../shared/text-edits";
 import { stripQuery } from "../capture";
 import { getCapturedSourceFile } from "../capture-analysis";
-import type { PluginContext } from "../internal-types";
+import type {
+  CapturedModule,
+  PluginContext,
+  ViteBuildMetrics,
+} from "../internal-types";
 
 export interface ExportOrigin {
   moduleId: string;
@@ -15,7 +19,9 @@ export interface ExportOrigin {
 interface ImporterBindingRewrite {
   code: string;
   importerId: string;
+  metrics: ViteBuildMetrics | undefined;
   originOf: (moduleId: string, name: string) => Promise<ExportOrigin>;
+  record: CapturedModule;
   resolve: (specifier: string, importerId: string) => Promise<string | null>;
   retainedModuleIds: ReadonlySet<string>;
 }
@@ -40,7 +46,11 @@ export async function rewriteImporterBindings(
   if (!input.code.includes("import")) {
     return input.code;
   }
-  const sourceFile = getCapturedSourceFile(input.importerId, input.code);
+  const sourceFile = getCapturedSourceFile(
+    input.record,
+    input.code,
+    input.metrics,
+  );
   const edits: ImportTextEdit[] = [];
 
   for (const statement of sourceFile.statements) {

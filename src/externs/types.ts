@@ -61,6 +61,13 @@ export interface GeneratedTypedExternArtifact extends GeneratedExternArtifact {
   globalSurfaces: readonly GeneratedGlobalSurface[];
   moduleExports: readonly GeneratedExternModule[];
   /**
+   * Disjoint declaration files, present only when typedModuleFragmentsDir is
+   * requested. Paths are absolute and each modules list is sorted. Include all
+   * fragments intersecting the requested modules, not the aggregate artifact.
+   */
+  moduleFragments?:
+    readonly { outputFile: string; modules: readonly string[] }[] | undefined;
+  /**
    * Property names this artifact pins program-wide. Typed declarations are
    * rename barriers too — an owner-qualified `T.prototype.P` and a record key
    * `{"P": …}` both put `P` in Closure's extern property set — so they are

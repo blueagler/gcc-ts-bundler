@@ -103,12 +103,15 @@ export function collectProtocolHelperMembers(
   hazards: RuntimeRenameHazards,
   protocolHelpers: RuntimeProtocolHelpers,
 ) {
-  const signature = getProtocolHelperCallSignature(node, protocolHelpers);
-  if (!signature) {
+  if (node.arguments.length < 2) {
+    return;
+  }
+  const calleeName = getProtocolHelperCalleeName(node.expression);
+  if (!calleeName) {
     return;
   }
 
-  if (signature.kind === "direct-key-read") {
+  if (protocolHelpers.keyReadCallees.includes(calleeName)) {
     addMember(
       hazards.protocolMembers,
       getStringLiteralMemberName(node.arguments[1]),
@@ -117,7 +120,11 @@ export function collectProtocolHelperMembers(
   }
 
   const memberList = node.arguments[1];
-  if (!memberList || !ts.isArrayLiteralExpression(memberList)) {
+  if (
+    !protocolHelpers.keyExclusionListCallees.includes(calleeName) ||
+    !memberList ||
+    !ts.isArrayLiteralExpression(memberList)
+  ) {
     return;
   }
   for (const element of memberList.elements) {
@@ -129,36 +136,6 @@ export function collectProtocolHelperMembers(
     }
     addMember(hazards.protocolMembers, element.text);
   }
-}
-
-type ProtocolHelperCallSignature =
-  | {
-      kind: "direct-key-read";
-    }
-  | {
-      kind: "key-exclusion-list";
-    };
-
-function getProtocolHelperCallSignature(
-  node: ts.CallExpression,
-  protocolHelpers: RuntimeProtocolHelpers,
-): ProtocolHelperCallSignature | null {
-  if (node.arguments.length < 2) {
-    return null;
-  }
-
-  const calleeName = getProtocolHelperCalleeName(node.expression);
-  if (!calleeName) {
-    return null;
-  }
-
-  if (protocolHelpers.keyReadCallees.includes(calleeName)) {
-    return { kind: "direct-key-read" };
-  }
-  if (protocolHelpers.keyExclusionListCallees.includes(calleeName)) {
-    return { kind: "key-exclusion-list" };
-  }
-  return null;
 }
 
 function getProtocolHelperCalleeName(expression: ts.Expression): string | null {

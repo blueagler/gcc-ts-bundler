@@ -1,7 +1,13 @@
 import { expect, test } from "bun:test";
 
-import { isResolveMetadata } from "../../src/build/resolve/cache.ts";
-import { isObjectOf, isNumber, isString } from "../../src/shared/validation.ts";
+import {
+  isBoolean,
+  isFunction,
+  isNumber,
+  isObjectOf,
+  isRecord,
+  isString,
+} from "../../src/shared/validation.ts";
 
 const isPoint = isObjectOf({ x: isNumber, y: isNumber });
 
@@ -23,39 +29,65 @@ test("object schemas accept an explicitly undefined optional property", () => {
   });
 
   expect(isLabelled({ name: "a" })).toBe(true);
+  expect(isLabelled({ name: "a", note: undefined })).toBe(true);
   expect(isLabelled({ name: "a", note: "b" })).toBe(true);
   expect(isLabelled({ name: "a", note: 1 })).toBe(false);
 });
 
-function resolveMetadata(chunk) {
-  return {
-    optionsSignature: "test",
-    chunkPlan: [{ dependencies: [], files: ["a.js"], name: "main", ...chunk }],
-    entryFiles: [],
-  };
-}
+test("primitive guards reject boxed values, prototypes, and spoofed tags", () => {
+  expect(isString("value")).toBe(true);
+  expect(isNumber(1)).toBe(true);
+  expect(isBoolean(false)).toBe(true);
+  expect(isNumber(NaN)).toBe(false);
+  expect(isNumber(Infinity)).toBe(false);
+  expect(isNumber(-Infinity)).toBe(false);
 
-test("cached chunk plans reject unknown chunk kinds", () => {
-  expect(isResolveMetadata(resolveMetadata({ kind: "lazy" }))).toBe(true);
-  expect(isResolveMetadata(resolveMetadata({}))).toBe(true);
-  // Previously accepted: `kind` was validated as a bare string, so any value
-  // was trusted and then read as the ChunkKind union.
-  expect(isResolveMetadata(resolveMetadata({ kind: "bogus" }))).toBe(false);
+  for (const [guard, primitive, prototype, tag] of [
+    [isString, "value", String.prototype, "String"],
+    [isNumber, 1, Number.prototype, "Number"],
+    [isBoolean, false, Boolean.prototype, "Boolean"],
+  ]) {
+    expect(guard(Object(primitive))).toBe(false);
+    expect(guard(Object.create(prototype))).toBe(false);
+    expect(guard({ [Symbol.toStringTag]: tag })).toBe(false);
+  }
 });
 
-test("cached resolve metadata rejects a malformed chunk plan", () => {
-  expect(
-    isResolveMetadata({
-      optionsSignature: "test",
-      chunkPlan: [],
-      entryFiles: [],
-    }),
-  ).toBe(true);
-  expect(
-    isResolveMetadata({
-      optionsSignature: "test",
-      chunkPlan: [],
-    }),
-  ).toBe(false);
-  expect(isResolveMetadata(resolveMetadata({ files: "a.js" }))).toBe(false);
+test("function guards recognize callable values without inspecting tags", () => {
+  const callables = [
+    function ordinary() {},
+    async function asynchronous() {},
+    function* generator() {},
+    async function* asyncGenerator() {},
+    (() => {}).bind(null),
+  ];
+  for (const callable of callables) {
+    Object.defineProperty(callable, Symbol.toStringTag, {
+      get() {
+        throw new Error("classification must not read this getter");
+      },
+    });
+    expect(isFunction(callable)).toBe(true);
+    expect(isRecord(callable)).toBe(false);
+  }
+
+  expect(isFunction(Object.create(Function.prototype))).toBe(false);
+  expect(isFunction({ [Symbol.toStringTag]: "Function" })).toBe(false);
+});
+
+test("record guards preserve object admission without evaluating tag getters", () => {
+  const value = {
+    get [Symbol.toStringTag]() {
+      throw new Error("classification must not read this getter");
+    },
+  };
+  expect(isRecord(value)).toBe(true);
+  expect(isFunction(value)).toBe(false);
+  expect(isString(value)).toBe(false);
+  expect(isNumber(value)).toBe(false);
+  expect(isBoolean(value)).toBe(false);
+  expect(isRecord(Object.create(null))).toBe(true);
+  expect(isRecord(Object(1))).toBe(true);
+  expect(isRecord([])).toBe(false);
+  expect(isRecord(null)).toBe(false);
 });

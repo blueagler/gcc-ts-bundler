@@ -28,7 +28,8 @@ export function collectExternalOwnedMemberAccesses({
   if (
     origins.files.size === 0 &&
     origins.moduleFiles.size === 0 &&
-    origins.packageRoots.length === 0
+    origins.packageRoots.length === 0 &&
+    origins.boundaryTypeSymbols.size === 0
   )
     return [...starts].sort((left, right) => left - right);
   const visitedInitializers = new Set<ts.Node>();
@@ -40,7 +41,7 @@ export function collectExternalOwnedMemberAccesses({
       checker.getPropertyOfType(type, name),
       origins,
     ) ||
-    typeIdentityKeys(type).some((identity) =>
+    typeIdentityKeys(type, origins).some((identity) =>
       origins.ownedProperties.get(identity)?.has(name),
     );
   const markKey = (key: ts.PropertyName | ts.BindingName) => {

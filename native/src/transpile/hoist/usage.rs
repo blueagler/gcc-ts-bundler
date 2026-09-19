@@ -2,7 +2,10 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    ComputedMemberExpression, Expression, IdentifierReference, ImportDeclarationSpecifier, Program,
+    Statement, StaticMemberExpression,
+};
 use oxc_ast_visit::{walk_js, Visit, VisitJs};
 
 use super::super::identity::{BindingKey, BindingKeyMap, BindingKeySet, ModuleIdentity};
@@ -20,8 +23,7 @@ pub(crate) fn collect_used_binding_ids(
     for statement in &program.body {
         match statement {
             Statement::ImportDeclaration(_) => {}
-            Statement::ExportNamedDeclaration(export)
-                if export.source.is_none() && export.declaration.is_none() => {}
+            Statement::ExportNamedDeclaration(_) => {}
             _ => collector.visit_statement(statement),
         }
     }
@@ -61,7 +63,7 @@ impl NamespaceUsage {
 pub(crate) fn scan_namespace_usage(
     program: &Program<'_>,
     identity: &ModuleIdentity,
-) -> NamespaceUsage {
+) -> Result<NamespaceUsage, String> {
     let mut candidates = HashSet::new();
     for statement in &program.body {
         let Statement::ImportDeclaration(declaration) = statement else {
@@ -69,7 +71,7 @@ pub(crate) fn scan_namespace_usage(
         };
         for specifier in declaration.specifiers.iter().flatten() {
             if let ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) = specifier {
-                candidates.insert(identity.key_of_binding(&specifier.local));
+                candidates.insert(ModuleIdentity::key_of_binding(&specifier.local)?);
             }
         }
     }
@@ -77,7 +79,7 @@ pub(crate) fn scan_namespace_usage(
         candidates,
         finite_property_bindings: super::super::namespace::flow::collect_finite_property_bindings(
             program, identity,
-        ),
+        )?,
         identity,
         usage: NamespaceUsage {
             disqualified: HashSet::new(),
@@ -85,7 +87,7 @@ pub(crate) fn scan_namespace_usage(
         },
     };
     VisitJs::visit_program(&mut scanner, program);
-    scanner.usage
+    Ok(scanner.usage)
 }
 
 struct NamespaceMemberScanner<'a> {

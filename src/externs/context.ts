@@ -1,7 +1,5 @@
 import ts from "@typescript/typescript6";
 
-import { collectContracts } from "./contracts/registry";
-import { createEmptyContractRegistry, type ContractRegistry } from "./shared";
 import { uniqueSortedStrings } from "../shared/files";
 
 export interface ExternAnalysisContext {
@@ -10,7 +8,6 @@ export interface ExternAnalysisContext {
   compilerOptions: ts.CompilerOptions;
   program: ts.Program;
   projectRoot: string;
-  registry: ContractRegistry;
   scannedFiles: string[];
 }
 
@@ -66,14 +63,6 @@ export function createExternAnalysisContext({
       },
     );
   const checker = typeWorld?.checker ?? program.getTypeChecker();
-  const registry =
-    scannedFiles.length === 0
-      ? createEmptyContractRegistry()
-      : collectContracts({
-          checker,
-          program,
-          scannedFiles,
-        });
 
   return {
     appEntryFiles,
@@ -81,7 +70,6 @@ export function createExternAnalysisContext({
     compilerOptions: typeWorld?.compilerOptions ?? compilerOptions,
     program,
     projectRoot,
-    registry,
     scannedFiles,
   };
 }

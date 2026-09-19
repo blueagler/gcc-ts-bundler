@@ -1,8 +1,7 @@
-import fs from "node:fs/promises";
-
 import type { ResolvedConfig } from "vite";
+import type { TransformOptions } from "rolldown/utils";
 
-import { DEFAULT_BUILD_OPTIONS, type LanguageOut } from "../../api/types";
+import type { LanguageOut } from "../../api/types";
 import type { CapturedModuleResolutionCache } from "../capture";
 import { resolveViteLanguageOut } from "../config";
 import type {
@@ -35,17 +34,19 @@ export async function compileAndEmitViteBundle(
     capturedModules: Map<string, CapturedModule>;
     config: ResolvedConfig;
     languageOut: LanguageOut | null;
+    nativeDefines: TransformOptions["define"];
     options: GccTsBundlerVitePluginOptions;
     outputOptions: NormalizedOutputOptions;
     resolutionCache: CapturedModuleResolutionCache;
     timingTotals: ViteTimingTotals;
-    workerImportDetected: boolean;
   },
 ) {
-  if (input.workerImportDetected) {
-    this.error(
-      "gccTsBundler() does not support worker entry graphs in Vite build mode.",
-    );
+  for (const id of input.capturedModules.keys()) {
+    if (id.includes("?worker") || id.includes("&worker")) {
+      this.error(
+        "gccTsBundler() does not support worker entry graphs in Vite build mode.",
+      );
+    }
   }
 
   input.resolutionCache.clear();
@@ -62,6 +63,7 @@ export async function compileAndEmitViteBundle(
       bundle: input.bundle,
       capturedModules: input.capturedModules,
       config: input.config,
+      nativeDefines: input.nativeDefines,
       options: input.options,
       resolutionCache: input.resolutionCache,
       timingTotals: input.timingTotals,
@@ -101,12 +103,6 @@ export async function compileAndEmitViteBundle(
       });
     }
   } finally {
-    if (
-      input.options.debug?.dumpCapturedGraphDir === undefined &&
-      (input.options.compiler?.cache?.mode ??
-        DEFAULT_BUILD_OPTIONS.cache.mode) !== "persistent"
-    ) {
-      await fs.rm(workspace.captureRoot, { force: true, recursive: true });
-    }
+    await workspace.dispose();
   }
 }

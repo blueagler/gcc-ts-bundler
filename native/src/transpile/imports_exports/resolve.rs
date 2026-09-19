@@ -36,12 +36,12 @@ pub(crate) fn resolve_module_id_for_specifier(
     let alias = context
         .package_aliases
         .iter()
-        .find(|alias| alias.packageName == package_name && alias.subpath == subpath)
+        .find(|alias| alias.package_name == package_name && alias.subpath == subpath)
         .or_else(|| {
             context
                 .package_aliases
                 .iter()
-                .find(|alias| alias.packageName == package_name && alias.subpath == ".")
+                .find(|alias| alias.package_name == package_name && alias.subpath == ".")
         })
         .ok_or_else(|| {
             format!(
@@ -50,13 +50,13 @@ pub(crate) fn resolve_module_id_for_specifier(
             )
         })?;
     Ok(to_goog_module_id(
-        Path::new(&alias.targetPath),
+        Path::new(&alias.target_path),
         &context.workspace_dir,
     ))
 }
 
 fn split_package_specifier(specifier: &str) -> (String, String) {
-    if specifier.starts_with('@') {
+    if specifier.starts_with('@') && specifier.contains('/') {
         let parts = specifier.split('/').collect::<Vec<_>>();
         let package_name = format!("{}/{}", parts[0], parts[1]);
         let subpath = if parts.len() > 2 {

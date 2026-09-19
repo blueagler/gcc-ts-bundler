@@ -2,11 +2,13 @@ import path from "node:path";
 
 import ts from "@typescript/typescript6";
 import type { ResolvedConfig } from "vite";
+import type { TransformOptions } from "rolldown/utils";
 
 import { syncDirectoryEntries } from "../../shared/files";
 import { applyTextEdits } from "../../shared/text-edits";
 import { createDefineApplier } from "../defines";
 import {
+  annotateAliasedStaticClassMemberWrites,
   isNonMaterializedAssetModuleId,
   isSupportedExternalSpecifier,
   resolveCapturedSpecifier,
@@ -14,6 +16,7 @@ import {
   toRelativeImportSpecifier,
 } from "../capture";
 import type { CapturedModuleResolutionCache } from "../capture";
+import { getCapturedSourceFile } from "../capture-analysis";
 import {
   resolveRuntimeResolutionIdentity,
   runtimeResolutionKey,
@@ -33,14 +36,12 @@ export async function writeMaterializedModuleCopies(
     filePathByModuleId: Map<string, string>;
     materializedModuleIds: string[];
     metrics?: ViteBuildMetrics | undefined;
+    nativeDefines: TransformOptions["define"];
     resolutionCache: CapturedModuleResolutionCache;
     srcDir: string;
   },
 ): Promise<RuntimeResolutionIdentity[]> {
-  const applyDefines = createDefineApplier(
-    input.config.define,
-    input.config.env,
-  );
+  const applyDefines = createDefineApplier(input.nativeDefines);
   const runtimeResolutionByKey = new Map<string, RuntimeResolutionIdentity>();
   const materializedEntries = await Promise.all(
     input.materializedModuleIds.map(async (moduleId) => {
@@ -57,14 +58,13 @@ export async function writeMaterializedModuleCopies(
       }
 
       const rewritten = await rewriteModuleImports.call(this, {
-        code: record.code,
         conditions: [
           "browser",
           "import",
           ...(input.config.resolve?.conditions ?? []),
         ],
         filePathByModuleId: input.filePathByModuleId,
-        importerId: moduleId,
+        record,
         metrics: input.metrics,
         resolutionCache: input.resolutionCache,
       });
@@ -75,12 +75,17 @@ export async function writeMaterializedModuleCopies(
         );
       }
       return {
-        content: applyDefines
-          ? await applyDefines(
-              rewritten.code,
-              record.format === "cjs" ? "cjs" : "esm",
-            )
-          : rewritten.code,
+        content: annotateAliasedStaticClassMemberWrites(
+          record,
+          applyDefines
+            ? await applyDefines(
+                rewritten.code,
+                moduleId,
+                record.format === "cjs" ? "cjs" : "esm",
+              )
+            : rewritten.code,
+          input.metrics,
+        ),
         relativePath: path
           .relative(input.srcDir, outputPath)
           .replace(/\\/g, "/"),
@@ -116,21 +121,15 @@ export async function writeMaterializedModuleCopies(
 async function rewriteModuleImports(
   this: PluginContext,
   input: {
-    code: string;
     conditions: string[];
     filePathByModuleId: Map<string, string>;
-    importerId: string;
+    record: CapturedModule;
     metrics?: ViteBuildMetrics | undefined;
     resolutionCache: CapturedModuleResolutionCache;
   },
 ) {
-  const sourceFile = ts.createSourceFile(
-    input.importerId,
-    input.code,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.JS,
-  );
+  const { code, id: importerId } = input.record;
+  const sourceFile = getCapturedSourceFile(input.record, code, input.metrics);
   const edits: Array<{ end: number; start: number; text: string }> = [];
   const runtimeResolutions = new Map<string, RuntimeResolutionIdentity>();
   const pendingEdits: Promise<void>[] = [];
@@ -141,7 +140,7 @@ async function rewriteModuleImports(
   ) => {
     const specifier = literal.text;
     const resolved = await resolveCapturedSpecifier.call(this, {
-      importerId: input.importerId,
+      importerId,
       metrics: input.metrics,
       resolutionCache: input.resolutionCache,
       specifier,
@@ -149,7 +148,7 @@ async function rewriteModuleImports(
     if (resolved && !resolved.external) {
       const runtimeResolution = await resolveRuntimeResolutionIdentity({
         conditions: input.conditions,
-        importerModuleId: input.importerId,
+        importerModuleId: importerId,
         resolvedModuleId: resolved.id,
         specifier,
       });
@@ -165,7 +164,7 @@ async function rewriteModuleImports(
         return;
       }
       this.error(
-        `gccTsBundler() could not materialize ${specifier} imported from ${input.importerId}. ` +
+        `gccTsBundler() could not materialize ${specifier} imported from ${importerId}. ` +
           "Ensure Vite/plugins lower the resource to a JS module before gccTsBundler() runs.",
       );
     }
@@ -208,14 +207,14 @@ async function rewriteModuleImports(
         return;
       }
       this.error(
-        `gccTsBundler() resolved ${specifier} from ${input.importerId} to ${resolved.id}, ` +
+        `gccTsBundler() resolved ${specifier} from ${importerId} to ${resolved.id}, ` +
           "but that transformed module was not captured in the final Vite JS graph.",
       );
     }
 
-    const importerFile = input.filePathByModuleId.get(input.importerId);
+    const importerFile = input.filePathByModuleId.get(importerId);
     if (!importerFile) {
-      this.error(`Missing importer file path for ${input.importerId}.`);
+      this.error(`Missing importer file path for ${importerId}.`);
     }
 
     edits.push({
@@ -251,7 +250,7 @@ async function rewriteModuleImports(
   await Promise.all(pendingEdits);
 
   return {
-    code: edits.length === 0 ? input.code : applyTextEdits(input.code, edits),
+    code: edits.length === 0 ? code : applyTextEdits(code, edits),
     runtimeResolutions: [...runtimeResolutions.values()],
   };
 }

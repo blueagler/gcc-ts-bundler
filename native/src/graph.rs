@@ -1,5 +1,3 @@
-#![allow(non_snake_case)]
-
 mod chunk_mirror;
 mod chunk_plan;
 mod deps;
@@ -10,26 +8,22 @@ mod path_utils;
 mod resolve;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::commonjs::{analyze_commonjs_source, CommonJsAnalysis};
-use crate::pathing::to_goog_module_id;
+use crate::utils::append_hex;
 
-pub use self::chunk_mirror::RollupChunkInput;
-use self::chunk_mirror::*;
-use self::chunk_plan::*;
-use self::deps::*;
-use self::exports::*;
+use self::chunk_mirror::build_mirror_chunk_plan;
+use self::chunk_plan::{build_bundler_chunk_plan, build_off_chunk_plan, sanitize_chunk_name};
 #[cfg(test)]
-pub(crate) use self::package_resolver::select_package_export_target;
-use self::package_resolver::*;
-use self::path_utils::*;
+use self::path_utils::module_candidates;
 pub(crate) use self::resolve::resolve_graph_impl;
-pub use napi_types::*;
+pub use napi_types::{
+    ChunkPlanChunkOutput, ChunkPlanEntryInput, DependencyGraphEntry, EntryExportMetadata,
+    ExternalBoundaryEntry, FileHashEntry, LazyImportEntry, PackageAliasEntry, PlanChunksInput,
+    PreservedModuleEntry, ResolveGraphOutput, ResolvedImportEntry,
+};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum PackageMode {
@@ -161,12 +155,12 @@ pub fn assign_chunk_names(
         .map(|(base_name, identity)| {
             let name = if counts.get(base_name.as_str()).copied().unwrap_or(0) > 1 {
                 let normalized_identity = identity.replace('\\', "/");
-                let suffix = Sha256::digest(normalized_identity.as_bytes())
-                    .iter()
-                    .take(5)
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>();
-                format!("{base_name}-{suffix}")
+                let digest = Sha256::digest(normalized_identity.as_bytes());
+                let mut name = base_name;
+                name.reserve(11);
+                name.push('-');
+                append_hex(&mut name, &digest[..5]);
+                name
             } else {
                 base_name
             };
@@ -190,25 +184,24 @@ impl ChunkMode {
     }
 }
 
-// napi positional contract: the TS side calls these by argument
-// position, so the parameter list is the published signature.
-#[allow(clippy::too_many_arguments)]
 pub fn plan_chunks(
-    chunk_mode: String,
-    base_chunk_name: String,
-    workspace_dir: String,
-    entry_files: Vec<ChunkPlanEntryInput>,
-    graph_entries: Vec<DependencyGraphEntry>,
-    lazy_imports: Vec<LazyImportEntry>,
-    rollup_chunks: Vec<RollupChunkInput>,
-    shim_files: Vec<String>,
-    vendor_chunk: bool,
+    input: PlanChunksInput,
 ) -> std::result::Result<Vec<ChunkPlanChunkOutput>, String> {
+    let PlanChunksInput {
+        chunk_mode,
+        base_chunk_name,
+        workspace_dir,
+        entry_files,
+        graph_entries,
+        lazy_imports,
+        rollup_chunks,
+        vendor_chunk,
+    } = input;
     let chunk_mode = ChunkMode::parse(&chunk_mode)?;
     let workspace_dir = PathBuf::from(workspace_dir);
     let graph = graph_entries
         .into_iter()
-        .map(|entry| (entry.filePath, entry.dependencies))
+        .map(|entry| (entry.file_path, entry.dependencies))
         .collect::<HashMap<_, _>>();
 
     Ok(match chunk_mode {
@@ -234,7 +227,7 @@ pub fn plan_chunks(
             // vendor chunk needs to be ordered against the base.
             vendor_chunk,
         ),
-        ChunkMode::Off => build_off_chunk_plan(&entry_files, &graph, &shim_files, &workspace_dir)?,
+        ChunkMode::Off => build_off_chunk_plan(&entry_files, &graph, &workspace_dir)?,
     })
 }
 

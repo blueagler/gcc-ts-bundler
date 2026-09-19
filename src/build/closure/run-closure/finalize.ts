@@ -77,19 +77,24 @@ export async function finalizeClosureStageOutputs({
     await stripUnusedSharedChunkImports(publishedOutputs);
   }
 
+  const copyCanonicalOutputs = input.options.cache.mode === "persistent";
   await withInternalTiming("closure:publish", () =>
     publishPreparedClosureOutputs(
       publishedOutputs,
       input.outDir,
       cacheOutputDir,
+      copyCanonicalOutputs,
     ),
   );
-  const cacheOutputFiles = publishedOutputs.map((outputFile) =>
-    path.join(cacheOutputDir, path.relative(input.outDir, outputFile)),
-  );
+  const cacheOutputFiles = copyCanonicalOutputs
+    ? publishedOutputs.map((outputFile) =>
+        path.join(cacheOutputDir, path.relative(input.outDir, outputFile)),
+      )
+    : [];
 
   return {
     cacheOutputFiles,
+    diagnostics: [],
     exitCode: 0,
     outputFiles: publishedOutputs,
   };

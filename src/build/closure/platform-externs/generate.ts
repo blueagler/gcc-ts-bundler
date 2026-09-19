@@ -57,8 +57,10 @@ export async function generatePlatformExternsText(
     // the same unbounded-shared-cache defect W2-P2 removed. It therefore lives
     // in the project cache, and is simply disabled when no caller supplies one.
     const sliceCacheRoot = options.sliceCacheRoot;
-    void collectExpiredEntries(cacheRoot);
-    if (sliceCacheRoot) void collectExpiredEntries(sliceCacheRoot);
+    await collectExpiredEntries(cacheRoot);
+    if (sliceCacheRoot && sliceCacheRoot !== cacheRoot) {
+      await collectExpiredEntries(sliceCacheRoot);
+    }
 
     // Archive identity is a stat, not a 49 MB read (see the archive module),
     // and the slice cache is consulted before the index so a hit costs neither

@@ -3,23 +3,14 @@ import fs from "fs/promises";
 import path from "path";
 
 import { ensureDirectory } from "../../../shared/files";
+import { runWithConcurrency } from "../../../shared/concurrency";
 import { logInternalDetail } from "../../../shared/timing";
-import {
-  getCompileJobArtifactFiles,
-  persistCachedClosureJob,
-  tryRestoreCachedClosureJob,
-} from "../cache";
-import {
-  resolveClosureCompilerVersionTag,
-  type ClosureCompilerEnvironment,
-} from "../compiler";
 import type { PreparedCompileJob } from "./types";
 
 /**
- * Feeds renaming maps from the previous build back into Closure so
- * unchanged chunks stay byte-identical across builds. Without this, one new
- * property name reshuffles the global renaming tables and invalidates every
- * emitted chunk; with pinned maps only genuinely changed chunks differ.
+ * Reuses previous renaming assignments to improve name stability across edits.
+ * This does not guarantee byte-identical chunks: output can depend on map
+ * history. Cache-off builds omit these inputs for history-independent output.
  * Maps live in the persistent cache and reset with `clean-cache`.
  */
 export async function applyStableRenamingMaps(
@@ -36,10 +27,11 @@ export async function applyStableRenamingMaps(
   const mapsDir = renamingMapsDirectory(cacheDir, job);
   const propertyMap = path.join(mapsDir, "property.map");
   const variableMap = path.join(mapsDir, "variable.map");
-  const [propertyMapInput, variableMapInput] = await Promise.all([
-    wellFormedRenamingMapPath(propertyMap),
-    wellFormedRenamingMapPath(variableMap),
-  ]);
+  const [propertyMapInput, variableMapInput] = await runWithConcurrency(
+    [propertyMap, variableMap],
+    2,
+    wellFormedRenamingMapPath,
+  );
   if (propertyMapInput) {
     stableJob.propertyMapInputFile = propertyMapInput;
   }
@@ -148,7 +140,7 @@ async function persistRenamingMapFile(sourcePath: string, destPath: string) {
   }
 }
 
-async function persistRenamingMaps(
+export async function persistRenamingMaps(
   job: PreparedCompileJob,
   cacheDir: string | null,
 ) {
@@ -161,73 +153,12 @@ async function persistRenamingMaps(
   }
   const mapsDir = renamingMapsDirectory(cacheDir, job);
   await ensureDirectory(mapsDir);
-  await Promise.all([
-    persistRenamingMapFile(
-      job.propertyRenamingReportPath,
-      path.join(mapsDir, "property.map"),
-    ),
-    persistRenamingMapFile(
-      job.variableRenamingReportPath,
-      path.join(mapsDir, "variable.map"),
-    ),
-  ]);
-}
-
-export async function restorePreparedClosureJob({
-  compilerEnvironment,
-  cacheDir,
-  job,
-}: {
-  compilerEnvironment: ClosureCompilerEnvironment;
-  cacheDir: string | null;
-  job: PreparedCompileJob;
-}): Promise<{ cacheHit: true; exitCode: 0 } | null> {
-  const cacheJob = {
-    ...job,
-    compilerEnvironment: compilerEnvironment.options,
-  };
-  const artifactFiles = getCompileJobArtifactFiles(job);
-  const compilerVersion = resolveClosureCompilerVersionTag();
-  const cached = cacheDir
-    ? await tryRestoreCachedClosureJob({
-        artifactFiles,
-        cacheDir,
-        compilerVersion,
-        job: cacheJob,
-      })
-    : false;
-  if (!cached) {
-    return null;
-  }
-  await persistRenamingMaps(job, cacheDir);
-  return {
-    cacheHit: true,
-    exitCode: 0,
-  };
-}
-
-export async function persistPreparedClosureJob({
-  compilerEnvironment,
-  cacheDir,
-  job,
-}: {
-  compilerEnvironment: ClosureCompilerEnvironment;
-  cacheDir: string | null;
-  job: PreparedCompileJob;
-}) {
-  const cacheJob = {
-    ...job,
-    compilerEnvironment: compilerEnvironment.options,
-  };
-  const artifactFiles = getCompileJobArtifactFiles(job);
-  const compilerVersion = resolveClosureCompilerVersionTag();
-  if (cacheDir) {
-    await persistCachedClosureJob({
-      artifactFiles,
-      cacheDir,
-      compilerVersion,
-      job: cacheJob,
-    });
-  }
-  await persistRenamingMaps(job, cacheDir);
+  await runWithConcurrency(
+    [
+      [job.propertyRenamingReportPath, path.join(mapsDir, "property.map")],
+      [job.variableRenamingReportPath, path.join(mapsDir, "variable.map")],
+    ] as const,
+    2,
+    ([source, destination]) => persistRenamingMapFile(source, destination),
+  );
 }

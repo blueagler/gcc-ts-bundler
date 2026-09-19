@@ -1,7 +1,16 @@
-use super::super::*;
+use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
+
+use super::super::chunk_plan::{
+    dedupe_lazy_imports, sanitize_chunk_name, to_relative_files, topological_sort,
+};
+use super::super::{
+    assign_chunk_names, ChunkPlanChunkOutput, ChunkPlanEntryInput, LazyImportEntry,
+};
 use super::input::RollupChunkInput;
 use super::order::{collect_ancestors, merge_cycles, single_root_order, MirrorChunk};
 use super::place::place_files;
+use crate::utils::path_relative_to;
 
 /// Mirrors Rollup's own chunk graph into a Closure chunk plan.
 ///
@@ -26,7 +35,7 @@ pub(crate) fn build_mirror_chunk_plan(
     let index_by_file_name = rollup_chunks
         .iter()
         .enumerate()
-        .map(|(index, chunk)| (chunk.fileName.clone(), index))
+        .map(|(index, chunk)| (chunk.file_name.clone(), index))
         .collect::<HashMap<_, _>>();
     if index_by_file_name.len() != rollup_chunks.len() {
         return Err("Rollup chunk file names are not unique.".to_string());
@@ -38,7 +47,7 @@ pub(crate) fn build_mirror_chunk_plan(
             .collect(),
         rollup_chunks
             .iter()
-            .map(|chunk| chunk.fileName.clone())
+            .map(|chunk| chunk.file_name.clone())
             .collect(),
     )?;
 
@@ -48,7 +57,7 @@ pub(crate) fn build_mirror_chunk_plan(
         .map(|(chunk, name)| {
             Ok(MirrorChunk {
                 dependencies: chunk
-                    .importedChunkFileNames
+                    .imported_chunk_file_names
                     .iter()
                     .map(|file_name| {
                         index_by_file_name.get(file_name).copied().ok_or_else(|| {
@@ -57,7 +66,7 @@ pub(crate) fn build_mirror_chunk_plan(
                     })
                     .collect::<std::result::Result<BTreeSet<_>, String>>()?,
                 files: BTreeSet::new(),
-                is_entry: chunk.isEntry,
+                is_entry: chunk.is_entry,
                 lazy_module_ids: BTreeSet::new(),
                 name,
             })
@@ -103,9 +112,9 @@ pub(crate) fn build_mirror_chunk_plan(
     for lazy_import in dedupe_lazy_imports(lazy_imports) {
         if let Some(chunk) = chunks
             .iter_mut()
-            .find(|chunk| chunk.files.contains(&lazy_import.targetPath))
+            .find(|chunk| chunk.files.contains(&lazy_import.target_path))
         {
-            chunk.lazy_module_ids.insert(lazy_import.moduleId.clone());
+            chunk.lazy_module_ids.insert(lazy_import.module_id.clone());
         }
     }
 
@@ -142,7 +151,7 @@ pub(crate) fn build_mirror_chunk_plan(
 
     let entry_paths = entry_files
         .iter()
-        .map(|entry| path_relative_to(Path::new(&entry.sourcePath), workspace_dir))
+        .map(|entry| path_relative_to(Path::new(&entry.source_path), workspace_dir))
         .collect::<Vec<_>>();
     Ok(order
         .iter()
@@ -154,7 +163,7 @@ pub(crate) fn build_mirror_chunk_plan(
                     .iter()
                     .map(|&dependency| chunks[dependency].name.clone())
                     .collect(),
-                entryFiles: (index == entry_index).then(|| entry_paths.clone()),
+                entry_files: (index == entry_index).then(|| entry_paths.clone()),
                 files: to_relative_files(
                     &topological_sort(chunk.files.iter().cloned().collect(), graph),
                     workspace_dir,
@@ -169,10 +178,10 @@ pub(crate) fn build_mirror_chunk_plan(
                 } else {
                     (!chunk.lazy_module_ids.is_empty()).then(|| "lazy".to_string())
                 },
-                lazyModuleIds: (!chunk.lazy_module_ids.is_empty())
+                lazy_module_ids: (!chunk.lazy_module_ids.is_empty())
                     .then(|| chunk.lazy_module_ids.iter().cloned().collect()),
                 name: chunk.name.clone(),
-                outputName: None,
+                output_name: None,
             }
         })
         .collect())

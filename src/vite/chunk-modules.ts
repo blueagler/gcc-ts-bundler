@@ -19,19 +19,14 @@ import type {
 export function buildChunkModuleIdLookup(input: {
   jsChunks: readonly OutputChunk[];
   manifest: GccRuntimeManifest;
-  materialized: MaterializedGraph;
-  runtimeModuleSourceMap: Record<string, string>;
+  runtimeModuleIdToOriginalIds: Map<string, string[]>;
 }) {
-  const runtimeModuleIdToOriginalIds = buildRuntimeModuleIdMap({
-    materialized: input.materialized,
-    runtimeModuleSourceMap: input.runtimeModuleSourceMap,
-  });
-
   const chunkModuleIds = new Map<string, Set<string>>();
   for (const [chunkId, chunk] of Object.entries(input.manifest.chunks)) {
     const moduleIds = new Set<string>();
     for (const runtimeModuleId of chunk.modules) {
-      const originalIds = runtimeModuleIdToOriginalIds.get(runtimeModuleId);
+      const originalIds =
+        input.runtimeModuleIdToOriginalIds.get(runtimeModuleId);
       if (!originalIds) {
         continue;
       }

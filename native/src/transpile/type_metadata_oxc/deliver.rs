@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use oxc_ast::ast::*;
+use oxc_ast::ast::{ClassElement, PropertyKey, Statement};
 use oxc_codegen::{Codegen, Gen};
 
 use super::super::identity::ModuleIdentity;
@@ -17,13 +17,13 @@ use super::bind::declared_statement_ids;
 use super::prepare::PreparedTypeMetadata;
 use crate::closure_metadata::{ClosureAnnotation, ClosureAnnotationTarget, TypeMetadataDiagnostic};
 
-struct RenderedMemberAnnotation {
-    annotation: ClosureAnnotation,
+struct RenderedMemberAnnotation<'m> {
+    annotation: &'m ClosureAnnotation,
     target: String,
     text: String,
 }
 
-impl PreparedTypeMetadata {
+impl PreparedTypeMetadata<'_> {
     pub(crate) fn render_statement_with_nocollapse(
         &mut self,
         identity: &ModuleIdentity,
@@ -31,7 +31,7 @@ impl PreparedTypeMetadata {
         tags: &[&str],
         nocollapse_assignments: Option<&NocollapseAssignments>,
     ) -> std::result::Result<String, String> {
-        let binding_ids = declared_statement_ids(&statement, identity);
+        let binding_ids = declared_statement_ids(&statement)?;
         if binding_ids.len() > 1 {
             let mut had_metadata = false;
             for binding in &binding_ids {
@@ -76,10 +76,10 @@ impl PreparedTypeMetadata {
                 &self.symbol_resolutions,
                 Some(target),
             );
-            self.delivery.counts.unresolvedTypeReferenceCount += rendered.unresolved_count;
+            self.delivery.counts.unresolved_type_references += rendered.unresolved_count;
             self.delivery.diagnostics.extend(rendered.diagnostics);
             if annotation.type_bearing {
-                self.delivery.counts.annotationCount += 1;
+                self.delivery.counts.annotations += 1;
             }
             binding_blocks.push(rendered.text);
         }
@@ -96,7 +96,7 @@ impl PreparedTypeMetadata {
                     &self.symbol_resolutions,
                     Some(target.clone()),
                 );
-                self.delivery.counts.unresolvedTypeReferenceCount += rendered.unresolved_count;
+                self.delivery.counts.unresolved_type_references += rendered.unresolved_count;
                 self.delivery.diagnostics.extend(rendered.diagnostics);
                 RenderedMemberAnnotation {
                     annotation,
@@ -148,7 +148,7 @@ impl PreparedTypeMetadata {
             };
             if delivered {
                 if rendered.annotation.type_bearing {
-                    self.delivery.counts.memberAnnotationCount += 1;
+                    self.delivery.counts.member_annotations += 1;
                 }
             } else {
                 self.delivery
@@ -174,7 +174,7 @@ impl PreparedTypeMetadata {
 
 fn remove_bound_valueless_class_fields(
     statement: &mut Statement<'_>,
-    members: &[RenderedMemberAnnotation],
+    members: &[RenderedMemberAnnotation<'_>],
 ) {
     let Statement::ClassDeclaration(class) = statement else {
         return;

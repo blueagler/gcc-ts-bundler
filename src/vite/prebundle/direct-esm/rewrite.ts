@@ -1,5 +1,7 @@
 import fs from "node:fs/promises";
 
+import { runWithConcurrency } from "../../../shared/concurrency";
+
 import type { MaterializedGraph } from "../../internal-types";
 import { createBarrelFlattener } from "../barrels";
 import { normalizePath } from "../shared";
@@ -20,34 +22,34 @@ export async function rewriteDirectEsmImports(input: {
     moduleFilePaths: new Set(moduleByFilePath.keys()),
   });
 
-  await Promise.all(
-    input.materialized.modules
-      .filter((module) => {
-        const filePath = normalizePath(module.filePath);
-        return (
-          input.materialized.authoredFiles.includes(module.filePath) ||
-          input.directDependencyFilePaths.has(filePath)
-        );
-      })
-      .map(async (module) => {
-        const filePath = normalizePath(module.filePath);
-        const sourceText = await fs.readFile(module.filePath, "utf8");
-        const rewritten = await rewriteModuleImports({
-          // Only a direct dependency module keeps its own import statements in
-          // the native graph; an authored module has its atom specifiers
-          // rewritten later against its region bundle instead.
-          atomFilePaths: input.directDependencyFilePaths.has(filePath)
-            ? input.prebundleFilePaths
-            : new Set<string>(),
-          directDependencyFilePaths: input.directDependencyFilePaths,
-          filePath,
-          flattener,
-          moduleByFilePath,
-          sourceText,
-        });
-        if (rewritten !== sourceText) {
-          await fs.writeFile(module.filePath, rewritten, "utf8");
-        }
-      }),
+  await runWithConcurrency(
+    input.materialized.modules.filter((module) => {
+      const filePath = normalizePath(module.filePath);
+      return (
+        input.materialized.authoredFiles.includes(module.filePath) ||
+        input.directDependencyFilePaths.has(filePath)
+      );
+    }),
+    8,
+    async (module) => {
+      const filePath = normalizePath(module.filePath);
+      const sourceText = await fs.readFile(module.filePath, "utf8");
+      const rewritten = await rewriteModuleImports({
+        // Only a direct dependency module keeps its own import statements in
+        // the native graph; an authored module has its atom specifiers
+        // rewritten later against its region bundle instead.
+        atomFilePaths: input.directDependencyFilePaths.has(filePath)
+          ? input.prebundleFilePaths
+          : new Set<string>(),
+        directDependencyFilePaths: input.directDependencyFilePaths,
+        filePath,
+        flattener,
+        moduleByFilePath,
+        sourceText,
+      });
+      if (rewritten !== sourceText) {
+        await fs.writeFile(module.filePath, rewritten, "utf8");
+      }
+    },
   );
 }

@@ -2,15 +2,16 @@
 
 use std::collections::BTreeSet;
 
-use oxc_ast::ast::*;
+use oxc_allocator::FromIn;
+use oxc_ast::ast::{BindingPattern, Expression, PropertyKey};
 use oxc_ast_visit::VisitMut;
 use oxc_span::SPAN;
-use oxc_syntax::number::NumberBase;
+use oxc_str::Str;
 
 use super::super::flow_helpers::{print_node, property_key_name, single_return_argument};
 use super::super::flow_visitors::BundlerRuntimeNamespaceVisitor;
 use super::super::wrappers::resolve_dynamic_import_module_ids;
-use crate::transpile::identity::BindingKey;
+use crate::transpile::identity::{BindingKey, ModuleIdentity};
 
 impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
     pub(crate) fn push_error(&mut self, message: impl Into<String>) {
@@ -93,19 +94,20 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
         }
     }
 
-    pub(crate) fn slot_for_module_ids(
+    pub(crate) fn validate_namespace_export(
         &self,
         module_ids: &BTreeSet<String>,
         export_name: &str,
-    ) -> std::result::Result<usize, String> {
-        let mut resolved = None;
+    ) -> std::result::Result<(), String> {
+        if module_ids.is_empty() {
+            return Err("Missing bundler-runtime namespace slots".to_string());
+        }
         for module_id in module_ids {
             let logical_id = self
                 .context
                 .bundler_runtime_logical_ids
                 .get(module_id)
-                .map(String::as_str)
-                .unwrap_or(module_id);
+                .map_or(module_id.as_str(), String::as_str);
             let slots = self
                 .context
                 .bundler_module_slots
@@ -113,21 +115,14 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
                 .ok_or_else(|| {
                     format!("Missing bundler-runtime export slot metadata for {module_id}")
                 })?;
-            let slot = slots.slot_for(export_name).ok_or_else(|| {
+            slots.slot_for(export_name).ok_or_else(|| {
                 format!(
                     "bundler-runtime cannot rewrite namespace access for export {:?} from {}",
                     export_name, module_id
                 )
             })?;
-            if resolved.is_some_and(|existing| existing != slot) {
-                return Err(format!(
-                    "bundler-runtime cannot rewrite namespace access for export {:?} because slot assignments diverge across dynamic import targets",
-                    export_name
-                ));
-            }
-            resolved = Some(slot);
         }
-        resolved.ok_or_else(|| "Missing bundler-runtime namespace slots".to_string())
+        Ok(())
     }
 
     pub(crate) fn rewrite_namespace_pattern(
@@ -137,28 +132,33 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
     ) -> bool {
         match pattern {
             BindingPattern::BindingIdentifier(binding) => {
-                self.namespace_bindings
-                    .insert(self.identity.key_of_binding(binding), module_ids.clone());
+                let key = match ModuleIdentity::key_of_binding(binding) {
+                    Ok(key) => key,
+                    Err(error) => {
+                        self.push_error(error);
+                        return false;
+                    }
+                };
+                self.namespace_bindings.insert(key, module_ids.clone());
                 true
             }
             BindingPattern::ObjectPattern(object) if object.rest.is_none() => {
-                let slots = object
+                let names = object
                     .properties
                     .iter()
                     .map(|property| {
                         property_key_name(&property.key)
-                            .and_then(|name| self.slot_for_module_ids(module_ids, &name).ok())
+                            .filter(|name| self.validate_namespace_export(module_ids, name).is_ok())
                     })
                     .collect::<Option<Vec<_>>>();
-                let Some(slots) = slots else {
+                let Some(names) = names else {
                     return false;
                 };
-                for (property, slot) in object.properties.iter_mut().zip(slots) {
-                    property.key = PropertyKey::new_numeric_literal(
+                for (property, name) in object.properties.iter_mut().zip(names) {
+                    property.key = PropertyKey::new_string_literal(
                         SPAN,
-                        slot as f64,
+                        Str::from_in(&name, self.allocator),
                         None,
-                        NumberBase::Decimal,
                         &self.builder,
                     );
                     property.computed = false;
@@ -179,7 +179,9 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
                 if let Some(expression) = arrow.get_expression() {
                     self.module_ids_for_promise(expression)
                 } else {
-                    single_return_argument(&arrow.body)
+                    arrow
+                        .get_function_body()
+                        .and_then(single_return_argument)
                         .and_then(|argument| self.module_ids_for_promise(argument))
                 }
             }
@@ -215,17 +217,19 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
                 };
                 let mut inserted = Vec::new();
                 if let BindingPattern::BindingIdentifier(binding) = &parameter.pattern {
-                    let key = self.identity.key_of_binding(binding);
+                    let key = match ModuleIdentity::key_of_binding(binding) {
+                        Ok(key) => key,
+                        Err(error) => {
+                            self.push_error(error);
+                            return;
+                        }
+                    };
                     self.namespace_bindings.insert(key, module_ids.clone());
                     inserted.push(key);
                 } else if !self.rewrite_namespace_pattern(&mut parameter.pattern, module_ids) {
                     return;
                 }
-                if let Some(body) = arrow.get_expression_mut() {
-                    self.visit_expression(body);
-                } else {
-                    self.visit_function_body(&mut arrow.body);
-                }
+                self.visit_arrow_function_body(&mut arrow.body);
                 for binding in inserted {
                     self.namespace_bindings.remove(&binding);
                 }
@@ -242,7 +246,13 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
                 };
                 let mut inserted = Vec::new();
                 if let BindingPattern::BindingIdentifier(binding) = &parameter.pattern {
-                    let key = self.identity.key_of_binding(binding);
+                    let key = match ModuleIdentity::key_of_binding(binding) {
+                        Ok(key) => key,
+                        Err(error) => {
+                            self.push_error(error);
+                            return;
+                        }
+                    };
                     self.namespace_bindings.insert(key, module_ids.clone());
                     inserted.push(key);
                 } else if !self.rewrite_namespace_pattern(&mut parameter.pattern, module_ids) {

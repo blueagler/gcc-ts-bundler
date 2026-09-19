@@ -6,16 +6,80 @@ import { expect, onTestFinished, test } from "bun:test";
 import ts from "@typescript/typescript6";
 
 import { collectExternalGlobalProtocolEvidence } from "../../src/build/transpile/type-metadata/metadata/external-ownership/index.ts";
+import { collectNativeAnalysis } from "../../src/build/transpile/emit-native/analysis/collect.ts";
+import { normalizeBuildOptions } from "../../src/build/resolve/options.ts";
 import { prebundleMaterializedDependencies } from "../../src/vite/prebundle/index.ts";
-import { createCompilerOptions } from "../../src/vite/config.ts";
+import { parseRuntimeExportGraph } from "../../src/vite/type-metadata/export-graphs/index.ts";
 import {
   classifyTypeMetadataSource,
   collectViteTypeMetadata,
   joinDeclarationAndRuntimeExports,
-  resolveDeclarationOverlay,
+  resolveDeclarationOverlays,
   resolveRuntimeResolutionIdentity,
   resolveRuntimeExportGraph,
 } from "../../src/vite/type-metadata/index.ts";
+
+test("native preflight uses current authored membership on repeated analysis", async () => {
+  const workspace = await createWorkspace();
+  const firstFile = await workspace.write(
+    "first.js",
+    "export const first = 1;\n",
+  );
+  const addedFile = await workspace.write(
+    "added.js",
+    '// @ts-check\n/** @type {number} */\nexport const added = "wrong";\n',
+  );
+  const tsConfigPath = await workspace.write(
+    "tsconfig.json",
+    JSON.stringify({
+      compilerOptions: {
+        allowJs: true,
+        checkJs: true,
+        module: "ESNext",
+        moduleResolution: "Bundler",
+        target: "ESNext",
+      },
+    }),
+  );
+  const analyze = (authoredFiles) =>
+    collectNativeAnalysis({
+      boundaryModuleFileNames: [],
+      externalSpecifiers: [],
+      fileNames: [firstFile, addedFile],
+      options: normalizeBuildOptions({
+        projectRoot: workspace.root,
+        entries: [firstFile, addedFile],
+        authoredFiles,
+        diagnostics: { preflight: "errors-only" },
+      }),
+      tsConfigPath,
+      workspaceDir: workspace.root,
+    });
+
+  const dependencyOnly = await analyze([firstFile]);
+  expect(
+    dependencyOnly.preflightDiagnostics.filter(
+      (diagnostic) =>
+        diagnostic.file?.fileName === addedFile && diagnostic.code === 2322,
+    ),
+  ).toEqual([]);
+
+  const nowAuthored = await analyze([firstFile, addedFile]);
+  expect(
+    nowAuthored.preflightDiagnostics.some(
+      (diagnostic) =>
+        diagnostic.file?.fileName === addedFile && diagnostic.code === 2322,
+    ),
+  ).toBe(true);
+
+  const removedAuthorship = await analyze([firstFile]);
+  expect(
+    removedAuthorship.preflightDiagnostics.filter(
+      (diagnostic) =>
+        diagnostic.file?.fileName === addedFile && diagnostic.code === 2322,
+    ),
+  ).toEqual([]);
+});
 
 test("classifies optional bare global protocols without a producer", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "gcc-global-protocol-"));
@@ -31,7 +95,12 @@ test("classifies optional bare global protocols without a producer", async () =>
       "if (typeof OPTIONAL_GLOBAL !== 'undefined') OPTIONAL_GLOBAL.run();",
       "void open;",
       "void pageXOffset;",
-      "const { class: local } = {};",
+      "const { class: local, definedKey: localKey = GLOBAL_DEFAULT } = {};",
+      "class Result { get styleSheet() { return 42; } set sink(value) {} get [GLOBAL_KEY]() { return 1; } }",
+      "const result = new Result();",
+      "void result.styleSheet;",
+      "const localObject = { OPTIONAL_GLOBAL: 1 };",
+      "void localObject.OPTIONAL_GLOBAL;",
       "",
     ].join("\n"),
   );
@@ -51,6 +120,8 @@ test("classifies optional bare global protocols without a producer", async () =>
     sourceFiles: [sourceFile],
   });
   expect(evidence.externalGlobals).toEqual([
+    "GLOBAL_DEFAULT",
+    "GLOBAL_KEY",
     "OPTIONAL_GLOBAL",
     "Prism",
     "nodeCrypto",
@@ -93,7 +164,14 @@ function graph({ modules, root, runtimeResolutions = [] }) {
     authoredFiles: modules
       .filter((module) => !module.sourceModuleIds[0]?.includes("node_modules"))
       .map((module) => module.filePath),
-    entries: modules[0] ? [`./${path.basename(modules[0].filePath)}`] : [],
+    entries: modules[0]
+      ? [
+          {
+            file: `./${path.basename(modules[0].filePath)}`,
+            sourceModuleId: modules[0].sourceModuleIds[0],
+          },
+        ]
+      : [],
     modules,
     prunedEmptyModuleIds: [],
     retainedEmptyModuleIds: [],
@@ -154,14 +232,12 @@ test("runtime resolution identity keeps package subpath and runtime path", async
   });
 });
 
-
-test("runtime export graph resolves default, named, reexport, star, and CJS identities", () => {
+test("runtime export graph resolves default, named, reexport, star, and CJS identities", async () => {
   const root = path.normalize("/runtime/index.js");
   const leaf = path.normalize("/runtime/leaf.js");
   const cjs = path.normalize("/runtime/cjs.js");
-  const { diagnostics, exports } = resolveRuntimeExportGraph({
-    entryModuleId: root,
-    modules: new Map([
+  const modules = new Map(
+    [
       [
         root,
         [
@@ -176,7 +252,14 @@ test("runtime export graph resolves default, named, reexport, star, and CJS iden
         cjs,
         "const main = () => 1; module.exports = main; exports.extra = value;",
       ],
+    ].map(([moduleId, source]) => [
+      moduleId,
+      parseRuntimeExportGraph(moduleId, source),
     ]),
+  );
+  const { diagnostics, exports } = await resolveRuntimeExportGraph({
+    entryModuleId: root,
+    factsFor: async (moduleId) => modules.get(moduleId) ?? [],
   });
 
   expect(diagnostics).toEqual([]);
@@ -240,19 +323,21 @@ test("declaration overlays are subpath/mode aware and join only public runtime e
     "declare function legacy(): string; export = legacy;\n",
   );
 
-  const overlay = await resolveDeclarationOverlay({
-    containingFilePath: path.join(workspace.root, "app.mts"),
-    resolution: {
-      conditions: ["browser", "import"],
-      packageJsonPath,
-      packageName: "pkg",
-      packageRoot,
-      packageSubpath: "feature",
-      runtimeModuleId: "pkg/feature-runtime",
-      runtimePath: path.join(packageRoot, "feature.js"),
+  const [overlay] = await resolveDeclarationOverlays([
+    {
+      containingFilePath: path.join(workspace.root, "app.mts"),
+      resolution: {
+        conditions: ["browser", "import"],
+        packageJsonPath,
+        packageName: "pkg",
+        packageRoot,
+        packageSubpath: "feature",
+        runtimeModuleId: "pkg/feature-runtime",
+        runtimePath: path.join(packageRoot, "feature.js"),
+      },
+      resolutionMode: "import",
     },
-    resolutionMode: "import",
-  });
+  ]);
 
   expect(overlay.identity).toEqual({
     declarationEntryPath: path.join(packageRoot, "feature.d.mts"),
@@ -263,11 +348,10 @@ test("declaration overlays are subpath/mode aware and join only public runtime e
   ]);
   expect(overlay.cacheFiles).toContain(path.normalize(packageJsonPath));
 
-  const runtime = resolveRuntimeExportGraph({
+  const runtime = await resolveRuntimeExportGraph({
     entryModuleId: path.join(packageRoot, "feature.js"),
-    modules: new Map([
-      [path.join(packageRoot, "feature.js"), "export class Feature {}"],
-    ]),
+    factsFor: async (moduleId) =>
+      parseRuntimeExportGraph(moduleId, "export class Feature {}"),
   });
   const joined = joinDeclarationAndRuntimeExports({
     declarationExports: overlay.exports,
@@ -283,19 +367,21 @@ test("declaration overlays are subpath/mode aware and join only public runtime e
     },
   ]);
 
-  const rootOverlay = await resolveDeclarationOverlay({
-    containingFilePath: path.join(workspace.root, "app.mts"),
-    resolution: {
-      conditions: ["browser", "import"],
-      packageJsonPath,
-      packageName: "pkg",
-      packageRoot,
-      packageSubpath: ".",
-      runtimeModuleId: "pkg/browser-runtime",
-      runtimePath: path.join(packageRoot, "index.js"),
+  const [rootOverlay] = await resolveDeclarationOverlays([
+    {
+      containingFilePath: path.join(workspace.root, "app.mts"),
+      resolution: {
+        conditions: ["browser", "import"],
+        packageJsonPath,
+        packageName: "pkg",
+        packageRoot,
+        packageSubpath: ".",
+        runtimeModuleId: "pkg/browser-runtime",
+        runtimePath: path.join(packageRoot, "index.js"),
+      },
+      resolutionMode: "import",
     },
-    resolutionMode: "import",
-  });
+  ]);
   expect(
     rootOverlay.exports.map((fact) => [fact.exportName, fact.isTypeOnly]),
   ).toEqual([
@@ -304,25 +390,212 @@ test("declaration overlays are subpath/mode aware and join only public runtime e
     ["NamedFeature", false],
   ]);
 
-  const legacy = await resolveDeclarationOverlay({
-    containingFilePath: path.join(workspace.root, "app.cts"),
-    resolution: {
-      conditions: ["require"],
-      packageJsonPath,
-      packageName: "pkg",
-      packageRoot,
-      packageSubpath: "legacy",
-      runtimeModuleId: "pkg/legacy-runtime",
-      runtimePath: path.join(packageRoot, "legacy.cjs"),
+  const [legacy] = await resolveDeclarationOverlays([
+    {
+      containingFilePath: path.join(workspace.root, "app.cts"),
+      resolution: {
+        conditions: ["require"],
+        packageJsonPath,
+        packageName: "pkg",
+        packageRoot,
+        packageSubpath: "legacy",
+        runtimeModuleId: "pkg/legacy-runtime",
+        runtimePath: path.join(packageRoot, "legacy.cjs"),
+      },
+      resolutionMode: "require",
     },
-    resolutionMode: "require",
-  });
+  ]);
   expect(legacy.identity?.declarationEntryPath).toBe(
     path.join(packageRoot, "legacy.d.cts"),
   );
   expect(legacy.exports.map((fact) => fact.exportName)).toContain("default");
 });
 
+test("declaration batches preserve package order, transitive dependencies, and conditional modes", async () => {
+  const workspace = await createWorkspace();
+  const inputs = [];
+  const leaves = [];
+  for (const name of ["alpha", "beta", "gamma"]) {
+    const packageRoot = path.join(workspace.root, "node_modules", name);
+    const packageJsonPath = await workspace.write(
+      `node_modules/${name}/package.json`,
+      JSON.stringify({
+        name,
+        type: "module",
+        exports: {
+          ".": {
+            browser: {
+              import: { types: "./browser.d.mts" },
+              require: { types: "./browser.d.cts" },
+            },
+            import: { types: "./index.d.mts" },
+            require: { types: "./index.d.cts" },
+          },
+        },
+      }),
+    );
+    await workspace.write(
+      `node_modules/${name}/index.d.mts`,
+      `export { ${name} } from "./leaf.mjs";\n`,
+    );
+    leaves.push(
+      await workspace.write(
+        `node_modules/${name}/leaf.d.mts`,
+        `export declare class ${name} {}\n`,
+      ),
+    );
+    inputs.push({
+      compilerOptions: { types: [] },
+      containingFilePath: path.join(workspace.root, "app.mts"),
+      resolution: {
+        conditions: ["import"],
+        packageJsonPath,
+        packageName: name,
+        packageRoot,
+        packageSubpath: ".",
+        runtimeModuleId: `${name}/runtime`,
+        runtimePath: path.join(packageRoot, "index.js"),
+      },
+      resolutionMode: "import",
+    });
+  }
+  await workspace.write(
+    "node_modules/gamma/browser.d.mts",
+    "export declare class BrowserImport {}\n",
+  );
+  await workspace.write(
+    "node_modules/gamma/browser.d.cts",
+    "export declare class BrowserRequire {}\n",
+  );
+  await workspace.write(
+    "node_modules/gamma/index.d.cts",
+    "export declare class ServerRequire {}\n",
+  );
+  const gamma = inputs[2];
+  const missing = {
+    ...gamma,
+    resolution: {
+      ...gamma.resolution,
+      packageSubpath: "missing",
+      runtimeModuleId: "gamma/missing",
+    },
+  };
+  const overlays = await resolveDeclarationOverlays([
+    inputs[0],
+    missing,
+    inputs[1],
+    gamma,
+    { ...gamma, compilerOptions: { customConditions: ["browser"], types: [] } },
+    {
+      ...gamma,
+      containingFilePath: path.join(workspace.root, "app.cts"),
+      resolution: { ...gamma.resolution, conditions: ["browser", "require"] },
+      resolutionMode: "require",
+    },
+    {
+      ...gamma,
+      containingFilePath: path.join(workspace.root, "app.cts"),
+      resolution: { ...gamma.resolution, conditions: ["require"] },
+      resolutionMode: "require",
+    },
+  ]);
+  expect(
+    overlays.map((overlay) => overlay.exports.map((fact) => fact.exportName)),
+  ).toEqual([
+    ["alpha"],
+    [],
+    ["beta"],
+    ["gamma"],
+    ["BrowserImport"],
+    ["BrowserRequire"],
+    ["ServerRequire"],
+  ]);
+  expect(overlays[1].diagnostics).toEqual([
+    { reason: "declaration-unresolved", runtimeModuleId: "gamma/missing" },
+  ]);
+  expect(
+    overlays
+      .filter((_, index) => index !== 1)
+      .flatMap((overlay) => overlay.diagnostics),
+  ).toEqual([]);
+  const dependencies = new Set(
+    overlays.flatMap((overlay) => overlay.cacheFiles),
+  );
+  for (const filePath of leaves) {
+    expect(dependencies.has(path.normalize(filePath))).toBe(true);
+  }
+  expect(
+    overlays
+      .slice(4)
+      .map((overlay) => path.basename(overlay.identity.declarationEntryPath)),
+  ).toEqual(["browser.d.mts", "browser.d.cts", "index.d.cts"]);
+
+  await workspace.write(
+    "node_modules/alpha/leaf.d.mts",
+    "export interface alpha { changed: string }\n",
+  );
+  const [updated] = await resolveDeclarationOverlays([inputs[0]]);
+  expect(
+    updated.exports.map((fact) => [fact.exportName, fact.isTypeOnly]),
+  ).toEqual([["alpha", true]]);
+  expect(
+    overlays[0].exports.map((fact) => [fact.exportName, fact.isTypeOnly]),
+  ).toEqual([["alpha", false]]);
+});
+
+test("declaration batches do not leak a package's transitive module augmentation into another entry", async () => {
+  const workspace = await createWorkspace();
+  const inputs = [];
+  for (const name of ["plain", "augmenting"]) {
+    const packageRoot = path.join(workspace.root, "node_modules", name);
+    const packageJsonPath = await workspace.write(
+      `node_modules/${name}/package.json`,
+      JSON.stringify({ name, type: "module", types: "./index.d.ts" }),
+    );
+    inputs.push({
+      compilerOptions: { types: [] },
+      resolution: {
+        conditions: ["import"],
+        packageJsonPath,
+        packageName: name,
+        packageRoot,
+        packageSubpath: ".",
+        runtimeModuleId: `${name}/runtime`,
+        runtimePath: path.join(packageRoot, "index.js"),
+      },
+      resolutionMode: "import",
+    });
+  }
+  const plain = await workspace.write(
+    "node_modules/plain/index.d.ts",
+    "export declare class Original {}\n",
+  );
+  const augmentation = await workspace.write(
+    "node_modules/augmenting/augmentation.d.ts",
+    'import "plain"; declare module "plain" { export const injected: number; }\n',
+  );
+  await workspace.write(
+    "node_modules/augmenting/index.d.ts",
+    'import "./augmentation.js"; export { Original, injected } from "plain";\n',
+  );
+  const [plainOverlay, augmentingOverlay] =
+    await resolveDeclarationOverlays(inputs);
+  expect(plainOverlay.exports.map((fact) => fact.exportName)).toEqual([
+    "Original",
+  ]);
+  expect(
+    new Set(augmentingOverlay.exports.map((fact) => fact.exportName)),
+  ).toEqual(new Set(["Original", "injected"]));
+  expect(plainOverlay.cacheFiles).not.toContain(path.normalize(augmentation));
+  expect(augmentingOverlay.cacheFiles).toContain(path.normalize(augmentation));
+  expect(augmentingOverlay.cacheFiles).toContain(path.normalize(plain));
+
+  const [augmentedFirst, plainSecond] = await resolveDeclarationOverlays(
+    [...inputs].reverse(),
+  );
+  expect(augmentedFirst.exports).toEqual(augmentingOverlay.exports);
+  expect(plainSecond.exports).toEqual(plainOverlay.exports);
+});
 
 test("prebundles retain deterministic exported facade provenance", async () => {
   const workspace = await createWorkspace();
@@ -342,7 +615,7 @@ test("prebundles retain deterministic exported facade provenance", async () => {
   );
   const graph = {
     authoredFiles: [app],
-    entries: ["./app.js"],
+    entries: [{ file: "./app.js", sourceModuleId: "/src/app.ts" }],
     modules: [
       {
         filePath: app,
@@ -428,7 +701,7 @@ test("typed dependency runtime sources bypass fusion conservatively", async () =
     dynamicRootModuleIds: [],
     materialized: {
       authoredFiles: [app],
-      entries: ["./app.js"],
+      entries: [{ file: "./app.js", sourceModuleId: "/src/app.ts" }],
       modules: [
         {
           filePath: app,
@@ -497,7 +770,7 @@ test("large typed dependency graphs fall back to prebundling", async () => {
     dynamicRootModuleIds: [],
     materialized: {
       authoredFiles: [app],
-      entries: ["./app.js"],
+      entries: [{ file: "./app.js", sourceModuleId: "/src/app.ts" }],
       modules: [
         {
           filePath: app,
@@ -714,6 +987,10 @@ test("declaration overlays attach only proven browser-subpath exports to fused v
     "captured/model.js",
     "export class Feature { constructor(label) { this.label = label; } } export function create(label) { return new Feature(label); }\n",
   );
+  const unusedRuntimeFile = await workspace.write(
+    "captured/unused.js",
+    "export const unused = 1;\n",
+  );
   const resolution = {
     conditions: ["browser", "import"],
     importerModuleId: importer,
@@ -737,6 +1014,16 @@ test("declaration overlays attach only proven browser-subpath exports to fused v
         filePath: leafRuntimeFile,
         id: leafRuntimeId,
         sourceModuleId: leafRuntimeId,
+      }),
+      oneToOneModule({
+        filePath: unusedRuntimeFile,
+        id: "unused-provenance",
+        sourceModuleId: "unused-provenance",
+      }),
+      oneToOneModule({
+        filePath: path.join(sourceRoot, "unreadable.js"),
+        id: "unreadable-provenance",
+        sourceModuleId: "unreadable-provenance",
       }),
     ],
     root: sourceRoot,
@@ -807,6 +1094,48 @@ test("declaration overlays attach only proven browser-subpath exports to fused v
       .join("\n"),
   ).not.toContain("Hidden");
   expect(first.dependencies).toContain(path.normalize(declarationModel));
+  expect(first.dependencies).toContain(path.normalize(publicRuntimeFile));
+  expect(first.dependencies).toContain(path.normalize(leafRuntimeFile));
+  expect(first.dependencies).not.toContain(path.normalize(unusedRuntimeFile));
+  expect(
+    first.diagnostics.some(
+      (diagnostic) => diagnostic.runtimeModuleId === "unreadable-provenance",
+    ),
+  ).toBe(false);
+
+  await workspace.write(
+    "captured/unused.js",
+    "export const unrelated = 123;\n",
+  );
+  const unchanged = await collectViteTypeMetadata({
+    materialized,
+    projectRoot: workspace.root,
+    sourceGraph,
+  });
+  expect(JSON.stringify(unchanged)).toBe(JSON.stringify(first));
+
+  await workspace.write(
+    "captured/feature.js",
+    'export { Feature } from "./model.js";\n',
+  );
+  const narrowed = await collectViteTypeMetadata({
+    materialized,
+    projectRoot: workspace.root,
+    sourceGraph,
+  });
+  expect(narrowed.files.map((file) => file.runtimeModuleId)).toEqual([
+    "fused:vendor",
+  ]);
+  await workspace.write(
+    "captured/feature.js",
+    'export { Feature, create } from "./model.js";\n',
+  );
+  const restoredExports = await collectViteTypeMetadata({
+    materialized,
+    projectRoot: workspace.root,
+    sourceGraph,
+  });
+  expect(restoredExports.files).toEqual(first.files);
 
   await workspace.write(
     "node_modules/pkg/types/model.d.ts",
@@ -818,9 +1147,27 @@ test("declaration overlays attach only proven browser-subpath exports to fused v
     sourceGraph,
   });
   expect(JSON.stringify(second.files)).not.toBe(JSON.stringify(first.files));
+
+  const missingLeaf = await collectViteTypeMetadata({
+    materialized,
+    projectRoot: workspace.root,
+    sourceGraph: {
+      ...sourceGraph,
+      modules: sourceGraph.modules.filter(
+        (module) => module.id !== leafRuntimeId,
+      ),
+    },
+  });
+  expect(missingLeaf.files).toEqual([]);
+  const restored = await collectViteTypeMetadata({
+    materialized,
+    projectRoot: workspace.root,
+    sourceGraph,
+  });
+  expect(restored.files).toEqual(second.files);
 });
 
-test("CJS export-equals overlays attach to the normalized one-to-one runtime binding and config carries the sidecar", async () => {
+test("CJS export-equals overlays attach to the normalized one-to-one runtime binding", async () => {
   const workspace = await createWorkspace();
   await workspace.write(
     "tsconfig.json",
@@ -893,18 +1240,4 @@ test("CJS export-equals overlays attach to the normalized one-to-one runtime bin
         annotation.target.bindingName === "__cjsExports",
     ),
   ).toBe(true);
-  const compilerOptions = createCompilerOptions({
-    config: { base: "/", build: { target: "esnext" }, root: workspace.root },
-    entries: ["./legacy.cjs"],
-    externs: [],
-    manifestFile: "manifest.json",
-    options: {},
-    outDir: path.join(workspace.root, "out"),
-    projectRoot: workspace.root,
-    publicPath: "/",
-    srcDir: path.dirname(runtimeFile),
-    typeMetadata: result,
-  });
-  expect(compilerOptions.typeMetadata).toBe(result);
-  expect(compilerOptions.typedExterns).toBeUndefined();
 });

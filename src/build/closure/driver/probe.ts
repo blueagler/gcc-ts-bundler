@@ -2,7 +2,6 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
-  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -14,7 +13,6 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import * as closureCompilerPackage from "google-closure-compiler";
 
@@ -32,6 +30,7 @@ export type ClosureDriverProbe =
     };
 
 const JAVA_PATH = "java";
+const PROBE_TIMEOUT_MS = 30_000;
 const CLASS_FILE_NAME = "ResidentCliWorker.class";
 const SOURCE_FILE_NAME = "ResidentCliWorker.java";
 const MANIFEST_FILE_NAME = "ResidentCliWorker.manifest";
@@ -55,7 +54,7 @@ async function runProbe(): Promise<ClosureDriverProbe> {
     return { ok: false, reason: "GCC_CLOSURE_DRIVER=0" };
   }
 
-  const jarPath = resolveJarPath();
+  const jarPath = resolveClosureCompilerJarPath();
   if (!jarPath) {
     return { ok: false, reason: "closure compiler jar is not installed" };
   }
@@ -108,43 +107,24 @@ async function runProbe(): Promise<ClosureDriverProbe> {
   return compileWorker(jarPath, classesDir, source);
 }
 
-function resolveJarPath(): string | undefined {
-  const fromExport = asNonEmptyString(
-    (closureCompilerPackage as { JAR_PATH?: unknown }).JAR_PATH,
-  );
-  if (fromExport) {
-    return fromExport;
-  }
-  const instance = new closureCompilerPackage.compiler({}) as unknown as {
-    JAR_PATH?: unknown;
-  };
-  return asNonEmptyString(instance.JAR_PATH);
-}
-
-function asNonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
+export function resolveClosureCompilerJarPath(): string | undefined {
+  // The package exports this path; its typings incorrectly put it on the class.
+  const packageExports = closureCompilerPackage as { JAR_PATH?: unknown };
+  const jarPath = packageExports.JAR_PATH;
+  return typeof jarPath === "string" && jarPath.length > 0
+    ? jarPath
+    : undefined;
 }
 
 function loadWorkerSource(): string | undefined {
-  const candidates = [
-    fileURLToPath(new URL("./ResidentCliWorker.java", import.meta.url)),
-  ];
   try {
-    candidates.push(
-      path.join(
-        getPackageRootFromBundle(),
-        "src/build/closure/driver/ResidentCliWorker.java",
-      ),
+    return readFileSync(
+      path.join(getPackageRootFromBundle(), "closure-lib", SOURCE_FILE_NAME),
+      "utf8",
     );
   } catch {
-    // Bundled builds may not sit next to package.json.
+    return undefined;
   }
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      return readFileSync(candidate, "utf8");
-    }
-  }
-  return undefined;
 }
 
 function ensurePrivateDirectory(
@@ -326,23 +306,38 @@ function runOnce(
   command: string,
   args: string[],
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
-    });
-    child.on("error", (error) => {
-      resolve({ code: 1, stdout, stderr: error.message });
-    });
-    child.on("close", (code) => {
-      resolve({ code: code ?? 1, stdout, stderr });
-    });
+  const { promise, resolve } = Promise.withResolvers<{
+    code: number;
+    stdout: string;
+    stderr: string;
+  }>();
+  const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  let failed = false;
+  let escalation: ReturnType<typeof setTimeout> | undefined;
+  const timeout = setTimeout(() => {
+    failed = true;
+    stderr += "\nClosure driver probe timed out.";
+    child.kill();
+    escalation = setTimeout(() => child.kill("SIGKILL"), PROBE_TIMEOUT_MS);
+  }, PROBE_TIMEOUT_MS);
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
   });
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  child.on("error", (error) => {
+    failed = true;
+    stderr += error.message;
+  });
+  child.on("close", (code) => {
+    clearTimeout(timeout);
+    clearTimeout(escalation);
+    resolve({ code: failed ? 1 : (code ?? 1), stdout, stderr });
+  });
+  return promise;
 }

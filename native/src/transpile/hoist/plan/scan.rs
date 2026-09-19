@@ -1,13 +1,18 @@
 //! Module scans for hoist-plan construction.
 
-use super::super::super::*;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::Path;
+
+use super::super::super::context::{module_export_name, ExportTopology};
+use super::super::super::identity::ModuleIdentity;
+use super::super::super::imports_exports::BundlerExportSlotMode;
+use super::super::super::{
+    resolve_module_id_for_specifier, to_emitted_commonjs_specifier, TranspileContext,
+};
 use super::super::usage::{collect_used_binding_ids, scan_namespace_usage};
 use oxc_ast::ast::{
-    BindingPattern, Declaration, ExportDefaultDeclarationKind, ImportDeclarationSpecifier,
-    ImportOrExportKind, ModuleExportName, Program as OxcProgram, Statement,
+    ImportDeclarationSpecifier, ImportOrExportKind, Program as OxcProgram, Statement,
 };
-
-pub(super) const DEFAULT_EXPORT_LOCAL: &str = "__gcc_dflt";
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ModuleScan {
@@ -20,8 +25,6 @@ pub(crate) struct ModuleScan {
     /// `export * from` targets, in source order
     pub(super) stars: Vec<String>,
     pub(super) import_edges: Vec<ImportEdge>,
-    /// `export ... from` targets (execution + facade edges)
-    pub(super) reexport_targets: Vec<String>,
     pub(super) scan_failed: bool,
     pub(super) local_export_modes: HashMap<String, BundlerExportSlotMode>,
     /// Local names of top-level declarations from which an assignment to a
@@ -79,242 +82,72 @@ pub(super) fn scan_commonjs_module(
 
 pub(super) fn scan_esm_program(
     program: &OxcProgram<'_>,
-    identity: &super::super::super::identity::ModuleIdentity,
+    identity: &ModuleIdentity,
     file_path: &Path,
     resolution_context: &TranspileContext,
-) -> ModuleScan {
-    let mut scan = ModuleScan::default();
-    let mut import_locals = HashMap::<String, Option<(String, String)>>::new();
-    let mut namespace_import_locals = HashMap::<String, String>::new();
-    let namespace_usage = scan_namespace_usage(program, identity);
+    topology: ExportTopology,
+) -> Result<ModuleScan, String> {
+    let mut scan = ModuleScan {
+        // Explicit external forwards have no internal binding to hoist.
+        scan_failed: topology.explicit.len()
+            != topology.locals.len() + topology.forwards.len() + topology.namespaces.len(),
+        own_exports: topology.locals,
+        reexports: topology.forwards,
+        namespace_reexports: topology.namespaces,
+        stars: topology.stars,
+        ..ModuleScan::default()
+    };
+    let namespace_usage = scan_namespace_usage(program, identity)?;
     let used_binding_ids = collect_used_binding_ids(program, identity);
 
     for statement in &program.body {
-        match statement {
-            Statement::ImportDeclaration(import) => {
-                if import.import_kind == ImportOrExportKind::Type {
-                    continue;
-                }
-                let Ok(target) = resolve_module_id_for_specifier(
-                    file_path,
-                    import.source.value.as_str(),
-                    resolution_context,
-                ) else {
-                    scan.scan_failed = true;
-                    continue;
-                };
-                let mut edge = ImportEdge {
-                    target_module_id: target.clone(),
-                    ..Default::default()
-                };
-                for specifier in import.specifiers.iter().flatten() {
-                    match specifier {
-                        ImportDeclarationSpecifier::ImportSpecifier(specifier)
-                            if specifier.import_kind == ImportOrExportKind::Type => {}
-                        ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
-                            let imported = module_export_name(&specifier.imported);
-                            let local = specifier.local.name.to_string();
-                            import_locals.insert(local, Some((target.clone(), imported.clone())));
-                            if used_binding_ids.contains(&identity.key_of_binding(&specifier.local))
-                            {
-                                edge.used_named.push(imported.clone());
-                            }
-                            edge.named.push(imported);
-                        }
-                        ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
-                            let local = specifier.local.name.to_string();
-                            import_locals
-                                .insert(local, Some((target.clone(), "default".to_string())));
-                            if used_binding_ids.contains(&identity.key_of_binding(&specifier.local))
-                            {
-                                edge.used_named.push("default".to_string());
-                            }
-                            edge.named.push("default".to_string());
-                        }
-                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-                            let local = specifier.local.name.to_string();
-                            import_locals.insert(local.clone(), None);
-                            namespace_import_locals.insert(local, target.clone());
-                            edge.namespace = true;
-                            edge.namespace_members = namespace_usage
-                                .member_only_usage(identity.key_of_binding(&specifier.local));
-                        }
-                    }
-                }
-                scan.import_edges.push(edge);
-            }
-            Statement::ExportNamedDeclaration(export) => {
-                if export.export_kind == ImportOrExportKind::Type {
-                    continue;
-                }
-                if let Some(declaration) = &export.declaration {
-                    for name in declaration_names(declaration) {
-                        scan.own_exports.insert(name.clone(), name);
-                    }
-                }
-                if let Some(source) = &export.source {
-                    let Ok(target) = resolve_module_id_for_specifier(
-                        file_path,
-                        source.value.as_str(),
-                        resolution_context,
-                    ) else {
-                        scan.scan_failed = true;
-                        continue;
-                    };
-                    scan.reexport_targets.push(target.clone());
-                    for specifier in &export.specifiers {
-                        if specifier.export_kind == ImportOrExportKind::Type {
-                            continue;
-                        }
-                        scan.reexports.insert(
-                            module_export_name(&specifier.exported),
-                            (target.clone(), module_export_name(&specifier.local)),
-                        );
-                    }
-                } else {
-                    for specifier in &export.specifiers {
-                        if specifier.export_kind == ImportOrExportKind::Type {
-                            continue;
-                        }
-                        let local = module_export_name(&specifier.local);
-                        let export_name = module_export_name(&specifier.exported);
-                        match import_locals.get(&local) {
-                            Some(Some((target, imported))) => {
-                                scan.reexports
-                                    .insert(export_name, (target.clone(), imported.clone()));
-                            }
-                            Some(None) => {
-                                let Some(target) = namespace_import_locals.get(&local) else {
-                                    scan.scan_failed = true;
-                                    continue;
-                                };
-                                scan.namespace_reexports.insert(export_name, target.clone());
-                            }
-                            None => {
-                                scan.own_exports.insert(export_name, local);
-                            }
-                        }
-                    }
-                }
-            }
-            Statement::ExportDefaultDeclaration(export) => {
-                let local = match &export.declaration {
-                    ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
-                        function.id.as_ref().map(|id| id.name.to_string())
-                    }
-                    ExportDefaultDeclarationKind::ClassDeclaration(class) => {
-                        class.id.as_ref().map(|id| id.name.to_string())
-                    }
-                    _ => None,
-                };
-                if let Some((target, imported)) =
-                    export.declaration.as_expression().and_then(|expression| {
-                        let oxc_ast::ast::Expression::Identifier(identifier) = expression else {
-                            return None;
-                        };
-                        import_locals
-                            .get(identifier.name.as_str())
-                            .and_then(Option::as_ref)
-                    })
-                {
-                    scan.reexports
-                        .insert("default".to_string(), (target.clone(), imported.clone()));
-                    continue;
-                }
-                scan.own_exports.insert(
-                    "default".to_string(),
-                    local.unwrap_or_else(|| DEFAULT_EXPORT_LOCAL.to_string()),
-                );
-            }
-            Statement::TSExportAssignment(_) => {
-                scan.own_exports
-                    .insert("default".to_string(), DEFAULT_EXPORT_LOCAL.to_string());
-            }
-            Statement::ExportAllDeclaration(export) => {
-                let Ok(target) = resolve_module_id_for_specifier(
-                    file_path,
-                    export.source.value.as_str(),
-                    resolution_context,
-                ) else {
-                    scan.scan_failed = true;
-                    continue;
-                };
-                scan.reexport_targets.push(target.clone());
-                if let Some(exported) = &export.exported {
-                    scan.namespace_reexports
-                        .insert(module_export_name(exported), target);
-                } else {
-                    scan.stars.push(target);
-                }
-            }
-            _ => {}
+        let Statement::ImportDeclaration(import) = statement else {
+            continue;
+        };
+        if import.import_kind == ImportOrExportKind::Type {
+            continue;
         }
+        let Ok(target) = resolve_module_id_for_specifier(
+            file_path,
+            import.source.value.as_str(),
+            resolution_context,
+        ) else {
+            scan.scan_failed = true;
+            continue;
+        };
+        let mut edge = ImportEdge {
+            target_module_id: target,
+            ..Default::default()
+        };
+        for specifier in import.specifiers.iter().flatten() {
+            match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(specifier)
+                    if specifier.import_kind == ImportOrExportKind::Type => {}
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                    let imported = module_export_name(&specifier.imported);
+                    if used_binding_ids.contains(&ModuleIdentity::key_of_binding(&specifier.local)?)
+                    {
+                        edge.used_named.push(imported.clone());
+                    }
+                    edge.named.push(imported);
+                }
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                    if used_binding_ids.contains(&ModuleIdentity::key_of_binding(&specifier.local)?)
+                    {
+                        edge.used_named.push("default".to_string());
+                    }
+                    edge.named.push("default".to_string());
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    edge.namespace = true;
+                    edge.namespace_members = namespace_usage
+                        .member_only_usage(ModuleIdentity::key_of_binding(&specifier.local)?);
+                }
+            }
+        }
+        scan.import_edges.push(edge);
     }
-    scan
-}
-
-fn declaration_names(declaration: &Declaration<'_>) -> Vec<String> {
-    let mut names = Vec::new();
-    match declaration {
-        Declaration::VariableDeclaration(declaration) => {
-            for declarator in &declaration.declarations {
-                collect_pattern_names(&declarator.id, &mut names);
-            }
-        }
-        Declaration::FunctionDeclaration(function) => {
-            if let Some(id) = &function.id {
-                names.push(id.name.to_string());
-            }
-        }
-        Declaration::ClassDeclaration(class) => {
-            if let Some(id) = &class.id {
-                names.push(id.name.to_string());
-            }
-        }
-        Declaration::TSEnumDeclaration(declaration) => {
-            names.push(declaration.id.name.to_string());
-        }
-        Declaration::TSModuleDeclaration(declaration) => {
-            if let oxc_ast::ast::TSModuleDeclarationName::Identifier(id) = &declaration.id {
-                names.push(id.name.to_string());
-            }
-        }
-        _ => {}
-    }
-    names
-}
-
-fn collect_pattern_names(pattern: &BindingPattern<'_>, names: &mut Vec<String>) {
-    match pattern {
-        BindingPattern::BindingIdentifier(identifier) => names.push(identifier.name.to_string()),
-        BindingPattern::ArrayPattern(array) => {
-            for pattern in array.elements.iter().flatten() {
-                collect_pattern_names(pattern, names);
-            }
-            if let Some(rest) = &array.rest {
-                collect_pattern_names(&rest.argument, names);
-            }
-        }
-        BindingPattern::ObjectPattern(object) => {
-            for property in &object.properties {
-                collect_pattern_names(&property.value, names);
-            }
-            if let Some(rest) = &object.rest {
-                collect_pattern_names(&rest.argument, names);
-            }
-        }
-        BindingPattern::AssignmentPattern(assignment) => {
-            collect_pattern_names(&assignment.left, names);
-        }
-    }
-}
-
-fn module_export_name(name: &ModuleExportName<'_>) -> String {
-    match name {
-        ModuleExportName::IdentifierName(identifier) => identifier.name.to_string(),
-        ModuleExportName::IdentifierReference(identifier) => identifier.name.to_string(),
-        ModuleExportName::StringLiteral(literal) => literal.value.to_string(),
-    }
+    Ok(scan)
 }
 
 /// Names of top-level declarations from which an assignment to a top-level

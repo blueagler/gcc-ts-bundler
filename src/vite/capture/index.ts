@@ -17,7 +17,6 @@ import type {
 } from "../internal-types";
 import { getCapturedSourceFile } from "../capture-analysis";
 import {
-  analyzeModuleCode,
   getCapturedModuleAnalysis,
   isDependencyModuleId,
   stripQuery,
@@ -107,209 +106,118 @@ interface DemoteReassignedConstantsResult {
   names: string[];
 }
 
-function collectBindingNames(name: ts.BindingName, into: Set<string>) {
+function visitBindingIdentifiers(
+  name: ts.BindingName,
+  visit: (identifier: ts.Identifier) => void,
+) {
   if (ts.isIdentifier(name)) {
-    into.add(name.text);
+    visit(name);
     return;
   }
   for (const element of name.elements) {
     if (!ts.isOmittedExpression(element)) {
-      collectBindingNames(element.name, into);
+      visitBindingIdentifiers(element.name, visit);
     }
   }
 }
 
-function collectArrayAssignmentTargetNames(
-  elements: ts.NodeArray<ts.Expression>,
-  into: Set<string>,
-) {
-  for (const element of elements) {
-    if (ts.isOmittedExpression(element)) {
-      continue;
-    }
-    collectAssignmentTargetNames(element, into);
-  }
-}
-
-function collectObjectAssignmentTargetNames(
-  properties: ts.NodeArray<ts.ObjectLiteralElementLike>,
-  into: Set<string>,
-) {
-  for (const property of properties) {
-    if (ts.isShorthandPropertyAssignment(property)) {
-      collectAssignmentTargetNames(property.name, into);
-      continue;
-    }
-    if (ts.isPropertyAssignment(property)) {
-      collectAssignmentTargetNames(property.initializer, into);
-      continue;
-    }
-    if (ts.isSpreadAssignment(property)) {
-      collectAssignmentTargetNames(property.expression, into);
-    }
-  }
-}
-
-function collectAssignmentTargetNames(
+function visitAssignmentIdentifiers(
   target: ts.Expression,
-  into: Set<string>,
+  visit: (identifier: ts.Identifier) => void,
 ) {
   if (ts.isIdentifier(target)) {
-    into.add(target.text);
-    return;
-  }
-  if (ts.isParenthesizedExpression(target)) {
-    collectAssignmentTargetNames(target.expression, into);
-    return;
-  }
-  if (ts.isArrayLiteralExpression(target)) {
-    collectArrayAssignmentTargetNames(target.elements, into);
-    return;
-  }
-  if (ts.isObjectLiteralExpression(target)) {
-    collectObjectAssignmentTargetNames(target.properties, into);
-    return;
-  }
-  if (ts.isSpreadElement(target)) {
-    collectAssignmentTargetNames(target.expression, into);
+    visit(target);
+  } else if (
+    ts.isParenthesizedExpression(target) ||
+    ts.isSpreadElement(target)
+  ) {
+    visitAssignmentIdentifiers(target.expression, visit);
+  } else if (ts.isArrayLiteralExpression(target)) {
+    for (const element of target.elements) {
+      if (!ts.isOmittedExpression(element)) {
+        visitAssignmentIdentifiers(element, visit);
+      }
+    }
+  } else if (ts.isObjectLiteralExpression(target)) {
+    for (const property of target.properties) {
+      if (ts.isShorthandPropertyAssignment(property)) {
+        visitAssignmentIdentifiers(property.name, visit);
+      } else if (ts.isPropertyAssignment(property)) {
+        visitAssignmentIdentifiers(property.initializer, visit);
+      } else if (ts.isSpreadAssignment(property)) {
+        visitAssignmentIdentifiers(property.expression, visit);
+      }
+    }
   }
 }
 
-function noteConstOrAssignment(
-  node: ts.Node,
-  constNames: Set<string>,
-  assignedNames: Set<string>,
-) {
-  if (
-    ts.isVariableDeclarationList(node) &&
-    (node.flags & ts.NodeFlags.Const) !== 0
-  ) {
-    for (const declaration of node.declarations) {
-      collectBindingNames(declaration.name, constNames);
-    }
-    return;
-  }
+function assignmentTarget(node: ts.Node) {
   if (
     ts.isBinaryExpression(node) &&
     node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
     node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
   ) {
-    collectAssignmentTargetNames(node.left, assignedNames);
-    return;
+    return node.left;
   }
   if (
     (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
     (node.operator === ts.SyntaxKind.PlusPlusToken ||
       node.operator === ts.SyntaxKind.MinusMinusToken)
   ) {
-    collectAssignmentTargetNames(node.operand, assignedNames);
-    return;
+    return node.operand;
   }
   if (
     (ts.isForInStatement(node) || ts.isForOfStatement(node)) &&
     !ts.isVariableDeclarationList(node.initializer)
   ) {
-    collectAssignmentTargetNames(node.initializer, assignedNames);
+    return node.initializer;
   }
-}
-
-function addArrayAssignedSymbols(
-  elements: ts.NodeArray<ts.Expression>,
-  checker: ts.TypeChecker,
-  assignedSymbols: Set<ts.Symbol>,
-) {
-  for (const element of elements) {
-    if (ts.isOmittedExpression(element)) {
-      continue;
-    }
-    addTarget(element, checker, assignedSymbols);
-  }
-}
-
-function addObjectAssignedSymbols(
-  properties: ts.NodeArray<ts.ObjectLiteralElementLike>,
-  checker: ts.TypeChecker,
-  assignedSymbols: Set<ts.Symbol>,
-) {
-  for (const property of properties) {
-    if (ts.isShorthandPropertyAssignment(property)) {
-      addTarget(property.name, checker, assignedSymbols);
-      continue;
-    }
-    if (ts.isPropertyAssignment(property)) {
-      addTarget(property.initializer, checker, assignedSymbols);
-      continue;
-    }
-    if (ts.isSpreadAssignment(property)) {
-      addTarget(property.expression, checker, assignedSymbols);
-    }
-  }
-}
-
-function addTarget(
-  target: ts.Expression,
-  checker: ts.TypeChecker,
-  assignedSymbols: Set<ts.Symbol>,
-) {
-  if (ts.isIdentifier(target)) {
-    const symbol = checker.getSymbolAtLocation(target);
-    if (symbol) assignedSymbols.add(symbol);
-    return;
-  }
-  if (ts.isParenthesizedExpression(target)) {
-    addTarget(target.expression, checker, assignedSymbols);
-    return;
-  }
-  if (ts.isArrayLiteralExpression(target)) {
-    addArrayAssignedSymbols(target.elements, checker, assignedSymbols);
-    return;
-  }
-  if (ts.isObjectLiteralExpression(target)) {
-    addObjectAssignedSymbols(target.properties, checker, assignedSymbols);
-    return;
-  }
-  if (ts.isSpreadElement(target)) {
-    addTarget(target.expression, checker, assignedSymbols);
-  }
-}
-
-function assignedNameHitsConst(
-  assignedNames: Set<string>,
-  constNames: Set<string>,
-) {
-  if (constNames.size === 0 || assignedNames.size === 0) {
-    return false;
-  }
-  for (const name of assignedNames) {
-    if (constNames.has(name)) {
-      return true;
-    }
-  }
-  return false;
+  return undefined;
 }
 
 /**
- * Cheap name-based over-approximation of "this module writes a const
- * binding". False positives (shadowed names) still pay for the Program;
- * false negatives would skip a required demotion, so every assignment
- * form the checker walk understands is collected here too.
+ * Cheap name-based over-approximation; only a matching assignment pays for
+ * the scope-aware Program. Both passes share the assignment grammar.
  */
 function moduleMayReassignConst(sourceFile: ts.SourceFile) {
   const constNames = new Set<string>();
   const assignedNames = new Set<string>();
+  const addConstName = (name: ts.Identifier) => constNames.add(name.text);
+  const addAssignedName = (name: ts.Identifier) => assignedNames.add(name.text);
   const visit = (node: ts.Node) => {
-    noteConstOrAssignment(node, constNames, assignedNames);
+    if (
+      ts.isVariableDeclarationList(node) &&
+      (node.flags & ts.NodeFlags.Const) !== 0
+    ) {
+      for (const declaration of node.declarations) {
+        visitBindingIdentifiers(declaration.name, addConstName);
+      }
+    } else {
+      const target = assignmentTarget(node);
+      if (target) visitAssignmentIdentifiers(target, addAssignedName);
+    }
     ts.forEachChild(node, visit);
   };
   visit(sourceFile);
-  return assignedNameHitsConst(assignedNames, constNames);
+  for (const name of assignedNames) {
+    if (constNames.has(name)) return true;
+  }
+  return false;
 }
 
 export function demoteReassignedConstants(
   code: string,
   id = "/__gcc_ts_bundler_capture__.js",
 ): DemoteReassignedConstantsResult {
-  if (!moduleMayReassignConst(getCapturedSourceFile(id, code))) {
+  return demoteReassignedConstantsForRecord({ code, id });
+}
+
+function demoteReassignedConstantsForRecord(
+  record: CapturedModule,
+  metrics?: ViteBuildMetrics,
+): DemoteReassignedConstantsResult {
+  const { code } = record;
+  if (!moduleMayReassignConst(getCapturedSourceFile(record, code, metrics))) {
     return { code, names: [] };
   }
 
@@ -336,19 +244,9 @@ export function demoteReassignedConstants(
   const constLists = new Map<ts.Symbol, ts.VariableDeclarationList>();
   const assignedSymbols = new Set<ts.Symbol>();
 
-  const addBinding = (
-    name: ts.BindingName,
-    declarationList: ts.VariableDeclarationList,
-  ) => {
-    if (ts.isIdentifier(name)) {
-      const symbol = checker.getSymbolAtLocation(name);
-      if (symbol) constLists.set(symbol, declarationList);
-      return;
-    }
-    for (const element of name.elements) {
-      if (!ts.isOmittedExpression(element))
-        addBinding(element.name, declarationList);
-    }
+  const addAssignedSymbol = (name: ts.Identifier) => {
+    const symbol = checker.getSymbolAtLocation(name);
+    if (symbol) assignedSymbols.add(symbol);
   };
   const visit = (node: ts.Node) => {
     if (
@@ -356,25 +254,14 @@ export function demoteReassignedConstants(
       (node.flags & ts.NodeFlags.Const) !== 0
     ) {
       for (const declaration of node.declarations) {
-        addBinding(declaration.name, node);
+        visitBindingIdentifiers(declaration.name, (name) => {
+          const symbol = checker.getSymbolAtLocation(name);
+          if (symbol) constLists.set(symbol, node);
+        });
       }
-    } else if (
-      ts.isBinaryExpression(node) &&
-      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
-      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
-    ) {
-      addTarget(node.left, checker, assignedSymbols);
-    } else if (
-      (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
-      (node.operator === ts.SyntaxKind.PlusPlusToken ||
-        node.operator === ts.SyntaxKind.MinusMinusToken)
-    ) {
-      addTarget(node.operand, checker, assignedSymbols);
-    } else if (
-      (ts.isForInStatement(node) || ts.isForOfStatement(node)) &&
-      !ts.isVariableDeclarationList(node.initializer)
-    ) {
-      addTarget(node.initializer, checker, assignedSymbols);
+    } else {
+      const target = assignmentTarget(node);
+      if (target) visitAssignmentIdentifiers(target, addAssignedSymbol);
     }
     ts.forEachChild(node, visit);
   };
@@ -401,12 +288,12 @@ export function demoteReassignedConstants(
 }
 
 async function normalizeCapturedCode(
-  id: string,
-  code: string,
+  record: CapturedModule,
   analysis?: CapturedModuleAnalysis,
   metrics?: ViteBuildMetrics,
 ) {
-  const demoted = demoteReassignedConstants(code, id);
+  const { id } = record;
+  const demoted = demoteReassignedConstantsForRecord(record, metrics);
   let nextCode = demoted.code;
   if (demoted.names.length > 0) {
     if (metrics)
@@ -415,7 +302,7 @@ async function normalizeCapturedCode(
       `gcc-ts-bundler: changed reassigned const binding(s) to let in ${stripQuery(id)}: ${demoted.names.join(", ")}. The original module would throw when these writes run.`,
     );
   }
-  const moduleAnalysis = analysis ?? analyzeModuleCode(id, code);
+  const moduleAnalysis = analysis ?? getCapturedModuleAnalysis(record, metrics);
 
   // Dependency compatibility syntax is owned downstream: ESM-clean graphs use
   // native Oxc lowering, while ambiguous/CJS graphs use the esbuild prebundle.
@@ -459,7 +346,7 @@ async function normalizeCapturedCode(
     }).outputText;
   }
 
-  return annotateAliasedStaticClassMemberWrites(id, nextCode);
+  return nextCode;
 }
 
 /**
@@ -469,10 +356,11 @@ async function normalizeCapturedCode(
  * assignments in place instead of changing their evaluation order.
  */
 export function annotateAliasedStaticClassMemberWrites(
-  id: string,
-  code: string,
+  record: CapturedModule,
+  code: string = record.code,
+  metrics?: ViteBuildMetrics,
 ) {
-  const sourceFile = getCapturedSourceFile(id, code);
+  const sourceFile = getCapturedSourceFile(record, code, metrics);
   const edits: Array<{ end: number; start: number; text: string }> = [];
 
   const visit = (node: ts.Node) => {
@@ -604,37 +492,18 @@ async function getNormalizedCapturedModule(
   record: CapturedModule,
   metrics?: ViteBuildMetrics,
 ): Promise<CapturedModule> {
-  if (record.normalizedCode !== undefined) {
-    const normalizedRecord: CapturedModule = {
-      code: record.normalizedCode,
-      id: record.id,
-      normalizedAnalysis:
-        record.normalizedAnalysis ??
-        getCapturedModuleAnalysis(record, metrics, "normalized"),
-      normalizedCode: record.normalizedCode,
-      rawAnalysis:
-        record.rawAnalysis ?? getCapturedModuleAnalysis(record, metrics),
-    };
-    if (record.format !== undefined) {
-      normalizedRecord.format = record.format;
+  if (record.normalizedCode === undefined) {
+    const analysis = getCapturedModuleAnalysis(record, metrics);
+    record.normalizedCode = await normalizeCapturedCode(
+      record,
+      analysis,
+      metrics,
+    );
+    if (record.normalizedCode === record.code) {
+      record.normalizedAnalysis = analysis;
     }
-    if (record.renderedLength !== undefined) {
-      normalizedRecord.renderedLength = record.renderedLength;
-    }
-    return normalizedRecord;
   }
-
-  const analysis = getCapturedModuleAnalysis(record, metrics);
-  const normalizedCode = await normalizeCapturedCode(
-    record.id,
-    record.code,
-    analysis,
-    metrics,
-  );
-  record.normalizedCode = normalizedCode;
-  if (normalizedCode === record.code) {
-    record.normalizedAnalysis = record.rawAnalysis ?? analysis;
-  }
+  const normalizedCode = record.normalizedCode;
   const normalizedRecord: CapturedModule = {
     code: normalizedCode,
     id: record.id,
@@ -642,8 +511,12 @@ async function getNormalizedCapturedModule(
       record.normalizedAnalysis ??
       getCapturedModuleAnalysis(record, metrics, "normalized"),
     normalizedCode,
-    rawAnalysis: record.rawAnalysis ?? analysis,
+    rawAnalysis:
+      record.rawAnalysis ?? getCapturedModuleAnalysis(record, metrics),
   };
+  if (record.parsedSource && record.parsedSource.code === normalizedCode) {
+    normalizedRecord.parsedSource = record.parsedSource;
+  }
   if (record.format !== undefined) {
     normalizedRecord.format = record.format;
   }

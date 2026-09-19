@@ -7,7 +7,6 @@ import type {
   CapturedModuleFormat,
   ViteBuildMetrics,
 } from "../internal-types";
-import { stripQuery } from "../capture/specifiers";
 
 function isEffectivelyEmptyStatement(statement: ts.Statement) {
   if (ts.isEmptyStatement(statement)) {
@@ -32,59 +31,45 @@ function isEmptyExportStatement(statement: ts.Statement) {
   );
 }
 
-function resolveScriptKind(id: string) {
-  const cleanId = stripQuery(id);
-  if (cleanId.endsWith(".tsx")) {
-    return ts.ScriptKind.TSX;
-  }
-  if (cleanId.endsWith(".ts")) {
-    return ts.ScriptKind.TS;
-  }
-  if (cleanId.endsWith(".jsx")) {
-    return ts.ScriptKind.JSX;
-  }
-  return ts.ScriptKind.JS;
-}
-
-interface CapturedSourceFileEntry {
-  code: string;
-  sourceFile: ts.SourceFile;
-}
-
-const capturedSourceFiles = new Map<string, CapturedSourceFileEntry>();
-const capturedParseCache: {
-  metrics: ViteBuildMetrics | undefined;
-} = { metrics: undefined };
-
 /**
  * Returns the memoized `ts.SourceFile` for a captured module revision.
  *
  * Captured module text is parsed by several independent passes (analysis,
  * const demotion, static member annotation, graph demand), so the parse is
- * shared here instead of repeated per pass. The entry is keyed by module id
- * and validated against the exact `code` string, and a re-inserted id drops
- * its previous revision: a rewritten module yields a fresh SourceFile, never a
- * stale one, and the cache stays bounded by the number of captured modules.
+ * shared here instead of repeated per pass. The entry lives on the capture
+ * record, is validated against the exact `code` string, and a rewritten
+ * revision replaces it: a later parse never sees a stale SourceFile, plugin
+ * instances do not share parses or metrics, and pruning the capture map drops
+ * the parse with the module.
+ *
+ * Vite has already transformed this text to JavaScript. The original module
+ * id (including TS/TSX extensions or resource queries) is provenance, not its
+ * syntax kind. JS also recognizes JSX left by a transform; every consumer,
+ * including materialization, must use this same policy for edit positions.
  */
-export function getCapturedSourceFile(id: string, code: string): ts.SourceFile {
-  const cached = capturedSourceFiles.get(id);
+export function getCapturedSourceFile(
+  record: CapturedModule,
+  code: string = record.code,
+  metrics?: ViteBuildMetrics,
+): ts.SourceFile {
+  const cached = record.parsedSource;
   if (cached && cached.code === code) {
-    if (capturedParseCache.metrics) {
-      capturedParseCache.metrics.parseCacheHits += 1;
+    if (metrics) {
+      metrics.parseCacheHits += 1;
     }
     return cached.sourceFile;
   }
-  if (capturedParseCache.metrics) {
-    capturedParseCache.metrics.parseCacheMisses += 1;
+  if (metrics) {
+    metrics.parseCacheMisses += 1;
   }
   const sourceFile = ts.createSourceFile(
-    id,
+    record.id,
     code,
     ts.ScriptTarget.Latest,
     true,
-    resolveScriptKind(id),
+    ts.ScriptKind.JS,
   );
-  capturedSourceFiles.set(id, { code, sourceFile });
+  record.parsedSource = { code, sourceFile };
   return sourceFile;
 }
 
@@ -268,7 +253,15 @@ export function analyzeModuleCode(
   id: string,
   code: string,
 ): CapturedModuleAnalysis {
-  const sourceFile = getCapturedSourceFile(id, code);
+  return analyzeCapturedModuleCode({ id, code }, code);
+}
+
+function analyzeCapturedModuleCode(
+  record: CapturedModule,
+  code: string,
+  metrics?: ViteBuildMetrics,
+): CapturedModuleAnalysis {
+  const sourceFile = getCapturedSourceFile(record, code, metrics);
   const specifiers: ModuleSpecifierSets = {
     importSpecifiers: new Set<string>(),
     dynamicImportSpecifiers: new Set<string>(),
@@ -338,9 +331,6 @@ export function getCapturedModuleAnalysis(
   metrics?: ViteBuildMetrics,
   mode: "raw" | "normalized" = "raw",
 ): CapturedModuleAnalysis {
-  if (metrics) {
-    capturedParseCache.metrics = metrics;
-  }
   const reused = reuseCapturedModuleAnalysis(record, metrics, mode);
   if (reused) {
     return reused;
@@ -349,11 +339,12 @@ export function getCapturedModuleAnalysis(
     return getCapturedModuleAnalysis(record, metrics, "raw");
   }
 
-  const analysis = analyzeModuleCode(
-    record.id,
+  const analysis = analyzeCapturedModuleCode(
+    record,
     mode === "normalized"
       ? (record.normalizedCode ?? record.code)
       : record.code,
+    metrics,
   );
   if (mode === "normalized") {
     record.normalizedAnalysis = analysis;

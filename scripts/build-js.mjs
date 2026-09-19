@@ -1,18 +1,20 @@
-import { spawn } from "node:child_process";
 import { rm } from "node:fs/promises";
-import { performance } from "node:perf_hooks";
+import path from "node:path";
+import { runCommand, runTasksInParallel } from "./command.mjs";
 
 const BUN = process.platform === "win32" ? "bun.exe" : "bun";
-const SHOW_TIMINGS = process.env.GCC_BUILD_TIMINGS === "1";
 
-await Promise.all([
-  rm("./dist", { force: true, recursive: true }),
-  rm("./bin", { force: true, recursive: true }),
-]);
+if (process.argv.length > 3)
+  throw new Error("Usage: build-js.mjs [output-directory]");
+const outputRoot = path.resolve(process.argv[2] ?? ".");
+const distDir = path.join(outputRoot, "dist");
+const binDir = path.join(outputRoot, "bin");
+await rm(distDir, { force: true, recursive: true });
+await rm(binDir, { force: true, recursive: true });
 
-await runCommandsInParallel([
-  {
-    args: [
+await runTasksInParallel([
+  () =>
+    runCommand(BUN, [
       "build",
       "./src/index.ts",
       "./src/vite/index.ts",
@@ -20,7 +22,7 @@ await runCommandsInParallel([
       "./src/presets/svelte.ts",
       "./src/presets/vue.ts",
       "--outdir",
-      "./dist",
+      distDir,
       "--format",
       "esm",
       "--packages",
@@ -33,15 +35,13 @@ await runCommandsInParallel([
       "node",
       "--root",
       "./src",
-    ],
-    label: "build-js:esm",
-  },
-  {
-    args: [
+    ], { label: "build-js:esm" }),
+  () =>
+    runCommand(BUN, [
       "build",
       "./src/cli/main.ts",
       "--outdir",
-      "./bin",
+      binDir,
       "--format",
       "esm",
       "--packages",
@@ -52,63 +52,11 @@ await runCommandsInParallel([
       "gcc-ts-bundler.mjs",
       "--target",
       "node",
-    ],
-    label: "build-js:cli",
-  },
+    ], { label: "build-js:cli" }),
+  () =>
+    runCommand(
+      process.execPath,
+      ["./scripts/bundle-declarations.mjs", distDir],
+      { label: "build-js:types" },
+    ),
 ]);
-
-await runCommand(process.execPath, ["./scripts/bundle-declarations.mjs"], {
-  label: "build-js:types",
-});
-
-async function runCommandsInParallel(commands) {
-  const running = commands.map(({ args, label }) =>
-    startCommand(BUN, args, { label }),
-  );
-  try {
-    await Promise.all(running.map(({ done }) => done));
-  } catch (error) {
-    for (const { child } of running) {
-      child.kill("SIGTERM");
-    }
-    throw error;
-  }
-}
-
-async function runCommand(command, args, options = {}) {
-  await startCommand(command, args, options).done;
-}
-
-function startCommand(command, args, { label } = {}) {
-  const startedAt = performance.now();
-  const child = spawn(command, args, {
-    stdio: "inherit",
-  });
-  const done = new Promise((resolve, reject) => {
-    child.on("error", reject);
-    child.on("exit", (code, signal) => {
-      if (code === 0) {
-        logTiming(label, startedAt);
-        resolve();
-        return;
-      }
-      reject(
-        new Error(
-          signal
-            ? `${command} ${args.join(" ")} exited via signal ${signal}`
-            : `${command} ${args.join(" ")} exited with code ${code ?? 1}`,
-        ),
-      );
-    });
-  });
-  return { child, done };
-}
-
-function logTiming(label, startedAt) {
-  if (!SHOW_TIMINGS || !label) {
-    return;
-  }
-
-  const durationMs = performance.now() - startedAt;
-  console.error(`[gcc-ts-bundler timing] ${label}: ${durationMs.toFixed(1)}ms`);
-}

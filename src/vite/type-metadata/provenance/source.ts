@@ -7,9 +7,7 @@ const EXPLICIT_JSDOC_TYPE_SIGNAL =
   /(?:\/\/\s*@ts-check\b|\/\*\*[\s\S]*?@(type|param|returns?|template|typedef|implements|extends|satisfies)\b)/u;
 
 export type TypeMetadataSourceEligibility =
-  | "js-jsdoc"
-  | "ts-runtime"
-  | "untyped";
+  "js-jsdoc" | "ts-runtime" | "untyped";
 
 export function classifyTypeMetadataSource(
   moduleId: string,

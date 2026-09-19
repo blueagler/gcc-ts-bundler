@@ -4,7 +4,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use oxc_allocator::Allocator;
 
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    Argument, AssignmentExpression, AssignmentTarget, BindingPattern, CallExpression, Expression,
+    ForInStatement, ForOfStatement, ImportDeclarationSpecifier, Program, ReturnStatement,
+    SimpleAssignmentTarget, Statement, UnaryExpression, UpdateExpression, VariableDeclarator,
+};
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_syntax::operator::{AssignmentOperator, UnaryOperator};
@@ -53,7 +57,13 @@ impl<'a> VisitMut<'a> for BundlerRuntimeNamespaceVisitor<'a, '_> {
             }
             for specifier in import.specifiers.iter().flatten() {
                 if let ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) = specifier {
-                    let binding = self.identity.key_of_binding(&namespace.local);
+                    let binding = match ModuleIdentity::key_of_binding(&namespace.local) {
+                        Ok(binding) => binding,
+                        Err(error) => {
+                            self.push_error(error);
+                            return;
+                        }
+                    };
                     if self
                         .hoist
                         .as_ref()
@@ -103,8 +113,12 @@ impl<'a> VisitMut<'a> for BundlerRuntimeNamespaceVisitor<'a, '_> {
             );
             return;
         };
-        self.promise_carriers
-            .insert(self.identity.key_of_binding(binding), module_ids);
+        match ModuleIdentity::key_of_binding(binding) {
+            Ok(binding) => {
+                self.promise_carriers.insert(binding, module_ids);
+            }
+            Err(error) => self.push_error(error),
+        }
     }
 
     fn visit_call_expression(&mut self, call: &mut CallExpression<'a>) {
@@ -246,14 +260,30 @@ impl<'a> VisitMut<'a> for BundlerRuntimeNamespaceVisitor<'a, '_> {
     fn visit_for_in_statement(&mut self, statement: &mut ForInStatement<'a>) {
         self.reify_namespace_value(&statement.right);
         walk_mut::walk_for_in_statement(self, statement);
-        remove_for_left_carriers(&statement.left, self.identity, &mut self.namespace_bindings);
-        remove_for_left_carriers(&statement.left, self.identity, &mut self.promise_carriers);
+        if let Err(error) =
+            remove_for_left_carriers(&statement.left, self.identity, &mut self.namespace_bindings)
+        {
+            self.push_error(error);
+        }
+        if let Err(error) =
+            remove_for_left_carriers(&statement.left, self.identity, &mut self.promise_carriers)
+        {
+            self.push_error(error);
+        }
     }
 
     fn visit_for_of_statement(&mut self, statement: &mut ForOfStatement<'a>) {
         self.reify_namespace_value(&statement.right);
         walk_mut::walk_for_of_statement(self, statement);
-        remove_for_left_carriers(&statement.left, self.identity, &mut self.namespace_bindings);
-        remove_for_left_carriers(&statement.left, self.identity, &mut self.promise_carriers);
+        if let Err(error) =
+            remove_for_left_carriers(&statement.left, self.identity, &mut self.namespace_bindings)
+        {
+            self.push_error(error);
+        }
+        if let Err(error) =
+            remove_for_left_carriers(&statement.left, self.identity, &mut self.promise_carriers)
+        {
+            self.push_error(error);
+        }
     }
 }

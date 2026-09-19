@@ -2,7 +2,10 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    AssignmentExpression, BindingPattern, CallExpression, Expression, ForInStatement,
+    ForOfStatement, Program, SimpleAssignmentTarget, UpdateExpression, VariableDeclarator,
+};
 use oxc_ast_visit::{walk, Visit};
 use oxc_syntax::operator::AssignmentOperator;
 
@@ -21,41 +24,49 @@ pub(crate) fn collect_dynamic_import_promise_carriers(
     object_carriers: &BindingKeyMap<DynamicImportObjectWrapper>,
     wrappers: &DynamicImportWrappers,
     identity: &ModuleIdentity,
-) -> BindingKeyMap<BTreeSet<String>> {
-    let storage_cells = collect_flow_storage_cells(program, identity);
+) -> Result<BindingKeyMap<BTreeSet<String>>, String> {
+    let storage_cells = collect_flow_storage_cells(program, identity)?;
     let mut collector = PromiseCarrierCollector {
         carriers: HashMap::new(),
-        object_carriers: object_carriers.clone(),
-        wrappers: wrappers.clone(),
+        object_carriers,
+        wrappers,
         identity,
         storage_cells,
+        error: None,
     };
     collector.visit_program(program);
-    collector.carriers
+    match collector.error {
+        Some(error) => Err(error),
+        None => Ok(collector.carriers),
+    }
 }
 
 pub(crate) fn collect_dynamic_import_object_carriers(
     program: &Program<'_>,
     wrappers: &DynamicImportWrappers,
     identity: &ModuleIdentity,
-) -> BindingKeyMap<DynamicImportObjectWrapper> {
+) -> Result<BindingKeyMap<DynamicImportObjectWrapper>, String> {
     let mut collector = ObjectCarrierCollector {
         carriers: HashMap::new(),
-        wrappers: wrappers.clone(),
+        wrappers,
         identity,
-        storage_cells: collect_flow_storage_cells(program, identity),
+        storage_cells: collect_flow_storage_cells(program, identity)?,
+        error: None,
     };
     collector.visit_program(program);
-    collector.carriers
+    match collector.error {
+        Some(error) => Err(error),
+        None => Ok(collector.carriers),
+    }
 }
 
-#[derive(Clone)]
 struct PromiseCarrierCollector<'a> {
     carriers: BindingKeyMap<BTreeSet<String>>,
-    object_carriers: BindingKeyMap<DynamicImportObjectWrapper>,
-    wrappers: DynamicImportWrappers,
+    object_carriers: &'a BindingKeyMap<DynamicImportObjectWrapper>,
+    wrappers: &'a DynamicImportWrappers,
     identity: &'a ModuleIdentity,
     storage_cells: BindingKeySet,
+    error: Option<String>,
 }
 
 impl PromiseCarrierCollector<'_> {
@@ -63,8 +74,8 @@ impl PromiseCarrierCollector<'_> {
         resolve_dynamic_import_module_ids_strict(
             expression,
             &self.carriers,
-            &self.object_carriers,
-            &self.wrappers,
+            self.object_carriers,
+            self.wrappers,
             self.identity,
         )
     }
@@ -76,7 +87,13 @@ impl<'a> Visit<'a> for PromiseCarrierCollector<'_> {
         let BindingPattern::BindingIdentifier(binding) = &declarator.id else {
             return;
         };
-        let binding = self.identity.key_of_binding(binding);
+        let binding = match ModuleIdentity::key_of_binding(binding) {
+            Ok(binding) => binding,
+            Err(error) => {
+                self.error.get_or_insert(error);
+                return;
+            }
+        };
         let module_ids = declarator
             .init
             .as_ref()
@@ -153,12 +170,12 @@ impl<'a> Visit<'a> for PromiseCarrierCollector<'_> {
     }
 }
 
-#[derive(Clone)]
 struct ObjectCarrierCollector<'a> {
     carriers: BindingKeyMap<DynamicImportObjectWrapper>,
-    wrappers: DynamicImportWrappers,
+    wrappers: &'a DynamicImportWrappers,
     identity: &'a ModuleIdentity,
     storage_cells: BindingKeySet,
+    error: Option<String>,
 }
 
 impl ObjectCarrierCollector<'_> {
@@ -169,7 +186,7 @@ impl ObjectCarrierCollector<'_> {
         resolve_dynamic_import_object_wrapper(
             expression,
             &self.carriers,
-            &self.wrappers,
+            self.wrappers,
             self.identity,
         )
     }
@@ -181,7 +198,13 @@ impl<'a> Visit<'a> for ObjectCarrierCollector<'_> {
         let BindingPattern::BindingIdentifier(binding) = &declarator.id else {
             return;
         };
-        let binding = self.identity.key_of_binding(binding);
+        let binding = match ModuleIdentity::key_of_binding(binding) {
+            Ok(binding) => binding,
+            Err(error) => {
+                self.error.get_or_insert(error);
+                return;
+            }
+        };
         let wrapper = declarator
             .init
             .as_ref()

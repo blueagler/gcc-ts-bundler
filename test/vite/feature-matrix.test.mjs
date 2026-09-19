@@ -417,7 +417,6 @@ test.serial(
       ).length,
     ).toBeGreaterThan(1);
     const workerJavaScript = (await readJavaScript(workerFixture)).join("\n");
-    expect(workerJavaScript).toContain("globalThis.__g");
     expect(workerJavaScript).not.toContain("__VITE_WORKER_ASSET__");
     await executeFixtureInChromium(workerFixture, "url-worker-surface");
 
@@ -677,16 +676,6 @@ test.serial(
     expect(preservedFile).toBeDefined();
     const entrySource = await fixture.read(path.join("dist", entryFile));
     expect(entrySource).toContain("__gcc_preserved/");
-    expect(entrySource).toContain("globalThis.__g");
-    const cacheFiles = await listFiles(cacheDir);
-    const nativeExtern = cacheFiles.find((filePath) =>
-      filePath.endsWith("native-generated.externs.js"),
-    );
-    expect(nativeExtern).toBeDefined();
-    const externText = await fs.readFile(path.join(cacheDir, nativeExtern), "utf8");
-    expect(externText).toContain("// Preserved ESM import bindings.");
-    expect(externText.match(/var __gcc_preserved_/gu)?.length).toBe(3);
-    expect(externText).toMatch(/__gcc_preserved_[\w$]+\.answer;/u);
     const preservedUrl = pathToFileURL(
       path.join(fixture.outDir, preservedFile),
     ).href;

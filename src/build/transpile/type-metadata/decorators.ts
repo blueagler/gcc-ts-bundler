@@ -1,24 +1,5 @@
 import ts from "@typescript/typescript6";
 
-export function containsDecorators(sourceFile: ts.SourceFile) {
-  let found = false;
-  const visit = (node: ts.Node) => {
-    if (found) {
-      return;
-    }
-    if (
-      ts.canHaveDecorators(node) &&
-      (ts.getDecorators(node)?.length ?? 0) > 0
-    ) {
-      found = true;
-      return;
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
-  return found;
-}
-
 export function transpileDecoratedSource({
   compilerOptions,
   fileName,

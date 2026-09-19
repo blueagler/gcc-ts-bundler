@@ -83,13 +83,13 @@ pub(super) fn merge_jsdoc_blocks(blocks: &[String]) -> Option<String> {
     if tags.is_empty() {
         None
     } else {
-        Some(format!(
-            "/**\n{}\n */\n",
-            tags.into_iter()
-                .map(|line| format!(" * {line}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ))
+        let mut block = String::from("/**");
+        for line in tags {
+            block.push_str("\n * ");
+            block.push_str(&line);
+        }
+        block.push_str("\n */\n");
+        Some(block)
     }
 }
 
@@ -136,16 +136,18 @@ pub(super) fn render_class_field_declaration(
 }
 
 fn indent_jsdoc(jsdoc: &str, indent: &str) -> String {
-    jsdoc
-        .trim_end()
-        .lines()
-        .map(|line| format!("{indent}{line}\n"))
-        .collect()
+    let mut output = String::new();
+    for line in jsdoc.trim_end().lines() {
+        output.push_str(indent);
+        output.push_str(line);
+        output.push('\n');
+    }
+    output
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{compose_annotations, empty_metadata, render_template, RuntimeTypeName, PURE_TAG};
     use std::collections::HashMap;
 
     use crate::closure_metadata::{ClosureTypeReference, ClosureTypeSymbol};
@@ -153,17 +155,15 @@ mod tests {
     #[test]
     fn unresolved_reference_degrades_only_its_token() {
         let metadata = empty_metadata();
-        let symbols = HashMap::from([(
-            "missing".to_string(),
-            ClosureTypeSymbol {
-                builtin_name: None,
-                declaration_file_path: None,
-                diagnostic_name: "Missing".to_string(),
-                id: "missing".to_string(),
-                kind: "runtime".to_string(),
-                local_name: Some("Missing".to_string()),
-            },
-        )]);
+        let symbol = ClosureTypeSymbol {
+            builtin_name: None,
+            declaration_file_path: None,
+            diagnostic_name: "Missing".to_string(),
+            id: "missing".to_string(),
+            kind: "runtime".to_string(),
+            local_name: Some("Missing".to_string()),
+        };
+        let symbols = HashMap::from([("missing", &symbol)]);
         let rendered = render_template(
             &metadata,
             "/** @param {!__GCC_TYPE_0__<string>} value @return {number} */\n",

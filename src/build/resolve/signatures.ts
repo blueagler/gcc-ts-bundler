@@ -4,16 +4,12 @@ import path from "path";
 
 import { hashContent, hashJson } from "../../shared/hash";
 import { getPackageRootFromBundle } from "../../shared/bundle-location";
-import { normalizeRelativePath } from "../../shared/files";
+import { listRelativeFiles, normalizeRelativePath } from "../../shared/files";
 import type { ResolvedBuildOptions } from "../types";
 import {
   resolveClosureCompilerEnvironment,
   type ClosureCompilerEnvironment,
 } from "../closure/compiler";
-
-export async function hashTsConfig(configPath: string): Promise<string> {
-  return hashContent(await fs.promises.readFile(configPath, "utf-8"));
-}
 
 export async function hashExternalInputs(filePaths: string[]): Promise<string> {
   const hashes = await Promise.all(
@@ -24,33 +20,43 @@ export async function hashExternalInputs(filePaths: string[]): Promise<string> {
   return hashJson(hashes);
 }
 
-/** Published JavaScript entries, relative to the package root. Kept in sync
- * with the `exports` map in `package.json`. */
-const PUBLISHED_ENTRY_FILES = [
-  "dist/index.mjs",
-  "dist/vite/index.mjs",
-  "dist/presets/react.mjs",
-  "dist/presets/svelte.mjs",
-  "dist/presets/vue.mjs",
+/** Owned JavaScript trees shipped by package.json#files, not dependency trees. */
+const SHIPPED_JAVASCRIPT_ROOTS = [
+  "bin",
+  "dist",
+  "closure-lib",
+  "closure-externs",
 ] as const;
 
 export async function getPackageSignature(
   packageRoot = getPackageRootFromBundle(),
 ) {
-  // Every published entry, not just the core one: a Vite-plugin or preset
-  // change alters emitted bytes without touching `dist/index.mjs`, and hashing
-  // only that let a warm cache replay output from the previous build of the
-  // plugin.
-  const [packageJsonSignature, nativeSignature, ...entrySignatures] =
+  // Public entries can be stable facades over shared/preserved implementation.
+  // Include relative names as well as bytes so additions, removals, and moves
+  // invalidate the cache too. Missing trees are valid during source bootstrap.
+  const [packageJsonSignature, nativeSignature, javascriptTrees] =
     await Promise.all([
       hashFile(path.join(packageRoot, "package.json")),
       hashOptionalFile(path.join(packageRoot, "native", "index.node")),
-      ...PUBLISHED_ENTRY_FILES.map((relativePath) =>
-        hashOptionalFile(path.join(packageRoot, relativePath)),
+      Promise.all(
+        SHIPPED_JAVASCRIPT_ROOTS.map(async (root) => {
+          const names = await listRelativeFiles(path.join(packageRoot, root));
+          return Promise.all(
+            names
+              .filter((name) => /\.(?:c|m)?js$/u.test(name))
+              .map(async (name) => {
+                const relativePath = `${root}/${name}`;
+                return [
+                  relativePath,
+                  await hashFile(path.join(packageRoot, relativePath)),
+                ] as const;
+              }),
+          );
+        }),
       ),
     ]);
   return hashJson({
-    entrySignatures,
+    javascriptArtifacts: javascriptTrees.flat(),
     nativeSignature,
     packageJsonSignature,
   });
@@ -61,6 +67,7 @@ export function getOptionsSignature(
   compilerEnvironment: ClosureCompilerEnvironment = resolveClosureCompilerEnvironment(),
 ) {
   return hashJson({
+    authoredFiles: options.authoredFiles ?? null,
     compilerEnvironment,
     compat: options.compat,
     compilationLevel: options.compilationLevel,
@@ -73,7 +80,7 @@ export function getOptionsSignature(
     hideWarningsFor: options.hideWarningsFor ?? null,
     entries: options.entries.map((entry) => ({
       name: entry.name,
-      // `outFile` is a publish destination, and `publishOffModeEntryOutFiles`
+      // `outFile` is a publish destination; preparing its relocated bytes
       // rewrites the copied file's relative imports from where it lands
       // versus `outDir`, so that relationship does change emitted bytes. The
       // absolute prefix does not. A relative `outFile` resolves against
@@ -92,7 +99,7 @@ export function getOptionsSignature(
       relativePath: toKeyedRelativePath(options.srcDir, entry.file),
     })),
     externals: options.externals,
-    // Externs, `js` and `typedExterns` key only which files participate and in
+    // Externs and `js` key only which files participate and in
     // what order Closure sees them: their contents are hashed separately by
     // `hashExternalInputs` in `src/build/resolve/index.ts`, so the absolute
     // location contributes no correctness, only directory sensitivity. The
@@ -123,9 +130,13 @@ export function getOptionsSignature(
     srcDir: toKeyedProjectPath(options.projectRoot, options.srcDir),
     target: options.target,
     typeMetadata: hashJson(options.typeMetadata ?? null),
-    typedExterns: options.typedExterns
-      .map((filePath) => toKeyedProjectPath(options.projectRoot, filePath))
-      .sort(),
+    // Scope changes alter which jobs consume the same extern bytes.
+    typedExterns: options.typedExterns.map((extern) => ({
+      path: toKeyedProjectPath(options.projectRoot, extern.path),
+      entryFiles: extern.entryFiles
+        .map((filePath) => toKeyedProjectPath(options.projectRoot, filePath))
+        .sort(),
+    })),
   });
 }
 /**

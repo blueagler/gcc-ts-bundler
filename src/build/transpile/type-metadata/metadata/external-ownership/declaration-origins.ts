@@ -8,6 +8,7 @@ import {
   expressionOriginatesFromExternalValue,
   forEachBoundaryCallArgument,
   isTypeReference,
+  normalizedSourceFileName,
   typeIdentityKey,
   typeIdentityKeys,
   typeOriginatesFromRuntimeBoundary,
@@ -17,16 +18,18 @@ import {
 export type { RuntimeBoundaryDeclarationOrigins };
 
 export function collectExternalDeclarationOrigins({
+  ambientValueSymbols = [],
   boundaryModuleFileNames = [],
   externalSpecifiers,
   program,
 }: {
+  ambientValueSymbols?: readonly ts.Symbol[] | undefined;
   boundaryModuleFileNames?: readonly string[] | undefined;
   externalSpecifiers: ReadonlySet<string>;
   program: ts.Program;
 }): RuntimeBoundaryDeclarationOrigins {
   const checker = program.getTypeChecker();
-  const externalValueSymbols = new Set<ts.Symbol>();
+  const externalValueSymbols = new Set(ambientValueSymbols);
   const files = new Set<string>();
   const packageRoots = new Set<string>();
 
@@ -102,11 +105,15 @@ export function collectExternalDeclarationOrigins({
     ),
     packageRoots: [...packageRoots].sort(),
     ownedProperties: new Map(),
+    typeIdentities: new WeakMap(),
+    normalizedFileNames: new WeakMap(),
+    boundarySourceFiles: new WeakMap(),
   };
   origins.boundaryTypeSymbols = collectBoundaryTypeSymbols(
     program,
     checker,
     origins,
+    ambientValueSymbols,
   );
   const ownedProperties = collectSpreadOwnedProperties(
     program,
@@ -153,6 +160,7 @@ function collectBoundaryTypeSymbols(
   program: ts.Program,
   checker: ts.TypeChecker,
   origins: RuntimeBoundaryDeclarationOrigins,
+  ambientValueSymbols: readonly ts.Symbol[],
 ) {
   const symbols = new Set<string>();
   const seenTypes = new Set<ts.Type>();
@@ -182,7 +190,7 @@ function collectBoundaryTypeSymbols(
     const defaultLibraryType = owners.some((symbol) =>
       symbol.declarations?.some((declaration) =>
         origins.defaultLibraryFiles.has(
-          path.normalize(declaration.getSourceFile().fileName),
+          normalizedSourceFileName(declaration.getSourceFile(), origins),
         ),
       ),
     );
@@ -190,12 +198,12 @@ function collectBoundaryTypeSymbols(
       for (const declaration of symbol.declarations ?? []) {
         if (
           origins.defaultLibraryFiles.has(
-            path.normalize(declaration.getSourceFile().fileName),
+            normalizedSourceFileName(declaration.getSourceFile(), origins),
           )
         ) {
           continue;
         }
-        symbols.add(typeIdentityKey(symbol, declaration));
+        symbols.add(typeIdentityKey(symbol, declaration, origins));
       }
     }
     if (type.isUnionOrIntersection()) {
@@ -219,6 +227,15 @@ function collectBoundaryTypeSymbols(
     }
   };
 
+  // Only types reachable from actual environment values cross this boundary.
+  // A type-only ambient interface does not make all its local consumers external.
+  for (const symbol of ambientValueSymbols) {
+    const declaration = symbol.valueDeclaration ?? symbol.declarations?.[0];
+    if (declaration) {
+      collectType(checker.getTypeOfSymbolAtLocation(symbol, declaration));
+    }
+  }
+
   collectRequiredRuntimeBoundarySurfaces();
 
   for (const sourceFile of program.getSourceFiles()) {
@@ -233,7 +250,7 @@ function collectBoundaryTypeSymbols(
   }
   const unclassified = [...requiredBoundaryTypes].flatMap(
     ([type, requiredBy]) => {
-      const identities = typeIdentityKeys(type).filter(
+      const identities = typeIdentityKeys(type, origins).filter(
         (identity) => !isDefaultLibraryIdentity(identity, origins),
       );
       if (
@@ -450,7 +467,9 @@ function collectBoundaryTypeSymbols(
 
   function collectRequiredRuntimeBoundarySurfaces() {
     for (const sourceFile of program.getSourceFiles()) {
-      if (!origins.moduleFiles.has(path.normalize(sourceFile.fileName)))
+      if (
+        !origins.moduleFiles.has(normalizedSourceFileName(sourceFile, origins))
+      )
         continue;
       collectPreservedModuleExports(sourceFile);
       collectNativeBindingSurfaces(sourceFile);
@@ -469,7 +488,9 @@ function collectSpreadOwnedProperties(
     const visit = (node: ts.Node) => {
       if (ts.isObjectLiteralExpression(node)) {
         const targetType = checker.getContextualType(node);
-        const targetIdentities = targetType ? typeIdentityKeys(targetType) : [];
+        const targetIdentities = targetType
+          ? typeIdentityKeys(targetType, origins)
+          : [];
         if (targetType && targetIdentities.length > 0) {
           for (const property of node.properties) {
             if (!ts.isSpreadAssignment(property)) continue;
@@ -514,6 +535,35 @@ function collectContextualOwnedProperties(
   origins: RuntimeBoundaryDeclarationOrigins,
   owned: Map<string, Set<string>>,
 ) {
+  // These checker facts belong to this alignment phase, not its evolving
+  // ownership result. Instantiate properties by symbol, never declaration alone.
+  const propertyTypes = new WeakMap<
+    ts.Symbol,
+    { declaration: ts.Declaration; type: ts.Type }
+  >();
+  const propertyType = (symbol: ts.Symbol, declaration: ts.Declaration) => {
+    const cached = propertyTypes.get(symbol);
+    if (cached?.declaration === declaration) return cached.type;
+    const type = checker.getTypeOfSymbolAtLocation(symbol, declaration);
+    propertyTypes.set(symbol, { declaration, type });
+    return type;
+  };
+  const propertiesByType = new WeakMap<
+    ts.Type,
+    Map<string, ts.Symbol | null>
+  >();
+  const propertyOfType = (type: ts.Type, name: string) => {
+    let properties = propertiesByType.get(type);
+    const cached = properties?.get(name);
+    if (cached !== undefined) return cached;
+    const property = checker.getPropertyOfType(type, name) ?? null;
+    if (!properties) {
+      properties = new Map();
+      propertiesByType.set(type, properties);
+    }
+    properties.set(name, property);
+    return property;
+  };
   const seen = new Map<ts.Type, Set<ts.Type>>();
   const alreadyAligned = (actual: ts.Type, expected: ts.Type) => {
     let expectedTypes = seen.get(actual);
@@ -539,7 +589,7 @@ function collectContextualOwnedProperties(
         typeOwnerSymbols(expected).some((symbol) =>
           symbol.declarations?.some((declaration) =>
             origins.defaultLibraryFiles.has(
-              path.normalize(declaration.getSourceFile().fileName),
+              normalizedSourceFileName(declaration.getSourceFile(), origins),
             ),
           ),
         )
@@ -565,12 +615,12 @@ function collectContextualOwnedProperties(
     names.add(name);
   };
   const alignSharedProperties = (actual: ts.Type, expected: ts.Type) => {
-    const actualOwners = typeIdentityKeys(actual).filter(
+    const actualOwners = typeIdentityKeys(actual, origins).filter(
       (identity) => !identity.startsWith("<default-lib>"),
     );
     for (const expectedProperty of checker.getPropertiesOfType(expected)) {
       const name = expectedProperty.getName();
-      const actualProperty = checker.getPropertyOfType(actual, name);
+      const actualProperty = propertyOfType(actual, name);
       if (!actualProperty) continue;
       for (const identity of actualOwners) {
         recordOwnedProperty(identity, name);
@@ -581,11 +631,8 @@ function collectContextualOwnedProperties(
         expectedProperty.valueDeclaration ?? expectedProperty.declarations?.[0];
       if (!actualDeclaration || !expectedDeclaration) continue;
       alignTypes(
-        checker.getTypeOfSymbolAtLocation(actualProperty, actualDeclaration),
-        checker.getTypeOfSymbolAtLocation(
-          expectedProperty,
-          expectedDeclaration,
-        ),
+        propertyType(actualProperty, actualDeclaration),
+        propertyType(expectedProperty, expectedDeclaration),
       );
     }
   };

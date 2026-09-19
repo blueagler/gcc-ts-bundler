@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use oxc_ast::ast::*;
+use oxc_ast::ast::Statement;
 
 use super::super::super::assigners::{assigner_function_name, NOINLINE_TAG};
 use super::super::super::hoist::HoistPlan;
@@ -14,17 +14,27 @@ use super::super::super::{
 };
 use super::super::helpers::is_pure_statement;
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn render_hoisted_statement(
-    type_metadata: &mut PreparedTypeMetadata,
+pub(super) struct StatementRenderOptions<'a> {
+    pub(super) pure_names: &'a HashSet<String>,
+    pub(super) module_bindings: &'a HashSet<String>,
+    pub(super) context: &'a TranspileContext,
+    pub(super) ordinal: usize,
+    pub(super) nocollapse_assignments: &'a NocollapseAssignments,
+}
+
+pub(super) fn render_hoisted_statement(
+    type_metadata: &mut PreparedTypeMetadata<'_>,
     identity: &ModuleIdentity,
     statement: Statement<'_>,
-    pure_names: &HashSet<String>,
-    module_bindings: &HashSet<String>,
-    context: &TranspileContext,
-    ordinal: usize,
-    nocollapse_assignments: &NocollapseAssignments,
+    options: &StatementRenderOptions<'_>,
 ) -> std::result::Result<String, String> {
+    let StatementRenderOptions {
+        pure_names,
+        module_bindings,
+        context,
+        ordinal,
+        nocollapse_assignments,
+    } = *options;
     let mut tags = Vec::new();
     if is_pure_statement(&statement, pure_names, &context.pure_callees, |name| {
         name.strip_suffix(&format!("$${ordinal}"))

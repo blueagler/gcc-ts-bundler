@@ -4,8 +4,8 @@ import type {
   TypeMetadataDiagnostic as ClosureTypeMetadataDiagnostic,
 } from "../../build/transpile/type-metadata";
 
-// v4: intersection types render as `?` so aliased receivers cannot split.
-export const VITE_TYPE_METADATA_VERSION = 4 as const;
+// v5: overlay provenance dependencies follow only consumed runtime exports.
+export const VITE_TYPE_METADATA_VERSION = 5 as const;
 
 export type ResolutionMode = "import" | "require";
 

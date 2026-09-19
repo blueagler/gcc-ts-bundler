@@ -7,5 +7,8 @@ import { reactPreset } from 'gcc-ts-bundler/presets/react'
 export default defineConfig({
   preview: { host: true, allowedHosts: true },
   build: { target: 'esnext' },
-  plugins: [react(), gccTsBundler(reactPreset({ compiler: { hideWarningsFor: [] } }))],
+  plugins: [
+    react(),
+    gccTsBundler(reactPreset({ compiler: { cache: { mode: 'off' }, hideWarningsFor: [] } })),
+  ],
 })

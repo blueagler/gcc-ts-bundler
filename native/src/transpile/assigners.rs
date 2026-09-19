@@ -3,7 +3,12 @@
 use std::collections::HashSet;
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    ArrowFunctionExpression, AssignmentExpression, AssignmentTarget, AssignmentTargetMaybeDefault,
+    AssignmentTargetProperty, BindingIdentifier, BindingPattern, Expression, ForInStatement,
+    ForOfStatement, ForStatementLeft, Function, ObjectPropertyKind, PropertyKey,
+    SimpleAssignmentTarget, Statement, UpdateExpression,
+};
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
@@ -271,7 +276,11 @@ fn has_noinline_leading_comment(leading: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{assigner_function_name, collect_annotated_assigner_names};
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+    use std::collections::HashSet;
 
     fn names(source: &str, bindings: &[&str]) -> Vec<String> {
         let allocator = Allocator::default();

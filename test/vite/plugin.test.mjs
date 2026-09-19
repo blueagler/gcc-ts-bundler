@@ -4,6 +4,8 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { expect, onTestFinished, test } from "bun:test";
+import { RUNTIME_MODULE_ID } from "rolldown";
+import { resolveConfig } from "vite";
 
 import {
   getCapturedModuleAnalysis,
@@ -11,21 +13,37 @@ import {
   annotateAliasedStaticClassMemberWrites,
   demoteReassignedConstants,
   resolveViteCaptureRootPath,
+  resolveCapturedModuleFormat,
 } from "../../src/vite/capture/index.ts";
 import {
   resolveNormalizedBridgeModuleIds,
   resolveRetainedCapturedModuleIds,
+  resolveRetainedModuleIds,
 } from "../../src/vite/graph/index.ts";
-import { createDefineApplier } from "../../src/vite/defines.ts";
+import { accountBarriers } from "../../src/externs/barriers.ts";
+import { getCapturedSourceFile } from "../../src/vite/capture-analysis/index.ts";
 import { resolveCompilerExterns } from "../../src/vite/compiler-externs/index.ts";
+import {
+  generateViteRuntimeAwareExterns,
+  splitRuntimeModules,
+} from "../../src/vite/compiler-externs/runtime.ts";
+import { prepareViteWorkspace } from "../../src/vite/workspace.ts";
 import { materializeCapturedGraph } from "../../src/vite/materialize/index.ts";
+import { normalizeCapturedGraph } from "../../src/vite/plugin-graph/normalize.ts";
+import { resolveViteAssetUrls } from "../../src/vite/output/asset-urls.ts";
+import {
+  createBuildMetrics,
+  createTimingTotals,
+} from "../../src/vite/plugin/metrics.ts";
 import {
   finalizeBaseJsOutputName,
   renameCompiledNonBaseJsOutputs,
 } from "../../src/vite/naming/index.ts";
-import { prebundleMaterializedDependencies } from "../../src/vite/prebundle/index.ts";
 import { createModuleParser } from "../../src/vite/prebundle/parse.ts";
 import { extractRuntimeInitManifest } from "../../src/build/closure/runtime-manifest/init.ts";
+import { parseGccRuntimeManifest } from "../../src/build/closure/runtime-manifest/parse.ts";
+import { buildChunkModuleIdLookup } from "../../src/vite/chunk-modules.ts";
+import { renameCompiledEmitOutputs } from "../../src/vite/plugin-compile/emit/rename.ts";
 import {
   applyViteBuildGuards,
   createCompilerOptions,
@@ -35,6 +53,7 @@ import {
 import { normalizeBuildOptions } from "../../src/build/resolve/options.ts";
 import {
   createFixture,
+  createExternFixture,
   execFileAsync,
   findFilesNamed,
   getProjectCacheDir,
@@ -134,8 +153,8 @@ test.serial(
     await fixture.write(
       "src/ops.js",
       [
-        'export function initProps(value) { return `init:${value}`; }',
-        'export function updateProps(value) { return `update:${value}`; }',
+        "export function initProps(value) { return `init:${value}`; }",
+        "export function updateProps(value) { return `update:${value}`; }",
         "",
       ].join("\n"),
     );
@@ -158,7 +177,7 @@ test.serial(
       globalThis.location = { href: "http://vite.test/index.html" };
       delete globalThis.__g;
       await import(
-        `${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?finite-namespace=${Date.now()}`,
+        `${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?finite-namespace=${Date.now()}`
       );
       expect(globalThis["__finiteNamespaceResult"]).toBe("init:radar");
     } finally {
@@ -208,7 +227,7 @@ test.serial(
       globalThis.location = { href: "http://vite.test/index.html" };
       delete globalThis.__g;
       await import(
-        `${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?finite-bound-namespace=${Date.now()}`,
+        `${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?finite-bound-namespace=${Date.now()}`
       );
       expect(globalThis["__finiteBoundNamespaceResult"]).toBe("circle:radius");
     } finally {
@@ -265,7 +284,7 @@ test.serial(
       globalThis.location = { href: "http://vite.test/index.html" };
       delete globalThis.__g;
       await import(
-        `${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?namespace-reexport=${Date.now()}`,
+        `${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?namespace-reexport=${Date.now()}`
       );
       expect(globalThis["__staticNamespaceReexport"]).toBe("namespace-ok");
       expect(await globalThis["__loadNamespace"]()).toEqual([
@@ -324,7 +343,7 @@ test.serial(
         globalThis.location = { href: "http://vite.test/index.html" };
         delete globalThis.__g;
         await import(
-          `${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?dynamic-namespace=${Date.now()}`,
+          `${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?dynamic-namespace=${Date.now()}`
         );
         expect(globalThis["__dynamicNamespaceResult"]).toBe("rect:axis");
       } finally {
@@ -343,13 +362,15 @@ test.serial(
   },
 );
 
-
 test.serial(
   "gccTsBundler passes reified module namespaces to calls",
   { timeout: 30000 },
   async () => {
     const fixture = await createFixture();
-    await fixture.write("index.html", '<script type="module" src="/src/main.js"></script>\n');
+    await fixture.write(
+      "index.html",
+      '<script type="module" src="/src/main.js"></script>\n',
+    );
     await fixture.write("src/ops.js", "export const answer = 42;\n");
     await fixture.write(
       "src/main.js",
@@ -371,7 +392,9 @@ test.serial(
       try {
         globalThis.location = { href: "http://vite.test/index.html" };
         delete globalThis.__g;
-        await import(`${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?namespace-call=${Date.now()}`);
+        await import(
+          `${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?namespace-call=${Date.now()}`
+        );
         expect(globalThis["__namespaceCallResult"]).toBe(42);
       } finally {
         if (previousLocation === undefined) delete globalThis.location;
@@ -391,7 +414,10 @@ test.serial(
   { timeout: 30000 },
   async () => {
     const fixture = await createFixture();
-    await fixture.write("index.html", '<script type="module" src="/src/main.js"></script>\n');
+    await fixture.write(
+      "index.html",
+      '<script type="module" src="/src/main.js"></script>\n',
+    );
     await fixture.write("src/ops.js", "export let answer = 42;\n");
     await fixture.write(
       "src/main.js",
@@ -470,7 +496,11 @@ async function writeViteCssFixture(fixture) {
 
 async function readRuntimeModuleSourceMap(fixture, debugDir) {
   const source = await fixture.read(
-    path.join(debugDir, ".gcc-ts-bundler-vite-runtime-module-sources.json"),
+    path.join(
+      debugDir,
+      "gcc-ts-bundler",
+      ".gcc-ts-bundler-vite-runtime-module-sources.json",
+    ),
   );
   return JSON.parse(source);
 }
@@ -515,7 +545,7 @@ test.serial(
       "index.html",
       [
         '<div id="status">bootstrap-ready</div>',
-        '<script>self.$_TSR={buffer:[]}</script>',
+        "<script>self.$_TSR={buffer:[]}</script>",
         '<script type="module" src="/src/main.js"></script>',
         "",
       ].join("\n"),
@@ -566,7 +596,7 @@ test.serial(
       "index.html",
       [
         '<div id="status">bootstrap-ready</div>',
-        '<script>self.EXTERNAL_PROTOCOL={nestedState:{},items:[1,2]}</script>',
+        "<script>self.EXTERNAL_PROTOCOL={nestedState:{},items:[1,2]}</script>",
         '<script type="module" src="/src/main.js"></script>',
         "",
       ].join("\n"),
@@ -693,11 +723,11 @@ test.serial(
       "node_modules/returned-object-protocol/producer.js",
       [
         "export function createReactiveSystem() {",
-        '  const link = (value) => `link:${value}`;',
-        '  const unlink = (value) => `unlink:${value}`;',
-        '  const propagate = (value) => `propagate:${value}`;',
-        '  const checkDirty = (value) => `checkDirty:${value}`;',
-        '  const shallowPropagate = (value) => `shallowPropagate:${value}`;',
+        "  const link = (value) => `link:${value}`;",
+        "  const unlink = (value) => `unlink:${value}`;",
+        "  const propagate = (value) => `propagate:${value}`;",
+        "  const checkDirty = (value) => `checkDirty:${value}`;",
+        "  const shallowPropagate = (value) => `shallowPropagate:${value}`;",
         "  return { link, unlink, propagate, checkDirty, shallowPropagate };",
         "}",
         "",
@@ -808,24 +838,6 @@ test.serial(
   },
 );
 
-test("annotates aliased static class writes in place", () => {
-  const source = [
-    "var _a;",
-    'let Derived = (_a = class extends Base {}, _a.value = "retained", _a);',
-    "",
-  ].join("\n");
-
-  expect(
-    annotateAliasedStaticClassMemberWrites("/src/main.js", source),
-  ).toBe(
-    [
-      "var _a;",
-      'let Derived = (_a = class extends Base {}, /** @nocollapse */ _a.value = "retained", _a);',
-      "",
-    ].join("\n"),
-  );
-});
-
 test("aliased static write annotation preserves a declared binding TDZ", () => {
   const source = [
     "var _a;",
@@ -835,7 +847,10 @@ test("aliased static write annotation preserves a declared binding TDZ", () => {
 
   for (const candidate of [
     source,
-    annotateAliasedStaticClassMemberWrites("/src/main.js", source),
+    annotateAliasedStaticClassMemberWrites({
+      id: "/src/main.js",
+      code: source,
+    }),
   ]) {
     expect(() => new Function(candidate)()).toThrow(ReferenceError);
   }
@@ -866,7 +881,10 @@ test("aliased static write annotation preserves throwing RHS binding state", () 
 
   const original = execute(source);
   const annotated = execute(
-    annotateAliasedStaticClassMemberWrites("/src/main.js", source),
+    annotateAliasedStaticClassMemberWrites({
+      id: "/src/main.js",
+      code: source,
+    }),
   );
   expect(original).toEqual({ error: "boom", binding: "ReferenceError" });
   expect(annotated).toEqual(original);
@@ -884,6 +902,133 @@ test("captured module analysis ignores comment-only hash text for compat downlev
   expect(analysis.importSpecifiers).toEqual(["./dep.js"]);
 });
 
+test("emitted file URLs preserve underscores inside opaque host reference ids", async () => {
+  const fixture = await createFixture();
+  const id = path.join(fixture.srcDir, "entry.js");
+  const referenceId = "a_b_c_d_e_f_g_h_i_j_k_";
+  const fileName = "assets/image.svg";
+  const context = {
+    ...createCapturePluginContext(),
+    getFileName(reference) {
+      if (reference !== referenceId) throw new Error("Unknown emitted asset");
+      return fileName;
+    },
+  };
+  const normalized = await normalizeCapturedGraph.call(context, {
+    bundle: {
+      [fileName]: { type: "asset", fileName, source: "<svg/>" },
+    },
+    buildMetrics: createBuildMetrics(),
+    capturedModules: new Map([
+      [
+        id,
+        {
+          id,
+          code: `globalThis["__assetUrls"] = [
+        import.meta.ROLLDOWN_FILE_URL_${referenceId},
+        import.meta.ROLLDOWN_FILE_URL_${referenceId}_file_url,
+        import.meta.ROLLUP_FILE_URL_${referenceId}
+      ];`,
+        },
+      ],
+    ]),
+    initialModuleIds: [id],
+    resolutionCache: new Map(),
+    timingTotals: createTimingTotals(),
+  });
+  await fs.mkdir(fixture.outDir, { recursive: true });
+  const outputJavaScript = path.join(fixture.outDir, "entry.js");
+  await fs.writeFile(outputJavaScript, normalized.capturedModules.get(id).code);
+  await resolveViteAssetUrls({
+    assetPlaceholders: normalized.assetPlaceholders,
+    chunkOutputType: "esm",
+    config: await resolveConfig(
+      {
+        configFile: false,
+        root: fixture.projectRoot,
+        plugins: [
+          {
+            name: "host-asset-owner",
+            resolveFileUrl: {
+              order: "pre",
+              handler({ urlId }) {
+                return JSON.stringify(
+                  urlId === "file_url"
+                    ? "file:///image.svg"
+                    : "/assets/image.svg",
+                );
+              },
+            },
+          },
+        ],
+      },
+      "build",
+    ),
+    jsChunks: [],
+    outDir: fixture.outDir,
+    outputFiles: [outputJavaScript],
+    outputOptions: { format: "es" },
+    pluginContext: context,
+  });
+  const result = await execFileAsync(process.execPath, [
+    "--eval",
+    `await import(${JSON.stringify(pathToFileURL(outputJavaScript).href)}); console.log(JSON.stringify(globalThis.__assetUrls));`,
+  ]);
+  expect(JSON.parse(result.stdout)).toEqual([
+    "/assets/image.svg",
+    "file:///image.svg",
+    "/assets/image.svg",
+  ]);
+});
+
+test("only linker-owned runtime membership can omit a transformed capture", async () => {
+  const entry = "/src/entry.js";
+  const pluginModule = "\0rolldown/plugin.js";
+  const missingAuthored = "/src/missing.js";
+  const chunks = [
+    {
+      modules: {
+        [entry]: {},
+        [RUNTIME_MODULE_ID]: {},
+        [pluginModule]: {},
+        [missingAuthored]: {},
+      },
+    },
+  ];
+  const capturedModules = new Map([
+    [entry, { id: entry, code: 'globalThis["__entryRan"] = true;' }],
+  ]);
+  const input = {
+    capturedModules,
+    metrics: undefined,
+    projectRoot: "/src",
+    resolutionCache: new Map(),
+    unshakenModuleIds: [entry],
+  };
+  const retained = await resolveRetainedCapturedModuleIds.call(
+    createCapturePluginContext(),
+    { ...input, retainedModuleIds: resolveRetainedModuleIds(chunks, [entry]) },
+  );
+  expect(retained.materializedModuleIds).toEqual([entry]);
+  expect(retained.missingModuleIds).toEqual(
+    [pluginModule, missingAuthored].sort((left, right) =>
+      left.localeCompare(right),
+    ),
+  );
+
+  const explicitRuntime = await resolveRetainedCapturedModuleIds.call(
+    createCapturePluginContext(),
+    {
+      ...input,
+      retainedModuleIds: resolveRetainedModuleIds(chunks, [
+        entry,
+        RUNTIME_MODULE_ID,
+      ]),
+    },
+  );
+  expect(explicitRuntime.missingModuleIds).toContain(RUNTIME_MODULE_ID);
+});
+
 test("retained graph follows demanded names through impure, named, and star barrels", async () => {
   const entry = "/src/entry.js";
   const barrel = "/node_modules/pkg/index.js";
@@ -893,7 +1038,10 @@ test("retained graph follows demanded names through impure, named, and star barr
   const heavy = "/node_modules/pkg/heavy.js";
   const capturedModules = new Map(
     [
-      [entry, 'import { hiddenHook, starName } from "/node_modules/pkg/index.js";'],
+      [
+        entry,
+        'import { hiddenHook, starName } from "/node_modules/pkg/index.js";',
+      ],
       [
         barrel,
         [
@@ -961,8 +1109,17 @@ test("retained bare package edges route to captured dependencies or fail with th
     id: specifier === "react-is" ? dependency : specifier,
   });
   const capturedModules = new Map([
-    [entry, { code: 'import { isValidElementType } from "react-is"; console.log(isValidElementType);', id: entry }],
-    [dependency, { code: "export const isValidElementType = () => true;", id: dependency }],
+    [
+      entry,
+      {
+        code: 'import { isValidElementType } from "react-is"; console.log(isValidElementType);',
+        id: entry,
+      },
+    ],
+    [
+      dependency,
+      { code: "export const isValidElementType = () => true;", id: dependency },
+    ],
   ]);
   const routed = await resolveRetainedCapturedModuleIds.call(context, {
     capturedModules,
@@ -983,9 +1140,7 @@ test("retained bare package edges route to captured dependencies or fail with th
       retainedModuleIds: [entry],
       unshakenModuleIds: [entry],
     }),
-  ).rejects.toThrow(
-    `${entry} -> "react-is" -> ${dependency}`,
-  );
+  ).rejects.toThrow(`${entry} -> "react-is" -> ${dependency}`);
 });
 
 test("dead dynamic package edges are dropped when Vite did not capture the target", async () => {
@@ -997,7 +1152,13 @@ test("dead dynamic package edges are dropped when Vite did not capture the targe
     id: specifier === "dev-only-tool" ? dependency : specifier,
   });
   const capturedModules = new Map([
-    [entry, { code: 'if (import.meta.env.DEV) void import("dev-only-tool");', id: entry }],
+    [
+      entry,
+      {
+        code: 'if (import.meta.env.DEV) void import("dev-only-tool");',
+        id: entry,
+      },
+    ],
   ]);
   const metrics = {
     deadDynamicEdgeDropCount: 0,
@@ -1041,45 +1202,6 @@ test("dead dynamic package edges are dropped when Vite did not capture the targe
   expect(unresolvedMetrics.deadDynamicEdgeDropCount).toBe(1);
 });
 
-test("static uncaptured package edges still fail with their chain", async () => {
-  const entry = "/src/entry.js";
-  const dependency = "/node_modules/react-is/index.js";
-  const context = createCapturePluginContext();
-  context.resolve = async (specifier) => ({
-    external: false,
-    id: specifier === "react-is" ? dependency : specifier,
-  });
-  await expect(
-    resolveRetainedCapturedModuleIds.call(context, {
-      capturedModules: new Map([
-        [entry, { code: 'import { isValidElementType } from "react-is"; console.log(isValidElementType);', id: entry }],
-      ]),
-      metrics: undefined,
-      projectRoot: "/src",
-      resolutionCache: new Map(),
-      retainedModuleIds: [entry],
-      unshakenModuleIds: [entry],
-    }),
-  ).rejects.toThrow(
-    `gccTsBundler() could not route package edge ${entry} -> "react-is" -> ${dependency}: the resolved module was not captured by Vite.`,
-  );
-});
-
-test("resolved Vite env values are removed before Closure chunk linking", async () => {
-  const apply = createDefineApplier(
-    { "import.meta.env.OVERRIDE": JSON.stringify("user") },
-    { MODE: "production", VITE_CDN: "https://cdn.example" },
-  );
-  expect(apply).not.toBeNull();
-  const output = await apply(
-    "export const values = [import.meta.env.MODE, import.meta.env.VITE_CDN, import.meta.env.OVERRIDE];",
-  );
-  expect(output).not.toContain("import.meta");
-  expect(output).toContain('"production"');
-  expect(output).toContain('"https://cdn.example"');
-  expect(output).toContain('"user"');
-});
-
 test.serial(
   "generateBundle preserves Rollup chunk identities and manifest targets",
   { timeout: 30000 },
@@ -1094,8 +1216,14 @@ test.serial(
       'document.querySelector("#app").textContent = "ready"; globalThis.loadLazyA = () => import("./lazy-a.js"); globalThis.loadLazyB = () => import("./lazy-b.js");\n',
     );
     await fixture.write("src/shared.js", 'export const value = "lazy";\n');
-    await fixture.write("src/lazy-a.js", 'export { value } from "./shared.js";\n');
-    await fixture.write("src/lazy-b.js", 'export { value } from "./shared.js";\n');
+    await fixture.write(
+      "src/lazy-a.js",
+      'export { value } from "./shared.js";\n',
+    );
+    await fixture.write(
+      "src/lazy-b.js",
+      'export { value } from "./shared.js";\n',
+    );
     await buildViteFixture(fixture, {
       buildLines: ["    manifest: true,"],
       preambleLines: ["const originalChunkNames = new Set();"],
@@ -1150,7 +1278,7 @@ test.serial(
       [
         'import { used } from "./barrel.js";',
         'import { initDeadTail, kept } from "./mixed.js";',
-        'initDeadTail();',
+        "initDeadTail();",
         'document.querySelector("#app").textContent = used + kept;',
         "",
       ].join("\n"),
@@ -1215,6 +1343,7 @@ test.serial(
     const capturedSrcDir = path.join(
       fixture.projectRoot,
       ".gcc-capture",
+      "gcc-ts-bundler",
       "src",
       "src",
     );
@@ -1256,7 +1385,7 @@ test.serial(
       [
         'export let characters = import.meta.env.VITE_CHUNK_MARKER || "initial";',
         "export function takeCharacters() {",
-        '  const value = characters;',
+        "  const value = characters;",
         '  characters = "";',
         "  return value;",
         "}",
@@ -1267,7 +1396,7 @@ test.serial(
       "src/main.js",
       [
         'import { characters } from "./shared.js";',
-        'globalThis.__initialCharacters = characters;',
+        "globalThis.__initialCharacters = characters;",
         'globalThis.__loadCharacters = () => import("./lazy.js").then((module) => module.read());',
         "",
       ].join("\n"),
@@ -1329,20 +1458,157 @@ test.serial(
   },
 );
 
+test("capture observes package format changes between output invocations", async () => {
+  const fixture = await createFixture();
+  const packageFile = "node_modules/format-package/package.json";
+  const record = {
+    id: path.join(
+      fixture.projectRoot,
+      "node_modules/format-package/nested/side-effect.js",
+    ),
+    code: "console.log(42);",
+  };
+  await fixture.write(packageFile, JSON.stringify({ type: "commonjs" }));
+  expect(await resolveCapturedModuleFormat(record, new Map())).toBe("cjs");
+  await fixture.write(packageFile, JSON.stringify({ type: "module" }));
+  expect(await resolveCapturedModuleFormat(record, new Map())).toBe("esm");
+});
+
+test("captured source parses stay on the capture record and do not leak metrics", () => {
+  const metricsA = createBuildMetrics();
+  const metricsB = createBuildMetrics();
+  const recordA = {
+    code: 'export const load = () => import("./first.js");',
+    id: "/src/shared.js",
+  };
+  const recordB = { code: recordA.code, id: "/src/shared.js" };
+
+  getCapturedSourceFile(recordA, recordA.code, metricsA);
+  getCapturedSourceFile(recordA, recordA.code, metricsA);
+  getCapturedSourceFile(recordB, recordB.code, metricsB);
+  recordA.code = 'export const load = () => import("./second.js");';
+  getCapturedSourceFile(recordA, recordA.code, metricsA);
+
+  expect(getCapturedModuleAnalysis(recordA).dynamicImportSpecifiers).toEqual([
+    "./second.js",
+  ]);
+  expect(getCapturedModuleAnalysis(recordB).dynamicImportSpecifiers).toEqual([
+    "./first.js",
+  ]);
+
+  expect(metricsA.parseCacheMisses).toBe(2);
+  expect(metricsA.parseCacheHits).toBe(1);
+  expect(metricsB.parseCacheMisses).toBe(1);
+  expect(metricsB.parseCacheHits).toBe(0);
+});
+
+test("fused dependency files are partitioned once under their contributing packages", async () => {
+  globalThis.__gcc_current_module_url = pathToFileURL(
+    path.join(process.cwd(), "dist/index.mjs"),
+  ).href;
+  const fixture = await createFixture();
+  const fusedFile = path.join(fixture.projectRoot, "fused.js");
+  const pkgAFile = path.join(fixture.projectRoot, "pkg-a.js");
+  const pkgBFile = path.join(fixture.projectRoot, "pkg-b.js");
+  const appFile = path.join(fixture.projectRoot, "app.js");
+  await fs.writeFile(fusedFile, 'this["fusedKey"] = 1; this.fusedKey;\n');
+  await fs.writeFile(pkgAFile, 'this["aOnly"] = 1; this.aOnly;\n');
+  await fs.writeFile(pkgBFile, 'this["bOnly"] = 1; this.bOnly;\n');
+  await fs.writeFile(appFile, "export const app = 1;\n");
+  const materialized = {
+    authoredFiles: [appFile],
+    entries: [{ file: "./app.js", sourceModuleId: appFile }],
+    modules: [
+      {
+        filePath: fusedFile,
+        id: fusedFile,
+        relativePath: "fused.js",
+        sourceModuleIds: [
+          path.join(fixture.projectRoot, "node_modules/pkg-a/fused.js"),
+          path.join(fixture.projectRoot, "node_modules/pkg-b/fused.js"),
+        ],
+      },
+      {
+        filePath: pkgAFile,
+        id: pkgAFile,
+        relativePath: "pkg-a.js",
+        sourceModuleIds: [
+          path.join(fixture.projectRoot, "node_modules/pkg-a/index.js"),
+        ],
+      },
+      {
+        filePath: pkgBFile,
+        id: pkgBFile,
+        relativePath: "pkg-b.js",
+        sourceModuleIds: [
+          path.join(fixture.projectRoot, "node_modules/pkg-b/index.js"),
+        ],
+      },
+      {
+        filePath: appFile,
+        id: appFile,
+        relativePath: "app.js",
+        sourceModuleIds: [path.join(fixture.srcDir, "main.js")],
+      },
+    ],
+    prunedEmptyModuleIds: [],
+    retainedEmptyModuleIds: [],
+    runtimeEntries: ["./app.js"],
+    runtimeResolutions: [],
+    srcDir: fixture.projectRoot,
+  };
+  const partitioned = splitRuntimeModules(materialized);
+  expect(partitioned.appRuntimeFiles).toEqual([appFile]);
+  expect([...partitioned.dependencyFilesByPackage.keys()].sort()).toEqual([
+    "pkg-a",
+    "pkg-a\0pkg-b",
+    "pkg-b",
+  ]);
+  expect(partitioned.dependencyFilesByPackage.get("pkg-a")).toEqual([pkgAFile]);
+  expect(partitioned.dependencyFilesByPackage.get("pkg-b")).toEqual([pkgBFile]);
+  expect(partitioned.dependencyFilesByPackage.get("pkg-a\0pkg-b")).toEqual([
+    fusedFile,
+  ]);
+  const generatedExternFile = path.join(
+    fixture.projectRoot,
+    "fused.externs.js",
+  );
+  await generateViteRuntimeAwareExterns({
+    captureRoot: fixture.projectRoot,
+    generatedExternFile,
+    modules: ["pkg-a", "pkg-b"],
+    options: { compiler: { cache: { mode: "off" } } },
+    materialized,
+    protocolHelpers: {
+      keyExclusionListCallees: [],
+      keyReadCallees: [],
+    },
+  });
+  const externText = await fs.readFile(generatedExternFile, "utf8");
+  expect(externText).toContain("Object.prototype.fusedKey;");
+  expect(externText).toContain("Object.prototype.aOnly;");
+  expect(externText).toContain("Object.prototype.bOnly;");
+});
+
 test("capture demotes only const bindings that the module writes", () => {
-  const result = demoteReassignedConstants([
-    "const crudSchemas = reactive([]);",
-    "const untouched = 1;",
-    "const object = { value: 1 };",
-    "const render = () => ($event) => crudSchemas = $event;",
-    "object.value = 2;",
-    "function shadow(crudSchemas) { crudSchemas = []; }",
-  ].join("\n"));
+  const result = demoteReassignedConstants(
+    [
+      "const crudSchemas = reactive([]);",
+      "const untouched = 1;",
+      "const object = { value: 1 };",
+      "const render = () => ($event) => crudSchemas = $event;",
+      "object.value = 2;",
+      "function shadow(crudSchemas) { crudSchemas = []; }",
+    ].join("\n"),
+  );
 
   expect(result.names).toEqual(["crudSchemas"]);
-  expect(result.code).toContain("let crudSchemas = reactive([])");
-  expect(result.code).toContain("const untouched = 1");
-  expect(result.code).toContain("const object = { value: 1 }");
+  expect(
+    new Function(
+      "reactive",
+      `${result.code}\nrender()(42); return [crudSchemas, untouched, object.value];`,
+    )((value) => value),
+  ).toEqual([42, 1, 2]);
 });
 
 test.serial(
@@ -1422,713 +1688,125 @@ test.serial(
         },
       );
 
-    expect(normalizedCapturedModules.get(entryId)?.code).toContain(
-      'from "./dep.js"',
-    );
     expect(additionalBridgeModuleIds).toContain(depId);
   },
 );
 
 test.serial(
-  "prebundleMaterializedDependencies collapses retained dependency modules into region bundles",
+  "Vite resolveFileUrl honors order-pre hooks before earlier normal hooks",
+  { timeout: 30000 },
   async () => {
     const fixture = await createFixture();
-    const srcDir = path.join(fixture.projectRoot, "captured-src");
-    const authoredEntry = path.join(srcDir, "src", "entry.js");
-    const authoredLazy = path.join(srcDir, "src", "lazy.js");
-    const depIndex = path.join(srcDir, "node_modules", "pkg", "index.js");
-    const depFoo = path.join(srcDir, "node_modules", "pkg", "foo.js");
-    const depBar = path.join(srcDir, "node_modules", "pkg", "bar.js");
-    const depShared = path.join(srcDir, "node_modules", "pkg", "shared.js");
-    const depHelper = path.join(srcDir, "node_modules", "pkg", "helper.js");
-
-    await fs.mkdir(path.dirname(authoredEntry), { recursive: true });
-    await fs.mkdir(path.dirname(depIndex), { recursive: true });
-
     await fixture.write(
-      path.relative(fixture.projectRoot, authoredEntry),
-      'import { foo } from "../node_modules/pkg/index.js";\nexport const entry = foo;\n',
+      "index.html",
+      '<script type="module" src="/src/main.js"></script>\n',
     );
     await fixture.write(
-      path.relative(fixture.projectRoot, authoredLazy),
-      'import { bar } from "../node_modules/pkg/index.js";\nexport const lazy = bar;\n',
+      "src/main.js",
+      'import url from "virtual:ordered-asset"; globalThis["__orderedAssetUrl"] = url;\n',
     );
-    await fixture.write(
-      path.relative(fixture.projectRoot, depIndex),
-      'export { foo } from "./foo.js";\nexport { bar } from "./bar.js";\n',
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, depFoo),
-      'import { shared } from "./shared.js";\nimport { helper } from "./helper.js";\nexport const foo = shared + helper;\n',
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, depBar),
-      'import { shared } from "./shared.js";\nimport { helper } from "./helper.js";\nexport const bar = shared - helper;\n',
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, depShared),
-      "export const shared = 7;\n",
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, depHelper),
-      "export const helper = 3;\n",
-    );
-
-    const materialized = {
-      authoredFiles: [authoredEntry, authoredLazy],
-      entries: ["./src/entry.js"],
-      modules: [
-        {
-          filePath: authoredEntry,
-          id: authoredEntry,
-          relativePath: "src/entry.js",
-          sourceModuleIds: [authoredEntry],
-        },
-        {
-          filePath: authoredLazy,
-          id: authoredLazy,
-          relativePath: "src/lazy.js",
-          sourceModuleIds: [authoredLazy],
-        },
-        {
-          filePath: depIndex,
-          id: depIndex,
-          relativePath: "node_modules/pkg/index.js",
-          sourceModuleIds: [depIndex],
-        },
-        {
-          filePath: depFoo,
-          id: depFoo,
-          relativePath: "node_modules/pkg/foo.js",
-          sourceModuleIds: [depFoo],
-        },
-        {
-          filePath: depBar,
-          id: depBar,
-          relativePath: "node_modules/pkg/bar.js",
-          sourceModuleIds: [depBar],
-        },
-        {
-          filePath: depShared,
-          id: depShared,
-          relativePath: "node_modules/pkg/shared.js",
-          sourceModuleIds: [depShared],
-        },
-        {
-          filePath: depHelper,
-          id: depHelper,
-          relativePath: "node_modules/pkg/helper.js",
-          sourceModuleIds: [depHelper],
-        },
-      ],
-      prunedEmptyModuleIds: [],
-      retainedEmptyModuleIds: [],
-      runtimeEntries: [
-        "./src/entry.js",
-        "./src/lazy.js",
-        "./node_modules/pkg/index.js",
-        "./node_modules/pkg/foo.js",
-        "./node_modules/pkg/bar.js",
-        "./node_modules/pkg/shared.js",
-        "./node_modules/pkg/helper.js",
-      ],
-      srcDir,
-    };
-
-    const prebundled = await prebundleMaterializedDependencies({
-      dynamicRootModuleIds: [authoredLazy],
-      materialized,
-    });
-
-    expect(prebundled.modules.length).toBeLessThan(materialized.modules.length);
-    expect(
-      prebundled.modules.some((module) => module.filePath === depIndex),
-    ).toBe(false);
-    expect(
-      prebundled.modules.some((module) =>
-        module.relativePath.startsWith("__dep-bundles/"),
-      ),
-    ).toBe(true);
-
-    // Barrel flattening resolves entry->foo and lazy->bar to their defining
-    // modules, so each region keeps its own bundle while the code shared by
-    // both regions splits into a chunks/ bundle.
-    const bundleSources = await Promise.all(
-      prebundled.modules
-        .filter((module) => module.relativePath.startsWith("__dep-bundles/"))
-        .map((module) => fs.readFile(module.filePath, "utf8")),
-    );
-    const rewrittenEntry = await fs.readFile(authoredEntry, "utf8");
-    const rewrittenLazy = await fs.readFile(authoredLazy, "utf8");
-    expect(rewrittenEntry).toContain("__dep-bundles/");
-    expect(rewrittenLazy).toContain("__dep-bundles/");
-    const entryBundlePath = rewrittenEntry.match(
-      /__dep-bundles\/[\w./-]+/,
-    )?.[0];
-    const lazyBundlePath = rewrittenLazy.match(/__dep-bundles\/[\w./-]+/)?.[0];
-    expect(entryBundlePath).toBeTruthy();
-    expect(lazyBundlePath).toBeTruthy();
-    expect(entryBundlePath).not.toBe(lazyBundlePath);
-    const entryBundle = await fs.readFile(
-      path.join(srcDir, entryBundlePath),
-      "utf8",
-    );
-    const lazyBundle = await fs.readFile(
-      path.join(srcDir, lazyBundlePath),
-      "utf8",
-    );
-    // foo stays out of the lazy region and bar stays out of the eager region.
-    expect(entryBundle).not.toContain("shared - helper");
-    expect(lazyBundle).not.toContain("shared + helper");
-    expect(bundleSources.length).toBeGreaterThan(0);
-  },
-);
-
-test.serial(
-  "prebundleMaterializedDependencies keeps proven multi-module ESM direct and flattens namespace barrels",
-  async () => {
-    const fixture = await createFixture();
-    const srcDir = path.join(fixture.projectRoot, "captured-src");
-    const runtimeDir = path.join(fixture.projectRoot, "runtime-src");
-    const authoredEntry = path.join(srcDir, "src", "entry.js");
-    const depIndex = path.join(srcDir, "node_modules", "pkg", "index.js");
-    const depFoo = path.join(srcDir, "node_modules", "pkg", "foo.js");
-    const depBar = path.join(srcDir, "node_modules", "pkg", "bar.js");
-
-    await fixture.write(
-      path.relative(fixture.projectRoot, authoredEntry),
-      'import * as dep from "../node_modules/pkg/index.js";\nexport const value = dep.foo + dep.bar;\n',
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, depIndex),
-      'export * from "./foo.js";\nexport * from "./bar.js";\n',
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, depFoo),
-      "export const foo = 3;\n",
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, depBar),
-      "export const bar = 4;\n",
-    );
-
-    const dependencyModule = (filePath, relativePath, renderedLength = 1) => ({
-      filePath,
-      format: "esm",
-      id: filePath,
-      relativePath,
-      renderedLength,
-      sourceModuleIds: [filePath],
-    });
-    const prebundled = await prebundleMaterializedDependencies({
-      dynamicRootModuleIds: [],
-      materialized: {
-        authoredFiles: [authoredEntry],
-        entries: ["./src/entry.js"],
-        modules: [
-          {
-            filePath: authoredEntry,
-            id: authoredEntry,
-            relativePath: "src/entry.js",
-            sourceModuleIds: [authoredEntry],
+    await buildViteFixture(fixture, {
+      compilerLines: ['        chunks: { outputType: "script" },'],
+      pluginEntries: [
+        `{
+          name: "ordinary-asset-owner",
+          resolveId(id) {
+            return id === "virtual:ordered-asset" ? "\\0virtual:ordered-asset" : null;
           },
-          dependencyModule(
-            depIndex,
-            "node_modules/pkg/index.js",
-            0,
-          ),
-          dependencyModule(depFoo, "node_modules/pkg/foo.js"),
-          dependencyModule(depBar, "node_modules/pkg/bar.js"),
-        ],
-        prunedEmptyModuleIds: [],
-        retainedEmptyModuleIds: [],
-        runtimeEntries: [
-          "./src/entry.js",
-          "./node_modules/pkg/index.js",
-          "./node_modules/pkg/foo.js",
-          "./node_modules/pkg/bar.js",
-        ],
-        srcDir,
-      },
-      outputSrcDir: runtimeDir,
+          load(id) {
+            if (id !== "\\0virtual:ordered-asset") return null;
+            const referenceId = this.emitFile({
+              type: "asset",
+              fileName: "asset.svg",
+              source: "<svg/>",
+            });
+            return "export default import.meta.ROLLUP_FILE_URL_" + referenceId + ";";
+          },
+          resolveFileUrl({ fileName }) {
+            return fileName === "asset.svg" ? JSON.stringify("/wrong.svg") : null;
+          },
+        },`,
+        `{
+          name: "preferred-asset-owner",
+          resolveFileUrl: {
+            order: "pre",
+            handler({ fileName }) {
+              return fileName === "asset.svg" ? JSON.stringify("/correct.svg") : null;
+            },
+          },
+        },`,
+      ],
     });
 
-    expect(
-      prebundled.modules.some((module) =>
-        module.relativePath.startsWith("__dep-bundles/"),
-      ),
-    ).toBe(false);
-    expect(prebundled.modules).toHaveLength(4);
-    const rewrittenEntry = await fs.readFile(
-      path.join(runtimeDir, "src", "entry.js"),
-      "utf8",
+    const html = await fixture.read("dist/index.html");
+    const entryScript = readRewrittenEntryScript(html);
+    const source = await fixture.read(
+      path.join("dist", toDistRelativeFile(entryScript)),
     );
-    expect(rewrittenEntry).not.toContain("import * as dep");
-    expect(rewrittenEntry).not.toContain("pkg/index.js");
-    expect(rewrittenEntry).toContain("pkg/foo.js");
-    expect(rewrittenEntry).toContain("pkg/bar.js");
+    const runtimeGlobal = { location: new URL("http://example.test/") };
+    new Function("globalThis", source)(runtimeGlobal);
+    expect(runtimeGlobal.__orderedAssetUrl).toBe("/correct.svg");
   },
 );
 
 test.serial(
-  "prebundleMaterializedDependencies resolves CJS through the original package context",
+  "Vite applies host defines to optional chains while preserving shadowed identifiers and literals",
+  { timeout: 30000 },
   async () => {
     const fixture = await createFixture();
-    const srcDir = path.join(fixture.projectRoot, "captured-src");
-    const authoredEntry = path.join(srcDir, "src", "entry.js");
-    const materializedDependency = path.join(
-      srcDir,
-      "__deps__",
-      "react-dom",
-      "index.js",
-    );
-    const sourceDependency = path.join(
-      fixture.projectRoot,
-      "isolated-store",
-      "node_modules",
-      "react-dom",
-      "index.js",
-    );
-    const materializedReact = path.join(
-      srcDir,
-      "__deps__",
-      "react",
-      "index.js",
-    );
-    const sourceReact = path.join(
-      fixture.projectRoot,
-      "isolated-store",
-      "node_modules",
-      "react",
-      "index.js",
-    );
-    const scheduler = path.join(
-      fixture.projectRoot,
-      "isolated-store",
-      "node_modules",
-      "scheduler",
-      "index.js",
-    );
-
     await fixture.write(
-      path.relative(fixture.projectRoot, authoredEntry),
-      'import dependency from "../__deps__/react-dom/index.js"; export const value = dependency.value;\n',
+      "index.html",
+      '<script type="module" src="/src/main.js"></script>\n',
     );
     await fixture.write(
-      path.relative(fixture.projectRoot, materializedDependency),
-      'module.exports = { value: require("react").value + require("scheduler").value };\n',
+      ".env.production",
+      "VITE_GCC_DEFINE_CDN=https://cdn.example\n",
     );
     await fixture.write(
-      path.relative(fixture.projectRoot, materializedReact),
-      "module.exports = { value: 10 };\n",
+      "src/main.js",
+      [
+        "function readShadowed(feature) { return feature?.enabled; }",
+        'globalThis["__definedValues"] = [',
+        "  feature?.enabled,",
+        "  readShadowed({ enabled: 33 }),",
+        '  "feature.enabled",',
+        "  settings.label,",
+        "  import.meta.env.MODE,",
+        "  import.meta.env.VITE_GCC_DEFINE_CDN,",
+        "  import.meta.env.OVERRIDE,",
+        "  import.meta.env.GCC_MISSING_DEFINE,",
+        "];",
+        "",
+      ].join("\n"),
     );
-    await fixture.write(
-      path.relative(fixture.projectRoot, sourceDependency),
-      "module.exports = {};\n",
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, sourceReact),
-      "module.exports = { value: 100 };\n",
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, scheduler),
-      "module.exports = { value: 7 };\n",
-    );
-
-    const materialized = {
-      authoredFiles: [authoredEntry],
-      dependencySourceFileByMaterializedFile: {
-        [materializedDependency]: sourceDependency,
-        [materializedReact]: sourceReact,
-      },
-      entries: ["./src/entry.js"],
-      modules: [
-        {
-          filePath: authoredEntry,
-          id: authoredEntry,
-          relativePath: "src/entry.js",
-          sourceModuleIds: [authoredEntry],
-        },
-        {
-          filePath: materializedDependency,
-          id: sourceDependency,
-          relativePath: "__deps__/react-dom/index.js",
-          sourceModuleIds: [sourceDependency],
-        },
-        {
-          filePath: materializedReact,
-          id: sourceReact,
-          relativePath: "__deps__/react/index.js",
-          sourceModuleIds: [sourceReact],
-        },
+    await buildViteFixture(fixture, {
+      compilerLines: ['        chunks: { outputType: "script" },'],
+      configLines: [
+        `  define: ${JSON.stringify({
+          "feature.enabled": false,
+          settings: { label: "configured" },
+          "import.meta.env.OVERRIDE": JSON.stringify("user"),
+        })},`,
       ],
-      prunedEmptyModuleIds: [],
-      retainedEmptyModuleIds: [],
-      runtimeEntries: [
-        "./src/entry.js",
-        "./__deps__/react-dom/index.js",
-        "./__deps__/react/index.js",
-      ],
-      srcDir,
-    };
-
-    const prebundled = await prebundleMaterializedDependencies({
-      dynamicRootModuleIds: [],
-      materialized,
-    });
-    const bundle = prebundled.modules.find((module) =>
-      module.relativePath.startsWith("__dep-bundles/eager/"),
-    );
-    expect(bundle).toBeDefined();
-    if (!bundle) throw new Error("Expected an eager dependency bundle");
-    const bundleText = await fs.readFile(bundle.filePath, "utf8");
-    expect(bundleText).toContain("module.exports = { value: 10 }");
-    expect(bundleText).not.toContain("value: 100");
-    expect(bundleText).toContain("scheduler");
-    const marker = JSON.parse(
-      await fs.readFile(
-        path.join(
-          srcDir,
-          "__dep-bundles",
-          ".gcc-ts-bundler-materialized-dependency-bundles.json",
-        ),
-        "utf8",
-      ),
-    );
-    expect(marker.kind).toBe(
-      "gcc-ts-bundler-materialized-dependency-bundles",
-    );
-    expect(
-      marker.files.some((file) => file.path.endsWith(path.basename(bundle.filePath))),
-    ).toBe(true);
-  },
-);
-
-test.serial(
-  "prebundleMaterializedDependencies keeps aliasing wrapper exports intact",
-  async () => {
-    const fixture = await createFixture();
-    const srcDir = path.join(fixture.projectRoot, "captured-src");
-    const authoredEntry = path.join(srcDir, "src", "entry.js");
-    const depIndex = path.join(srcDir, "node_modules", "pkg", "index.js");
-    const depFoo = path.join(srcDir, "node_modules", "pkg", "foo.js");
-
-    await fs.mkdir(path.dirname(authoredEntry), { recursive: true });
-    await fs.mkdir(path.dirname(depIndex), { recursive: true });
-
-    await fixture.write(
-      path.relative(fixture.projectRoot, authoredEntry),
-      'import { aliased } from "../node_modules/pkg/index.js";\nexport const entry = aliased;\n',
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, depIndex),
-      'export { foo as aliased } from "./foo.js";\n',
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, depFoo),
-      "export const foo = 7;\n",
-    );
-
-    const materialized = {
-      authoredFiles: [authoredEntry],
-      entries: ["./src/entry.js"],
-      modules: [
-        {
-          filePath: authoredEntry,
-          id: authoredEntry,
-          relativePath: "src/entry.js",
-          sourceModuleIds: [authoredEntry],
-        },
-        {
-          filePath: depIndex,
-          id: depIndex,
-          relativePath: "node_modules/pkg/index.js",
-          sourceModuleIds: [depIndex],
-        },
-        {
-          filePath: depFoo,
-          id: depFoo,
-          relativePath: "node_modules/pkg/foo.js",
-          sourceModuleIds: [depFoo],
-        },
-      ],
-      prunedEmptyModuleIds: [],
-      retainedEmptyModuleIds: [],
-      runtimeEntries: [
-        "./src/entry.js",
-        "./node_modules/pkg/index.js",
-        "./node_modules/pkg/foo.js",
-      ],
-      srcDir,
-    };
-
-    const prebundled = await prebundleMaterializedDependencies({
-      dynamicRootModuleIds: [],
-      materialized,
     });
 
-    expect(
-      prebundled.modules.some(
-        (module) =>
-          module.relativePath.startsWith("__dep-bundles/eager/") &&
-          !module.relativePath.startsWith("__dep-bundles/chunks/"),
-      ),
-    ).toBe(true);
-
-    const rewrittenEntry = await fs.readFile(authoredEntry, "utf8");
-    expect(rewrittenEntry).toContain("__dep-bundles/eager/");
-    expect(rewrittenEntry).not.toContain("__dep-bundles/chunks/");
-  },
-);
-
-test.serial(
-  "prebundleMaterializedDependencies dedupes identical lazy dependency bundles into one shared module",
-  async () => {
-    const fixture = await createFixture();
-    const srcDir = path.join(fixture.projectRoot, "captured-src");
-    const authoredEntry = path.join(srcDir, "src", "entry.js");
-    const authoredLazyA = path.join(srcDir, "src", "lazy-a.js");
-    const authoredLazyB = path.join(srcDir, "src", "lazy-b.js");
-    const depIndex = path.join(srcDir, "node_modules", "pkg", "index.js");
-    const depFoo = path.join(srcDir, "node_modules", "pkg", "foo.js");
-
-    await fs.mkdir(path.dirname(authoredEntry), { recursive: true });
-    await fs.mkdir(path.dirname(depIndex), { recursive: true });
-
-    await fixture.write(
-      path.relative(fixture.projectRoot, authoredEntry),
-      "export const entry = true;\n",
+    const html = await fixture.read("dist/index.html");
+    const entryScript = readRewrittenEntryScript(html);
+    const source = await fixture.read(
+      path.join("dist", toDistRelativeFile(entryScript)),
     );
-    await fixture.write(
-      path.relative(fixture.projectRoot, authoredLazyA),
-      'import { aliased } from "../node_modules/pkg/index.js";\nexport const lazyA = aliased;\n',
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, authoredLazyB),
-      'import { aliased } from "../node_modules/pkg/index.js";\nexport const lazyB = aliased;\n',
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, depIndex),
-      'export { foo as aliased } from "./foo.js";\n',
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, depFoo),
-      "export const foo = 7;\n",
-    );
-
-    const materialized = {
-      authoredFiles: [authoredEntry, authoredLazyA, authoredLazyB],
-      entries: ["./src/entry.js"],
-      modules: [
-        {
-          filePath: authoredEntry,
-          id: authoredEntry,
-          relativePath: "src/entry.js",
-          sourceModuleIds: [authoredEntry],
-        },
-        {
-          filePath: authoredLazyA,
-          id: authoredLazyA,
-          relativePath: "src/lazy-a.js",
-          sourceModuleIds: [authoredLazyA],
-        },
-        {
-          filePath: authoredLazyB,
-          id: authoredLazyB,
-          relativePath: "src/lazy-b.js",
-          sourceModuleIds: [authoredLazyB],
-        },
-        {
-          filePath: depIndex,
-          id: depIndex,
-          relativePath: "node_modules/pkg/index.js",
-          sourceModuleIds: [depIndex],
-        },
-        {
-          filePath: depFoo,
-          id: depFoo,
-          relativePath: "node_modules/pkg/foo.js",
-          sourceModuleIds: [depFoo],
-        },
-      ],
-      prunedEmptyModuleIds: [],
-      retainedEmptyModuleIds: [],
-      runtimeEntries: [
-        "./src/entry.js",
-        "./src/lazy-a.js",
-        "./src/lazy-b.js",
-        "./node_modules/pkg/index.js",
-        "./node_modules/pkg/foo.js",
-      ],
-      srcDir,
-    };
-
-    const prebundled = await prebundleMaterializedDependencies({
-      dynamicRootModuleIds: [authoredLazyA, authoredLazyB],
-      materialized,
-    });
-
-    const sharedModules = prebundled.modules.filter((module) =>
-      module.relativePath.startsWith("__dep-bundles/shared/"),
-    );
-    expect(sharedModules).toHaveLength(1);
-    expect(
-      prebundled.modules.some(
-        (module) =>
-          module.relativePath.startsWith("__dep-bundles/") &&
-          !module.relativePath.startsWith("__dep-bundles/chunks/") &&
-          !module.relativePath.startsWith("__dep-bundles/shared/"),
-      ),
-    ).toBe(false);
-
-    const rewrittenLazyA = await fs.readFile(authoredLazyA, "utf8");
-    const rewrittenLazyB = await fs.readFile(authoredLazyB, "utf8");
-    const sharedImportA = rewrittenLazyA.match(
-      /__dep-bundles\/shared\/[^"']+\.js/u,
-    );
-    const sharedImportB = rewrittenLazyB.match(
-      /__dep-bundles\/shared\/[^"']+\.js/u,
-    );
-    expect(sharedImportA).toBeTruthy();
-    expect(sharedImportB).toBeTruthy();
-    expect(sharedImportA?.[0]).toBe(sharedImportB?.[0]);
-    expect(
-      prebundled.runtimeEntries.filter((entry) =>
-        entry.startsWith("./__dep-bundles/shared/"),
-      ),
-    ).toHaveLength(1);
-  },
-);
-
-test.serial(
-  "prebundleMaterializedDependencies keeps non-identical lazy dependency bundles separate",
-  async () => {
-    const fixture = await createFixture();
-    const srcDir = path.join(fixture.projectRoot, "captured-src");
-    const authoredEntry = path.join(srcDir, "src", "entry.js");
-    const authoredLazyA = path.join(srcDir, "src", "lazy-a.js");
-    const authoredLazyB = path.join(srcDir, "src", "lazy-b.js");
-    const depIndexA = path.join(srcDir, "node_modules", "pkg-a", "index.js");
-    const depFoo = path.join(srcDir, "node_modules", "pkg-a", "foo.js");
-    const depIndexB = path.join(srcDir, "node_modules", "pkg-b", "index.js");
-    const depBar = path.join(srcDir, "node_modules", "pkg-b", "bar.js");
-
-    await fs.mkdir(path.dirname(authoredEntry), { recursive: true });
-    await fs.mkdir(path.dirname(depIndexA), { recursive: true });
-    await fs.mkdir(path.dirname(depIndexB), { recursive: true });
-
-    await fixture.write(
-      path.relative(fixture.projectRoot, authoredEntry),
-      "export const entry = true;\n",
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, authoredLazyA),
-      'import { aliased } from "../node_modules/pkg-a/index.js";\nexport const lazyA = aliased;\n',
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, authoredLazyB),
-      'import { aliased } from "../node_modules/pkg-b/index.js";\nexport const lazyB = aliased;\n',
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, depIndexA),
-      'export { foo as aliased } from "./foo.js";\n',
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, depFoo),
-      "export const foo = 7;\n",
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, depIndexB),
-      'export { bar as aliased } from "./bar.js";\n',
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, depBar),
-      "export const bar = 9;\n",
-    );
-
-    const materialized = {
-      authoredFiles: [authoredEntry, authoredLazyA, authoredLazyB],
-      entries: ["./src/entry.js"],
-      modules: [
-        {
-          filePath: authoredEntry,
-          id: authoredEntry,
-          relativePath: "src/entry.js",
-          sourceModuleIds: [authoredEntry],
-        },
-        {
-          filePath: authoredLazyA,
-          id: authoredLazyA,
-          relativePath: "src/lazy-a.js",
-          sourceModuleIds: [authoredLazyA],
-        },
-        {
-          filePath: authoredLazyB,
-          id: authoredLazyB,
-          relativePath: "src/lazy-b.js",
-          sourceModuleIds: [authoredLazyB],
-        },
-        {
-          filePath: depIndexA,
-          id: depIndexA,
-          relativePath: "node_modules/pkg-a/index.js",
-          sourceModuleIds: [depIndexA],
-        },
-        {
-          filePath: depFoo,
-          id: depFoo,
-          relativePath: "node_modules/pkg-a/foo.js",
-          sourceModuleIds: [depFoo],
-        },
-        {
-          filePath: depIndexB,
-          id: depIndexB,
-          relativePath: "node_modules/pkg-b/index.js",
-          sourceModuleIds: [depIndexB],
-        },
-        {
-          filePath: depBar,
-          id: depBar,
-          relativePath: "node_modules/pkg-b/bar.js",
-          sourceModuleIds: [depBar],
-        },
-      ],
-      prunedEmptyModuleIds: [],
-      retainedEmptyModuleIds: [],
-      runtimeEntries: [
-        "./src/entry.js",
-        "./src/lazy-a.js",
-        "./src/lazy-b.js",
-        "./node_modules/pkg-a/index.js",
-        "./node_modules/pkg-a/foo.js",
-        "./node_modules/pkg-b/index.js",
-        "./node_modules/pkg-b/bar.js",
-      ],
-      srcDir,
-    };
-
-    const prebundled = await prebundleMaterializedDependencies({
-      dynamicRootModuleIds: [authoredLazyA, authoredLazyB],
-      materialized,
-    });
-
-    expect(
-      prebundled.modules.some((module) =>
-        module.relativePath.startsWith("__dep-bundles/shared/"),
-      ),
-    ).toBe(false);
-    expect(
-      prebundled.modules.filter(
-        (module) =>
-          module.relativePath.startsWith("__dep-bundles/") &&
-          !module.relativePath.startsWith("__dep-bundles/chunks/"),
-      ).length,
-    ).toBe(2);
-
-    const rewrittenLazyA = await fs.readFile(authoredLazyA, "utf8");
-    const rewrittenLazyB = await fs.readFile(authoredLazyB, "utf8");
-    expect(rewrittenLazyA).toContain("__dep-bundles/lazy-a/");
-    expect(rewrittenLazyB).toContain("__dep-bundles/lazy-b/");
+    const runtimeGlobal = { location: new URL("http://example.test/") };
+    new Function("globalThis", source)(runtimeGlobal);
+    expect(runtimeGlobal.__definedValues).toEqual([
+      false,
+      33,
+      "feature.enabled",
+      "configured",
+      "production",
+      "https://cdn.example",
+      "user",
+      undefined,
+    ]);
   },
 );
 
@@ -2288,84 +1966,6 @@ test.serial(
 );
 
 test.serial(
-  "prebundle derives eventemitter3-style named exports for an atom facade",
-  async () => {
-    const fixture = await createFixture();
-    const srcDir = path.join(fixture.projectRoot, "captured-src");
-    const runtimeDir = path.join(fixture.projectRoot, "runtime-src");
-    const authoredEntry = path.join(srcDir, "src", "entry.js");
-    const wrapper = path.join(srcDir, "node_modules", "wrapper", "index.js");
-    const facade = path.join(srcDir, "__virtual__", "callable-cjs-facade.js");
-    const commonJs = path.join(srcDir, "node_modules", "callable-cjs", "index.js");
-    const commonJsCode = [
-      "var state = { exports: {} };",
-      "function requireCallable() {",
-      "  (function(module) {",
-      "    function EventEmitter() { this.value = 42; }",
-      "    EventEmitter.EventEmitter = EventEmitter;",
-      "    module.exports = EventEmitter;",
-      "  })(state);",
-      "  return state.exports;",
-      "}",
-      "export { requireCallable as __require };",
-      "",
-    ].join("\n");
-    const commonJsNamedExports = getCapturedModuleAnalysis({
-      code: commonJsCode,
-      id: commonJs,
-    }).commonJsNamedExports;
-    expect(commonJsNamedExports).toEqual(["EventEmitter"]);
-    await fixture.write(
-      path.relative(fixture.projectRoot, authoredEntry),
-      'import { EventEmitter } from "../node_modules/wrapper/index.js"; export const value = new EventEmitter().value;\n',
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, wrapper),
-      'import Callable, { EventEmitter } from "../../__virtual__/callable-cjs-facade.js"; export { Callable as default, EventEmitter };\n',
-    );
-    await fixture.write(
-      path.relative(fixture.projectRoot, facade),
-      [
-        'import { __require as requireCallable } from "../node_modules/callable-cjs/index.js";',
-        "var callableExports = requireCallable();",
-        "var callableDefault = callableExports;",
-        "export { callableDefault as default };",
-        "",
-      ].join("\n"),
-    );
-    await fixture.write(path.relative(fixture.projectRoot, commonJs), commonJsCode);
-
-    const prebundled = await prebundleMaterializedDependencies({
-      dynamicRootModuleIds: [],
-      materialized: {
-        authoredFiles: [authoredEntry],
-        entries: ["./src/entry.js"],
-        modules: [
-          { filePath: authoredEntry, format: "esm", id: authoredEntry, relativePath: "src/entry.js", sourceModuleIds: [authoredEntry] },
-          { filePath: wrapper, format: "esm", id: wrapper, relativePath: "node_modules/wrapper/index.js", sourceModuleIds: [wrapper] },
-          { filePath: facade, format: "cjs", id: "\0callable-cjs?commonjs-es-import", relativePath: "__virtual__/callable-cjs-facade.js", sourceModuleIds: ["\0callable-cjs?commonjs-es-import"] },
-          { commonJsNamedExports, filePath: commonJs, format: "mixed", id: commonJs, relativePath: "node_modules/callable-cjs/index.js", sourceModuleIds: [commonJs] },
-        ],
-        prunedEmptyModuleIds: [],
-        retainedEmptyModuleIds: [],
-        runtimeEntries: ["./src/entry.js", "./node_modules/wrapper/index.js", "./__virtual__/callable-cjs-facade.js", "./node_modules/callable-cjs/index.js"],
-        srcDir,
-      },
-      outputSrcDir: runtimeDir,
-    });
-
-    const atom = prebundled.modules.find((module) =>
-      module.relativePath.startsWith("__dep-bundles/atom/"),
-    );
-    expect(atom).toBeDefined();
-    if (!atom) throw new Error("Expected a callable CommonJS atom");
-    const exports = await import(`${pathToFileURL(atom.filePath).href}?eventemitter3`);
-    expect(new exports.EventEmitter().value).toBe(42);
-    expect(exports.EventEmitter).toBe(exports.default.EventEmitter);
-  },
-);
-
-test.serial(
   "gccTsBundler recognizes local named default exports in dependency metadata",
   { timeout: 20000 },
   async () => {
@@ -2452,9 +2052,7 @@ test.serial(
     await fixture.write("src/value.js", 'export const value = "APP_VALUE";\n');
 
     await buildViteFixture(fixture, {
-      compilerLines: [
-        '        chunks: { outputType: "esm" },',
-      ],
+      compilerLines: ['        chunks: { outputType: "esm" },'],
       pluginEntries: ["    virtualBridge,"],
       preambleLines: [
         "const virtualBridge = {",
@@ -2815,6 +2413,78 @@ test.serial(
 );
 
 test.serial(
+  "materialization rewrites warmed captured imports across source and virtual identities",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write("package.json", JSON.stringify({ type: "module" }));
+    const ids = [
+      "main.js",
+      "main.jsx",
+      "main.ts",
+      "main.tsx",
+      "component.vue?vue&type=script&lang.ts",
+    ].map((name) => path.join(fixture.projectRoot, "src", name));
+    ids.push("\0virtual:captured-entry");
+    const targets = new Map(
+      ["static", "forwarded", "lazy"].map((name) => [
+        `./${name}.ts`,
+        path.join(fixture.projectRoot, "src", `${name}.ts`),
+      ]),
+    );
+    const capturedModules = new Map(
+      ids.map((id) => [
+        id,
+        {
+          id,
+          code: [
+            'import { value } from "./static.ts";',
+            'export { value as forwarded } from "./forwarded.ts";',
+            'export const load = () => import("./lazy.ts");',
+            "export const initial = value;",
+          ].join("\n"),
+        },
+      ]),
+    );
+    for (const [specifier, id] of targets) {
+      capturedModules.set(id, {
+        id,
+        code: `export const value = ${JSON.stringify(specifier)};`,
+      });
+    }
+    for (const record of capturedModules.values()) {
+      getCapturedSourceFile(record, record.code);
+    }
+    const materialized = await materializeCapturedGraph.call(
+      {
+        ...createCapturePluginContext(),
+        async resolve(specifier) {
+          return { id: targets.get(specifier), external: false };
+        },
+      },
+      {
+        capturedModules,
+        config: { root: fixture.projectRoot },
+        dynamicRootModuleIds: [targets.get("./lazy.ts")],
+        entryModuleIds: ids,
+        nativeDefines: undefined,
+        resolutionCache: new Map(),
+        moduleIds: [...capturedModules.keys()],
+        srcDir: path.join(fixture.projectRoot, ".gcc-debug", "src"),
+      },
+    );
+    for (const id of ids) {
+      const module = materialized.modules.find(
+        (candidate) => candidate.id === id,
+      );
+      const emitted = await import(pathToFileURL(module.filePath).href);
+      expect(emitted.initial).toBe("./static.ts");
+      expect(emitted.forwarded).toBe("./forwarded.ts");
+      expect((await emitted.load()).value).toBe("./lazy.ts");
+    }
+  },
+);
+
+test.serial(
   "materializeCapturedGraph preserves pruning boundaries for empty, dynamic, and CSS side-effect stubs",
   async () => {
     const fixture = await createFixture();
@@ -2866,6 +2536,7 @@ test.serial(
         config: { root: fixture.projectRoot },
         dynamicRootModuleIds: [lazyId],
         entryModuleIds: [mainId],
+        nativeDefines: undefined,
         resolutionCache: new Map(),
         moduleIds: [mainId, emptyId, lazyId, styleId],
         srcDir,
@@ -2898,7 +2569,6 @@ test.serial(
   },
 );
 
-
 test.serial(
   "Vite es2020 keeps Unicode property escapes in a dependency chunk",
   { timeout: 30000 },
@@ -2910,11 +2580,15 @@ test.serial(
     );
     await fixture.write(
       "node_modules/property-regex/package.json",
-      JSON.stringify({ name: "property-regex", type: "module", version: "1.0.0" }),
+      JSON.stringify({
+        name: "property-regex",
+        type: "module",
+        version: "1.0.0",
+      }),
     );
     await fixture.write(
       "node_modules/property-regex/index.js",
-      'export const isIdeographPair = (value) => /^\\p{Unified_Ideograph}{2}$/u.test(value);\n',
+      "export const isIdeographPair = (value) => /^\\p{Unified_Ideograph}{2}$/u.test(value);\n",
     );
     await fixture.write(
       "src/main.js",
@@ -3060,9 +2734,9 @@ test("resolveViteCaptureRootPath is deterministic for identical inputs", () => {
 
   const captureRoot = resolveViteCaptureRootPath(input);
   expect(captureRoot).toBe(resolveViteCaptureRootPath(input));
-  expect(captureRoot.startsWith(`${path.resolve("/tmp/demo")}${path.sep}`)).toBe(
-    false,
-  );
+  expect(
+    captureRoot.startsWith(`${path.resolve("/tmp/demo")}${path.sep}`),
+  ).toBe(false);
   expect(path.basename(path.dirname(captureRoot))).toBe("vite-capture");
 });
 
@@ -3089,7 +2763,9 @@ test("resolveViteCaptureRootPath uses the specified persistent cache.dir", () =>
   };
 
   const captureRoot = resolveViteCaptureRootPath(input);
-  expect(captureRoot.startsWith(path.resolve("/tmp/demo", ".cache"))).toBe(true);
+  expect(captureRoot.startsWith(path.resolve("/tmp/demo", ".cache"))).toBe(
+    true,
+  );
   expect(path.basename(path.dirname(captureRoot))).toBe("vite-capture");
 });
 
@@ -3128,6 +2804,33 @@ test("resolveViteCaptureRootPath changes when material build identity changes", 
   ).not.toBe(resolveViteCaptureRootPath(baseInput));
 });
 
+test("Vite debug workspace cleanup preserves caller-owned directory contents", async () => {
+  const fixture = await createFixture();
+  await fixture.write("debug/notes.txt", "caller-owned\n");
+  const input = {
+    config: {},
+    debugDir: "debug",
+    options: { compiler: { cache: { mode: "off" } } },
+    projectRoot: fixture.projectRoot,
+  };
+  const first = await prepareViteWorkspace(input);
+  try {
+    await fs.writeFile(
+      path.join(first.captureRoot, "obsolete.js"),
+      "old build",
+    );
+  } finally {
+    await first.dispose();
+  }
+  const second = await prepareViteWorkspace(input);
+  try {
+    expect(await fixture.read("debug/notes.txt")).toBe("caller-owned\n");
+    expect(await fs.readdir(second.captureRoot)).not.toContain("obsolete.js");
+  } finally {
+    await second.dispose();
+  }
+});
+
 test.serial(
   "gccTsBundler does not write .gcc-ts-bundler-vite into the project without persistent cache",
   { timeout: 20000 },
@@ -3145,46 +2848,155 @@ test.serial(
 );
 
 test.serial(
-  "gccTsBundler reuses the same Vite capture root and hits resolve snapshot plus final fast cache on identical builds",
+  "one Vite watcher recovers from worker rejection with current imports and exports",
+  { timeout: 60000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "index.html",
+      '<script type="module" src="/src/main.js"></script>\n',
+    );
+    await fixture.write(
+      "src/stable.js",
+      'export const kept = "kept";\nexport const restored = "restored";\n',
+    );
+    await fixture.write("src/worker.js", 'self.postMessage("worker");\n');
+    await fixture.write(
+      "src/removed.js",
+      'globalThis["__removedModuleRan"] = true;\n',
+    );
+    const initialMain =
+      'import "./removed.js"; import { kept } from "./stable.js"; globalThis["__watchResult"] = kept;\n';
+    const workerMain =
+      'import Worker from "./worker.js?worker"; import { kept } from "./stable.js"; globalThis["__watchResult"] = kept; globalThis["__worker"] = Worker;\n';
+    const recoveredMain =
+      'import { restored } from "./stable.js"; globalThis["__watchResult"] = restored;\n';
+    await fixture.write("src/main.js", initialMain);
+    const viteUrl = pathToFileURL(
+      path.join(process.cwd(), "node_modules/vite/dist/node/index.js"),
+    ).href;
+    const pluginUrl = pathToFileURL(
+      path.join(process.cwd(), "dist/vite/index.mjs"),
+    ).href;
+    await fixture.write(
+      "watch.mjs",
+      `
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { build } from ${JSON.stringify(viteUrl)};
+import { gccTsBundler } from ${JSON.stringify(pluginUrl)};
+
+const plugin = gccTsBundler({
+  compiler: { cache: { mode: "persistent", dir: ".cache" } },
+  report: { file: "watch-report.json" },
+});
+const watcher = await build({
+  configFile: false,
+  root: process.cwd(),
+  logLevel: "silent",
+  build: {
+    outDir: "dist",
+    target: "es2018",
+    modulePreload: false,
+    watch: {},
+  },
+  plugins: [plugin],
+});
+let phase = 0;
+let buildError;
+let queue = Promise.resolve();
+const observed = [];
+try {
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("watch sequence timed out")), 45000);
+    const fail = (error) => { clearTimeout(timer); reject(error); };
+    watcher.on("event", (event) => {
+      queue = queue.then(async () => {
+        if (event.code === "START") buildError = undefined;
+        if (event.code === "ERROR") buildError = event.error;
+        if (event.code !== "END") return;
+        if (phase === 1) {
+          assert.match(String(buildError), /does not support worker entry graphs/);
+          phase = 2;
+          await fs.writeFile("src/main.js", ${JSON.stringify(recoveredMain)});
+          return;
+        }
+        if (buildError) throw buildError;
+        const html = await fs.readFile("dist/index.html", "utf8");
+        const script = html.match(/<script[^>]*src="([^"]+)"/)?.[1];
+        assert.ok(script, "successful build has an entry script");
+        globalThis.location = { href: "http://vite.test/index.html" };
+        delete globalThis.__g;
+        await import(pathToFileURL(path.resolve("dist", script.replace(/^\\//, ""))).href + "?phase=" + phase);
+        observed.push(globalThis.__watchResult);
+        if (phase === 0) {
+          assert.equal(globalThis.__watchResult, "kept");
+          phase = 1;
+          await fs.writeFile("src/main.js", ${JSON.stringify(workerMain)});
+          return;
+        }
+        assert.equal(globalThis.__watchResult, "restored");
+        const report = JSON.parse(await fs.readFile("watch-report.json", "utf8"));
+        assert.equal(report.modules.deadModules.some((module) => module.id === "src/removed.js"), false);
+        await fs.writeFile("watch-result.json", JSON.stringify(observed));
+        clearTimeout(timer);
+        resolve();
+      }).catch(fail);
+    });
+  });
+} finally {
+  await watcher.close();
+}
+`,
+    );
+    await execFileAsync(
+      process.execPath,
+      [path.join(fixture.projectRoot, "watch.mjs")],
+      { cwd: fixture.projectRoot, timeout: 55000 },
+    );
+    expect(JSON.parse(await fixture.read("watch-result.json"))).toEqual([
+      "kept",
+      "restored",
+    ]);
+  },
+);
+
+test.serial(
+  "gccTsBundler reuses captured inputs and preserves published assets on identical cached builds",
   { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
     await writeViteCssFixture(fixture);
 
-    const first = await buildViteFixture(fixture, {
+    await buildViteFixture(fixture, {
       cache: { dir: ".cache", mode: "persistent" },
       env: { GCC_BUILD_TIMINGS: "1" },
     });
+    const firstFiles = await listFiles(fixture.outDir);
+    const firstContents = await Promise.all(
+      firstFiles.map((file) => fixture.read(path.join("dist", file))),
+    );
     const second = await buildViteFixture(fixture, {
       cache: { dir: ".cache", mode: "persistent" },
       env: { GCC_BUILD_TIMINGS: "1" },
     });
 
     expect(
-      await listDirectoryNames(
-        persistentViteCaptureDir(fixture.projectRoot),
-      ),
+      await listDirectoryNames(persistentViteCaptureDir(fixture.projectRoot)),
     ).toHaveLength(1);
     expect(
       await listDirectoryNames(
         path.join(fixture.projectRoot, ".gcc-ts-bundler-vite"),
       ).catch(() => []),
     ).toEqual([]);
-    expect(first.stderr).toContain(
-      "[gcc-ts-bundler timing] cache:final-fast: miss",
-    );
-    expect(first.stderr).toContain(
-      "[gcc-ts-bundler timing] cache:final-metadata: miss",
-    );
-    expect(second.stderr).toContain(
-      "[gcc-ts-bundler timing] cache:resolve-snapshot: hit",
-    );
-    expect(second.stderr).toContain(
-      "[gcc-ts-bundler timing] cache:final-fast: hit",
-    );
-    expect(second.stderr).not.toContain(
-      "[gcc-ts-bundler timing] cache:final-metadata:",
-    );
+    expect(await listFiles(fixture.outDir)).toEqual(firstFiles);
+    expect(
+      await Promise.all(
+        firstFiles.map((file) => fixture.read(path.join("dist", file))),
+      ),
+    ).toEqual(firstContents);
     expect(second.stderr).not.toContain(
       "[gcc-ts-bundler timing] closure:compile:",
     );
@@ -3245,9 +3057,6 @@ test.serial(
       "export interface Config { label: string; optional?: number }\n",
     );
     const rebuilt = await buildViteFixture(fixture, options);
-    expect(rebuilt.stderr).toContain(
-      "[gcc-ts-bundler timing] cache:final-fast: miss",
-    );
     expect(rebuilt.stderr).toContain(
       "[gcc-ts-bundler timing] cache:native-emit: miss",
     );
@@ -3393,7 +3202,7 @@ test.serial(
 );
 
 test.serial(
-  "gccTsBundler recreates the runtime source map when the capture root is deleted",
+  "gccTsBundler restores current chunk ownership when the capture root is deleted",
   { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
@@ -3404,32 +3213,27 @@ test.serial(
     };
 
     await buildViteFixture(fixture, options);
+    const firstFiles = await listFiles(fixture.outDir);
+    const firstContents = await Promise.all(
+      firstFiles.map((file) => fixture.read(path.join("dist", file))),
+    );
     await fs.rm(persistentViteCaptureDir(fixture.projectRoot), {
       force: true,
       recursive: true,
     });
-    const rebuilt = await buildViteFixture(fixture, options);
+    await buildViteFixture(fixture, options);
 
-    expect(rebuilt.stderr).toContain(
-      "[gcc-ts-bundler timing] cache:native-emit: miss",
-    );
-    const captureDir = persistentViteCaptureDir(fixture.projectRoot);
-    const [captureRootId] = await listDirectoryNames(captureDir);
+    expect(await listFiles(fixture.outDir)).toEqual(firstFiles);
     expect(
-      await fs.readFile(
-        path.join(
-          captureDir,
-          captureRootId,
-          ".gcc-ts-bundler-vite-runtime-module-sources.json",
-        ),
-        "utf8",
+      await Promise.all(
+        firstFiles.map((file) => fixture.read(path.join("dist", file))),
       ),
-    ).toContain("{");
+    ).toEqual(firstContents);
   },
 );
 
 test.serial(
-  "gccTsBundler falls back to final metadata restore when core outputs are missing",
+  "gccTsBundler republishes deleted assets from the immutable build cache",
   { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
@@ -3440,28 +3244,23 @@ test.serial(
       env: { GCC_BUILD_TIMINGS: "1" },
     });
 
-    const captureDir = persistentViteCaptureDir(fixture.projectRoot);
-    const [captureRootId] = await listDirectoryNames(captureDir);
-    expect(captureRootId).toBeTruthy();
-    await fs.rm(
-      path.join(captureDir, captureRootId, "gcc-core-out"),
-      { force: true, recursive: true },
+    const firstFiles = await listFiles(fixture.outDir);
+    const firstContents = await Promise.all(
+      firstFiles.map((file) => fixture.read(path.join("dist", file))),
     );
+    await fs.rm(fixture.outDir, { force: true, recursive: true });
 
     const restored = await buildViteFixture(fixture, {
       cache: { dir: ".cache", mode: "persistent" },
       env: { GCC_BUILD_TIMINGS: "1" },
     });
 
-    expect(restored.stderr).toContain(
-      "[gcc-ts-bundler timing] cache:resolve-snapshot: hit",
-    );
-    expect(restored.stderr).toContain(
-      "[gcc-ts-bundler timing] cache:final-fast: miss",
-    );
-    expect(restored.stderr).toContain(
-      "[gcc-ts-bundler timing] cache:final-metadata: hit",
-    );
+    expect(await listFiles(fixture.outDir)).toEqual(firstFiles);
+    expect(
+      await Promise.all(
+        firstFiles.map((file) => fixture.read(path.join("dist", file))),
+      ),
+    ).toEqual(firstContents);
     expect(restored.stderr).not.toContain(
       "[gcc-ts-bundler timing] closure:compile:",
     );
@@ -3593,18 +3392,28 @@ async function createNamingWorkspace(input) {
 }
 
 async function runNamingPasses(workspace, chunkOutputType) {
+  const manifest = parseGccRuntimeManifest(
+    await fs.readFile(workspace.manifestFilePath, "utf8"),
+    workspace.manifestFilePath,
+  );
+  // Direct naming is also used without a native source-map sidecar.
+  const chunkModuleIds = buildChunkModuleIdLookup({
+    jsChunks: [],
+    manifest,
+    runtimeModuleIdToOriginalIds: new Map(),
+  });
   const renamed = await renameCompiledNonBaseJsOutputs({
     baseChunkName: "main",
     chunkOutputType,
+    chunkModuleIds,
     dynamicRootModuleIds: [],
     jsChunks: [],
+    manifest,
     manifestFilePath: workspace.manifestFilePath,
-    materialized: { modules: [] },
     outDir: workspace.outDir,
     outputFiles: workspace.outputFiles,
     outputOptions: NAMING_OUTPUT_OPTIONS,
     publicPath: "/",
-    runtimeModuleSourceMapFilePath: path.join(workspace.outDir, "missing.json"),
   });
   const finalized = await finalizeBaseJsOutputName({
     baseChunkFilePath: renamed.baseChunkFilePath,
@@ -3612,14 +3421,12 @@ async function runNamingPasses(workspace, chunkOutputType) {
     chunkOutputType,
     deferredChunkSeeds: renamed.deferredChunkSeeds,
     emittedOutputFiles: renamed.emittedOutputFiles,
+    manifest,
     manifestFilePath: workspace.manifestFilePath,
     outDir: workspace.outDir,
     outputOptions: NAMING_OUTPUT_OPTIONS,
     publicPath: "/",
   });
-  const manifest = JSON.parse(
-    await fs.readFile(workspace.manifestFilePath, "utf8"),
-  );
   const emitted = finalized.emittedOutputFiles.map((filePath) =>
     path.relative(workspace.outDir, filePath).replace(/\\/g, "/"),
   );
@@ -3635,6 +3442,40 @@ async function runNamingPasses(workspace, chunkOutputType) {
 const ESM_BASE_SOURCE =
   'var r=globalThis.__g;r.a([0,[[[],"",[]],[[0],"./lazy.js",[]]],[0,1],"/assets/"]);export{r};\n';
 const ESM_LAZY_SOURCE = 'import{r}from"./main.js";r.u(1);\n';
+
+test("compiled emit fails closed on malformed native source maps", async () => {
+  const workspace = await createNamingWorkspace({
+    baseSource: ESM_BASE_SOURCE,
+    lazySource: ESM_LAZY_SOURCE,
+  });
+  const runtimeModuleSourceMapFilePath = path.join(
+    workspace.outDir,
+    "sources.json",
+  );
+  const input = {
+    compiled: {
+      chunkOutputType: "esm",
+      compiledCoreOutputs: {
+        finalOutDir: workspace.outDir,
+        outputFiles: workspace.outputFiles,
+      },
+      cssOwnership: { enabled: false },
+      dynamicRootModuleIds: [],
+      jsChunks: [],
+      manifestFilePath: workspace.manifestFilePath,
+      materialized: { modules: [] },
+      publicPath: "/",
+      runtimeModuleSourceMapFilePath,
+    },
+    options: {},
+    outputOptions: NAMING_OUTPUT_OPTIONS,
+    timingTotals: createTimingTotals(),
+  };
+  await fs.writeFile(runtimeModuleSourceMapFilePath, "{broken", "utf8");
+  await expect(renameCompiledEmitOutputs(input)).rejects.toThrow(SyntaxError);
+  await fs.writeFile(runtimeModuleSourceMapFilePath, '{"runtime":42}', "utf8");
+  await expect(renameCompiledEmitOutputs(input)).rejects.toThrow(TypeError);
+});
 
 test("esm chunk naming hashes every chunk and rewrites import specifiers", async () => {
   const workspace = await createNamingWorkspace({
@@ -3730,7 +3571,6 @@ test("esm chunk naming rewrites base-dependency import specifiers", async () => 
   expect(baseSource).toContain(`"./${path.posix.basename(vendorFileName)}"`);
   expect(baseSource).not.toContain('"./vendor.js"');
 });
-
 
 test("vendor chunk keeps its file name across an app-code edit", async () => {
   // Only the base chunk body differs; vendor and lazy bytes are identical.
@@ -3837,7 +3677,7 @@ async function writeExternsGraphFixture(fixture) {
 
   const graph = (depFilePath) => ({
     authoredFiles: [appFile],
-    entries: ["./app.js"],
+    entries: [{ file: "./app.js", sourceModuleId: appFile }],
     modules: [
       {
         filePath: appFile,
@@ -3860,6 +3700,135 @@ async function writeExternsGraphFixture(fixture) {
 
   return { post: graph(postDepFile), pre: graph(preDepFile) };
 }
+
+test("typed extern scopes follow original Vite entries through materialized output paths", async () => {
+  const fixture = await createFixture();
+  const settledDir = path.join(fixture.projectRoot, "settled");
+  const originalA = path.join(fixture.projectRoot, "src/a.ts");
+  const originalB = path.join(fixture.projectRoot, "src/b.ts");
+  const materialized = {
+    entries: [
+      { file: "./fused-a.js", sourceModuleId: originalA },
+      { file: "./fused-b.js", sourceModuleId: originalB },
+    ],
+    modules: [
+      {
+        filePath: path.join(settledDir, "fused-a.js"),
+        sourceModuleIds: [
+          originalA,
+          path.join(fixture.projectRoot, "src/not-entry.ts"),
+        ],
+      },
+    ],
+    srcDir: settledDir,
+  };
+  const input = {
+    captureRoot: fixture.projectRoot,
+    materialized,
+    projectRoot: fixture.projectRoot,
+    options: {
+      compiler: {
+        typedExterns: [
+          "./global.externs.js",
+          { path: "./scoped.externs.js", entries: ["./src/a.ts"] },
+        ],
+      },
+    },
+  };
+  const externs = await resolveCompilerExterns(input);
+  const resolved = normalizeBuildOptions({
+    entries: materialized.entries.map((entry) => entry.file),
+    projectRoot: fixture.projectRoot,
+    srcDir: settledDir,
+    typedExterns: externs.typedDeclarations,
+  });
+  expect(resolved.typedExterns).toEqual([
+    {
+      path: path.join(fixture.projectRoot, "global.externs.js"),
+      entryFiles: [],
+    },
+    {
+      path: path.join(fixture.projectRoot, "scoped.externs.js"),
+      entryFiles: [path.join(settledDir, "fused-a.js")],
+    },
+  ]);
+  input.options.compiler.typedExterns[1].entries = ["./src/not-entry.ts"];
+  await expect(resolveCompilerExterns(input)).rejects.toThrow(
+    /not a configured Vite source entry/,
+  );
+  input.options.compiler.typedExterns[1].entries = [];
+  await expect(resolveCompilerExterns(input)).rejects.toThrow(
+    /nonempty entries/,
+  );
+});
+
+test("boundary-aware externs analyze the settled graph's app entry", async () => {
+  const fixture = await createExternFixture();
+  const finalSrcDir = path.join(fixture.projectRoot, "settled");
+  const finalEntry = path.join(finalSrcDir, "app.js");
+  await fixture.write(
+    "settled/app.js",
+    'import { Controller } from "contract-pkg"; class Host { constructor() { new Controller(this); } addController() {} removeController() {} requestUpdate() {} updateComplete = Promise.resolve(true); } new Host();\n',
+  );
+  const generatedExternFile = path.join(
+    fixture.projectRoot,
+    "boundary.externs.js",
+  );
+  const materialized = {
+    authoredFiles: [finalEntry],
+    entries: [
+      {
+        file: "./app.js",
+        sourceModuleId: path.join(fixture.srcDir, "main.ts"),
+      },
+    ],
+    modules: [
+      {
+        filePath: finalEntry,
+        id: finalEntry,
+        relativePath: "app.js",
+        sourceModuleIds: [path.join(fixture.srcDir, "main.ts")],
+      },
+    ],
+    prunedEmptyModuleIds: [],
+    retainedEmptyModuleIds: [],
+    runtimeEntries: ["./app.js"],
+    srcDir: finalSrcDir,
+  };
+  const options = {
+    compiler: { cache: { mode: "off" } },
+    externs: {
+      generate: {
+        mode: "boundary-aware",
+        modules: ["contract-pkg"],
+        outputFile: generatedExternFile,
+      },
+    },
+  };
+  await resolveCompilerExterns({
+    captureRoot: fixture.projectRoot,
+    materialized,
+    options,
+    projectRoot: fixture.projectRoot,
+  });
+  const barrierNames = async () =>
+    accountBarriers({
+      label: "settled graph",
+      text: await fs.readFile(generatedExternFile, "utf8"),
+    }).propertyNames;
+  expect(await barrierNames()).toContain("addController");
+
+  // Same settled filename, but no current boundary consumer. Original source
+  // still constructs Controller and must not leak into the current externs.
+  await fs.writeFile(finalEntry, "export const app = 1;\n");
+  await resolveCompilerExterns({
+    captureRoot: fixture.projectRoot,
+    materialized,
+    options,
+    projectRoot: fixture.projectRoot,
+  });
+  expect(await barrierNames()).not.toContain("addController");
+});
 
 test("dependency hazards are read from the post-prebundle graph", async () => {
   // Running the externs stage straight from src skips the bundler define that
@@ -3887,9 +3856,8 @@ test("dependency hazards are read from the post-prebundle graph", async () => {
 
   await resolveCompilerExterns({
     captureRoot: fixture.projectRoot,
-    materialized: graphs.pre,
+    materialized: graphs.post,
     options,
-    postPrebundleMaterialized: Promise.resolve(graphs.post),
     projectRoot: fixture.projectRoot,
   });
 
@@ -3900,13 +3868,12 @@ test("dependency hazards are read from the post-prebundle graph", async () => {
     "Object.prototype.loweredField;",
   );
 
-  // Control: feeding the pre-prebundle graph to both sides must NOT find it,
-  // which is what makes the assertion above about ordering rather than luck.
+  // Control: feeding the pre-prebundle graph must NOT find it,
+  // distinguishing a real lowering hazard from unconditional preservation.
   await resolveCompilerExterns({
     captureRoot: fixture.projectRoot,
     materialized: graphs.pre,
     options,
-    postPrebundleMaterialized: Promise.resolve(graphs.pre),
     projectRoot: fixture.projectRoot,
   });
   expect(await fs.readFile(generatedExternFile, "utf8")).not.toContain(
@@ -3962,7 +3929,7 @@ test.serial(
       globalThis.location = { href: "http://vite.test/index.html" };
       delete globalThis.__g;
       await import(
-        `${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?recursive-matcher=${Date.now()}`,
+        `${pathToFileURL(path.join(fixture.outDir, toDistRelativeFile(entryScript))).href}?recursive-matcher=${Date.now()}`
       );
       const record = {};
       const shared = {

@@ -5,7 +5,7 @@ import {
   emitEnum,
   emitFunction,
   emitInterface,
-  emitNamespace,
+  emitNamespaceMembers,
   emitTypeAlias,
   emitUnknown,
   emitValue,
@@ -48,8 +48,14 @@ export function emitSymbol(symbol: ts.Symbol, state: RenderState) {
     symbol.flags &
     (ts.SymbolFlags.NamespaceModule | ts.SymbolFlags.ValueModule)
   ) {
-    emitNamespace(name, symbol, state, module);
+    state.lines.push("/** @const */", `${name} = {};`);
   } else {
     emitValue(name, symbol, declaration, state, module);
+  }
+  if (
+    symbol.flags &
+    (ts.SymbolFlags.NamespaceModule | ts.SymbolFlags.ValueModule)
+  ) {
+    emitNamespaceMembers(name, symbol, state, module);
   }
 }

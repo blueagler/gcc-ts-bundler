@@ -7,8 +7,12 @@
 
 # ES_MODULES chunk output — research + spike
 
-Status: **research spike, GO with gating.** No repo source was changed for this
-document; all experiments live in `/tmp/spike`.
+Status: **historical research spike, GO with gating at the measured snapshot.**
+No repo source was changed for this document; its experiments live in
+`/tmp/spike`. ESM output is now a supported mode; implementation ownership and
+current restrictions belong to [Architecture](../development/architecture.md#chunk-planning-and-linking)
+and the [API reference](../reference/api.md), not the landing stages below.
+The original measurements and compiler scope are unchanged.
 
 Scope: replacing Closure's `--chunk_output_type GLOBAL_NAMESPACE` (+
 `--rename_prefix_namespace $gcc` + our script-injecting chunk loader) with

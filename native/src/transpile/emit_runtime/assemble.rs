@@ -53,12 +53,13 @@ pub(crate) fn assemble_runtime_module_text(
         let namespace_slots = current_slots
             .export_names()
             .filter(|export_name| export_name.as_str() != "__cjsExports")
-            .filter_map(|export_name| {
-                current_slots
-                    .slot_for(export_name)
-                    .map(|slot| (export_name.clone(), slot))
+            .map(|export_name| {
+                let slot = current_slots.slot_for(export_name).ok_or_else(|| {
+                    format!("Missing bundler-runtime export slot for {export_name} in {module_id}")
+                })?;
+                Ok((export_name.clone(), slot))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, String>>()?;
         if !namespace_slots.is_empty() {
             output.push(
                 if context

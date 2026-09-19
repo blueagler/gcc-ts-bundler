@@ -12,13 +12,38 @@ import type {
 
 export interface ClosureDocRenderContext {
   diagnostics: TypeMetadataDiagnostic[];
-  nextReferenceId: number;
   referencesByToken: Map<string, ClosureTypeReference>;
   sourceFilePath: string;
   symbolIdByDeclaredName: Map<string, string>;
   symbolsById: Map<string, ClosureTypeSymbol>;
   typeDeclarations: ClosureTypeDeclaration[];
-  unresolvedTypeReferenceCount: number;
+  // Facts live only as long as this render context. Rendered Closure strings
+  // are deliberately not cached: they allocate reference tokens and diagnostics.
+  symbolIds?: Map<ts.Symbol, string>;
+  canonicalDeclarations?: Map<ts.Symbol, ts.Declaration>;
+  normalizedDeclarationPaths?: Map<string, string>;
+  builtinIds?: Map<string, string>;
+  semanticQueries?: WeakMap<ts.TypeChecker, SemanticQueries>;
+}
+
+interface SemanticQueries {
+  aliases?: Map<ts.Symbol, ts.Symbol>;
+  locationSymbols?: Map<ts.Node, ts.Symbol>;
+  symbolNames?: Map<ts.Symbol, string>;
+  typeNames?: Map<ts.Type, string>;
+}
+
+function semanticQueries(
+  context: ClosureDocRenderContext,
+  checker: ts.TypeChecker,
+): SemanticQueries {
+  const byChecker = (context.semanticQueries ??= new WeakMap());
+  let queries = byChecker.get(checker);
+  if (!queries) {
+    queries = {};
+    byChecker.set(checker, queries);
+  }
+  return queries;
 }
 
 const MAX_SYMBOL_CHAIN_DEPTH = 64;
@@ -28,13 +53,11 @@ export function createClosureDocRenderContext(
 ): ClosureDocRenderContext {
   return {
     diagnostics: [],
-    nextReferenceId: 0,
     referencesByToken: new Map(),
     sourceFilePath: sourceFile.fileName,
     symbolIdByDeclaredName: new Map(),
     symbolsById: new Map(),
     typeDeclarations: [],
-    unresolvedTypeReferenceCount: 0,
   };
 }
 
@@ -54,9 +77,9 @@ export function registerDeclaredTypeSymbol(
   context: ClosureDocRenderContext,
 ) {
   const id = symbol
-    ? canonicalSymbolId(symbol)
+    ? canonicalSymbolId(symbol, context)
     : hashIdentity(
-        `${normalizeDeclarationPath(declaration.getSourceFile().fileName)}:${declaration.getStart()}:${name}:declared`,
+        `${normalizeDeclarationPath(declaration.getSourceFile().fileName, context)}:${declaration.getStart()}:${name}:declared`,
       );
   context.symbolIdByDeclaredName.set(name, id);
   context.symbolsById.set(id, {
@@ -69,14 +92,24 @@ export function registerDeclaredTypeSymbol(
   return id;
 }
 
-export function canonicalSymbolId(symbol: ts.Symbol) {
-  const declaration = canonicalDeclaration(symbol);
-  if (!declaration) {
-    return hashIdentity(`symbol:${symbol.getName()}:${symbol.flags}`);
+export function canonicalSymbolId(
+  symbol: ts.Symbol,
+  context?: ClosureDocRenderContext,
+) {
+  const cached = context?.symbolIds?.get(symbol);
+  if (cached !== undefined) {
+    return cached;
   }
-  return hashIdentity(
-    `${normalizeDeclarationPath(declaration.getSourceFile().fileName)}:${declaration.getStart()}:${symbol.flags}`,
+  const declaration = canonicalDeclaration(symbol, context);
+  const id = hashIdentity(
+    declaration
+      ? `${normalizeDeclarationPath(declaration.getSourceFile().fileName, context)}:${declaration.getStart()}:${symbol.flags}`
+      : `symbol:${symbol.getName()}:${symbol.flags}`,
   );
+  if (context) {
+    (context.symbolIds ??= new Map()).set(symbol, id);
+  }
+  return id;
 }
 
 export function isDeclarationFileSymbol(symbol: ts.Symbol) {
@@ -128,13 +161,22 @@ export function getReferenceNodeSymbol(
   if (!location) {
     return undefined;
   }
+  const queries = semanticQueries(context, checker);
+  const cached = queries.locationSymbols?.get(location);
+  if (cached !== undefined) {
+    return cached;
+  }
   try {
-    return checker.getSymbolAtLocation(location);
+    const symbol = checker.getSymbolAtLocation(location);
+    if (symbol !== undefined) {
+      (queries.locationSymbols ??= new Map()).set(location, symbol);
+    }
+    return symbol;
   } catch (error) {
     if (!(error instanceof RangeError)) {
       throw error;
     }
-    recordSymbolRenderingFailure(context, undefined);
+    recordTypeDiagnostic(context, "symbol-rendering-failed", undefined);
     return null;
   }
 }
@@ -143,7 +185,11 @@ export function referenceBuiltin(
   name: string,
   context: ClosureDocRenderContext,
 ) {
-  const id = hashIdentity(`builtin:${name}`);
+  let id = context.builtinIds?.get(name);
+  if (id === undefined) {
+    id = hashIdentity(`builtin:${name}`);
+    (context.builtinIds ??= new Map()).set(name, id);
+  }
   if (!context.symbolsById.has(id)) {
     context.symbolsById.set(id, {
       builtinName: name,
@@ -161,16 +207,16 @@ export function referenceInGraphDeclaredType(
   diagnosticName: string,
   context: ClosureDocRenderContext,
 ) {
-  const declaration = canonicalDeclaration(resolvedSymbol);
+  const declaration = canonicalDeclaration(resolvedSymbol, context);
   if (!declaration || !isInGraphEmittedTypeDeclaration(declaration)) {
     return null;
   }
   const aliasDeclaration =
     sourceSymbol.flags & ts.SymbolFlags.Alias
-      ? canonicalDeclaration(sourceSymbol)
+      ? canonicalDeclaration(sourceSymbol, context)
       : undefined;
   const localName = getDeclarationName(aliasDeclaration) ?? diagnosticName;
-  const id = canonicalSymbolId(resolvedSymbol);
+  const id = canonicalSymbolId(resolvedSymbol, context);
   if (!context.symbolsById.has(id)) {
     context.symbolsById.set(id, {
       declarationFilePath: declaration.getSourceFile().fileName,
@@ -207,13 +253,13 @@ export function referenceRuntimeSymbol(
 ) {
   const aliasDeclaration =
     sourceSymbol.flags & ts.SymbolFlags.Alias
-      ? canonicalDeclaration(sourceSymbol)
+      ? canonicalDeclaration(sourceSymbol, context)
       : undefined;
   const localName = getDeclarationName(aliasDeclaration) ?? diagnosticName;
   const identitySymbol = aliasDeclaration ? sourceSymbol : resolvedSymbol;
-  const id = canonicalSymbolId(identitySymbol);
+  const id = canonicalSymbolId(identitySymbol, context);
   if (!context.symbolsById.has(id)) {
-    const declaration = canonicalDeclaration(resolvedSymbol);
+    const declaration = canonicalDeclaration(resolvedSymbol, context);
     context.symbolsById.set(id, {
       declarationFilePath: declaration?.getSourceFile().fileName,
       diagnosticName,
@@ -245,27 +291,25 @@ export function referenceSymbolId(
   id: string,
   context: ClosureDocRenderContext,
 ) {
-  const token = `__GCC_TYPE_${context.nextReferenceId}__`;
-  context.nextReferenceId += 1;
+  const token = `__GCC_TYPE_${context.referencesByToken.size}__`;
   context.referencesByToken.set(token, { symbolId: id, token });
   return token;
 }
 
-export function recordUnresolvedType(
+export function recordTypeDiagnostic(
   context: ClosureDocRenderContext,
   reason: TypeMetadataDiagnostic["reason"],
-  type: ts.Type,
-  _checker: ts.TypeChecker,
-  symbol = type.aliasSymbol ?? type.getSymbol(),
+  symbol: ts.Symbol | undefined,
 ) {
-  context.unresolvedTypeReferenceCount += 1;
-  const declaration = symbol ? canonicalDeclaration(symbol) : undefined;
+  const declaration = symbol
+    ? canonicalDeclaration(symbol, context)
+    : undefined;
   context.diagnostics.push({
     declarationFilePath: declaration?.getSourceFile().fileName,
     phase: "analysis",
     reason,
     sourceFilePath: context.sourceFilePath,
-    symbolId: symbol ? canonicalSymbolId(symbol) : undefined,
+    symbolId: symbol ? canonicalSymbolId(symbol, context) : undefined,
     // Diagnostics must never recurse back into the checker renderer after the
     // rendering path already degraded. `getName()` is bounded and sufficient
     // to identify the offending symbol; anonymous types omit the name.
@@ -278,13 +322,20 @@ export function safeGetAliasedSymbol(
   checker: ts.TypeChecker,
   context: ClosureDocRenderContext,
 ) {
+  const queries = semanticQueries(context, checker);
+  const cached = queries.aliases?.get(symbol);
+  if (cached !== undefined) {
+    return cached;
+  }
   try {
-    return checker.getAliasedSymbol(symbol);
+    const resolved = checker.getAliasedSymbol(symbol);
+    (queries.aliases ??= new Map()).set(symbol, resolved);
+    return resolved;
   } catch (error) {
     if (!(error instanceof RangeError)) {
       throw error;
     }
-    recordSymbolRenderingFailure(context, symbol);
+    recordTypeDiagnostic(context, "symbol-rendering-failed", symbol);
     return null;
   }
 }
@@ -294,17 +345,24 @@ export function safeSymbolToString(
   checker: ts.TypeChecker,
   context: ClosureDocRenderContext,
 ) {
+  const queries = semanticQueries(context, checker);
+  const cached = queries.symbolNames?.get(symbol);
+  if (cached !== undefined) {
+    return cached;
+  }
   if (!hasBoundedSymbolParentChain(symbol)) {
-    recordSymbolRenderingFailure(context, symbol);
+    recordTypeDiagnostic(context, "symbol-rendering-failed", symbol);
     return null;
   }
   try {
-    return checker.symbolToString(symbol);
+    const name = checker.symbolToString(symbol);
+    (queries.symbolNames ??= new Map()).set(symbol, name);
+    return name;
   } catch (error) {
     if (!(error instanceof RangeError)) {
       throw error;
     }
-    recordSymbolRenderingFailure(context, symbol);
+    recordTypeDiagnostic(context, "symbol-rendering-failed", symbol);
     return null;
   }
 }
@@ -314,13 +372,24 @@ export function safeTypeToString(
   checker: ts.TypeChecker,
   context: ClosureDocRenderContext,
 ) {
+  const queries = semanticQueries(context, checker);
+  const cached = queries.typeNames?.get(type);
+  if (cached !== undefined) {
+    return cached;
+  }
   try {
-    return checker.typeToString(type);
+    const name = checker.typeToString(type);
+    (queries.typeNames ??= new Map()).set(type, name);
+    return name;
   } catch (error) {
     if (!(error instanceof RangeError)) {
       throw error;
     }
-    recordSymbolRenderingFailure(context, type.aliasSymbol ?? type.getSymbol());
+    recordTypeDiagnostic(
+      context,
+      "symbol-rendering-failed",
+      type.aliasSymbol ?? type.getSymbol(),
+    );
     return null;
   }
 }
@@ -336,22 +405,6 @@ function hasBoundedSymbolParentChain(symbol: ts.Symbol) {
     current = symbolParent(current);
   }
   return true;
-}
-
-export function recordSymbolRenderingFailure(
-  context: ClosureDocRenderContext,
-  symbol: ts.Symbol | undefined,
-) {
-  context.unresolvedTypeReferenceCount += 1;
-  const declaration = symbol ? canonicalDeclaration(symbol) : undefined;
-  context.diagnostics.push({
-    declarationFilePath: declaration?.getSourceFile().fileName,
-    phase: "analysis",
-    reason: "symbol-rendering-failed",
-    sourceFilePath: context.sourceFilePath,
-    symbolId: symbol ? canonicalSymbolId(symbol) : undefined,
-    symbolName: symbol?.getName(),
-  });
 }
 
 export function isUnboundAmbientNominal(symbol: ts.Symbol) {
@@ -371,23 +424,64 @@ export function isUnboundAmbientNominal(symbol: ts.Symbol) {
   );
 }
 
-export function canonicalDeclaration(symbol: ts.Symbol) {
-  return [...(symbol.declarations ?? [])].sort((left, right) => {
-    const pathOrder = normalizeDeclarationPath(
-      left.getSourceFile().fileName,
-    ).localeCompare(normalizeDeclarationPath(right.getSourceFile().fileName));
-    return pathOrder || left.getStart() - right.getStart();
-  })[0];
+export function canonicalDeclaration(
+  symbol: ts.Symbol,
+  context?: ClosureDocRenderContext,
+) {
+  const declarations = symbol.declarations;
+  // The usual single-declaration case needs neither a copy nor a cache entry.
+  if (!declarations || declarations.length < 2) {
+    return declarations?.[0];
+  }
+  const cached = context?.canonicalDeclarations?.get(symbol);
+  if (cached !== undefined) {
+    return cached;
+  }
+  let first: ts.Declaration | undefined;
+  let firstPath = "";
+  for (const declaration of declarations) {
+    const declarationPath = normalizeDeclarationPath(
+      declaration.getSourceFile().fileName,
+      context,
+    );
+    const pathOrder = declarationPath.localeCompare(firstPath);
+    if (
+      !first ||
+      pathOrder < 0 ||
+      (pathOrder === 0 && declaration.getStart() < first.getStart())
+    ) {
+      first = declaration;
+      firstPath = declarationPath;
+    }
+  }
+  if (context && first) {
+    (context.canonicalDeclarations ??= new Map()).set(symbol, first);
+  }
+  return first;
 }
 
-function normalizeDeclarationPath(filePath: string) {
+function normalizeDeclarationPath(
+  filePath: string,
+  context?: ClosureDocRenderContext,
+) {
+  const cached = context?.normalizedDeclarationPaths?.get(filePath);
+  if (cached !== undefined) {
+    return cached;
+  }
   let normalized = path.resolve(filePath);
   try {
-    normalized = fs.realpathSync.native(normalized);
+    normalized = fs.realpathSync.native(normalized).replaceAll(path.sep, "/");
+    if (context) {
+      (context.normalizedDeclarationPaths ??= new Map()).set(
+        filePath,
+        normalized,
+      );
+    }
+    return normalized;
   } catch {
-    // The checker can retain deleted virtual files; the normalized absolute path is stable.
+    // The checker can retain deleted virtual files; do not cache failed lookups.
+    return normalized.replaceAll(path.sep, "/");
   }
-  return normalized.replaceAll(path.sep, "/");
 }
 
 function hashIdentity(value: string) {

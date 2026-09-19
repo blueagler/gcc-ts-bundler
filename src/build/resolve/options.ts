@@ -29,11 +29,11 @@ export function normalizeBuildOptions(
   const projectRoot = path.resolve(options.projectRoot ?? process.cwd());
   const srcDir = path.resolve(
     projectRoot,
-    options.srcDir ?? (DEFAULT_BUILD_OPTIONS.srcDir || "src"),
+    options.srcDir ?? DEFAULT_BUILD_OPTIONS.srcDir,
   );
   const outDir = path.resolve(
     projectRoot,
-    options.outDir ?? (DEFAULT_BUILD_OPTIONS.outDir || "dist"),
+    options.outDir ?? DEFAULT_BUILD_OPTIONS.outDir,
   );
   const chunkPublicPath = normalizeChunkPublicPath(
     options.chunks?.publicPath ?? DEFAULT_BUILD_OPTIONS.chunks.publicPath,
@@ -56,6 +56,8 @@ export function normalizeBuildOptions(
     LANGUAGE_OUTPUTS,
     "languageOut",
   );
+  const entries = options.entries.map((entry) => normalizeEntry(entry, srcDir));
+  const entryPaths = new Set(entries.map((entry) => entry.file));
 
   return {
     cache: {
@@ -126,7 +128,7 @@ export function normalizeBuildOptions(
       options.hideWarningsFor === undefined
         ? DEFAULT_BUILD_OPTIONS.hideWarningsFor
         : [...options.hideWarningsFor],
-    entries: options.entries.map((entry) => normalizeEntry(entry, srcDir)),
+    entries,
     externals: normalizeExternalSpecifiers(options.externals ?? []),
     externs: [...(options.externs ?? [])].map((filePath) =>
       path.isAbsolute(filePath)
@@ -162,15 +164,41 @@ export function normalizeBuildOptions(
       TARGET_NAMES,
       "target",
     ),
-    typedExterns: [...(options.typedExterns ?? [])].map((filePath) =>
-      path.isAbsolute(filePath)
-        ? filePath
-        : path.resolve(projectRoot, filePath),
-    ),
+    typedExterns: (options.typedExterns ?? []).map((extern, index) => {
+      if (typeof extern === "string") {
+        return { path: path.resolve(projectRoot, extern), entryFiles: [] };
+      }
+      if (
+        !extern ||
+        typeof extern.path !== "string" ||
+        !Array.isArray(extern.entries) ||
+        extern.entries.length === 0
+      ) {
+        throw new TypeError(
+          `typedExterns[${index}] must provide a path and nonempty entries scope.`,
+        );
+      }
+      const entryFiles = extern.entries.map((entry) => {
+        if (typeof entry !== "string" || entry.length === 0) {
+          throw new TypeError(
+            `typedExterns[${index}].entries must contain entry paths.`,
+          );
+        }
+        const file = path.resolve(projectRoot, entry);
+        if (!entryPaths.has(file)) {
+          throw new TypeError(
+            `typedExterns[${index}] scope ${JSON.stringify(entry)} is not a configured build entry.`,
+          );
+        }
+        return file;
+      });
+      return {
+        path: path.resolve(projectRoot, extern.path),
+        entryFiles: [...new Set(entryFiles)].sort(),
+      };
+    }),
     typeMetadata: options.typeMetadata,
-    viteAuthoredFilesFile: options.viteAuthoredFilesFile
-      ? path.resolve(projectRoot, options.viteAuthoredFilesFile)
-      : undefined,
+    authoredFiles: options.authoredFiles,
     viteRuntimeSourceMapFile: options.viteRuntimeSourceMapFile
       ? path.resolve(projectRoot, options.viteRuntimeSourceMapFile)
       : undefined,
@@ -273,20 +301,10 @@ export function resolveChunkOutputType({
 /**
  * Applies the gates for the vendor chunk.
  *
- * **Opt-in only.** `auto` resolves to `false`; nothing but an explicit
- * `vendorChunk: true` turns the split on. The split trades first-load bytes
- * for repeat-visit stability, and which side wins depends on traffic the
- * bundler cannot see, so it is not a default we can pick for anyone. Measured
- * on the Svelte example: 29,796 B gzip split versus 27,570 B unsplit, against
- * a ~12.5 KB gzip vendor chunk that then survives every app-only deploy in
- * the browser cache. See docs/vite.md.
- *
- * The gates below still apply on top of an explicit `true`: the split only
- * works under ES module output, where the base chunk's file name is embedded
- * in every sibling's `import` statement and an app edit therefore cascades
- * new names through the whole graph. Script-mode chunks reference each other
- * through the manifest instead, so there is nothing to stabilise and an extra
- * chunk is pure overhead; `off` has no vendor split.
+ * Only explicit `true` enables this partition, and only for chunked ESM.
+ * `auto` is off. Separating dependencies can reduce invalidation across app
+ * edits but adds another chunk; output-name stability is not guaranteed.
+ * Public behavior: docs/reference/api.md#chunk-options.
  */
 export function resolveVendorChunk({
   chunkMode,
@@ -321,7 +339,7 @@ function normalizeEntry(entry: BuildEntryOption, srcDir: string) {
       ? undefined
       : entry.outFile;
   return {
-    file: path.isAbsolute(file) ? file : path.resolve(srcDir, file),
+    file: path.resolve(srcDir, file),
     name,
     ...(outFile === undefined ? {} : { outFile }),
   };
@@ -362,6 +380,8 @@ export async function validateOutputPathBoundaries(
   options: ResolvedBuildOptions,
   cacheWorkspaceDir: string | null,
   extraInputPaths: string[] = [],
+  cacheRootDir: string | null = null,
+  outputNames: string[] = [],
 ) {
   await canonicalizePreservedModules(options);
   const outDir = await canonicalPath(options.outDir);
@@ -376,8 +396,18 @@ export async function validateOutputPathBoundaries(
     ),
     ...options.js.map((filePath, index) => [`js[${index}]`, filePath] as const),
     ...options.typedExterns.map(
-      (filePath, index) => [`typedExterns[${index}]`, filePath] as const,
+      (extern, index) => [`typedExterns[${index}]`, extern.path] as const,
     ),
+    ...(options.typeMetadata?.dependencies ?? []).map(
+      (filePath, index) =>
+        [`typeMetadata dependency ${index + 1}`, filePath] as const,
+    ),
+    ...(options.authoredFiles ?? []).map(
+      (filePath, index) => [`authoredFiles[${index}]`, filePath] as const,
+    ),
+    ...(options.viteRuntimeSourceMapFile
+      ? [["runtime source map", options.viteRuntimeSourceMapFile] as const]
+      : []),
     ...extraInputPaths.map(
       (filePath, index) => [`resolved input ${index + 1}`, filePath] as const,
     ),
@@ -394,11 +424,85 @@ export async function validateOutputPathBoundaries(
 
   if (cacheWorkspaceDir) {
     const workspaceDir = await canonicalPath(cacheWorkspaceDir);
-    if (isSameOrDescendant(workspaceDir, outDir)) {
+    if (
+      isSameOrDescendant(workspaceDir, outDir) ||
+      isSameOrDescendant(outDir, workspaceDir)
+    ) {
       throw new TypeError(
         `Unsafe outDir ${JSON.stringify(options.outDir)}: it contains the selected cache workspace ${JSON.stringify(cacheWorkspaceDir)}.`,
       );
     }
+  }
+  const cacheRoot = cacheRootDir ? await canonicalPath(cacheRootDir) : null;
+  if (cacheRoot && isSameOrDescendant(outDir, cacheRoot)) {
+    throw new TypeError(
+      `Unsafe outDir ${JSON.stringify(options.outDir)}: it is inside the selected cache.`,
+    );
+  }
+  const destinations = await Promise.all(
+    options.entries.map(async (entry) =>
+      entry.outFile === undefined
+        ? null
+        : canonicalPath(path.resolve(options.projectRoot, entry.outFile)),
+    ),
+  );
+  const canonicalOutputs = await Promise.all(
+    outputNames.map((name) => canonicalPath(path.join(options.outDir, name))),
+  );
+  const canonicalInputs = await Promise.all(
+    protectedInputs.map(async ([label, inputPath]) => ({
+      label,
+      inputPath,
+      canonical: await canonicalPath(inputPath),
+    })),
+  );
+  const srcDir = await canonicalPath(options.srcDir);
+  const workspace = cacheWorkspaceDir
+    ? await canonicalPath(cacheWorkspaceDir)
+    : null;
+  for (const [index, destination] of destinations.entries()) {
+    if (!destination) continue;
+    const unsafe = (reason: string) => {
+      throw new TypeError(
+        `Unsafe outFile ${JSON.stringify(options.entries[index]?.outFile)}: ${reason}.`,
+      );
+    };
+    for (const input of canonicalInputs) {
+      if (isSameOrDescendant(input.canonical, destination))
+        unsafe(`it contains ${input.label} ${JSON.stringify(input.inputPath)}`);
+    }
+    if (isSameOrDescendant(destination, srcDir)) unsafe("it is inside srcDir");
+    if (
+      cacheRoot &&
+      (isSameOrDescendant(destination, cacheRoot) ||
+        isSameOrDescendant(cacheRoot, destination))
+    )
+      unsafe("it overlaps the selected cache");
+    if (
+      workspace &&
+      (isSameOrDescendant(destination, workspace) ||
+        isSameOrDescendant(workspace, destination))
+    )
+      unsafe("it overlaps the selected cache workspace");
+    for (const [otherIndex, other] of destinations.entries()) {
+      if (
+        other &&
+        otherIndex !== index &&
+        (isSameOrDescendant(destination, other) ||
+          isSameOrDescendant(other, destination))
+      )
+        unsafe("it overlaps another outFile");
+    }
+    for (const [otherIndex, output] of canonicalOutputs.entries()) {
+      if (
+        otherIndex !== index &&
+        (isSameOrDescendant(destination, output) ||
+          isSameOrDescendant(output, destination))
+      )
+        unsafe("it overlaps another output");
+    }
+    if (destination === outDir || isSameOrDescendant(outDir, destination))
+      unsafe("it contains outDir");
   }
 }
 

@@ -58,15 +58,13 @@ export async function rewriteAuthoredModules(input: {
 
       if (regionKey) {
         for (const statement of sourceFile.statements) {
-          if (
-            !(
-              (ts.isImportDeclaration(statement) ||
-                ts.isExportDeclaration(statement)) &&
-              statement.moduleSpecifier &&
-              ts.isStringLiteralLike(statement.moduleSpecifier) &&
-              statement.moduleSpecifier.text.startsWith(".")
-            )
-          ) {
+          if (!(
+            (ts.isImportDeclaration(statement) ||
+              ts.isExportDeclaration(statement)) &&
+            statement.moduleSpecifier &&
+            ts.isStringLiteralLike(statement.moduleSpecifier) &&
+            statement.moduleSpecifier.text.startsWith(".")
+          )) {
             continue;
           }
           const targetFilePath = normalizePath(

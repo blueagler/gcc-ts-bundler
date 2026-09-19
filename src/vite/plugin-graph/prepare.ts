@@ -1,6 +1,7 @@
 import type { ResolvedConfig } from "vite";
+import type { TransformOptions } from "rolldown/utils";
 
-import { logInternalDetail } from "../../shared/timing";
+import { logInternalDetail, SHOW_INTERNAL_TIMINGS } from "../../shared/timing";
 import type { CapturedModuleResolutionCache } from "../capture";
 import { resolveManifestFileSettings, resolvePublicPath } from "../config";
 import { analyzeViteCssOwnership } from "../css";
@@ -40,6 +41,7 @@ export async function prepareViteGraph(
     bundle: OutputBundle;
     capturedModules: Map<string, CapturedModule>;
     config: ResolvedConfig;
+    nativeDefines: TransformOptions["define"];
     options: GccTsBundlerVitePluginOptions;
     resolutionCache: CapturedModuleResolutionCache;
     timingTotals: ViteTimingTotals;
@@ -121,6 +123,7 @@ export async function prepareViteGraph(
         entryModuleIds,
         metrics: input.buildMetrics,
         moduleIds: normalized.moduleIds,
+        nativeDefines: input.nativeDefines,
         resolutionCache: input.resolutionCache,
         srcDir: workspace.materializedSrcDir,
       }),
@@ -136,13 +139,9 @@ export async function prepareViteGraph(
     stage: "before-prebundle",
   });
 
-  // Every extern scan awaits the prebundle promise inside `resolveCompilerExterns`.
-  // Prebundling rewrites authored and direct-dependency modules in place, so a scan
-  // overlapping it read pre-rewrite text on one build and post-rewrite text on the
-  // next purely on interleaving — and `generated.externs.js` is a cache-key input,
-  // so that instability cost every first rebuild a full recompile. The rewritten
-  // text is also the only text that matters: it is what Closure compiles.
-  const prebundlePromise = measureAsync(
+  // Prebundling rewrites files in place. All extern modes must observe the
+  // settled graph that Closure compiles, not the original provenance graph.
+  const materialized = await measureAsync(
     input.timingTotals,
     "dependencyPrebundleMs",
     () =>
@@ -152,18 +151,14 @@ export async function prepareViteGraph(
         outputSrcDir: workspace.srcDir,
       }),
   );
-  const [materialized, externs] = await Promise.all([
-    prebundlePromise,
-    measureAsync(input.timingTotals, "externsMs", () =>
-      resolveCompilerExterns({
-        captureRoot: workspace.captureRoot,
-        materialized: materializedBeforePrebundle,
-        options: input.options,
-        postPrebundleMaterialized: prebundlePromise,
-        projectRoot: input.config.root,
-      }),
-    ),
-  ]);
+  const externs = await measureAsync(input.timingTotals, "externsMs", () =>
+    resolveCompilerExterns({
+      captureRoot: workspace.captureRoot,
+      materialized,
+      options: input.options,
+      projectRoot: input.config.root,
+    }),
+  );
   logInternalDetail(
     "vite:prebundled-runtime-modules",
     `${materialized.modules.length}`,
@@ -223,6 +218,10 @@ async function logCapturedGraph(input: {
   retainedModuleCount: number;
   stage: "after-prebundle" | "before-prebundle";
 }) {
+  if (!SHOW_INTERNAL_TIMINGS) {
+    return;
+  }
+
   if (input.stage === "before-prebundle") {
     logInternalDetail("vite:captured-modules", `${input.capturedModuleCount}`);
     logInternalDetail("vite:retained-modules", `${input.retainedModuleCount}`);

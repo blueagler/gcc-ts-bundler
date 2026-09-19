@@ -3,6 +3,7 @@ import ts from "@typescript/typescript6";
 
 import { uniqueSortedStrings } from "../../../../shared/files";
 import {
+  countInternalWork,
   logInternalDetail,
   withInternalTiming,
 } from "../../../../shared/timing";
@@ -17,10 +18,7 @@ import {
 } from "../../type-metadata";
 import type { TypeWorld } from "../../../../externs/context";
 import { classifyClosureIrSourceFile } from "../../type-metadata/metadata/scan";
-import {
-  collectNativePreflightDiagnostics,
-  loadViteAuthoredFiles,
-} from "../../type-metadata/preflight";
+import { collectNativePreflightDiagnostics } from "../../type-metadata/preflight";
 
 interface QuickScannedNativeFile {
   fileName: string;
@@ -45,7 +43,13 @@ export async function collectNativeAnalysis({
   typeWorld?: TypeWorld | undefined;
   workspaceDir: string;
 }) {
-  if (!canUseJsAnalysisFastPath(fileNames, options.viteAuthoredFilesFile)) {
+  countInternalWork("analysisFiles", fileNames.length);
+  countInternalWork("boundaryModules", boundaryModuleFileNames.length);
+  countInternalWork("analysisExternalSpecifiers", externalSpecifiers.length);
+  const authoredFiles = options.authoredFiles
+    ? new Set(options.authoredFiles)
+    : null;
+  if (!canUseJsAnalysisFastPath(fileNames, options.authoredFiles)) {
     const analysisContext = await withInternalTiming(
       "native-emit:analysis-context",
       () =>
@@ -68,7 +72,7 @@ export async function collectNativeAnalysis({
       () =>
         Promise.resolve(
           collectNativePreflightDiagnostics({
-            authoredFiles: loadViteAuthoredFiles(options.viteAuthoredFilesFile),
+            authoredFiles,
             preflight: options.diagnostics.preflight,
             program: analysisContext.program,
             scan: analysisScan,
@@ -85,6 +89,7 @@ export async function collectNativeAnalysis({
         }),
       ),
     );
+    countAnalysisWork(analysis.extractedCounts, analysis.files.length);
     return {
       dependencies: collectAnalysisDependencies(
         analysisContext.program,
@@ -99,10 +104,9 @@ export async function collectNativeAnalysis({
     };
   }
 
-  const authoredFiles = loadViteAuthoredFiles(options.viteAuthoredFilesFile);
   const quickScanFiles = await withInternalTiming(
     "native-emit:quick-scan",
-    () => scanNativeFilesQuickly(fileNames),
+    () => scanNativeFilesQuickly(fileNames, typeWorld?.program),
   );
   const checkerRequiredFileNames = quickScanFiles
     .filter(
@@ -123,6 +127,8 @@ export async function collectNativeAnalysis({
     `${checkerRequiredFileNames.length}`,
   );
   logInternalDetail("native-emit:trivial-js-files", `${trivialJsFiles.length}`);
+  countInternalWork("checkerRequiredFiles", checkerRequiredFileNames.length);
+  countInternalWork("trivialJsFiles", trivialJsFiles.length);
 
   const analysisContext =
     checkerRequiredFileNames.length > 0 ||
@@ -195,6 +201,10 @@ export async function collectNativeAnalysis({
           files: [],
           typeMetadataDiagnostics: [],
         };
+  countAnalysisWork(
+    checkerAnalysis.extractedCounts,
+    checkerAnalysis.files.length,
+  );
   const checkerFileMap = new Map(
     checkerAnalysis.files.map(
       (file): readonly [string, ClosureTypeMetadataFile] => [
@@ -221,6 +231,18 @@ export async function collectNativeAnalysis({
   };
 }
 
+function countAnalysisWork(counts: TypeMetadataCounts, files: number): void {
+  countInternalWork("metadataFiles", files);
+  countInternalWork("annotations", counts.annotationCount);
+  countInternalWork("memberAnnotations", counts.memberAnnotationCount);
+  countInternalWork("typeDeclarations", counts.typeDeclarationCount);
+  countInternalWork("enumDeclarations", counts.enumDeclarationCount);
+  countInternalWork(
+    "unresolvedTypeReferences",
+    counts.unresolvedTypeReferenceCount,
+  );
+}
+
 function collectAnalysisDependencies(
   program: ts.Program | undefined,
   fileNames: string[],
@@ -235,17 +257,21 @@ function collectAnalysisDependencies(
   ]);
 }
 
-async function scanNativeFilesQuickly(fileNames: string[]) {
+async function scanNativeFilesQuickly(
+  fileNames: string[],
+  program: ts.Program | undefined,
+) {
   const files = await Promise.all(
     fileNames.map(async (fileName) => {
-      const text = await fs.promises.readFile(fileName, "utf8");
-      const sourceFile = ts.createSourceFile(
-        fileName,
-        text,
-        ts.ScriptTarget.Latest,
-        true,
-        resolveScriptKind(fileName),
-      );
+      const sourceFile =
+        program?.getSourceFile(fileName) ??
+        ts.createSourceFile(
+          fileName,
+          await fs.promises.readFile(fileName, "utf8"),
+          ts.ScriptTarget.Latest,
+          true,
+          resolveScriptKind(fileName),
+        );
       return {
         features: classifyClosureIrSourceFile(sourceFile),
         fileName,
@@ -258,9 +284,9 @@ async function scanNativeFilesQuickly(fileNames: string[]) {
 
 function canUseJsAnalysisFastPath(
   fileNames: string[],
-  authoredFilesFile: string | undefined,
+  authoredFiles: readonly string[] | undefined,
 ) {
-  if (!authoredFilesFile) {
+  if (!authoredFiles) {
     return false;
   }
   return fileNames.every((fileName) => /\.(?:[cm]?jsx?)$/u.test(fileName));

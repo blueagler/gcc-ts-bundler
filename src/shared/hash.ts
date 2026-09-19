@@ -1,10 +1,8 @@
 import crypto from "crypto";
-import { isFunction, isRecord, type RuntimePrimitive } from "./validation";
+import { isFunction, isRecord, isUnknownArray } from "./validation";
 
-type HashInput = RuntimePrimitive | object;
-
-function normalizeValue<Value extends HashInput>(value: Value): HashInput {
-  if (Array.isArray(value)) {
+function normalizeValue(value: unknown): unknown {
+  if (isUnknownArray(value)) {
     return value.map((item) => normalizeValue(item));
   }
 
@@ -24,6 +22,6 @@ export function hashContent(content: string): string {
   return crypto.createHash("sha256").update(content).digest("hex");
 }
 
-export function hashJson<Value extends HashInput>(value: Value): string {
+export function hashJson(value: unknown): string {
   return hashContent(JSON.stringify(normalizeValue(value)));
 }

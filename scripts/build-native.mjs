@@ -9,6 +9,7 @@ import {
 import { spawnSync } from "child_process";
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
+import { hostNativeTarget, parseNativeTargets } from "./native-targets.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, "..");
@@ -17,65 +18,10 @@ const packageJson = JSON.parse(
   readFileSync(path.join(packageRoot, "package.json"), "utf8"),
 );
 
-const TARGETS = {
-  "darwin-arm64": {
-    arch: "arm64",
-    packageName: "gcc-ts-bundler-darwin-arm64",
-    platform: "darwin",
-    targetTriple: "aarch64-apple-darwin",
-  },
-  "darwin-x64": {
-    arch: "x64",
-    packageName: "gcc-ts-bundler-darwin-x64",
-    platform: "darwin",
-    targetTriple: "x86_64-apple-darwin",
-  },
-  "linux-arm64-gnu": {
-    arch: "arm64",
-    libc: "gnu",
-    packageName: "gcc-ts-bundler-linux-arm64-gnu",
-    platform: "linux",
-    targetTriple: "aarch64-unknown-linux-gnu",
-  },
-  "linux-arm64-musl": {
-    arch: "arm64",
-    libc: "musl",
-    packageName: "gcc-ts-bundler-linux-arm64-musl",
-    platform: "linux",
-    targetTriple: "aarch64-unknown-linux-musl",
-  },
-  "linux-x64-gnu": {
-    arch: "x64",
-    libc: "gnu",
-    packageName: "gcc-ts-bundler-linux-x64-gnu",
-    platform: "linux",
-    targetTriple: "x86_64-unknown-linux-gnu",
-  },
-  "linux-x64-musl": {
-    arch: "x64",
-    libc: "musl",
-    packageName: "gcc-ts-bundler-linux-x64-musl",
-    platform: "linux",
-    targetTriple: "x86_64-unknown-linux-musl",
-  },
-  "win32-arm64-msvc": {
-    arch: "arm64",
-    packageName: "gcc-ts-bundler-win32-arm64-msvc",
-    platform: "win32",
-    targetTriple: "aarch64-pc-windows-msvc",
-  },
-  "win32-x64-msvc": {
-    arch: "x64",
-    packageName: "gcc-ts-bundler-win32-x64-msvc",
-    platform: "win32",
-    targetTriple: "x86_64-pc-windows-msvc",
-  },
-};
-
 const MUSL_ZIGBUILD_RUSTFLAG = "-C target-feature=-crt-static";
 const MUSL_ZIGBUILD_RUSTFLAG_PATTERN =
   /(?:^|\s)(?:-C\s+target-feature=-crt-static|-Ctarget-feature=-crt-static|--codegen\s+target-feature=-crt-static|--codegen=target-feature=-crt-static)(?=\s|$)/gu;
-const hostTarget = resolveSingleBuildTarget({});
+let hostTarget;
 
 if (
   process.argv[1] &&
@@ -85,13 +31,21 @@ if (
 }
 
 function main() {
-  const args = parseArgs(process.argv.slice(2));
-  const targets = resolveBuildTargets(args);
-  const sharedSkipRootCopy =
-    args["skip-root-copy"] === true || targets.length > 1;
-
+  const { targets, skipRootCopy: sharedSkipRootCopy } = parseNativeTargets(
+    process.argv.slice(2),
+  );
+  hostTarget = hostNativeTarget();
   ensureCargoSubcommands(targets);
+  const installedTargets = readInstalledRustTargets();
+  for (const target of targets) {
+    if (target.targetTriple && !installedTargets.has(target.targetTriple)) {
+      throw new Error(
+        `Rust target ${target.targetTriple} is not installed; run rustup target add ${target.targetTriple} before building`,
+      );
+    }
+  }
 
+  // Cargo builds share the workspace target directory and remain serial.
   for (const target of targets) {
     buildNativeTarget({
       skipRootCopy: sharedSkipRootCopy || !isHostTarget(target),
@@ -101,7 +55,6 @@ function main() {
 }
 
 function buildNativeTarget({ skipRootCopy, target }) {
-  ensureRustTargetInstalled(target);
 
   const cargoCommand = target.cargoCommand ?? inferCargoCommand(target);
   const cargoArgs = buildCargoArgs({
@@ -160,7 +113,9 @@ function writeNativePackage(target, builtLibraryPath) {
         license: packageJson.license,
         os: [target.platform],
         cpu: [target.arch],
-        ...(target.libc ? { libc: [target.libc] } : {}),
+        ...(target.libc
+          ? { libc: [target.libc === "gnu" ? "glibc" : target.libc] }
+          : {}),
         files: ["index.node", "LICENSE"],
         main: "index.node",
         publishConfig: {
@@ -177,20 +132,6 @@ function writeNativePackage(target, builtLibraryPath) {
     `${target.packageName}\n`,
     "utf8",
   );
-}
-
-function ensureRustTargetInstalled(target) {
-  if (!target.targetTriple || isRustTargetInstalled(target.targetTriple)) {
-    return;
-  }
-
-  const result = spawnSync("rustup", ["target", "add", target.targetTriple], {
-    cwd: packageRoot,
-    stdio: "inherit",
-  });
-  if ((result.status ?? 1) !== 0) {
-    process.exit(result.status ?? 1);
-  }
 }
 
 export function buildCargoEnvironment({
@@ -230,25 +171,22 @@ function buildCargoArgs({ cargoCommand, targetTriple }) {
   return ["build", ...baseArgs];
 }
 
-function isRustTargetInstalled(targetTriple) {
+function readInstalledRustTargets() {
   const result = spawnSync("rustup", ["target", "list", "--installed"], {
     cwd: packageRoot,
     encoding: "utf8",
   });
   if ((result.status ?? 1) !== 0) {
-    return false;
+    return new Set();
   }
-  return result.stdout
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .includes(targetTriple);
+  return new Set(result.stdout.split(/\r?\n/u).map((line) => line.trim()));
 }
 
 function ensureCargoSubcommands(targets) {
   const requiredCommands = new Set(
     targets
       .map((target) => target.cargoCommand ?? inferCargoCommand(target))
-      .filter(Boolean),
+      .filter((command) => command && command !== "build"),
   );
 
   for (const cargoCommand of requiredCommands) {
@@ -256,21 +194,9 @@ function ensureCargoSubcommands(targets) {
       continue;
     }
 
-    if (cargoCommand === "zigbuild") {
-      installCargoTool("cargo-zigbuild");
-      ensureExternalCommand(
-        "zig",
-        "zig is required for cross-compiling Linux targets. Install zig and rerun the build.",
-      );
-      continue;
-    }
-
-    if (cargoCommand === "xwin") {
-      installCargoTool("cargo-xwin");
-      continue;
-    }
-
-    throw new Error(`Unsupported cargo subcommand ${cargoCommand}`);
+    throw new Error(
+      `cargo ${cargoCommand} is not installed; provision it explicitly before building`,
+    );
   }
 }
 
@@ -280,144 +206,6 @@ function hasCargoSubcommand(cargoCommand) {
     stdio: "ignore",
   });
   return (result.status ?? 1) === 0;
-}
-
-function installCargoTool(crateName) {
-  const result = spawnSync("cargo", ["install", crateName, "--locked"], {
-    cwd: packageRoot,
-    stdio: "inherit",
-  });
-  if ((result.status ?? 1) !== 0) {
-    process.exit(result.status ?? 1);
-  }
-}
-
-function ensureExternalCommand(command, message) {
-  const versionArgs = command === "zig" ? ["version"] : ["--version"];
-  const result = spawnSync(command, versionArgs, {
-    cwd: packageRoot,
-    stdio: "ignore",
-  });
-  if ((result.status ?? 1) === 0) {
-    return;
-  }
-
-  throw new Error(message);
-}
-
-function parseArgs(argv) {
-  const parsed = {};
-  for (let index = 0; index < argv.length; index += 1) {
-    const current = argv[index];
-    if (!current.startsWith("--")) {
-      continue;
-    }
-
-    const flag = current.slice(2);
-    const [key, inlineValue] = flag.split("=", 2);
-    if (inlineValue !== undefined) {
-      parsed[key] = inlineValue;
-      continue;
-    }
-
-    const nextValue = argv[index + 1];
-    if (!nextValue || nextValue.startsWith("--")) {
-      parsed[key] = true;
-      continue;
-    }
-
-    parsed[key] = nextValue;
-    index += 1;
-  }
-
-  return parsed;
-}
-
-function resolveBuildTargets(options) {
-  const explicitTargetKeys = parseListArg(options.targets);
-  if (explicitTargetKeys.length > 0) {
-    return explicitTargetKeys.map((targetKey) =>
-      resolveSingleBuildTarget({ ...options, targetKey }),
-    );
-  }
-
-  const platformFilters = new Set(parseListArg(options.platforms));
-  if (options.all === true || platformFilters.size > 0) {
-    return Object.keys(TARGETS)
-      .filter((targetKey) => {
-        if (platformFilters.size === 0) {
-          return true;
-        }
-        return platformFilters.has(TARGETS[targetKey].platform);
-      })
-      .map((targetKey) => resolveSingleBuildTarget({ ...options, targetKey }));
-  }
-
-  return [resolveSingleBuildTarget(options)];
-}
-
-function resolveSingleBuildTarget(options) {
-  if (typeof options.targetKey === "string") {
-    const metadata = TARGETS[options.targetKey];
-    if (!metadata) {
-      throw new Error(`Unsupported native target ${options.targetKey}`);
-    }
-    return {
-      arch: metadata.arch,
-      cargoCommand:
-        typeof options["cargo-command"] === "string"
-          ? options["cargo-command"]
-          : undefined,
-      libc: metadata.libc ?? null,
-      packageName:
-        typeof options["package-name"] === "string"
-          ? options["package-name"]
-          : metadata.packageName,
-      platform: metadata.platform,
-      targetTriple:
-        typeof options.target === "string"
-          ? options.target
-          : metadata.targetTriple,
-    };
-  }
-
-  const platform =
-    typeof options.platform === "string" ? options.platform : process.platform;
-  const arch = typeof options.arch === "string" ? options.arch : process.arch;
-  const libc =
-    platform === "linux"
-      ? typeof options.libc === "string"
-        ? options.libc
-        : detectLinuxLibc()
-      : null;
-  const targetKey =
-    platform === "linux"
-      ? `${platform}-${arch}-${libc}`
-      : platform === "win32"
-        ? `${platform}-${arch}-msvc`
-        : `${platform}-${arch}`;
-  const metadata = TARGETS[targetKey];
-  if (!metadata) {
-    throw new Error(`Unsupported native target ${targetKey}`);
-  }
-
-  return {
-    arch,
-    cargoCommand:
-      typeof options["cargo-command"] === "string"
-        ? options["cargo-command"]
-        : undefined,
-    libc,
-    packageName:
-      typeof options["package-name"] === "string"
-        ? options["package-name"]
-        : metadata.packageName,
-    platform,
-    targetTriple:
-      typeof options.target === "string"
-        ? options.target
-        : metadata.targetTriple,
-  };
 }
 
 function inferCargoCommand(target) {
@@ -439,37 +227,6 @@ function isHostTarget(target) {
     target.arch === hostTarget.arch &&
     target.libc === hostTarget.libc
   );
-}
-
-function parseListArg(value) {
-  if (typeof value !== "string") {
-    return [];
-  }
-  return value
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-}
-
-function detectLinuxLibc() {
-  if (process.platform !== "linux") {
-    return null;
-  }
-
-  if (process.report?.getReport?.().header?.glibcVersionRuntime) {
-    return "gnu";
-  }
-
-  try {
-    const output = spawnSync("ldd", ["--version"], {
-      encoding: "utf8",
-    });
-    return output.stdout.includes("musl") || output.stderr.includes("musl")
-      ? "musl"
-      : "gnu";
-  } catch {
-    return "musl";
-  }
 }
 
 function platformFileName(platform) {

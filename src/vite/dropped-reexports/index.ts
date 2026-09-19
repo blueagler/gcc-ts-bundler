@@ -16,6 +16,7 @@ import type {
  */
 interface ReexportChase {
   capturedModules: Map<string, CapturedModule>;
+  metrics: ViteBuildMetrics | undefined;
   origins: Map<string, ExportOrigin>;
   resolve: (specifier: string, importerId: string) => Promise<string | null>;
   tables: Map<string, ModuleExportTable>;
@@ -53,6 +54,7 @@ export async function bypassDroppedReexports(
 ) {
   const chase: ReexportChase = {
     capturedModules: input.capturedModules,
+    metrics: input.metrics,
     origins: new Map<string, ExportOrigin>(),
     resolve: (specifier, importerId) =>
       resolveCapturedModuleId.call(this, {
@@ -74,7 +76,9 @@ export async function bypassDroppedReexports(
     const rewritten = await rewriteImporterBindings.call(this, {
       code: record.code,
       importerId,
+      metrics: input.metrics,
       originOf: (moduleId, name) => originOf(chase, moduleId, name),
+      record,
       resolve: chase.resolve,
       retainedModuleIds: input.retainedModuleIds,
     });
@@ -96,8 +100,11 @@ function exportTableOf(chase: ReexportChase, moduleId: string) {
   if (existing) {
     return existing;
   }
-  const record = chase.capturedModules.get(moduleId);
-  const table = collectModuleExportTable(moduleId, record?.code ?? "");
+  const record = chase.capturedModules.get(moduleId) ?? {
+    code: "",
+    id: moduleId,
+  };
+  const table = collectModuleExportTable(record, chase.metrics);
   chase.tables.set(moduleId, table);
   return table;
 }

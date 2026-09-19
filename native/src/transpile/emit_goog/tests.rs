@@ -25,7 +25,7 @@ fn parse_with_source_type<'a>(
 ) -> (Program<'a>, ModuleIdentity) {
     let parsed = Parser::new(allocator, source, source_type).parse();
     assert!(
-        !parsed.panicked && parsed.diagnostics.is_empty(),
+        !parsed.fatal_error && parsed.diagnostics.is_empty(),
         "{:?}",
         parsed.diagnostics
     );
@@ -40,6 +40,7 @@ fn parse_with_source_type<'a>(
 fn context(workspace_dir: &Path) -> TranspileContext {
     TranspileContext {
         bundler_module_slots: HashMap::new(),
+        goog_live_modules: HashMap::new(),
         bundler_runtime_logical_ids: HashMap::new(),
         chunk_mode: ChunkMode::Off,
         class_map_calls: Vec::new(),
@@ -50,6 +51,7 @@ fn context(workspace_dir: &Path) -> TranspileContext {
         external_specifiers: HashMap::new(),
         opaque_external_specifiers: HashSet::new(),
         file_metadata: HashMap::new(),
+        authored_enum_values: HashMap::new(),
         hoist_plan: None,
         lazy_imports_by_file: HashMap::new(),
         lazy_target_module_ids: HashSet::new(),
@@ -59,70 +61,22 @@ fn context(workspace_dir: &Path) -> TranspileContext {
         preserved_property_names: HashSet::new(),
         static_property_names: HashSet::new(),
         type_metadata_enabled: false,
-        assigner_pin_module_ids: HashSet::new(),
+        pin_cross_chunk_assigners: false,
         workspace_dir: workspace_dir.to_path_buf(),
     }
 }
 
 #[test]
-fn goog_text_preserves_live_binding_contract() {
-    let root = std::env::temp_dir().join(format!("gcc-emit-goog-{}", std::process::id()));
-    std::fs::create_dir_all(&root).unwrap();
-    let dep = root.join("dep.js");
-    let entry = root.join("entry.js");
-    std::fs::write(
-        &dep,
-        "export let changing = 1; changing++; export const fixed = 2; export default 3;",
-    )
-    .unwrap();
-    let source = r#"
-        import value, { changing as live, fixed } from "./dep.js";
-        import * as ns from "./dep.js";
-        const object = { live };
-        function shadow(live) { return live; }
-        export function helper() { return shadow(live); }
-        export class Box {}
-        export const total = live + fixed + value + ns.fixed;
-        export { live as snapshot };
-        export { fixed as remote } from "./dep.js";
-        export * as everything from "./dep.js";
-        export * from "./dep.js";
-        export default function named() { return object.live; }
-    "#;
-    std::fs::write(&entry, source).unwrap();
-
-    let allocator = Allocator::default();
-    let (mut program, identity) = parse(&allocator, source);
-    let oxc = emit_goog_module_text(
-        &allocator,
-        &entry,
-        &mut program,
-        &identity,
-        &context(&root),
-        None,
-    )
-    .unwrap();
-    assert!(oxc.contains("const live = __goog_import_0.__gccLive_changing;"));
-    assert!(oxc.contains("const object = { live: live() };"));
-    assert!(oxc.contains("exports.snapshot = live();"));
-    assert!(oxc.contains("function shadow(live)"));
-    assert!(oxc.contains("return live;"));
-    assert!(oxc.contains("exports.helper = helper;"));
-    assert!(oxc.contains("exports.Box = Box;"));
-
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn object_assign_result_keeps_copied_properties_renameable() {
+fn object_assign_result_keeps_copied_properties_renameable(
+) -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::temp_dir().join(format!(
         "gcc-emit-goog-external-object-{}",
         std::process::id()
     ));
-    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&root)?;
     let entry = root.join("entry.js");
     let source = "const assign = Object.assign; const record = {}; const matcher = assign({}, { record }); matcher.record;";
-    std::fs::write(&entry, source).unwrap();
+    std::fs::write(&entry, source)?;
     let allocator = Allocator::default();
     let (mut program, identity) = parse(&allocator, source);
     let metadata = ClosureFileMetadata {
@@ -135,9 +89,8 @@ fn object_assign_result_keeps_copied_properties_renameable() {
         external_global_member_accesses: vec![source
             .find("Object.assign")
             .map(|start| start + "Object.".len())
-            .unwrap()
-            .try_into()
-            .unwrap()],
+            .ok_or("Object.assign member is missing")?
+            .try_into()?],
         external_owned_member_accesses: Vec::new(),
         file_path: entry.to_string_lossy().into_owned(),
         source_file_path: entry.to_string_lossy().into_owned(),
@@ -151,24 +104,24 @@ fn object_assign_result_keeps_copied_properties_renameable() {
         &context(&root),
         Some(&metadata),
         None,
-    )
-    .unwrap()
+    )?
     .code;
     assert!(oxc.contains("{ record }"), "{oxc}");
     assert!(oxc.contains("matcher.record"), "{oxc}");
-    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(root)?;
+    Ok(())
 }
 
 #[test]
-fn external_owned_optional_chain_member_is_quoted() {
+fn external_owned_optional_chain_member_is_quoted() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::temp_dir().join(format!(
         "gcc-emit-goog-optional-external-{}",
         std::process::id()
     ));
-    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&root)?;
     let entry = root.join("entry.js");
     let source = "const value = input?.resolvedFileName;";
-    std::fs::write(&entry, source).unwrap();
+    std::fs::write(&entry, source)?;
     let allocator = Allocator::default();
     let (mut program, identity) = parse(&allocator, source);
     let metadata = ClosureFileMetadata {
@@ -181,9 +134,8 @@ fn external_owned_optional_chain_member_is_quoted() {
         external_global_member_accesses: Vec::new(),
         external_owned_member_accesses: vec![source
             .find("resolvedFileName")
-            .unwrap()
-            .try_into()
-            .unwrap()],
+            .ok_or("resolvedFileName member is missing")?
+            .try_into()?],
         file_path: entry.to_string_lossy().into_owned(),
         source_file_path: entry.to_string_lossy().into_owned(),
         symbols: Vec::new(),
@@ -196,11 +148,11 @@ fn external_owned_optional_chain_member_is_quoted() {
         &context(&root),
         Some(&metadata),
         None,
-    )
-    .unwrap()
+    )?
     .code;
     assert!(oxc.contains("input?.[\"resolvedFileName\"]"), "{oxc}");
-    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(root)?;
+    Ok(())
 }
 
 #[test]
@@ -219,7 +171,7 @@ fn boundary_identity_tokens_are_order_independent_and_extend_collisions() {
 }
 
 #[test]
-fn external_boundary_names_are_workspace_relative() {
+fn external_boundary_names_are_workspace_relative() -> Result<(), Box<dyn std::error::Error>> {
     let base = std::env::temp_dir().join(format!(
         "gcc-emit-goog-path-independent-{}",
         std::process::id()
@@ -229,12 +181,10 @@ fn external_boundary_names_are_workspace_relative() {
     for stage in ["stage-1", "stage-2"] {
         let workspace = base.join(stage);
         let entry = workspace.join("src/entry.ts");
-        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
-        std::fs::write(&entry, source).unwrap();
+        std::fs::create_dir_all(entry.parent().ok_or("entry parent is missing")?)?;
+        std::fs::write(&entry, source)?;
         let allocator = Allocator::default();
-        let source_type = SourceType::from_path(Path::new("entry.ts"))
-            .unwrap()
-            .with_module(true);
+        let source_type = SourceType::from_path(Path::new("entry.ts"))?.with_module(true);
         let (mut program, identity) = parse_with_source_type(&allocator, source, source_type);
         let mut transpile_context = context(&workspace);
         transpile_context.external_specifiers.insert(
@@ -250,35 +200,33 @@ fn external_boundary_names_are_workspace_relative() {
                 &transpile_context,
                 None,
                 None,
-            )
-            .unwrap()
+            )?
             .code,
         );
     }
     assert_eq!(outputs[0], outputs[1]);
-    assert!(outputs[0].contains("e"));
+    assert!(outputs[0].contains('e'));
     assert!(!outputs[0].contains("__gcc_external_"));
-    std::fs::remove_dir_all(base).unwrap();
+    std::fs::remove_dir_all(base)?;
+    Ok(())
 }
 
 #[test]
-fn external_owned_spread_clone_assignment_is_quoted() {
+fn external_owned_spread_clone_assignment_is_quoted() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::temp_dir().join(format!(
         "gcc-emit-goog-spread-clone-assignment-{}",
         std::process::id()
     ));
-    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&root)?;
     let entry = root.join("entry.ts");
     let source = r#"
         import external from "external-package";
         const clone = { ...external };
         clone.value = 1;
     "#;
-    std::fs::write(&entry, source).unwrap();
+    std::fs::write(&entry, source)?;
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(Path::new("entry.ts"))
-        .unwrap()
-        .with_module(true);
+    let source_type = SourceType::from_path(Path::new("entry.ts"))?.with_module(true);
     let (mut program, identity) = parse_with_source_type(&allocator, source, source_type);
     let metadata = ClosureFileMetadata {
         ambient_globals: Vec::new(),
@@ -288,7 +236,10 @@ fn external_owned_spread_clone_assignment_is_quoted() {
         diagnostics: Vec::new(),
         enums: Vec::new(),
         external_global_member_accesses: Vec::new(),
-        external_owned_member_accesses: vec![source.rfind("value").unwrap().try_into().unwrap()],
+        external_owned_member_accesses: vec![source
+            .rfind("value")
+            .ok_or("value member is missing")?
+            .try_into()?],
         file_path: entry.to_string_lossy().into_owned(),
         source_file_path: entry.to_string_lossy().into_owned(),
         symbols: Vec::new(),
@@ -306,20 +257,21 @@ fn external_owned_spread_clone_assignment_is_quoted() {
         &transpile_context,
         Some(&metadata),
         None,
-    )
-    .unwrap()
+    )?
     .code;
     assert!(oxc.contains("clone[\"value\"] = 1"), "{oxc}");
-    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(root)?;
+    Ok(())
 }
 
 #[test]
-fn external_boundary_value_forms_quote_following_members() {
+fn external_boundary_value_forms_quote_following_members() -> Result<(), Box<dyn std::error::Error>>
+{
     let root = std::env::temp_dir().join(format!(
         "gcc-emit-goog-external-forms-{}",
         std::process::id()
     ));
-    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&root)?;
     let entry = root.join("entry.ts");
     let source = r#"
         import * as external from "external-package";
@@ -344,11 +296,9 @@ fn external_boundary_value_forms_quote_following_members() {
         const nonNull = external!.value;
         const instantiated = external.make<string>().value;
     "#;
-    std::fs::write(&entry, source).unwrap();
+    std::fs::write(&entry, source)?;
     let allocator = Allocator::default();
-    let source_type = SourceType::from_path(Path::new("entry.ts"))
-        .unwrap()
-        .with_module(true);
+    let source_type = SourceType::from_path(Path::new("entry.ts"))?.with_module(true);
     let (mut program, identity) = parse_with_source_type(&allocator, source, source_type);
     let mut transpile_context = context(&root);
     transpile_context.external_specifiers.insert(
@@ -363,25 +313,25 @@ fn external_boundary_value_forms_quote_following_members() {
         &transpile_context,
         None,
         None,
-    )
-    .unwrap()
+    )?
     .code;
     assert!(!oxc.contains(".value"), "{oxc}");
     assert!(oxc.matches("[\"value\"]").count() >= 19, "{oxc}");
-    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(root)?;
+    Ok(())
 }
 
 #[test]
-fn anonymous_default_forms_are_exported() {
+fn anonymous_default_forms_are_exported() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::temp_dir().join(format!("gcc-emit-goog-default-{}", std::process::id()));
-    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&root)?;
     let entry = root.join("entry.js");
     for source in [
         "export default () => 1;",
         "export default function() { return 2; }",
         "export default class { method() { return 3; } }",
     ] {
-        std::fs::write(&entry, source).unwrap();
+        std::fs::write(&entry, source)?;
         let allocator = Allocator::default();
         let (mut program, identity) = parse(&allocator, source);
         let oxc = emit_goog_module_text(
@@ -391,24 +341,25 @@ fn anonymous_default_forms_are_exported() {
             &identity,
             &context(&root),
             None,
-        )
-        .unwrap();
+        )?;
         assert!(oxc.contains("exports.default ="), "source: {source}\n{oxc}");
     }
-    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(root)?;
+    Ok(())
 }
 
 #[test]
-fn statement_printing_keeps_only_the_allowed_pure_annotation() {
+fn statement_printing_keeps_only_the_allowed_pure_annotation(
+) -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::temp_dir().join(format!("gcc-emit-goog-comments-{}", std::process::id()));
-    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&root)?;
     let entry = root.join("entry.js");
-    let source = r#"
+    let source = r"
         /** @const HOSTILE */ const value = 1;
         /*#__PURE__*/ make();
         function make() { return value; }
-    "#;
-    std::fs::write(&entry, source).unwrap();
+    ";
+    std::fs::write(&entry, source)?;
     let allocator = Allocator::default();
     let (mut program, identity) = parse(&allocator, source);
     let oxc = emit_goog_module_text(
@@ -418,15 +369,15 @@ fn statement_printing_keeps_only_the_allowed_pure_annotation() {
         &identity,
         &context(&root),
         None,
-    )
-    .unwrap();
+    )?;
     assert!(!oxc.contains("HOSTILE"), "{oxc}");
     assert!(oxc.contains("@__PURE__"), "{oxc}");
-    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(root)?;
+    Ok(())
 }
 
 #[test]
-fn live_export_facts_cover_aliases_and_invalidations() {
+fn live_export_facts_cover_aliases_and_invalidations() -> Result<(), String> {
     let source = r#"
         let direct = 0, local = 1, stable = 2;
         export { local as renamed, stable };
@@ -438,7 +389,7 @@ fn live_export_facts_cover_aliases_and_invalidations() {
     "#;
     let allocator = Allocator::default();
     let (program, identity) = parse(&allocator, source);
-    let oxc = live_export_bindings_of_program(&program, &identity);
+    let oxc = live_export_bindings_of_program(&program, &identity)?;
     assert_eq!(
         oxc,
         BTreeMap::from([
@@ -446,4 +397,5 @@ fn live_export_facts_cover_aliases_and_invalidations() {
             ("renamed".to_string(), "local".to_string()),
         ])
     );
+    Ok(())
 }

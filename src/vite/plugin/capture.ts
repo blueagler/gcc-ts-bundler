@@ -2,7 +2,6 @@ import { performance } from "node:perf_hooks";
 
 import {
   getCapturedModuleAnalysis,
-  resolveCapturedModuleFormat,
   restoreEmptyDependencyModuleSource,
   shouldCaptureModule,
 } from "../capture";
@@ -14,21 +13,28 @@ export async function captureViteModule(input: {
   code: string;
   id: string;
   timingTotals: ViteTimingTotals;
-}): Promise<{ captured: boolean; workerImport: boolean }> {
+}): Promise<void> {
   const startedAt = performance.now();
   if (!shouldCaptureModule(input.id, input.code)) {
-    return { captured: false, workerImport: false };
+    return;
   }
-  const workerImport =
-    input.id.includes("?worker") || input.id.includes("&worker");
   const capturedCode = await restoreEmptyDependencyModuleSource(
     input.id,
     input.code,
   );
-  const record: CapturedModule = { code: capturedCode, id: input.id };
+  const record = input.capturedModules.get(input.id) ?? {
+    code: capturedCode,
+    id: input.id,
+  };
+  if (record.code !== capturedCode) {
+    record.code = capturedCode;
+    delete record.capturedCode;
+    delete record.normalizedAnalysis;
+    delete record.normalizedCode;
+    delete record.parsedSource;
+    delete record.rawAnalysis;
+  }
   record.rawAnalysis = getCapturedModuleAnalysis(record);
-  record.format = await resolveCapturedModuleFormat(record);
   input.capturedModules.set(input.id, record);
   input.timingTotals.transformCaptureMs += performance.now() - startedAt;
-  return { captured: true, workerImport };
 }

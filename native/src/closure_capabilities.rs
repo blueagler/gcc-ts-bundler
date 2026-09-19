@@ -1,10 +1,8 @@
-#![allow(non_snake_case)]
-
 //! The pinned Closure Compiler's syntax contract.
 //!
 //! Closure is the middle-end in an Oxc envelope. Keep every syntax decision
 //! that crosses that boundary here so a compiler bump changes one table, and
-//! `test/closure-capabilities.test.mjs` proves the new table against its jar.
+//! `test/native/closure-capabilities.test.mjs` checks that table's parser probes.
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ClosureCompilerCapabilities {
@@ -17,8 +15,8 @@ pub(crate) struct ClosureCompilerCapabilities {
 
 pub(crate) const CLOSURE_COMPILER_CAPABILITIES: ClosureCompilerCapabilities =
     ClosureCompilerCapabilities {
-        compiler_version: "20260811.0.0",
-        // Probed directly by test/closure-capabilities.test.mjs with
+        compiler_version: "20260909.0.0",
+        // Probed directly by test/native/closure-capabilities.test.mjs with
         // --compilation_level WHITESPACE_ONLY --language_in UNSTABLE.
         private_class_elements: false,
         class_static_blocks: true,
@@ -30,21 +28,26 @@ pub(crate) const CLOSURE_COMPILER_CAPABILITIES: ClosureCompilerCapabilities =
 
 #[napi_derive::napi(object)]
 pub struct ClosureCompilerCapabilitiesOutput {
-    pub classStaticBlocks: bool,
-    pub compilerVersion: String,
-    pub prebundleTarget: String,
-    pub privateClassElements: bool,
-    pub topLevelAwait: bool,
+    #[napi(js_name = "classStaticBlocks")]
+    pub class_static_blocks: bool,
+    #[napi(js_name = "compilerVersion")]
+    pub compiler_version: String,
+    #[napi(js_name = "prebundleTarget")]
+    pub prebundle_target: String,
+    #[napi(js_name = "privateClassElements")]
+    pub private_class_elements: bool,
+    #[napi(js_name = "topLevelAwait")]
+    pub top_level_await: bool,
 }
 
 pub(crate) fn closure_compiler_capabilities() -> ClosureCompilerCapabilitiesOutput {
     let capabilities = CLOSURE_COMPILER_CAPABILITIES;
     ClosureCompilerCapabilitiesOutput {
-        classStaticBlocks: capabilities.class_static_blocks,
-        compilerVersion: capabilities.compiler_version.to_string(),
-        prebundleTarget: capabilities.prebundle_target.to_string(),
-        privateClassElements: capabilities.private_class_elements,
-        topLevelAwait: capabilities.top_level_await,
+        class_static_blocks: capabilities.class_static_blocks,
+        compiler_version: capabilities.compiler_version.to_string(),
+        prebundle_target: capabilities.prebundle_target.to_string(),
+        private_class_elements: capabilities.private_class_elements,
+        top_level_await: capabilities.top_level_await,
     }
 }
 
@@ -198,16 +201,13 @@ pub(crate) fn resolve_vite_target_language_out(target: &str) -> Option<&'static 
     if let Some(year) = normalized.strip_prefix("es20") {
         let year = 2000 + year.parse::<u16>().ok()?;
         return match year {
-            2015..=2021 => Some(match year {
-                2015 => "ECMASCRIPT_2015",
-                2016 => "ECMASCRIPT_2016",
-                2017 => "ECMASCRIPT_2017",
-                2018 => "ECMASCRIPT_2018",
-                2019 => "ECMASCRIPT_2019",
-                2020 => "ECMASCRIPT_2020",
-                2021 => "ECMASCRIPT_2021",
-                _ => unreachable!(),
-            }),
+            2015 => Some("ECMASCRIPT_2015"),
+            2016 => Some("ECMASCRIPT_2016"),
+            2017 => Some("ECMASCRIPT_2017"),
+            2018 => Some("ECMASCRIPT_2018"),
+            2019 => Some("ECMASCRIPT_2019"),
+            2020 => Some("ECMASCRIPT_2020"),
+            2021 => Some("ECMASCRIPT_2021"),
             2022.. => Some("STABLE"),
             _ => None,
         };

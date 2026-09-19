@@ -35,11 +35,10 @@ pub fn path_relative_to(path: &Path, root: &Path) -> String {
 pub fn hash_content(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    let digest = hasher.finalize();
+    let mut output = String::with_capacity(digest.len() * 2);
+    append_hex(&mut output, &digest);
+    output
 }
 
 pub fn base36(mut value: u64) -> String {
@@ -50,9 +49,9 @@ pub fn base36(mut value: u64) -> String {
     while value > 0 {
         let digit = (value % 36) as u8;
         digits.push(if digit < 10 {
-            (b'0' + digit) as char
+            char::from(b'0' + digit)
         } else {
-            (b'a' + digit - 10) as char
+            char::from(b'a' + digit - 10)
         });
         value /= 36;
     }
@@ -74,12 +73,18 @@ pub fn short_stable_id(prefix: char, value: &str) -> String {
     hasher.update([prefix as u8]);
     hasher.update(value.as_bytes());
     let digest = hasher.finalize();
-    let hex = digest
-        .iter()
-        .take(4)
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("{prefix}{hex}")
+    let mut output = String::with_capacity(prefix.len_utf8() + 8);
+    output.push(prefix);
+    append_hex(&mut output, &digest[..4]);
+    output
+}
+
+pub(crate) fn append_hex(output: &mut String, bytes: &[u8]) {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    for &byte in bytes {
+        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
 }
 
 pub fn unique_strings(items: Vec<String>) -> Vec<String> {
@@ -95,7 +100,7 @@ pub fn unique_strings(items: Vec<String>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{base36, hash48_base36, hash_content};
 
     #[test]
     fn hash_content_emits_lowercase_sha256_hex() {

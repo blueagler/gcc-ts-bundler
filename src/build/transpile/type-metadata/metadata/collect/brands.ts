@@ -1,7 +1,9 @@
 import ts from "@typescript/typescript6";
 
 import { buildObjectLiteralBrandDeclaration } from "../docs";
+import { getClosureIrSyntaxIndex } from "../scan";
 import { referencesForTemplate } from "../type-render/index";
+import { referenceSymbolId } from "../type-render/context";
 import type { ClosureDocRenderContext } from "../type-render/index";
 import type { ClosureAnnotation, ClosureTypeDeclaration } from "../../types";
 import {
@@ -28,67 +30,63 @@ export function collectObjectLiteralBrands(
   checker: ts.TypeChecker,
   context: ClosureDocRenderContext,
 ) {
-  const declarations: ClosureTypeDeclaration[] = [];
   const annotations: ClosureAnnotation[] = [];
+  const objectLiterals = getClosureIrSyntaxIndex(sourceFile).objectLiterals;
+  if (objectLiterals.length === 0) {
+    return { annotations, declarations: [] };
+  }
   const importedSymbols = collectImportedSymbols(sourceFile, checker);
   const exportedSymbols = collectExportedSymbols(sourceFile, checker);
   const dynamicallyKeyedSymbols = collectDynamicallyKeyedSymbols(
     sourceFile,
     checker,
   );
-  const brandNameByShape = new Map<string, string>();
-  const declaredBrandNames = new Set<string>();
+  const brandDeclarationByShape = new Map<string, ClosureTypeDeclaration>();
 
-  const visit = (node: ts.Node) => {
-    if (ts.isObjectLiteralExpression(node)) {
-      const keys = objectLiteralBrandKeys(node);
-      if (
-        keys &&
-        keys.length > 0 &&
-        isBrandableObjectLiteral(node, {
+  for (const node of objectLiterals) {
+    const keys = objectLiteralBrandKeys(node);
+    if (
+      keys &&
+      keys.length > 0 &&
+      isBrandableObjectLiteral(node, {
+        checker,
+        dynamicallyKeyedSymbols,
+        exportedSymbols,
+        importedSymbols,
+        sourceFile,
+      })
+    ) {
+      const sortedKeys = [...keys].sort();
+      const shape = sortedKeys.join("\0");
+      let declaration = brandDeclarationByShape.get(shape);
+      if (!declaration) {
+        declaration = buildObjectLiteralBrandDeclaration({
+          brandName: `Brand$${brandDeclarationByShape.size}`,
           checker,
-          dynamicallyKeyedSymbols,
-          exportedSymbols,
-          importedSymbols,
-          sourceFile,
-        })
-      ) {
-        const sortedKeys = [...keys].sort();
-        const shape = sortedKeys.join("\0");
-        let brandName = brandNameByShape.get(shape);
-        if (!brandName) {
-          brandName = `Brand$${brandNameByShape.size}`;
-          brandNameByShape.set(shape, brandName);
-        }
-        if (!declaredBrandNames.has(brandName)) {
-          declaredBrandNames.add(brandName);
-          declarations.push(
-            buildObjectLiteralBrandDeclaration({
-              brandName,
-              checker,
-              context,
-              keys: sortedKeys,
-              literal: node,
-            }),
-          );
-        }
-        const bindingName = objectLiteralBindingName(node);
-        if (bindingName) {
-          const template = brandTypeAnnotationTemplate(brandName, context);
-          annotations.push({
-            references: referencesForTemplate(template, context),
-            target: { bindingName, kind: "binding" },
-            template,
-            typeBearing: true,
-          });
-        }
+          context,
+          keys: sortedKeys,
+          literal: node,
+        });
+        brandDeclarationByShape.set(shape, declaration);
+      }
+      const bindingName = objectLiteralBindingName(node);
+      if (bindingName) {
+        const typeName = referenceSymbolId(
+          declaration.declaredSymbolId,
+          context,
+        );
+        const template = `/** @type {!${typeName}} */\n`;
+        annotations.push({
+          references: referencesForTemplate(template, context),
+          target: { bindingName, kind: "binding" },
+          template,
+          typeBearing: true,
+        });
       }
     }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
+  }
 
-  return { annotations, declarations };
+  return { annotations, declarations: [...brandDeclarationByShape.values()] };
 }
 
 function objectLiteralBrandKeys(literal: ts.ObjectLiteralExpression) {
@@ -97,15 +95,13 @@ function objectLiteralBrandKeys(literal: ts.ObjectLiteralExpression) {
     if (ts.isSpreadAssignment(member)) {
       return null;
     }
-    if (
-      !(
-        ts.isPropertyAssignment(member) ||
-        ts.isShorthandPropertyAssignment(member) ||
-        ts.isMethodDeclaration(member) ||
-        ts.isGetAccessorDeclaration(member) ||
-        ts.isSetAccessorDeclaration(member)
-      )
-    ) {
+    if (!(
+      ts.isPropertyAssignment(member) ||
+      ts.isShorthandPropertyAssignment(member) ||
+      ts.isMethodDeclaration(member) ||
+      ts.isGetAccessorDeclaration(member) ||
+      ts.isSetAccessorDeclaration(member)
+    )) {
       return null;
     }
     const name = member.name;
@@ -311,19 +307,4 @@ function isAssignedOntoImportedOrGlobal(
     return true;
   }
   return isGlobalSymbol(symbol, sourceFile);
-}
-
-function brandTypeAnnotationTemplate(
-  brandName: string,
-  context: ClosureDocRenderContext,
-) {
-  const symbolId = context.symbolIdByDeclaredName.get(brandName);
-  let typeName = brandName;
-  if (symbolId) {
-    const token = `__GCC_TYPE_${context.nextReferenceId}__`;
-    context.nextReferenceId += 1;
-    context.referencesByToken.set(token, { symbolId, token });
-    typeName = token;
-  }
-  return `/** @type {!${typeName}} */\n`;
 }

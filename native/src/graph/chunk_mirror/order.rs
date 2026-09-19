@@ -1,4 +1,4 @@
-use super::super::*;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) struct MirrorChunk {
     pub(crate) dependencies: BTreeSet<usize>,
@@ -26,7 +26,7 @@ pub(crate) fn merge_cycles(chunks: &mut [MirrorChunk], entry_index: usize) -> Ve
             chunks[owner].dependencies.extend(absorbed);
             let lazy = std::mem::take(&mut chunks[member].lazy_module_ids);
             chunks[owner].lazy_module_ids.extend(lazy);
-            for target in representative.iter_mut() {
+            for target in &mut representative {
                 if *target == member {
                     *target = owner;
                 }

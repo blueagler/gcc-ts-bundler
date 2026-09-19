@@ -1,7 +1,7 @@
-import fs from "node:fs/promises";
-
-import { parseGccRuntimeManifest } from "../../build/closure/runtime-manifest/parse";
-import type { NormalizedOutputOptions } from "../internal-types";
+import type {
+  GccRuntimeManifest,
+  NormalizedOutputOptions,
+} from "../internal-types";
 import { assignEsmRenameMap, rewriteEsmChunkContents } from "./esm-apply";
 import { listEsmChunks, requireBaseEsmChunk } from "./esm-chunks";
 import { computeEsmFinalHashes, tokeniseEsmChunks } from "./esm-hash";
@@ -25,15 +25,13 @@ export async function finalizeEsmChunkNames(input: {
   baseSeed: BaseOutputSeed;
   deferredChunkSeeds: DeferredChunkSeed[];
   emittedOutputFiles: string[];
+  manifest: GccRuntimeManifest;
   manifestFilePath: string;
   outDir: string;
   outputOptions: NormalizedOutputOptions;
   publicPath: string;
 }) {
-  const manifest = parseGccRuntimeManifest(
-    await fs.readFile(input.manifestFilePath, "utf8"),
-    input.manifestFilePath,
-  );
+  const { manifest } = input;
   const chunks = listEsmChunks(manifest);
   const baseChunk = requireBaseEsmChunk(chunks, manifest.baseChunk);
   const { referencesByChunkId, tokenByChunkId, tokenisedByChunkId } =

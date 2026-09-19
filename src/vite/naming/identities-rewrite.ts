@@ -6,6 +6,7 @@ import {
   JAVASCRIPT_OUTPUT_FILE,
   minifyFinalJavaScriptText,
 } from "../../build/closure/final-minify";
+import { runWithConcurrency } from "../../shared/concurrency";
 import { dynamicImportSpecifier } from "../../shared/typescript";
 import type { OutputChunk } from "../internal-types";
 import {
@@ -54,32 +55,32 @@ export async function rewriteAndRenameCompiledFiles(
   outputFiles: string[],
   renameMap: Map<string, string>,
 ) {
-  await Promise.all(
-    outputFiles
-      .filter((filePath) => JAVASCRIPT_OUTPUT_FILE.test(filePath))
-      .map(async (outputFile) => {
-        const oldName = path.relative(outDir, outputFile).replace(/\\/g, "/");
-        const newName = renameMap.get(oldName) ?? oldName;
-        const source = await fs.readFile(outputFile, "utf8");
-        const isJs = outputFile.endsWith(".js");
-        const afterPreserved = isJs
-          ? rewritePreservedImportSpecifiers({
-              code: source,
-              filePath: outputFile,
-              outDir,
-            })
-          : source;
-        const minified = minifyFinalJavaScriptText(outputFile, afterPreserved);
-        const afterIdentities = isJs
-          ? rewriteCompiledChunkIdentitiesInText({
-              code: minified,
-              newName,
-              oldName,
-              renameMap,
-            })
-          : minified;
-        await fs.writeFile(outputFile, afterIdentities, "utf8");
-      }),
+  await runWithConcurrency(
+    outputFiles.filter((filePath) => JAVASCRIPT_OUTPUT_FILE.test(filePath)),
+    8,
+    async (outputFile) => {
+      const oldName = path.relative(outDir, outputFile).replace(/\\/g, "/");
+      const newName = renameMap.get(oldName) ?? oldName;
+      const source = await fs.readFile(outputFile, "utf8");
+      const isJs = outputFile.endsWith(".js");
+      const afterPreserved = isJs
+        ? rewritePreservedImportSpecifiers({
+            code: source,
+            filePath: outputFile,
+            outDir,
+          })
+        : source;
+      const minified = minifyFinalJavaScriptText(outputFile, afterPreserved);
+      const afterIdentities = isJs
+        ? rewriteCompiledChunkIdentitiesInText({
+            code: minified,
+            newName,
+            oldName,
+            renameMap,
+          })
+        : minified;
+      await fs.writeFile(outputFile, afterIdentities, "utf8");
+    },
   );
   await applyFileRenames(outDir, renameMap);
 }

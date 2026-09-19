@@ -29,6 +29,7 @@ import {
   isRecord,
   isString,
   isStringArray,
+  isUnknownArray,
   oneOf,
   optional,
 } from "../../shared/validation";
@@ -48,61 +49,11 @@ import {
 // v1: `{ dependencyStates, sidecar }`.
 const VITE_TYPE_METADATA_SIDECAR_CACHE_VERSION = 1;
 
-type TypeMetadataCacheRawArray = readonly TypeMetadataCacheRawValue[];
-
-interface TypeMetadataCacheRawCallable {
-  (...arguments_: never[]): void;
-}
-
-interface TypeMetadataCacheRawRecord {
-  [key: string]: TypeMetadataCacheRawValue;
-}
-
-type TypeMetadataCacheRawValue =
-  | TypeMetadataCacheRawArray
-  | TypeMetadataCacheRawCallable
-  | TypeMetadataCacheRawRecord
-  | bigint
-  | boolean
-  | null
-  | number
-  | string
-  | symbol
-  | undefined;
-
-type TypeMetadataCacheDomainValue<Value> =
-  Value extends TypeMetadataCacheRawValue
-    ? Value
-    : Value extends readonly (infer Entry)[]
-      ? readonly TypeMetadataCacheDomainValue<Entry>[]
-      : Value extends object
-        ? { [Key in keyof Value]: TypeMetadataCacheDomainValue<Value[Key]> }
-        : Value;
-
-type TypeMetadataCacheValue =
-  | {
-      kind: "array";
-      values: TypeMetadataCacheValue[];
-    }
-  | {
-      entries: Array<{
-        key: string;
-        value: TypeMetadataCacheValue;
-      }>;
-      kind: "object";
-    }
-  | {
-      json: string;
-      kind: "scalar";
-    };
-
-export function hashTypeMetadataValue<Value>(
-  value: TypeMetadataCacheDomainValue<Value>,
-) {
+export function hashTypeMetadataValue<Value>(value: Value) {
   return createHash("sha256")
     .update(String(VITE_TYPE_METADATA_VERSION))
     .update("\0")
-    .update(stableJson(parseTypeMetadataCacheValue(value)))
+    .update(stableJson(value))
     .digest("hex");
 }
 
@@ -151,44 +102,17 @@ function snapshotMaterializedGraph(graph: MaterializedGraph) {
   };
 }
 
-function parseTypeMetadataCacheValue<Value>(
-  value: TypeMetadataCacheDomainValue<Value>,
-): TypeMetadataCacheValue {
-  if (Array.isArray(value)) {
-    return {
-      kind: "array",
-      values: value.map(parseTypeMetadataCacheValue),
-    };
+function stableJson<Value>(value: Value): string {
+  if (isUnknownArray(value)) {
+    return `[${value.map(stableJson).join(",")}]`;
   }
   if (isRecord(value)) {
-    return {
-      entries: Object.entries(value).map(([key, entry]) => ({
-        key,
-        value: parseTypeMetadataCacheValue(entry),
-      })),
-      kind: "object",
-    };
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
+      .join(",")}}`;
   }
-  return {
-    json: JSON.stringify(value) ?? "null",
-    kind: "scalar",
-  };
-}
-
-function stableJson(value: TypeMetadataCacheValue): string {
-  switch (value.kind) {
-    case "array":
-      return `[${value.values.map(stableJson).join(",")}]`;
-    case "object":
-      return `{${value.entries
-        .sort((left, right) => left.key.localeCompare(right.key))
-        .map(
-          (entry) => `${JSON.stringify(entry.key)}:${stableJson(entry.value)}`,
-        )
-        .join(",")}}`;
-    case "scalar":
-      return value.json;
-  }
+  return JSON.stringify(value) ?? "null";
 }
 
 const TYPE_METADATA_CACHE_SUBDIR = "vite-type-metadata";
@@ -216,11 +140,9 @@ export function resolveViteTypeMetadataCacheRoot(input: {
 }
 
 export async function hashTypeMetadataSidecarDiskKey(input: {
-  materialized: MaterializedGraph;
   projectRoot: string;
-  sourceGraph: MaterializedGraph;
+  sidecarKey: string;
 }) {
-  const sidecarKey = hashTypeMetadataSidecarKey(input);
   const tsconfigPath = ts.findConfigFile(
     input.projectRoot,
     ts.sys.fileExists,
@@ -235,7 +157,7 @@ export async function hashTypeMetadataSidecarDiskKey(input: {
     }
   }
   return hashTypeMetadataValue({
-    sidecarKey,
+    sidecarKey: input.sidecarKey,
     tsconfigIdentity,
     tsconfigPath: tsconfigPath ?? "",
   });

@@ -1,6 +1,24 @@
-use super::package_resolver::is_external_boundary_specifier;
-use super::*;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use super::deps::{
+    collect_dynamic_import_specifiers, collect_export_source_specifiers, extract_dependencies,
+    has_top_level_await, parse_scanned_module,
+};
+use super::exports::collect_exports;
+use super::package_resolver::{
+    is_external_boundary_specifier, resolve_module_specifier, validate_commonjs_usage,
+};
+use super::{
+    target_descriptor, DependencyGraphEntry, EntryExportMetadata, ExternalBoundaryEntry,
+    FileHashEntry, LazyImportEntry, PackageAliasEntry, PackageMode, PreservedModuleEntry,
+    ResolveContext, ResolveGraphOutput, ResolvedImportEntry, TargetDescriptor,
+};
 use crate::closure_capabilities::CLOSURE_COMPILER_CAPABILITIES;
+use crate::commonjs::{analyze_commonjs_program, CommonJsAnalysis};
+use crate::pathing::to_goog_module_id;
+use crate::utils::{hash_content, normalize_path, path_relative_to};
 use oxc_allocator::Allocator;
 
 pub(crate) fn resolve_graph_impl(
@@ -51,14 +69,14 @@ pub(crate) fn resolve_graph_impl(
         }
 
         visited.insert(current_file.clone());
-        let contents = fs::read_to_string(&current_file).map_err(|error| error.to_string())?;
+        let contents = fs::read_to_string(&current_file).map_err(|error| {
+            format!("Unable to read source {}: {error}", current_file.display())
+        })?;
         let relative = path_relative_to(&current_file, context.workspace_dir);
         file_hashes.insert(relative, hash_content(&contents));
 
         let normalized_current = normalize_path(&current_file).to_string_lossy().to_string();
         let authored_preserved = context.preserved_file_paths.contains(&normalized_current);
-        let commonjs_analysis = analyze_commonjs_source(&current_file, &contents)?;
-        commonjs_cache.insert(current_file.clone(), commonjs_analysis.clone());
 
         // Preserved classification happens after the complete static graph is
         // known. Scan ESM edges even when a createRequire() binding looks like
@@ -66,6 +84,7 @@ pub(crate) fn resolve_graph_impl(
         // before CommonJS validation is applied to the remaining modules.
         let scan_allocator = Allocator::default();
         let scanned = parse_scanned_module(&scan_allocator, &current_file, &contents)?;
+        let commonjs_analysis = analyze_commonjs_program(&scanned);
         // Closure's pinned syntax table rejects top-level await, so retain its
         // ESM edge for Oxc to emit rather than handing the module to Closure.
         if authored_preserved
@@ -82,7 +101,8 @@ pub(crate) fn resolve_graph_impl(
             }
         }
         let mut specifiers = extract_dependencies(&scanned);
-        specifiers.extend(commonjs_analysis.dependencies.clone());
+        specifiers.extend(commonjs_analysis.dependencies.iter().cloned());
+        commonjs_cache.insert(current_file.clone(), commonjs_analysis);
         specifiers.sort();
         specifiers.dedup();
         let lazy_specifiers = if authored_preserved {
@@ -99,7 +119,7 @@ pub(crate) fn resolve_graph_impl(
                 external_boundaries.insert(
                     format!("{importer_file_path}\0{specifier}"),
                     ExternalBoundaryEntry {
-                        importerFilePath: importer_file_path,
+                        importer_file_path,
                         specifier,
                     },
                 );
@@ -109,7 +129,7 @@ pub(crate) fn resolve_graph_impl(
                 consulted_package_jsons.extend(resolved.package_json_files.iter().cloned());
                 if let Some(package_alias) = resolved.package_alias {
                     package_aliases.insert(
-                        format!("{}\0{}", package_alias.packageName, package_alias.subpath),
+                        format!("{}\0{}", package_alias.package_name, package_alias.subpath),
                         package_alias,
                     );
                 }
@@ -120,10 +140,10 @@ pub(crate) fn resolve_graph_impl(
                 resolved_imports.insert(
                     key,
                     ResolvedImportEntry {
-                        importerFilePath: importer_file_path,
-                        moduleId: to_goog_module_id(&target_path, context.workspace_dir),
+                        importer_file_path,
+                        module_id: to_goog_module_id(&target_path, context.workspace_dir),
                         specifier,
-                        targetPath: target_path.to_string_lossy().to_string(),
+                        target_path: target_path.to_string_lossy().to_string(),
                     },
                 );
                 dependencies.insert(target_path);
@@ -140,7 +160,7 @@ pub(crate) fn resolve_graph_impl(
                 consulted_package_jsons.extend(resolved.package_json_files.iter().cloned());
                 if let Some(package_alias) = resolved.package_alias.clone() {
                     package_aliases.insert(
-                        format!("{}\0{}", package_alias.packageName, package_alias.subpath),
+                        format!("{}\0{}", package_alias.package_name, package_alias.subpath),
                         package_alias,
                     );
                 }
@@ -149,10 +169,10 @@ pub(crate) fn resolve_graph_impl(
                 lazy_imports.insert(
                     key,
                     LazyImportEntry {
-                        importerFilePath: current_file.to_string_lossy().to_string(),
-                        moduleId: to_goog_module_id(&resolved.path, context.workspace_dir),
+                        importer_file_path: current_file.to_string_lossy().to_string(),
+                        module_id: to_goog_module_id(&resolved.path, context.workspace_dir),
                         specifier,
-                        targetPath: resolved.path.to_string_lossy().to_string(),
+                        target_path: resolved.path.to_string_lossy().to_string(),
                     },
                 );
             }
@@ -168,6 +188,8 @@ pub(crate) fn resolve_graph_impl(
 
         pending.extend(dependencies);
     }
+
+    crate::pathing::validate_module_paths(graph.keys().map(String::as_str), &workspace_dir)?;
 
     for package_json_file in &consulted_package_jsons {
         let contents = fs::read_to_string(package_json_file).map_err(|error| error.to_string())?;
@@ -204,11 +226,11 @@ pub(crate) fn resolve_graph_impl(
     }
     if let Some(lazy_import) = lazy_imports
         .values()
-        .find(|lazy_import| preserved_file_paths.contains(&lazy_import.targetPath))
+        .find(|lazy_import| preserved_file_paths.contains(&lazy_import.target_path))
     {
         return Err(format!(
             "Dynamic import of preserved module {} is unsupported in phase 1; use a static ESM import.",
-            lazy_import.targetPath
+            lazy_import.target_path
         ));
     }
     validate_preserved_export_sources(&preserved_file_paths, &context)?;
@@ -219,10 +241,11 @@ pub(crate) fn resolve_graph_impl(
             let path = PathBuf::from(file_path);
             let exports = collect_exports(&path, &mut commonjs_cache, &mut export_cache, &context)?;
             Ok(PreservedModuleEntry {
-                exportNames: exports.exportNames,
-                filePath: file_path.clone(),
-                hasDefaultExport: exports.hasDefaultExport,
-                moduleId: to_goog_module_id(&path, context.workspace_dir),
+                const_enum_export_names: exports.const_enum_export_names,
+                export_names: exports.export_names,
+                file_path: file_path.clone(),
+                has_default_export: exports.has_default_export,
+                module_id: to_goog_module_id(&path, context.workspace_dir),
             })
         })
         .collect::<std::result::Result<Vec<_>, String>>()?;
@@ -247,28 +270,25 @@ pub(crate) fn resolve_graph_impl(
 
     Ok(ResolveGraphOutput {
         entries: entries_metadata,
-        externalBoundaries: external_boundaries.into_values().collect(),
-        fileHashes: file_hashes
+        external_boundaries: external_boundaries.into_values().collect(),
+        file_hashes: file_hashes
             .into_iter()
-            .map(|(file_path, hash)| FileHashEntry {
-                filePath: file_path,
-                hash,
-            })
+            .map(|(file_path, hash)| FileHashEntry { file_path, hash })
             .collect(),
         graph: graph
             .iter()
             .map(|(file_path, dependencies)| DependencyGraphEntry {
                 dependencies: dependencies.clone(),
-                filePath: file_path.clone(),
+                file_path: file_path.clone(),
             })
             .collect(),
-        lazyImports: lazy_imports.into_values().collect(),
-        packageAliases: package_aliases.into_values().collect(),
-        resolvedImports: resolved_imports.into_values().collect(),
-        packageJsonFiles: package_json_files,
-        preservedModules: preserved_modules,
-        sourceFiles: source_files,
-        trackedFiles: tracked_files,
+        lazy_imports: lazy_imports.into_values().collect(),
+        package_aliases: package_aliases.into_values().collect(),
+        resolved_imports: resolved_imports.into_values().collect(),
+        package_json_files,
+        preserved_modules,
+        source_files,
+        tracked_files,
     })
 }
 
@@ -290,10 +310,10 @@ fn validate_preserved_export_sources(
                 {
                     Some(export.source.value.as_str())
                 }
-                oxc_ast::ast::Statement::ExportNamedDeclaration(export)
+                oxc_ast::ast::Statement::ExportFromDeclaration(export)
                     if export.export_kind == oxc_ast::ast::ImportOrExportKind::Value =>
                 {
-                    export.source.as_ref().map(|source| source.value.as_str())
+                    Some(export.source.value.as_str())
                 }
                 _ => None,
             };

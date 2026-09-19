@@ -1,6 +1,4 @@
-use super::*;
-
-pub(super) use crate::utils::{hash_content, normalize_path, path_relative_to};
+use std::path::{Path, PathBuf};
 
 /// Extensions that actually denote a module file. Anything else after the last
 /// dot is part of the name, not an extension.

@@ -22,12 +22,10 @@ pub(crate) fn collect_class_static_assignments(source_text: &str) -> Vec<(String
         .captures_iter(source_text)
         .filter_map(|captures| {
             let class_name = captures.get(1)?.as_str();
-            class_bindings.contains(class_name).then(|| {
-                (
-                    class_name.to_string(),
-                    captures.get(2).unwrap().as_str().to_string(),
-                )
-            })
+            let property_name = captures.get(2)?.as_str();
+            class_bindings
+                .contains(class_name)
+                .then(|| (class_name.to_string(), property_name.to_string()))
         })
         .collect()
 }
@@ -49,24 +47,24 @@ fn validate_optional_pattern(
 
 pub(crate) fn validate_class_map_calls(calls: &[ClassMapCallInput]) -> Result<(), String> {
     for call in calls {
-        validate_optional_pattern(&call.callee, "keyPattern", call.keyPattern.as_deref())?;
+        validate_optional_pattern(&call.callee, "keyPattern", call.key_pattern.as_deref())?;
         validate_optional_pattern(
             &call.callee,
             "keyExcludePattern",
-            call.keyExcludePattern.as_deref(),
+            call.key_exclude_pattern.as_deref(),
         )?;
         validate_optional_pattern(
             &call.callee,
             "calleeModulePattern",
-            call.calleeModulePattern.as_deref(),
+            call.callee_module_pattern.as_deref(),
         )?;
         if !matches!(
-            call.keySource.as_deref(),
-            None | Some("objectLiteral") | Some("pairArray")
+            call.key_source.as_deref(),
+            None | Some("objectLiteral" | "pairArray")
         ) {
             return Err(format!(
                 "Invalid compat.classMapCalls rule for callee {:?}: keySource must be \"objectLiteral\" or \"pairArray\", got {:?}.",
-                call.callee, call.keySource
+                call.callee, call.key_source
             ));
         }
     }

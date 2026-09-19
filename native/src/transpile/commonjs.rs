@@ -1,96 +1,293 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use oxc_allocator::Allocator;
-use oxc_ast::ast::*;
-use oxc_ast_visit::{walk, Visit};
-use oxc_parser::Parser;
-use oxc_span::{GetSpan, SourceType};
+use oxc_allocator::{Allocator, FromIn, ReplaceWith, Vec};
+use oxc_ast::ast::{
+    Argument, AssignmentExpression, AssignmentTarget, BindingIdentifier, BindingPattern,
+    CallExpression, Class, Expression, FormalParameterKind, FormalParameters, Function,
+    FunctionBody, FunctionType, IdentifierName, ImportDeclarationSpecifier, ImportOrExportKind,
+    ModuleExportName, ObjectExpression, ObjectProperty, ObjectPropertyKind, Program, PropertyKey,
+    SimpleAssignmentTarget, Statement, StringLiteral, ThisExpression, VariableDeclarationKind,
+    VariableDeclarator,
+};
+use oxc_ast::builder::AstBuilder;
+use oxc_ast_visit::{walk_mut, Visit, VisitMut};
+use oxc_span::{GetSpan, Span, SPAN};
+use oxc_str::{Ident, Str};
+use oxc_syntax::operator::{AssignmentOperator, BinaryOperator};
 
 use crate::commonjs::CommonJsAnalysis;
 
-pub(crate) fn normalize_source(
+use super::fresh::FreshNameAllocator;
+use super::{resolve_module_id_for_specifier, ChunkMode, TranspileContext};
+
+pub(crate) fn normalize_program<'a>(
+    allocator: &'a Allocator,
     file_path: &Path,
-    source: &str,
+    program: &mut Program<'a>,
     analysis: &CommonJsAnalysis,
     quoted: bool,
-) -> Result<String, String> {
+    context: &TranspileContext,
+) -> Result<(), String> {
     if let Some(reason) = analysis.unsupported.first() {
         return Err(format!("Unsupported CommonJS pattern: {reason}"));
     }
-    let allocator = Allocator::default();
-    let source_type = SourceType::from_path(file_path)
-        .map_err(|error| error.to_string())?
-        .with_module(true);
-    let parsed = Parser::new(&allocator, source, source_type).parse();
-    if !parsed.diagnostics.is_empty() {
-        return Err(parsed
-            .diagnostics
-            .iter()
-            .map(|diagnostic| format!("{}: {diagnostic}", file_path.display()))
-            .collect::<Vec<_>>()
-            .join("\n"));
-    }
+    let builder = AstBuilder::new(allocator);
     let require_bindings = analysis
         .dependencies
         .iter()
         .enumerate()
         .map(|(index, specifier)| (specifier.clone(), format!("__cjs_require_{index}")))
         .collect::<HashMap<_, _>>();
-    let commonjs_bindings = collect_commonjs_bindings(&parsed.program, &require_bindings);
-    let mut collector = SourceEditCollector {
+    let commonjs_bindings = collect_commonjs_bindings(program, &require_bindings);
+    let wrap_this = uses_top_level_this(program);
+    CommonJsRewriter {
+        allocator,
+        builder: AstBuilder::new(allocator),
         commonjs_bindings: &commonjs_bindings,
-        edits: Vec::new(),
         quoted,
         require_bindings: &require_bindings,
+    }
+    .visit_program(program);
+    program
+        .directives
+        .retain(|directive| directive.directive != "use strict");
+
+    let identifier =
+        |name: &str| Expression::new_identifier(SPAN, Ident::from_in(name, allocator), &builder);
+    let binding =
+        |name: &str| BindingIdentifier::new(SPAN, Ident::from_in(name, allocator), &builder);
+    let member = |object, name: &str| {
+        Expression::new_computed_member_expression(
+            SPAN,
+            object,
+            Expression::new_string_literal(SPAN, Str::from_in(name, allocator), None, &builder),
+            false,
+            &builder,
+        )
     };
-    collector.visit_program(&parsed.program);
-    for directive in &parsed.program.directives {
-        if directive.directive == "use strict" {
-            collector.edits.push((
-                directive.span.start as usize,
-                directive.span.end as usize,
-                String::new(),
-            ));
-        }
-    }
-    let mut body = source.to_string();
-    collector.edits.sort_by_key(|(start, _, _)| *start);
-    collector
-        .edits
-        .dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
-    for (start, end, replacement) in collector.edits.into_iter().rev() {
-        if start <= end && end <= body.len() {
-            body.replace_range(start..end, &replacement);
-        }
-    }
-    let imports = analysis
-        .dependencies
-        .iter()
-        .enumerate()
-        .map(|(index, specifier)| {
-            let specifier = super::to_emitted_commonjs_specifier(specifier);
-            format!(
-                "import * as __cjs_import_{index} from {specifier:?};\nconst __cjs_require_{index} = \"__cjsExports\" in __cjs_import_{index} ? __cjs_import_{index}.__cjsExports : __cjs_import_{index};"
+    let mut body = Vec::new_in(&allocator);
+    for (index, specifier) in analysis.dependencies.iter().enumerate() {
+        let specifier = super::to_emitted_commonjs_specifier(specifier);
+        let require = format!("__cjs_require_{index}");
+        let (import, fallback) = if context.chunk_mode == ChunkMode::Off {
+            let import = format!("__cjs_import_{index}");
+            let test = Expression::new_binary_expression(
+                SPAN,
+                Expression::new_string_literal(SPAN, "__cjsExports", None, &builder),
+                BinaryOperator::In,
+                identifier(&import),
+                &builder,
+            );
+            let value = Expression::new_conditional_expression(
+                SPAN,
+                test,
+                member(identifier(&import), "__cjsExports"),
+                identifier(&import),
+                &builder,
+            );
+            (
+                ImportDeclarationSpecifier::new_import_namespace_specifier(
+                    SPAN,
+                    binding(&import),
+                    &builder,
+                ),
+                Some(variable_statement(
+                    &builder,
+                    SPAN,
+                    VariableDeclarationKind::Const,
+                    BindingPattern::new_binding_identifier(
+                        SPAN,
+                        Ident::from_in(require.as_str(), allocator),
+                        &builder,
+                    ),
+                    value,
+                )),
             )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let body = if uses_top_level_this(&parsed.program) {
-        format!("(function () {{\n{body}\n}}).call(module.exports);")
+        } else {
+            let module_id = resolve_module_id_for_specifier(file_path, &specifier, context)?;
+            let import = if context
+                .bundler_module_slots
+                .get(&module_id)
+                .is_some_and(|slots| slots.slot_for("__cjsExports").is_some())
+            {
+                ImportDeclarationSpecifier::new_import_specifier(
+                    SPAN,
+                    ModuleExportName::IdentifierName(IdentifierName::new(
+                        SPAN,
+                        "__cjsExports",
+                        &builder,
+                    )),
+                    binding(&require),
+                    ImportOrExportKind::Value,
+                    &builder,
+                )
+            } else {
+                ImportDeclarationSpecifier::new_import_namespace_specifier(
+                    SPAN,
+                    binding(&require),
+                    &builder,
+                )
+            };
+            (import, None)
+        };
+        body.push(Statement::new_import_declaration(
+            SPAN,
+            Some(Vec::from_value_in(import, &allocator)),
+            StringLiteral::new(
+                SPAN,
+                Str::from_in(specifier.as_str(), allocator),
+                None,
+                &builder,
+            ),
+            None,
+            None,
+            ImportOrExportKind::Value,
+            &builder,
+        ));
+        if let Some(fallback) = fallback {
+            body.push(fallback);
+        }
+    }
+    body.push(variable_statement(
+        &builder,
+        SPAN,
+        VariableDeclarationKind::Var,
+        BindingPattern::new_binding_identifier(SPAN, "module", &builder),
+        Expression::new_object_expression(SPAN, Vec::new_in(&allocator), &builder),
+    ));
+    let initial_exports =
+        Expression::new_object_expression(SPAN, Vec::new_in(&allocator), &builder);
+    let receiver = wrap_this.then(|| fresh_receiver_name(program));
+    let initial_exports = if let Some(receiver) = &receiver {
+        // Own the initial receiver independently of module.exports. Closure can
+        // inline .call(module.exports) into a mutable property read in arrows.
+        body.push(variable_statement(
+            &builder,
+            SPAN,
+            VariableDeclarationKind::Const,
+            BindingPattern::new_binding_identifier(
+                SPAN,
+                Ident::from_in(receiver.as_str(), allocator),
+                &builder,
+            ),
+            initial_exports,
+        ));
+        identifier(receiver)
     } else {
-        body
+        initial_exports
     };
-    Ok([
-        imports,
-        "var module = {}; module[\"exports\"] = {};".to_string(),
-        body,
-        "var __cjsExports = module.exports;".to_string(),
-    ]
-    .into_iter()
-    .filter(|part| !part.trim().is_empty())
-    .collect::<Vec<_>>()
-    .join("\n"))
+    body.push(Statement::new_expression_statement(
+        SPAN,
+        Expression::new_assignment_expression(
+            SPAN,
+            AssignmentOperator::Assign,
+            AssignmentTarget::new_computed_member_expression(
+                SPAN,
+                identifier("module"),
+                Expression::new_string_literal(SPAN, "exports", None, &builder),
+                false,
+                &builder,
+            ),
+            initial_exports,
+            &builder,
+        ),
+        &builder,
+    ));
+    if let Some(receiver) = receiver {
+        let statements = std::mem::replace(&mut program.body, Vec::new_in(&allocator));
+        let function = Expression::new_function_expression(
+            SPAN,
+            FunctionType::FunctionExpression,
+            None,
+            false,
+            false,
+            false,
+            None,
+            None,
+            FormalParameters::boxed(
+                SPAN,
+                FormalParameterKind::FormalParameter,
+                Vec::new_in(&allocator),
+                None,
+                &builder,
+            ),
+            None,
+            Some(FunctionBody::boxed(
+                SPAN,
+                Vec::new_in(&allocator),
+                statements,
+                &builder,
+            )),
+            &builder,
+        );
+        body.push(Statement::new_expression_statement(
+            SPAN,
+            Expression::new_call_expression(
+                SPAN,
+                member(function, "call"),
+                None,
+                Vec::from_value_in(Argument::from(identifier(&receiver)), &allocator),
+                false,
+                &builder,
+            ),
+            &builder,
+        ));
+    } else {
+        body.extend(program.body.drain(..));
+    }
+    body.push(variable_statement(
+        &builder,
+        SPAN,
+        VariableDeclarationKind::Var,
+        BindingPattern::new_binding_identifier(SPAN, "__cjsExports", &builder),
+        member(identifier("module"), "exports"),
+    ));
+    program.body = body;
+    Ok(())
+}
+
+fn fresh_receiver_name(program: &Program<'_>) -> String {
+    #[derive(Default)]
+    struct Names(FreshNameAllocator);
+    impl<'a> Visit<'a> for Names {
+        fn visit_identifier_reference(
+            &mut self,
+            identifier: &oxc_ast::ast::IdentifierReference<'a>,
+        ) {
+            self.0.try_reserve(identifier.name.as_str());
+        }
+
+        fn visit_binding_identifier(&mut self, identifier: &BindingIdentifier<'a>) {
+            self.0.try_reserve(identifier.name.as_str());
+        }
+    }
+    let mut names = Names::default();
+    names.visit_program(program);
+    names.0.fresh("__cjsThis")
+}
+
+pub(crate) fn variable_statement<'a>(
+    builder: &AstBuilder<'a>,
+    span: Span,
+    kind: VariableDeclarationKind,
+    id: BindingPattern<'a>,
+    init: Expression<'a>,
+) -> Statement<'a> {
+    Statement::new_variable_declaration(
+        span,
+        kind,
+        [VariableDeclarator::new(
+            span,
+            id,
+            None,
+            Some(init),
+            false,
+            builder,
+        )],
+        false,
+        builder,
+    )
 }
 
 fn collect_commonjs_bindings(
@@ -130,172 +327,143 @@ fn collect_commonjs_bindings(
     }
 }
 
-type SourceEdit = (usize, usize, String);
-
-struct SourceEditCollector<'a> {
-    commonjs_bindings: &'a HashSet<String>,
-    edits: Vec<SourceEdit>,
+struct CommonJsRewriter<'a, 'c> {
+    allocator: &'a Allocator,
+    builder: AstBuilder<'a>,
+    commonjs_bindings: &'c HashSet<String>,
     quoted: bool,
-    require_bindings: &'a HashMap<String, String>,
+    require_bindings: &'c HashMap<String, String>,
 }
 
-impl<'a> Visit<'a> for SourceEditCollector<'_> {
-    fn visit_statement(&mut self, statement: &Statement<'a>) {
-        if let Statement::ExpressionStatement(expression) = statement {
+impl<'a> CommonJsRewriter<'a, '_> {
+    fn quote_member(&self, object: &Expression<'_>, property: &str) -> bool {
+        (is_module_identifier(object) && property == "exports")
+            || (self.quoted
+                && (is_commonjs_export_object(object)
+                    || match object.without_parentheses() {
+                        Expression::Identifier(identifier) => {
+                            self.commonjs_bindings.contains(identifier.name.as_str())
+                        }
+                        Expression::CallExpression(call) => require_specifier(call)
+                            .is_some_and(|specifier| self.require_bindings.contains_key(specifier)),
+                        _ => false,
+                    }))
+    }
+
+    fn exports(&self, span: Span) -> Expression<'a> {
+        Expression::new_computed_member_expression(
+            span,
+            Expression::new_identifier(SPAN, "module", &self.builder),
+            Expression::new_string_literal(SPAN, "exports", None, &self.builder),
+            false,
+            &self.builder,
+        )
+    }
+}
+
+impl<'a> VisitMut<'a> for CommonJsRewriter<'a, '_> {
+    fn visit_statement(&mut self, statement: &mut Statement<'a>) {
+        if matches!(statement, Statement::ExpressionStatement(expression)
             if matches!(&expression.expression, Expression::StringLiteral(literal) if literal.value == "use strict")
-                || matches!(&expression.expression, Expression::CallExpression(call) if object_define_property_es_module(call))
+                || matches!(&expression.expression, Expression::CallExpression(call) if object_define_property_es_module(call)))
+        {
+            *statement = Statement::new_empty_statement(statement.span(), &self.builder);
+            return;
+        }
+        walk_mut::walk_statement(self, statement);
+    }
+
+    fn visit_assignment_expression(&mut self, assignment: &mut AssignmentExpression<'a>) {
+        if self.quoted
+            && assignment
+                .left
+                .as_simple_assignment_target()
+                .is_some_and(is_commonjs_export_target)
+        {
+            if let Expression::ObjectExpression(object) = &mut assignment.right {
+                quote_object_literal(object, self.allocator, &self.builder);
+            }
+        }
+        walk_mut::walk_assignment_expression(self, assignment);
+    }
+
+    fn visit_expression(&mut self, expression: &mut Expression<'a>) {
+        if let Expression::CallExpression(call) = expression {
+            if let Some(binding) =
+                require_specifier(call).and_then(|specifier| self.require_bindings.get(specifier))
             {
-                self.edits.push((
-                    statement.span().start as usize,
-                    statement.span().end as usize,
-                    String::new(),
-                ));
+                *expression = Expression::new_identifier(
+                    call.span,
+                    Ident::from_in(binding.as_str(), self.allocator),
+                    &self.builder,
+                );
                 return;
             }
         }
-        walk::walk_statement(self, statement);
-    }
-
-    fn visit_assignment_expression(&mut self, assignment: &AssignmentExpression<'a>) {
-        self.visit_expression(&assignment.right);
-        let Some(simple) = assignment.left.as_simple_assignment_target() else {
-            walk::walk_assignment_target(self, &assignment.left);
-            return;
-        };
-        let rendered = match simple {
-            SimpleAssignmentTarget::StaticMemberExpression(member) => render_static_member(
-                member,
-                self.quoted,
-                self.require_bindings,
-                self.commonjs_bindings,
-            ),
-            SimpleAssignmentTarget::ComputedMemberExpression(member) => render_computed_member(
-                member,
-                self.quoted,
-                self.require_bindings,
-                self.commonjs_bindings,
-            ),
-            _ => None,
-        };
-        if let Some(rendered) = rendered {
-            self.edits.push((
-                simple.span().start as usize,
-                simple.span().end as usize,
-                rendered,
-            ));
-            if self.quoted && is_commonjs_export_target(simple) {
-                if let Expression::ObjectExpression(object) = &assignment.right {
-                    quote_object_literal(object, &mut self.edits);
-                }
-            }
-        } else {
-            walk::walk_simple_assignment_target(self, simple);
-        }
-    }
-
-    fn visit_expression(&mut self, expression: &Expression<'a>) {
-        let rendered = match expression {
-            Expression::CallExpression(call) => require_specifier(call)
-                .and_then(|specifier| self.require_bindings.get(specifier))
-                .cloned(),
-            Expression::StaticMemberExpression(member) => render_static_member(
-                member,
-                self.quoted,
-                self.require_bindings,
-                self.commonjs_bindings,
-            ),
-            Expression::ComputedMemberExpression(member) => render_computed_member(
-                member,
-                self.quoted,
-                self.require_bindings,
-                self.commonjs_bindings,
-            ),
-            Expression::Identifier(identifier) if identifier.name == "exports" => {
-                Some("module[\"exports\"]".to_string())
-            }
-            _ => None,
-        };
-        if let Some(rendered) = rendered {
-            self.edits.push((
-                expression.span().start as usize,
-                expression.span().end as usize,
-                rendered,
-            ));
-            return;
-        }
-        walk::walk_expression(self, expression);
-    }
-}
-
-fn render_static_member(
-    member: &StaticMemberExpression<'_>,
-    quoted: bool,
-    require_bindings: &HashMap<String, String>,
-    commonjs_bindings: &HashSet<String>,
-) -> Option<String> {
-    render_member(
-        &member.object,
-        member.property.name.as_str(),
-        false,
-        quoted,
-        require_bindings,
-        commonjs_bindings,
-    )
-}
-
-fn render_computed_member(
-    member: &ComputedMemberExpression<'_>,
-    quoted: bool,
-    require_bindings: &HashMap<String, String>,
-    commonjs_bindings: &HashSet<String>,
-) -> Option<String> {
-    let Expression::StringLiteral(property) = &member.expression else {
-        return None;
-    };
-    render_member(
-        &member.object,
-        property.value.as_str(),
-        true,
-        quoted,
-        require_bindings,
-        commonjs_bindings,
-    )
-}
-
-fn render_member(
-    object: &Expression<'_>,
-    property: &str,
-    computed: bool,
-    quoted: bool,
-    require_bindings: &HashMap<String, String>,
-    commonjs_bindings: &HashSet<String>,
-) -> Option<String> {
-    if is_module_identifier(object) && property == "exports" {
-        return Some("module[\"exports\"]".to_string());
-    }
-    if is_commonjs_export_object(object) {
-        let property = if computed || quoted {
-            format!("[{property:?}]")
-        } else {
-            format!(".{property}")
-        };
-        return Some(format!("module[\"exports\"]{property}"));
-    }
-    let binding = match object.without_parentheses() {
-        Expression::Identifier(identifier)
-            if commonjs_bindings.contains(identifier.name.as_str()) =>
+        if matches!(expression, Expression::Identifier(identifier) if identifier.name == "exports")
         {
-            Some(identifier.name.to_string())
+            *expression = self.exports(expression.span());
+            return;
         }
-        Expression::CallExpression(call) => require_specifier(call)
-            .and_then(|specifier| require_bindings.get(specifier))
-            .cloned(),
-        _ => None,
-    }?;
-    if !quoted || computed {
-        return None;
+        let quote = matches!(expression, Expression::StaticMemberExpression(member)
+            if self.quote_member(&member.object, member.property.name.as_str()));
+        walk_mut::walk_expression(self, expression);
+        if quote {
+            expression.replace_with(|expression| match expression {
+                Expression::StaticMemberExpression(member) => {
+                    let member = member.unbox();
+                    Expression::new_computed_member_expression(
+                        member.span,
+                        member.object,
+                        Expression::new_string_literal(
+                            member.property.span,
+                            Str::from_in(member.property.name.as_str(), self.allocator),
+                            None,
+                            &self.builder,
+                        ),
+                        member.optional,
+                        &self.builder,
+                    )
+                }
+                expression => expression,
+            });
+        }
     }
-    Some(format!("{binding}[{property:?}]"))
+
+    fn visit_simple_assignment_target(&mut self, target: &mut SimpleAssignmentTarget<'a>) {
+        let quote = matches!(target, SimpleAssignmentTarget::StaticMemberExpression(member)
+            if self.quote_member(&member.object, member.property.name.as_str()));
+        walk_mut::walk_simple_assignment_target(self, target);
+        if quote {
+            target.replace_with(|target| match target {
+                SimpleAssignmentTarget::StaticMemberExpression(member) => {
+                    let member = member.unbox();
+                    SimpleAssignmentTarget::new_computed_member_expression(
+                        member.span,
+                        member.object,
+                        Expression::new_string_literal(
+                            member.property.span,
+                            Str::from_in(member.property.name.as_str(), self.allocator),
+                            None,
+                            &self.builder,
+                        ),
+                        member.optional,
+                        &self.builder,
+                    )
+                }
+                target => target,
+            });
+        }
+    }
+
+    fn visit_object_property(&mut self, property: &mut ObjectProperty<'a>) {
+        let rewritten_shorthand = property.shorthand
+            && matches!(&property.value, Expression::Identifier(identifier) if identifier.name == "exports");
+        walk_mut::walk_object_property(self, property);
+        if rewritten_shorthand {
+            property.shorthand = false;
+        }
+    }
 }
 
 fn is_commonjs_export_target(target: &SimpleAssignmentTarget<'_>) -> bool {
@@ -331,32 +499,32 @@ fn is_module_identifier(expression: &Expression<'_>) -> bool {
     matches!(expression.without_parentheses(), Expression::Identifier(identifier) if identifier.name == "module")
 }
 
-fn quote_object_literal(object: &ObjectExpression<'_>, edits: &mut Vec<SourceEdit>) {
-    for property in &object.properties {
+fn quote_object_literal<'a>(
+    object: &mut ObjectExpression<'a>,
+    allocator: &'a Allocator,
+    builder: &AstBuilder<'a>,
+) {
+    for property in &mut object.properties {
         let ObjectPropertyKind::ObjectProperty(property) = property else {
             continue;
         };
-        match &property.key {
-            PropertyKey::StaticIdentifier(identifier) if property.shorthand => edits.push((
-                property.span.start as usize,
-                property.span.end as usize,
-                format!(
-                    "{:?}: {}",
-                    identifier.name.as_str(),
-                    identifier.name.as_str()
-                ),
+        if property.computed {
+            continue;
+        }
+        let key = match &property.key {
+            PropertyKey::StaticIdentifier(identifier) => Some((
+                identifier.span,
+                Str::from_in(identifier.name.as_str(), allocator),
             )),
-            PropertyKey::StaticIdentifier(identifier) => edits.push((
-                identifier.span.start as usize,
-                identifier.span.end as usize,
-                format!("{:?}", identifier.name.as_str()),
+            PropertyKey::NumericLiteral(number) => Some((
+                number.span,
+                Str::from_in(&number.value.to_string(), allocator),
             )),
-            PropertyKey::NumericLiteral(number) => edits.push((
-                number.span.start as usize,
-                number.span.end as usize,
-                format!("{:?}", number.value.to_string()),
-            )),
-            _ => {}
+            _ => None,
+        };
+        if let Some((span, key)) = key {
+            property.key = PropertyKey::new_string_literal(span, key, None, builder);
+            property.shorthand = false;
         }
     }
 }
@@ -419,4 +587,106 @@ fn uses_top_level_this(program: &Program<'_>) -> bool {
     let mut finder = Finder { found: false };
     finder.visit_program(program);
     finder.found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commonjs::analyze_commonjs_program;
+    use crate::transpile::context::analysis_resolution_context;
+    use oxc_codegen::Codegen;
+    use oxc_parser::Parser;
+    use oxc_semantic::SemanticBuilder;
+    use oxc_span::SourceType;
+
+    #[test]
+    fn normalized_commonjs_retains_require_exports_and_wrapper_this(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let allocator = Allocator::default();
+        let source = r#"
+            "use strict";
+            const dependency = require("data:text/javascript,export const amount=4");
+            const alias = dependency;
+            Object.defineProperty(exports, "__esModule", { value: true });
+            exports.before = 2;
+            const initial = this;
+            const readThis = () => this;
+            const local = 8;
+            const key = "computed";
+            module.exports = {
+                total: alias.amount + initial.before,
+                same: initial === readThis(),
+                before: initial.before,
+                local,
+                [key]: alias.amount
+            };
+        "#;
+        let mut program = Parser::new(&allocator, source, SourceType::mjs())
+            .parse()
+            .program;
+        let analysis = analyze_commonjs_program(&program);
+        let mut context = analysis_resolution_context(Path::new("/work"), &[], &HashMap::new());
+        context.chunk_mode = ChunkMode::Off;
+        normalize_program(
+            &allocator,
+            Path::new("/work/node_modules/pkg/index.cjs"),
+            &mut program,
+            &analysis,
+            true,
+            &context,
+        )?;
+        let semantic = SemanticBuilder::new().build(&program);
+        assert!(
+            semantic.diagnostics.is_empty(),
+            "{:?}",
+            semantic.diagnostics
+        );
+        let code = Codegen::new().build(&program).code;
+        let output = std::process::Command::new("node")
+            .args(["--input-type=module", "--eval"])
+            .arg(format!(
+                "{code}\nconsole.log(JSON.stringify(__cjsExports));"
+            ))
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            r#"{"total":6,"same":true,"before":2,"local":8,"computed":4}"#,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn normalization_rejects_mixed_modules_and_dynamic_require() {
+        let context = analysis_resolution_context(Path::new("/work"), &[], &HashMap::new());
+        for (source, expected) in [
+            (
+                "import x from 'x'; exports.value = x;",
+                "Mixed ESM and CommonJS",
+            ),
+            (
+                "module.exports = require(name);",
+                "Only string-literal require()",
+            ),
+        ] {
+            let allocator = Allocator::default();
+            let mut program = Parser::new(&allocator, source, SourceType::mjs())
+                .parse()
+                .program;
+            let analysis = analyze_commonjs_program(&program);
+            let result = normalize_program(
+                &allocator,
+                Path::new("/work/node_modules/pkg/index.js"),
+                &mut program,
+                &analysis,
+                false,
+                &context,
+            );
+            assert!(result.is_err_and(|error| error.contains(expected)));
+        }
+    }
 }

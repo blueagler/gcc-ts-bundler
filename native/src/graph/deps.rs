@@ -1,14 +1,12 @@
-use super::*;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Expression, ForOfStatement, ImportOrExportKind, Program, Statement, TemplateLiteral,
-    VariableDeclaration, VariableDeclarationKind,
+    Expression, ForOfStatement, ImportExpression, ImportOrExportKind, Program, Statement,
+    TemplateLiteral, VariableDeclaration, VariableDeclarationKind,
 };
-use oxc_ast::AstKind;
 use oxc_ast_visit::{walk, Visit};
-use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
 use oxc_syntax::scope::ScopeFlags;
+use std::path::Path;
 
 /// Parses one source file for the import scan.
 ///
@@ -20,21 +18,20 @@ pub(super) fn parse_scanned_module<'a>(
     file_path: &Path,
     source: &'a str,
 ) -> std::result::Result<Program<'a>, String> {
-    // Language and JSX come from the extension, exactly as before. The module
-    // kind is forced: `from_path` leaves `.ts`/`.js` ambiguous and would fall
-    // back to script mode for a file with no import or export, which rejects
-    // top-level `await`. Every file here was previously parsed as a module, and
-    // an unknown extension keeps the old plain-ESM fallback.
+    // Preserve the extension rejection and complete diagnostic sequence of the
+    // CommonJS parse that previously preceded this scan. Both analyses consume
+    // this same module-mode program.
     let source_type = SourceType::from_path(file_path)
-        .unwrap_or_else(|_| SourceType::mjs())
+        .map_err(|error| error.to_string())?
         .with_module(true);
     let parsed = oxc_parser::Parser::new(allocator, source, source_type).parse();
-    if let Some(error) = parsed.diagnostics.first() {
-        return Err(format!(
-            "{}: {}",
-            file_path.to_string_lossy(),
-            error.message
-        ));
+    if !parsed.diagnostics.is_empty() {
+        return Err(parsed
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {diagnostic}", file_path.display()))
+            .collect::<Vec<_>>()
+            .join("\n"));
     }
     Ok(parsed.program)
 }
@@ -83,13 +80,10 @@ pub(super) fn collect_export_source_specifiers(program: &Program<'_>) -> Vec<Str
         .body
         .iter()
         .filter_map(|statement| match statement {
-            Statement::ExportNamedDeclaration(export)
+            Statement::ExportFromDeclaration(export)
                 if export.export_kind == ImportOrExportKind::Value =>
             {
-                export
-                    .source
-                    .as_ref()
-                    .map(|source| source.value.to_string())
+                Some(export.source.value.to_string())
             }
             Statement::ExportAllDeclaration(export)
                 if export.export_kind == ImportOrExportKind::Value =>
@@ -111,12 +105,10 @@ pub(super) fn extract_dependencies(program: &Program<'_>) -> Vec<String> {
                     dependencies.push(import_decl.source.value.to_string());
                 }
             }
-            Statement::ExportNamedDeclaration(named) => {
-                if named.export_kind == ImportOrExportKind::Value {
-                    if let Some(source) = &named.source {
-                        dependencies.push(source.value.to_string());
-                    }
-                }
+            Statement::ExportFromDeclaration(export)
+                if export.export_kind == ImportOrExportKind::Value =>
+            {
+                dependencies.push(export.source.value.to_string());
             }
             Statement::ExportAllDeclaration(export_all)
                 if export_all.export_kind == ImportOrExportKind::Value =>
@@ -138,40 +130,50 @@ pub(super) fn extract_dependencies(program: &Program<'_>) -> Vec<String> {
 pub(super) fn collect_dynamic_import_specifiers(
     program: &Program<'_>,
 ) -> std::result::Result<Vec<String>, String> {
-    let mut specifiers = Vec::new();
-    let mut errors = Vec::new();
+    struct DynamicImportVisitor {
+        specifiers: Vec<String>,
+        errors: Vec<String>,
+    }
 
-    // `with_build_nodes` is what fills the node store; without it the scan
-    // finds nothing.
-    let semantic = SemanticBuilder::new()
-        .with_build_nodes(true)
-        .build(program)
-        .semantic;
-    for node in semantic.nodes().iter() {
-        let AstKind::ImportExpression(import_expression) = node.kind() else {
-            continue;
-        };
-        if import_expression.options.is_some() {
-            errors.push("import() requires exactly one string literal argument".to_string());
-            continue;
-        }
-        match &import_expression.source {
-            Expression::StringLiteral(string) => specifiers.push(string.value.to_string()),
-            Expression::TemplateLiteral(template) => {
-                match no_substitution_template_value(template) {
-                    Some(specifier) => specifiers.push(specifier),
-                    None => errors
+    impl<'a> Visit<'a> for DynamicImportVisitor {
+        fn visit_import_expression(&mut self, import: &ImportExpression<'a>) {
+            if import.options.is_some() {
+                self.errors
+                    .push("import() requires exactly one string literal argument".to_string());
+            } else {
+                match &import.source {
+                    Expression::StringLiteral(string) => {
+                        self.specifiers.push(string.value.to_string());
+                    }
+                    Expression::TemplateLiteral(template) => {
+                        if let Some(specifier) = no_substitution_template_value(template) {
+                            self.specifiers.push(specifier);
+                        } else {
+                            self.errors.push(
+                                "import() requires a string literal module specifier".to_string(),
+                            );
+                        }
+                    }
+                    _ => self
+                        .errors
                         .push("import() requires a string literal module specifier".to_string()),
                 }
             }
-            _ => errors.push("import() requires a string literal module specifier".to_string()),
+            // Match the former node-store pre-order, including imports nested
+            // inside invalid specifiers and options.
+            walk::walk_import_expression(self, import);
         }
     }
 
-    if !errors.is_empty() {
-        return Err(errors.join("\n"));
+    let mut visitor = DynamicImportVisitor {
+        specifiers: Vec::new(),
+        errors: Vec::new(),
+    };
+    visitor.visit_program(program);
+    if !visitor.errors.is_empty() {
+        return Err(visitor.errors.join("\n"));
     }
-    Ok(specifiers)
+    Ok(visitor.specifiers)
 }
 
 /// The text of a template literal that has no substitutions, cooked value
@@ -186,7 +188,6 @@ fn no_substitution_template_value(template: &TemplateLiteral<'_>) -> Option<Stri
             .value
             .cooked
             .as_ref()
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| quasi.value.raw.to_string()),
+            .map_or_else(|| quasi.value.raw.to_string(), |value| value.to_string()),
     )
 }

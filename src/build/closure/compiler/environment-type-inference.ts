@@ -38,16 +38,6 @@ export function shouldEnableTypeInference(
   );
 }
 
-/** Wrapper camelCase for `--jscomp_warning=checkTypes --hide_warnings_for=/`. */
-export const TYPE_INFERENCE_OPTIONS: ClosureCompilerOptions = {
-  hideWarningsFor: ["/"],
-  jscompWarning: ["checkTypes"],
-};
-
-const TYPE_INFERENCE_JSCOMP_WARNING = [
-  "checkTypes",
-] as const satisfies readonly string[];
-
 function hasHideWarningsFor(
   value: ClosureCompilerOption | ClosureCompilerOption[] | undefined,
 ): value is ClosureCompilerOption | ClosureCompilerOption[] {
@@ -68,8 +58,8 @@ export function applyTypeInferenceOptions(
 ): void {
   const hideWarningsFor = Object.hasOwn(environmentOptions, "hideWarningsFor")
     ? environmentOptions.hideWarningsFor
-    : TYPE_INFERENCE_OPTIONS.hideWarningsFor;
-  closureOptions.jscompWarning = [...TYPE_INFERENCE_JSCOMP_WARNING];
+    : ["/"];
+  closureOptions.jscompWarning = ["checkTypes"];
   if (hasHideWarningsFor(hideWarningsFor)) {
     closureOptions.hideWarningsFor = hideWarningsFor;
   }

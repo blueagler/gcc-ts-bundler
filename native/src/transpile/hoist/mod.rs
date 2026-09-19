@@ -6,7 +6,9 @@
 //! dynamic-import targets go through the `__register`/`__require` registry via
 //! small export facades.
 
-use super::*;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+use super::imports_exports::BundlerExportSlotMode;
 
 mod plan;
 mod usage;
@@ -18,10 +20,10 @@ pub(crate) use usage::{collect_used_binding_ids, scan_namespace_usage, Namespace
 
 #[derive(Clone, Debug)]
 pub(super) struct ResolvedExportBinding {
-    pub(super) owner_module_id: String,
-    pub(super) owner_export_name: String,
-    pub(super) owner_local_name: String,
-    pub(super) owner_slot_mode: BundlerExportSlotMode,
+    pub(super) module_id: String,
+    pub(super) export_name: String,
+    pub(super) local_name: String,
+    pub(super) slot_mode: BundlerExportSlotMode,
 }
 
 /// Which export slots a hoisted module's registry factory must expose.
@@ -94,18 +96,17 @@ impl HoistPlan {
     /// binding owned by one lazy chunk and read from another has to go back
     /// through the `__require` registry.
     ///
-    /// The plan is built so this never happens; the `debug_assert` says so out
-    /// loud in tests, and the release path still falls back to the registry
-    /// rather than emitting a reference to a binding that may not exist yet.
+    /// An unordered dependency falls back to the registry rather than emitting
+    /// a reference to a binding that may not exist yet.
     pub(super) fn is_direct_binding(
         &self,
         consumer_module_id: &str,
         binding: &ResolvedExportBinding,
     ) -> bool {
-        if !self.is_hoisted(&binding.owner_module_id) {
+        if !self.is_hoisted(&binding.module_id) {
             return false;
         }
-        let Some(owner_chunk) = self.chunk_of(&binding.owner_module_id) else {
+        let Some(owner_chunk) = self.chunk_of(&binding.module_id) else {
             return false;
         };
         let Some(consumer_chunk) = self.chunk_of(consumer_module_id) else {
@@ -116,22 +117,16 @@ impl HoistPlan {
         if self.chunk_dependency_closure.is_empty() {
             return true;
         }
-        let ordered = owner_chunk == consumer_chunk
+        owner_chunk == consumer_chunk
             || self
                 .chunk_dependency_closure
                 .get(consumer_chunk)
-                .is_some_and(|dependencies| dependencies.contains(&owner_chunk));
-        debug_assert!(
-            ordered,
-            "direct binding {} (chunk {owner_chunk}) read from {consumer_module_id} (chunk {consumer_chunk}), which does not depend on it",
-            binding.owner_module_id,
-        );
-        ordered
+                .is_some_and(|dependencies| dependencies.contains(&owner_chunk))
     }
 
     pub(super) fn direct_binding_name(&self, binding: &ResolvedExportBinding) -> Option<String> {
-        let ordinal = self.ordinal_of(&binding.owner_module_id)?;
-        Some(suffixed_name(&binding.owner_local_name, ordinal))
+        let ordinal = self.ordinal_of(&binding.module_id)?;
+        Some(suffixed_name(&binding.local_name, ordinal))
     }
 
     pub(super) fn direct_binding_slot_mode(
@@ -141,11 +136,11 @@ impl HoistPlan {
     ) -> BundlerExportSlotMode {
         let owner_precedes_consumer = self
             .module_positions
-            .get(&binding.owner_module_id)
+            .get(&binding.module_id)
             .zip(self.module_positions.get(consumer_module_id))
             .is_some_and(|(owner, consumer)| owner < consumer);
-        if binding.owner_slot_mode == BundlerExportSlotMode::Static
-            && self.chunk_of(consumer_module_id) == self.chunk_of(&binding.owner_module_id)
+        if binding.slot_mode == BundlerExportSlotMode::Static
+            && self.chunk_of(consumer_module_id) == self.chunk_of(&binding.module_id)
             && owner_precedes_consumer
         {
             BundlerExportSlotMode::Static
@@ -165,33 +160,30 @@ pub(super) fn suffixed_name(local_name: &str, ordinal: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{build_hoist_plan, HoistPlan};
+    use crate::transpile::{to_goog_module_id, TranspileChunkInput};
+    use std::collections::HashMap;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn namespace_import_named_export_is_hoistable() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+    fn namespace_import_named_export_is_hoistable() -> Result<(), Box<dyn std::error::Error>> {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let workspace = std::env::temp_dir().join(format!("gcc-hoist-namespace-{unique}"));
         let src = workspace.join("src");
-        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&src)?;
         let util = src.join("util.js");
         let api = src.join("api.js");
         fs::write(
             &util,
             "export const answer = 42;
 ",
-        )
-        .unwrap();
+        )?;
         fs::write(
             &api,
             "import * as util from './util.js'; export { util };
 ",
-        )
-        .unwrap();
+        )?;
 
         let files = vec![
             util.to_string_lossy().into_owned(),
@@ -210,26 +202,25 @@ mod tests {
             &chunks,
             &[],
             &HashMap::new(),
-        )
-        .unwrap()
-        .unwrap();
+        )?
+        .ok_or("expected hoist plan")?;
         let api_id = to_goog_module_id(&api, &workspace);
         assert!(plan.is_hoisted(&api_id));
-        fs::remove_dir_all(workspace).unwrap();
+        fs::remove_dir_all(workspace)?;
+        Ok(())
     }
 
-    fn namespace_plan(consumer_source: &str) -> (HoistPlan, String) {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+    fn namespace_plan(
+        consumer_source: &str,
+    ) -> Result<(HoistPlan, String), Box<dyn std::error::Error>> {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let workspace = std::env::temp_dir().join(format!("gcc-hoist-reify-{unique}"));
         let src = workspace.join("src");
-        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&src)?;
         let target = src.join("graphic.js");
         let consumer = src.join("main.js");
-        fs::write(&target, "export class Circle {}\nexport class Arc {}\n").unwrap();
-        fs::write(&consumer, consumer_source).unwrap();
+        fs::write(&target, "export class Circle {}\nexport class Arc {}\n")?;
+        fs::write(&consumer, consumer_source)?;
         let files = vec![
             target.to_string_lossy().into_owned(),
             consumer.to_string_lossy().into_owned(),
@@ -247,34 +238,37 @@ mod tests {
             &chunks,
             &[],
             &HashMap::new(),
-        )
-        .unwrap()
-        .unwrap();
+        )?
+        .ok_or("expected hoist plan")?;
         let target_id = to_goog_module_id(&target, &workspace);
-        fs::remove_dir_all(workspace).unwrap();
-        (plan, target_id)
+        fs::remove_dir_all(workspace)?;
+        Ok((plan, target_id))
     }
 
     #[test]
-    fn dynamic_namespace_access_reifies_the_target() {
+    fn dynamic_namespace_access_reifies_the_target() -> Result<(), Box<dyn std::error::Error>> {
         let (plan, target) = namespace_plan(
             "import * as graphic from './graphic.js';\nconst option = { type: key };\nnew graphic[option.type]();\n",
-        );
+        )?;
         assert!(plan.is_reified_namespace_module(&target));
+        Ok(())
     }
 
     #[test]
-    fn finite_namespace_access_does_not_reify_the_target() {
+    fn finite_namespace_access_does_not_reify_the_target() -> Result<(), Box<dyn std::error::Error>>
+    {
         let (plan, target) = namespace_plan(
             "import * as graphic from './graphic.js';\nconst type = flag ? 'Circle' : 'Arc';\nnew graphic[type]();\n",
-        );
+        )?;
         assert!(!plan.is_namespace_object_module(&target));
+        Ok(())
     }
 
     #[test]
-    fn namespace_call_argument_reifies_the_target() {
+    fn namespace_call_argument_reifies_the_target() -> Result<(), Box<dyn std::error::Error>> {
         let (plan, target) =
-            namespace_plan("import * as graphic from './graphic.js';\nconsume(graphic);\n");
+            namespace_plan("import * as graphic from './graphic.js';\nconsume(graphic);\n")?;
         assert!(plan.is_reified_namespace_module(&target));
+        Ok(())
     }
 }

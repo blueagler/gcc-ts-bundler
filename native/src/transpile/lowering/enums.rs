@@ -1,17 +1,9 @@
-// Owned lowering: const-enum inlining
+// Owned lowering: const-enum inlining and erasure.
 //
-// oxc does not inline const enums -- measured above, it emits the runtime object
-// and leaves `Dir.Down` as a property read. TypeScript erases a `const enum`
-// entirely and inlines every member read, so the whole job is ours, exactly as
-// it is on the swc side (`enums.rs`).
-//
-// Same shape as the swc implementation, deliberately: collect member values from
-// the *pre*-transform AST (the declaration is gone afterwards), inline reads on
-// the *post*-transform AST (that is where the reads survive), then drop the
-// runtime object oxc emitted for a `const` enum. The folding grammar is the same
-// one OXD0 added after finding that unfolded constant expressions crashed at
-// runtime -- the two folders must agree, so this is a port of that logic and not
-// a fresh one.
+// Oxc can optimize local enums, but its isolated-module preservation and export
+// policies differ from this pipeline's cross-file erasure contract. Collect
+// values before lowering, inline only references to the selected root binding,
+// and erase the lowered const-enum objects.
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Declaration, Expression, Program, Statement, TSEnumMemberName, UnaryOperator};
@@ -26,17 +18,16 @@ pub(crate) enum EnumValue {
     String(String),
 }
 
+pub(crate) type EnumValues = HashMap<String, HashMap<String, EnumValue>>;
+
 /// `enum name -> member name -> value`, for enums whose members all fold.
-fn collect_enum_values_where(
-    program: &Program<'_>,
-    only_const: bool,
-) -> HashMap<String, HashMap<String, EnumValue>> {
+fn collect_enum_values_where(program: &Program<'_>, only_const: bool) -> EnumValues {
     let mut enums = HashMap::new();
     for statement in &program.body {
         let declaration = match statement {
             Statement::TSEnumDeclaration(declaration) => Some(&**declaration),
-            Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
-                Some(Declaration::TSEnumDeclaration(declaration)) => Some(&**declaration),
+            Statement::ExportDeclaration(export) => match &export.declaration {
+                Declaration::TSEnumDeclaration(declaration) => Some(&**declaration),
                 _ => None,
             },
             _ => None,
@@ -88,15 +79,11 @@ fn collect_enum_values_where(
     enums
 }
 
-pub(crate) fn collect_enum_values(
-    program: &Program<'_>,
-) -> HashMap<String, HashMap<String, EnumValue>> {
+pub(crate) fn collect_enum_values(program: &Program<'_>) -> EnumValues {
     collect_enum_values_where(program, false)
 }
 
-pub(crate) fn collect_const_enum_values(
-    program: &Program<'_>,
-) -> HashMap<String, HashMap<String, EnumValue>> {
+pub(crate) fn collect_const_enum_values(program: &Program<'_>) -> EnumValues {
     collect_enum_values_where(program, true)
 }
 
@@ -107,10 +94,8 @@ pub(crate) fn remove_enum_declarations(program: &mut Program<'_>, names: &HashSe
     program.body.retain(|statement| {
         let name = match statement {
             Statement::TSEnumDeclaration(declaration) => Some(declaration.id.name.as_str()),
-            Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
-                Some(Declaration::TSEnumDeclaration(declaration)) => {
-                    Some(declaration.id.name.as_str())
-                }
+            Statement::ExportDeclaration(export) => match &export.declaration {
+                Declaration::TSEnumDeclaration(declaration) => Some(declaration.id.name.as_str()),
                 _ => None,
             },
             _ => None,
@@ -149,7 +134,7 @@ fn fold_enum_initializer(
             match unary.operator {
                 UnaryOperator::UnaryNegation => Some(EnumValue::Number(-value)),
                 UnaryOperator::UnaryPlus => Some(EnumValue::Number(value)),
-                UnaryOperator::BitwiseNot => Some(EnumValue::Number(!to_int32(value) as f64)),
+                UnaryOperator::BitwiseNot => Some(EnumValue::Number(f64::from(!to_int32(value)))),
                 _ => None,
             }
         }
@@ -168,22 +153,22 @@ fn fold_enum_initializer(
                 oxc_ast::ast::BinaryOperator::Remainder => left % right,
                 oxc_ast::ast::BinaryOperator::Exponential => left.powf(right),
                 oxc_ast::ast::BinaryOperator::BitwiseOR => {
-                    (to_int32(left) | to_int32(right)) as f64
+                    f64::from(to_int32(left) | to_int32(right))
                 }
                 oxc_ast::ast::BinaryOperator::BitwiseAnd => {
-                    (to_int32(left) & to_int32(right)) as f64
+                    f64::from(to_int32(left) & to_int32(right))
                 }
                 oxc_ast::ast::BinaryOperator::BitwiseXOR => {
-                    (to_int32(left) ^ to_int32(right)) as f64
+                    f64::from(to_int32(left) ^ to_int32(right))
                 }
                 oxc_ast::ast::BinaryOperator::ShiftLeft => {
-                    (to_int32(left) << (to_uint32(right) & 31)) as f64
+                    f64::from(to_int32(left) << (to_uint32(right) & 31))
                 }
                 oxc_ast::ast::BinaryOperator::ShiftRight => {
-                    (to_int32(left) >> (to_uint32(right) & 31)) as f64
+                    f64::from(to_int32(left) >> (to_uint32(right) & 31))
                 }
                 oxc_ast::ast::BinaryOperator::ShiftRightZeroFill => {
-                    (to_uint32(left) >> (to_uint32(right) & 31)) as f64
+                    f64::from(to_uint32(left) >> (to_uint32(right) & 31))
                 }
                 _ => return None,
             };
@@ -209,7 +194,8 @@ fn to_int32(value: f64) -> i32 {
 pub(super) struct ConstEnumInliner<'a, 'v> {
     pub(super) allocator: &'a Allocator,
     pub(super) builder: oxc_ast::builder::AstBuilder<'a>,
-    pub(super) values: &'v HashMap<String, HashMap<String, EnumValue>>,
+    pub(super) values: &'v EnumValues,
+    pub(super) scoping: &'v mut oxc_semantic::Scoping,
 }
 
 impl<'a> oxc_ast_visit::VisitMut<'a> for ConstEnumInliner<'a, '_> {
@@ -224,9 +210,25 @@ impl<'a> oxc_ast_visit::VisitMut<'a> for ConstEnumInliner<'a, '_> {
         let Some(members) = self.values.get(object.name.as_str()) else {
             return;
         };
+        let Some(reference_id) = object.reference_id.get() else {
+            return;
+        };
+        let symbol_id = self.scoping.get_reference(reference_id).symbol_id();
+        // Metadata-selected enums may already have been erased before semantic
+        // analysis; only their unresolved reads qualify. Local/imported enums
+        // must resolve to the actual root binding, never a shadowing parameter.
+        if symbol_id != self.scoping.get_root_binding(object.name) {
+            return;
+        }
         let Some(value) = members.get(member.property.name.as_str()) else {
             return;
         };
+        if symbol_id.is_some() {
+            self.scoping.delete_reference(reference_id);
+        } else {
+            self.scoping
+                .delete_root_unresolved_reference(object.name, reference_id);
+        }
         *expression = match value {
             EnumValue::Number(number) => {
                 // Negative values are a unary expression, not a literal.
@@ -269,10 +271,7 @@ impl<'a> oxc_ast_visit::VisitMut<'a> for ConstEnumInliner<'a, '_> {
 /// would ship bytes no legal program can reach *and* make the erased value
 /// observable (`import * as m; m.ConstEnum` would return an object where `tsc`
 /// gives `undefined`) -- the divergence the tsickle export corpus caught.
-pub(super) fn erase_const_enum_objects(
-    program: &mut Program<'_>,
-    inlined: &HashMap<String, HashMap<String, EnumValue>>,
-) {
+pub(super) fn erase_const_enum_objects(program: &mut Program<'_>, inlined: &EnumValues) {
     program.body.retain(|statement| {
         let declared = match statement {
             Statement::VariableDeclaration(declaration) => declaration
@@ -280,8 +279,8 @@ pub(super) fn erase_const_enum_objects(
                 .first()
                 .and_then(|declarator| declarator.id.get_binding_identifier())
                 .map(|binding| binding.name.to_string()),
-            Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
-                Some(Declaration::VariableDeclaration(declaration)) => declaration
+            Statement::ExportDeclaration(export) => match &export.declaration {
+                Declaration::VariableDeclaration(declaration) => declaration
                     .declarations
                     .first()
                     .and_then(|declarator| declarator.id.get_binding_identifier())
@@ -296,19 +295,20 @@ pub(super) fn erase_const_enum_objects(
 
 #[cfg(test)]
 mod const_enums {
-    use super::*;
+    use super::{collect_const_enum_values, Allocator, EnumValue, SourceType};
 
     /// The values OXD0 pinned on the swc folder, re-asserted on this one. The
     /// two folders must agree: a disagreement is the silent-divergence class the
     /// safety net exists for.
     #[test]
-    fn constant_expression_members_fold_to_the_same_values_as_the_swc_folder() {
+    fn constant_expression_members_fold_to_the_same_values_as_the_swc_folder(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let allocator = Allocator::default();
         let source = "const enum Dir { Up = 1, Down = 1 + Up, Both = Down << 2, Neg = -Down, Mask = Both | Dir.Up, Half = (Both + 2) / 5, Next }\n";
         let parsed = oxc_parser::Parser::new(&allocator, source, SourceType::ts()).parse();
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         let values = collect_const_enum_values(&parsed.program);
-        let dir = values.get("Dir").expect("Dir folded");
+        let dir = values.get("Dir").ok_or("Dir did not fold")?;
 
         // Up=1, Down=2, Both=8, Neg=-2, Mask=9, Half=2, Next=3 -- auto-numbering
         // resumes from the folded value, exactly as TypeScript does.
@@ -319,10 +319,11 @@ mod const_enums {
         assert_eq!(dir.get("Mask"), Some(&EnumValue::Number(9.0)));
         assert_eq!(dir.get("Half"), Some(&EnumValue::Number(2.0)));
         assert_eq!(dir.get("Next"), Some(&EnumValue::Number(3.0)));
+        Ok(())
     }
 
     #[test]
-    fn string_members_fold() {
+    fn string_members_fold() -> Result<(), Box<dyn std::error::Error>> {
         let allocator = Allocator::default();
         let parsed =
             oxc_parser::Parser::new(&allocator, "const enum L { S = \"s\" }\n", SourceType::ts())
@@ -332,14 +333,16 @@ mod const_enums {
             values.get("L").and_then(|members| members.get("S")),
             Some(&EnumValue::String("s".to_string()))
         );
+        Ok(())
     }
 
     #[test]
-    fn a_plain_enum_is_not_a_const_enum() {
+    fn a_plain_enum_is_not_a_const_enum() -> Result<(), Box<dyn std::error::Error>> {
         let allocator = Allocator::default();
         let parsed =
             oxc_parser::Parser::new(&allocator, "enum Plain { A = 1 }\n", SourceType::ts()).parse();
         assert!(collect_const_enum_values(&parsed.program).is_empty());
+        Ok(())
     }
 }
 
@@ -348,46 +351,19 @@ mod const_enum_end_to_end {
     //! The gate for "enum inlining ours end-to-end": emit through the real oxc
     //! pipeline and run it. A const enum has no runtime object, so if the reads
     //! were not inlined this throws instead of returning values.
-    use super::super::lower_with_oxc;
-    use std::path::Path;
-    use std::process::Command;
-
-    fn run(source: &str) -> String {
-        let code = lower_with_oxc(Path::new("m.ts"), source).expect("lowering");
-        let dir = std::env::temp_dir().join(format!(
-            "gcc-oxc-enum-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("m.mjs");
-        std::fs::write(
-            &file,
-            format!("{code}\nconsole.log(JSON.stringify(probe));\n"),
-        )
-        .unwrap();
-        let output = Command::new("node").arg(&file).output().expect("node");
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        std::fs::remove_dir_all(&dir).ok();
-        assert!(
-            output.status.success(),
-            "node failed: {stderr}\n--- emitted:\n{code}"
-        );
-        stdout
-    }
+    use super::super::executing::run_emitted;
 
     #[test]
-    fn const_enum_reads_inline_and_the_object_is_erased() {
-        let probe = run(concat!(
-            "const enum Dir { Up = 1, Down = 1 + Up, Both = Down << 2, Neg = -Down, Mask = Both | Dir.Up, Half = (Both + 2) / 5, Next }\n",
-            "const enum L { S = \"s\" }\n",
-            "export const probe = [Dir.Up, Dir.Down, Dir.Both, Dir.Neg, Dir.Mask, Dir.Half, Dir.Next, L.S, typeof Dir].join(\"|\");\n",
-        ));
+    fn const_enum_reads_inline_and_the_object_is_erased() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let probe = run_emitted("lowering", concat!(
+        "const enum Dir { Up = 1, Down = 1 + Up, Both = Down << 2, Neg = -Down, Mask = Both | Dir.Up, Half = (Both + 2) / 5, Next }\n",
+        "const enum L { S = \"s\" }\n",
+        "export const probe = [Dir.Up, Dir.Down, Dir.Both, Dir.Neg, Dir.Mask, Dir.Half, Dir.Next, L.S, typeof Dir].join(\"|\");\n",
+    ))?;
         // Values identical to the swc pipeline's, and `typeof Dir` proves the
         // runtime object is gone rather than merely unused.
         assert_eq!(probe, "\"1|2|8|-2|9|2|3|s|undefined\"");
+        Ok(())
     }
 }

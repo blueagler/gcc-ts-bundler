@@ -1,5 +1,3 @@
-#![allow(non_snake_case)]
-
 pub(crate) mod assigners;
 mod cjs_opacity;
 mod commonjs;
@@ -52,58 +50,9 @@ pub(crate) use self::imports_exports::*;
 pub(crate) use self::js_compat::*;
 #[cfg(test)]
 pub(crate) use self::transpile_plan::parse_oxc_program;
-pub(crate) use self::transpile_run::resolve_relative_module;
+pub(crate) use self::transpile_run::{resolve_relative_module, transpile_sources};
 pub use napi::*;
 
 pub fn emit_preserved_module(file_path: String, source: String) -> Result<String, String> {
     lowering::emit_preserved_module(Path::new(&file_path), &source)
-}
-
-// napi positional contract: the TS side calls these by argument
-// position, so the parameter list is the published signature.
-#[allow(clippy::too_many_arguments)]
-pub fn transpile_sources(
-    file_names: Vec<String>,
-    explicit_extern_paths: Vec<String>,
-    out_dir: String,
-    externs_path: String,
-    metadata_path: String,
-    chunk_mode: String,
-    target: String,
-    runtime_module_source_map_file: Option<String>,
-    workspace_dir: String,
-    package_aliases: Vec<PackageAliasInput>,
-    resolved_imports: Vec<ResolvedImportInput>,
-    external_boundaries: Vec<ExternalBoundaryInput>,
-    opaque_external_specifiers: Vec<String>,
-    package_json_files: Vec<String>,
-    preserved_modules: Vec<PreservedModuleInput>,
-    lazy_imports: Vec<LazyImportInput>,
-    chunk_graph: Vec<TranspileChunkInput>,
-    class_map_calls: Vec<ClassMapCallInput>,
-    pure_callees: Vec<String>,
-    type_inference_disabled: bool,
-) -> std::result::Result<TranspileOutput, String> {
-    transpile_run::run_transpile_sources(
-        file_names,
-        explicit_extern_paths,
-        out_dir,
-        externs_path,
-        metadata_path,
-        chunk_mode,
-        target,
-        runtime_module_source_map_file,
-        workspace_dir,
-        package_aliases,
-        resolved_imports,
-        external_boundaries,
-        opaque_external_specifiers,
-        package_json_files,
-        preserved_modules,
-        lazy_imports,
-        chunk_graph,
-        class_map_calls,
-        pure_callees,
-        type_inference_disabled,
-    )
 }

@@ -7,31 +7,11 @@ import {
   createCurrentWorkingDirectoryRequire,
   getPackageRootFromBundle,
 } from "../shared/bundle-location";
-import {
-  getErrorMessage,
-  isRecord,
-  isString,
-  type RuntimeValue,
-} from "../shared/validation";
-
-export interface NativeAddonCandidate {
-  [key: string]: RuntimeValue;
-}
+import { getErrorMessage, isRecord, isString } from "../shared/validation";
 
 const NATIVE_ADDON_LOAD_FAILED = Symbol("native-addon-load-failed");
-const INVALID_NATIVE_ADDON_MESSAGE =
-  "Loaded native addon has an invalid API surface.";
 
 const require = createBundleRequire();
-
-function parseNativeAddonCandidate<Value>(
-  value: Value,
-): Value & NativeAddonCandidate {
-  if (!isRecord(value)) {
-    throw new TypeError(INVALID_NATIVE_ADDON_MESSAGE);
-  }
-  return value;
-}
 
 const SUPPORTED_TARGETS = new Map<string, string>([
   ["darwin-arm64", "gcc-ts-bundler-darwin-arm64"],
@@ -74,7 +54,7 @@ function getTargetKey() {
   return `${process.platform}-${process.arch}`;
 }
 
-export function loadNativeBinding(): NativeAddonCandidate {
+export function loadNativeBinding(): unknown {
   const targetKey = getTargetKey();
   const packageName = SUPPORTED_TARGETS.get(targetKey);
   const loadErrors: string[] = [];
@@ -93,13 +73,11 @@ export function loadNativeBinding(): NativeAddonCandidate {
     loadErrors.push(`local development addon: ${getErrorMessage(error)}`);
   }
   if (localBinding !== NATIVE_ADDON_LOAD_FAILED) {
-    return parseNativeAddonCandidate(localBinding);
+    return localBinding;
   }
 
   if (packageName) {
-    const packageRequires: Array<
-      [string, (packageName: string) => RuntimeValue]
-    > = [
+    const packageRequires: Array<[string, (packageName: string) => unknown]> = [
       ["bundle", require],
       ["current working directory", createCurrentWorkingDirectoryRequire()],
     ];
@@ -113,7 +91,7 @@ export function loadNativeBinding(): NativeAddonCandidate {
         );
       }
       if (packageBinding !== NATIVE_ADDON_LOAD_FAILED) {
-        return parseNativeAddonCandidate(packageBinding);
+        return packageBinding;
       }
     }
   }

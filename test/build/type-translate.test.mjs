@@ -329,7 +329,7 @@ test("checker symbol-rendering recursion degrades one type atom instead of abort
       siblingDeclaration.type,
     ),
   ).toBe("number");
-  expect(context.unresolvedTypeReferenceCount).toBe(1);
+  expect(context.diagnostics).toHaveLength(1);
   expect(context.diagnostics[0]?.reason).toBe("symbol-rendering-failed");
 
   const nonRangeChecker = new Proxy(baseChecker, {

@@ -158,7 +158,8 @@ fn is_module_exports_access(object: &Expression<'_>, key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::quote_literal_computed_members;
+    use oxc_allocator::Allocator;
     use oxc_codegen::Codegen;
     use oxc_parser::Parser;
     use oxc_span::SourceType;

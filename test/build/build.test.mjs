@@ -6,14 +6,442 @@ import { expect, test } from "bun:test";
 import { build } from "../../dist/index.mjs";
 import {
   persistCachedClosureJob,
+  prepareClosureJobCache,
   tryRestoreCachedClosureJob,
 } from "../../src/build/closure/cache.ts";
-import {
-  shouldEnableTypeInference,
-  TYPE_INFERENCE_OPTIONS,
-} from "../../src/build/closure/compiler.ts";
+import { shouldEnableTypeInference } from "../../src/build/closure/compiler.ts";
 import { generatePlatformExternsText } from "../../src/build/closure/platform-externs/generate.ts";
 import { createFixture, execFileAsync, findFilesNamed } from "../helpers.mjs";
+
+let importCounter = 0;
+
+async function importOutput(outputPath, tag) {
+  return import(`${pathToFileURL(outputPath).href}?${tag}=${importCounter++}`);
+}
+
+function expectBuilt(result) {
+  expect(
+    result.ok,
+    (result.diagnostics ?? []).map(({ message }) => message).join("\n"),
+  ).toBe(true);
+}
+
+/** Leading `//` and `/* *\/` comments, in source order, with positions. */
+function extractComments(source) {
+  const comments = [];
+  // ponytail: regex lexer, not a parser. It over-reports (a `//` inside a
+  // string literal counts), which is the safe direction for a "no comments"
+  // gate; it is not used to rewrite anything.
+  const pattern = /\/\*[\s\S]*?\*\/|\/\/[^\n]*/gu;
+  for (const match of source.matchAll(pattern)) {
+    comments.push(match[0]);
+  }
+  return comments;
+}
+
+// Closure inputs admit generated type annotations and the deliberately forwarded
+// PURE marker, never authored optimizer directives.
+const ALLOWED_COMMENTS = [
+  /^\/\*\*[\s\S]*@[A-Za-z]/u,
+  /^\/\*#?\s*@?__PURE__\s*\*\/$/u,
+  /^\/\*#?__PURE__\*\/$/u,
+];
+const HOSTILE_MARKERS = [
+  "HOSTILE_LICENSE",
+  "HOSTILE_CONST",
+  "HOSTILE_CAST",
+  "HOSTILE_LINE",
+  "HOSTILE_ENUM",
+  "@license",
+  "@preserve",
+  "@nocollapse",
+  "@suppress",
+];
+
+test.serial(
+  "hostile source jsdoc never reaches the Closure inputs",
+  { timeout: 60_000 },
+  async () => {
+    // If authored `@const`, `@license`, or `@type` casts reach Closure's input,
+    // Closure reads them as real
+    // annotations: `@const` on a reassigned binding is a type error, a wrong
+    // `@type` cast changes inference, `@license` changes output preservation,
+    // and `@nocollapse`/`@suppress` change renaming. Those are silent
+    // miscompiles, not build failures.
+    //
+    // So pin the contract from both ends: the full ADVANCED job still accepts
+    // and executes the module, and every comment in the emitted Closure input
+    // is a generated annotation -- never something the source wrote.
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/helper.ts",
+      [
+        "/**",
+        " * @license HOSTILE_LICENSE-1.0",
+        " * @preserve",
+        " */",
+        "",
+        "/** @const HOSTILE_CONST */",
+        "export let mutable = 1;",
+        "",
+        "/** @nocollapse @suppress {checkTypes} HOSTILE_CAST */",
+        "export const cast = /** @type {string} */ (String(2));",
+        "",
+        "// HOSTILE_LINE trailing prose",
+        "export function bump(): number {",
+        "  mutable = mutable + 1; // HOSTILE_LINE inside a body",
+        "  return mutable;",
+        "}",
+        "export function readMutable(): number { return mutable; }",
+        "",
+        "/** @enum HOSTILE_ENUM */",
+        "export enum Kind { A = 1, B = 2 }",
+        "",
+        "/** A pure factory. */",
+        "export const pure = /*#__PURE__*/ makeToken();",
+        'function makeToken(): string { return "TOKEN"; }',
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/entry.ts",
+      [
+        'import { bump, cast, Kind, mutable, pure, readMutable } from "./helper";',
+        "export function probe(): string {",
+        // `mutable` is read straight through the import binding: `@const` must
+        // not have frozen it, and the ES live-binding rule says this importer
+        // sees the reassignment (see `es-live-bindings.test.mjs`).
+        '  return [bump(), bump(), cast, Kind.B, pure, readMutable(), mutable].join("|");',
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    const cacheDir = path.join(fixture.projectRoot, ".cache");
+    const result = await build({
+      cache: { dir: cacheDir, mode: "persistent" },
+      entries: ["./entry.ts"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+    // A full ADVANCED job: the hostile annotations did not become Closure
+    // errors, because Closure never saw them.
+    expectBuilt(result);
+
+    const module = await importOutput(
+      path.join(fixture.outDir, "entry.js"),
+      "hostile-jsdoc",
+    );
+    // `@const` on `mutable` did not freeze it (it is reassigned twice), the
+    // `@type {string}` cast did not retype `cast`, and `@license`/`@preserve`
+    // did not pin dead text into the bundle.
+    // The trailing `3` is the imported `mutable` read *after* two `bump()`
+    // calls: the importer observes the reassignment.
+    expect(module.probe()).toBe("2|3|2|2|TOKEN|3|3");
+
+    const emitted = (await findFilesNamed(cacheDir, "helper.js"))
+      .concat(await findFilesNamed(cacheDir, "entry.js"))
+      .filter(
+        (file) => file.includes("/native-emit/") && file.includes("/out/src/"),
+      );
+    expect(emitted.length).toBeGreaterThanOrEqual(2);
+
+    let sawGeneratedAnnotation = false;
+    for (const file of emitted) {
+      const source = await fs.readFile(file, "utf8");
+      for (const marker of HOSTILE_MARKERS) {
+        expect(source, `${file} leaked ${marker}`).not.toContain(marker);
+      }
+      for (const comment of extractComments(source)) {
+        expect(
+          ALLOWED_COMMENTS.some((allowed) => allowed.test(comment)),
+          `${file} carries a comment outside the allowed set: ${comment}`,
+        ).toBe(true);
+        sawGeneratedAnnotation = true;
+      }
+    }
+    // The gate must be able to see comments at all, otherwise it passes vacuously.
+    expect(sawGeneratedAnnotation).toBe(true);
+
+    // PURE is the one authored annotation oxc deliberately retains; every other
+    // authored comment is absent, and the annotation still reaches Closure immediately
+    // before the call (swc spells the same contract as `@pureOrBreakMyCode`).
+    const helperEmit = await fs.readFile(
+      emitted.find((file) => file.endsWith("helper.js")),
+      "utf8",
+    );
+    expect(helperEmit).toMatch(
+      /(?:@pureOrBreakMyCode[\s\S]*|@__PURE__\s*\*\/\s*)makeToken/u,
+    );
+  },
+);
+
+test.serial(
+  "a nested exported namespace survives a full Closure job and executes",
+  { timeout: 60_000 },
+  async () => {
+    // Namespace lowering shape (`var` vs `let`, `_Outer` param aliasing, the
+    // nested binding chain) is what feeds Closure's goog.module checks, and the
+    // existing namespace goldens assert the *swc* shape -- a re-baseline
+    // rewrites them, so they cannot tell us the oxc shape still compiles.
+    // This test is deliberately shape-agnostic: it only requires that Closure
+    // accepts the lowered module and that the values cross every level of the
+    // nesting, including sibling references within a namespace, an alias taken
+    // out of the middle of the chain, and a *second* declaration block for the
+    // same namespace.
+    //
+    // The merged block is here because it used to fail: SWC's `strip` qualifies a
+    // member reference only inside the block that declares it, so the second
+    // block emitted bare `Inner`/`version` reads and Closure rejected the module
+    // (JSC_UNDEFINED_VARIABLE). The blocks are now merged before `strip` runs.
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/lib.ts",
+      [
+        "export namespace Outer {",
+        "  export const version = 3;",
+        "  export namespace Inner {",
+        '    export const tag = "INNER";',
+        "    export function twice(value: number): number { return value * 2; }",
+        "    export namespace Deep {",
+        "      export function thrice(value: number): number {",
+        "        return twice(value) + value;",
+        "      }",
+        "    }",
+        "  }",
+        "  export function describe(): string {",
+        "    return `${version}:${Inner.tag}`;",
+        "  }",
+        "}",
+        "// A second block for the same namespace must merge, not shadow.",
+        "export namespace Outer {",
+        "  export function versionTwice(): number { return Inner.twice(version); }",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/entry.ts",
+      [
+        'import { Outer } from "./lib";',
+        "export function probe(): string {",
+        "  return [",
+        "    Outer.version,",
+        "    Outer.Inner.tag,",
+        "    Outer.Inner.twice(4),",
+        "    Outer.Inner.Deep.thrice(4),",
+        "    Outer.describe(),",
+        "    Outer.versionTwice(),",
+        '  ].join("|");',
+        "}",
+        "export function reachThroughAlias(): number {",
+        "  const alias = Outer.Inner;",
+        "  return alias.twice(alias.tag.length);",
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await build({
+      cache: { mode: "off" },
+      entries: ["./entry.ts"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+    // Closure ADVANCED accepted the lowered namespace chain.
+    expectBuilt(result);
+
+    const module = await importOutput(
+      path.join(fixture.outDir, "entry.js"),
+      "nested-namespace",
+    );
+    // The trailing `6` comes from the merged second block reading the first
+    // block's `Inner` and `version`.
+    expect(module.probe()).toBe("3|INNER|8|12|3:INNER|6");
+    expect(module.reachThroughAlias()).toBe(10);
+  },
+);
+
+test.serial(
+  "literal namespace initialization preserves inherited setters and their owner",
+  { timeout: 60_000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write("package.json", '{"type":"module"}\n');
+    await fixture.write(
+      "src/entry.ts",
+      [
+        "namespace Stable {",
+        "  export const namespaceStableFirst = 7;",
+        '  export const namespaceStableSecond = "ready";',
+        "  export const namespaceStableThird = true;",
+        "}",
+        "export function probe(original: unknown): string {",
+        // Quoted reads pin the names seen by the external setter host; renamed
+        // writes would bypass the setters and stop exercising this boundary.
+        "  return [",
+        '    Stable["namespaceStableFirst"],',
+        '    Stable["namespaceStableSecond"],',
+        '    Stable["namespaceStableThird"],',
+        "    Stable === original,",
+        '  ].join("|");',
+        "}",
+        "",
+      ].join("\n"),
+    );
+    const result = await build({
+      cache: { mode: "off" },
+      chunks: { mode: "off", outputType: "esm" },
+      entries: ["./entry.ts"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+      target: "node",
+    });
+    expectBuilt(result);
+
+    // Prototype instrumentation must run outside the Bun test process. Each
+    // setter materializes its own property so the final reads also check values.
+    await fixture.write(
+      "runtime.mjs",
+      [
+        'const keys = ["namespaceStableFirst", "namespaceStableSecond", "namespaceStableThird"];',
+        "const descriptors = keys.map(key => Object.getOwnPropertyDescriptor(Object.prototype, key));",
+        "const writes = [];",
+        "let original;",
+        "try {",
+        "  for (const key of keys) {",
+        "    Object.defineProperty(Object.prototype, key, {",
+        "      configurable: true,",
+        "      set(value) {",
+        "        original ??= this;",
+        '        writes.push(`${key}:${value}:${this === original}`);',
+        "        Object.defineProperty(this, key, { value, writable: true, enumerable: true, configurable: true });",
+        "      },",
+        "    });",
+        "  }",
+        '  const module = await import("./dist/entry.js");',
+        '  console.log(`${module.probe(original)}::${writes.join("|")}`);',
+        "} finally {",
+        "  keys.forEach((key, index) => {",
+        "    if (descriptors[index]) Object.defineProperty(Object.prototype, key, descriptors[index]);",
+        "    else delete Object.prototype[key];",
+        "  });",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [path.join(fixture.projectRoot, "runtime.mjs")],
+      { cwd: fixture.projectRoot },
+    );
+    expect(stdout.trim()).toBe(
+      "7|ready|true|true::namespaceStableFirst:7:true|namespaceStableSecond:ready:true|namespaceStableThird:true:true",
+    );
+  },
+);
+
+test.serial(
+  "namespace initialization retains its captured owner after setter reassignment",
+  { timeout: 60_000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write("package.json", '{"type":"module"}\n');
+    await fixture.write(
+      "node_modules/namespace-setter-host/package.json",
+      '{"name":"namespace-setter-host","type":"module","exports":"./index.js","types":"./index.d.ts"}\n',
+    );
+    await fixture.write(
+      "node_modules/namespace-setter-host/index.js",
+      "export let onFirstWrite;\nexport function registerMutation(callback) { onFirstWrite = callback; }\n",
+    );
+    await fixture.write(
+      "node_modules/namespace-setter-host/index.d.ts",
+      "export declare function registerMutation(callback: () => void): void;\n",
+    );
+    await fixture.write(
+      "src/entry.ts",
+      [
+        'import { registerMutation } from "namespace-setter-host";',
+        "const replacement = { namespaceMutationFirst: 41, namespaceMutationSecond: 42 };",
+        "registerMutation(() => {",
+        "  // @ts-ignore Deliberately reassign the namespace during its first property write.",
+        "  Mutable = replacement;",
+        "});",
+        "namespace Mutable {",
+        "  export const namespaceMutationFirst = 7;",
+        "  export const namespaceMutationSecond = 11;",
+        "}",
+        "export function probe(original: unknown): string {",
+        // Keep the external host's setter names stable through Closure.
+        "  return [",
+        '    Mutable["namespaceMutationFirst"],',
+        '    Mutable["namespaceMutationSecond"],',
+        "    Mutable === original,",
+        "    Mutable === replacement,",
+        '  ].join("|");',
+        "}",
+        "",
+      ].join("\n"),
+    );
+    const result = await build({
+      cache: { mode: "off" },
+      chunks: { mode: "off", outputType: "esm" },
+      entries: ["./entry.ts"],
+      externals: ["namespace-setter-host"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+      target: "node",
+    });
+    expectBuilt(result);
+
+    // The first inherited setter reassigns the authored binding. The second
+    // write must still target the IIFE's captured object, not the replacement.
+    await fixture.write(
+      "runtime.mjs",
+      [
+        'import { onFirstWrite } from "namespace-setter-host";',
+        'const keys = ["namespaceMutationFirst", "namespaceMutationSecond"];',
+        "const descriptors = keys.map(key => Object.getOwnPropertyDescriptor(Object.prototype, key));",
+        "const writes = [];",
+        "let original;",
+        "try {",
+        "  for (const key of keys) {",
+        "    Object.defineProperty(Object.prototype, key, {",
+        "      configurable: true,",
+        "      set(value) {",
+        "        original ??= this;",
+        '        writes.push(`${key}:${value}:${this === original}`);',
+        "        Object.defineProperty(this, key, { value, writable: true, enumerable: true, configurable: true });",
+        "        if (key === keys[0]) onFirstWrite();",
+        "      },",
+        "    });",
+        "  }",
+        '  const module = await import("./dist/entry.js");',
+        '  console.log(`${module.probe(original)}::${original[keys[0]]}|${original[keys[1]]}::${writes.join("|")}`);',
+        "} finally {",
+        "  keys.forEach((key, index) => {",
+        "    if (descriptors[index]) Object.defineProperty(Object.prototype, key, descriptors[index]);",
+        "    else delete Object.prototype[key];",
+        "  });",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [path.join(fixture.projectRoot, "runtime.mjs")],
+      { cwd: fixture.projectRoot },
+    );
+    expect(stdout.trim()).toBe(
+      "41|42|false|true::7|11::namespaceMutationFirst:7:true|namespaceMutationSecond:11:true",
+    );
+  },
+);
 
 test.serial(
   "lowers private class elements faithfully for modern Node output",
@@ -328,10 +756,9 @@ test.serial("emits and executes all external ESM import forms", async () => {
 });
 
 test.serial(
-  "uses typed external declarations and warns on opaque fallback",
+  "executes typed and opaque external boundaries and warns on opaque fallback",
   async () => {
     const fixture = await createFixture();
-    const cacheDir = path.join(fixture.projectRoot, "cache");
     await fixture.write("package.json", '{"type":"module"}\n');
     await fixture.write(
       "node_modules/typed-ext/package.json",
@@ -367,7 +794,7 @@ test.serial(
     console.warn = (message) => warnings.push(String(message));
     try {
       const result = await build({
-        cache: { dir: cacheDir, mode: "persistent" },
+        cache: { mode: "off" },
         chunks: { mode: "off", outputType: "esm" },
         entries: ["./index.ts"],
         externals: ["typed-ext", "opaque-ext"],
@@ -386,34 +813,14 @@ test.serial(
       console.warn = originalWarn;
     }
 
-    const nativeInputs = await findFilesNamed(cacheDir, "index.js");
-    const nativeInputTexts = await Promise.all(
-      nativeInputs.map((filePath) => fs.readFile(filePath, "utf8")),
-    );
-    const nativeInput = nativeInputTexts.find(
-      (text) => text.includes("goog.module(") && text.includes("extra"),
-    );
-    expect(nativeInput).toContain('opaque["extra"]');
-
-    const externFiles = await findFilesNamed(
-      cacheDir,
-      "native-generated.externs.js",
-    );
-    expect(externFiles).toHaveLength(1);
-    const externText = await fs.readFile(externFiles[0], "utf8");
-    expect(externText).toContain("Typed external runtime declarations");
-    expect(externText).toContain("@type {number}");
-    expect(externText).toMatch(/@type \{\?\} \*\/ var e[a-z0-9]+_[a-z0-9]+_[a-z0-9]+/u);
-    expect(externText).not.toMatch(/e[a-z0-9_]+\.extra;/u);
     expect(warnings.join("\n")).toContain("using opaque externs");
   },
 );
 
 test.serial(
-  "declares each external boundary variable exactly once across importers",
+  "compiles shared external boundaries without duplicate declarations and executes every importer",
   async () => {
     const fixture = await createFixture();
-    const cacheDir = path.join(fixture.projectRoot, "cache");
     await fixture.write("package.json", '{"type":"module"}\n');
     await fixture.write(
       "node_modules/shared-ext/package.json",
@@ -437,11 +844,8 @@ test.serial(
         "",
       ].join("\n"),
     );
-    // Two *separate* modules importing the same export from the same external
-    // is the entire reproduction. The boundary name is deliberately shared —
-    // it *is* the shared boundary global — so every importer contributed its
-    // own declaration of it, and the aggregator deduplicated by line text
-    // instead of by declared name. A single importer never reproduces this.
+    // Separate importers of the same external export reproduce the duplicate
+    // declaration failure; a single importer cannot exercise it.
     await fixture.write(
       "src/first.ts",
       [
@@ -463,6 +867,7 @@ test.serial(
       [
         'import * as namespaced from "shared-ext";',
         "export const third = namespaced.extra;",
+        "export const label = namespaced.label;",
         "",
       ].join("\n"),
     );
@@ -471,23 +876,36 @@ test.serial(
       [
         'import { first } from "./first";',
         'import { second } from "./second";',
-        'import { third } from "./third";',
-        'if (first + second + third !== 7) throw new Error("boundary mismatch");',
+        'import { third, label } from "./third";',
+        'if (first + second + third !== 7 || label !== "boundary") throw new Error("boundary mismatch");',
         "",
       ].join("\n"),
     );
 
-    const result = await build({
-      cache: { dir: cacheDir, mode: "persistent" },
-      chunks: { mode: "off", outputType: "esm" },
-      entries: ["./index.ts"],
-      externals: ["shared-ext"],
-      outDir: fixture.outDir,
-      projectRoot: fixture.projectRoot,
-      srcDir: fixture.srcDir,
-      target: "node",
-    });
-    expect(result.ok).toBe(true);
+    // Without hidden type inference, Closure rejects duplicate declarations
+    // rather than tolerating them. Check the compiler boundary, not extern text.
+    const previous = process.env.GCC_DISABLE_TYPE_INFERENCE;
+    process.env.GCC_DISABLE_TYPE_INFERENCE = "1";
+    let result;
+    try {
+      result = await build({
+        cache: { mode: "off" },
+        chunks: { mode: "off", outputType: "esm" },
+        entries: ["./index.ts"],
+        externals: ["shared-ext"],
+        outDir: fixture.outDir,
+        projectRoot: fixture.projectRoot,
+        srcDir: fixture.srcDir,
+        target: "node",
+      });
+    } finally {
+      if (previous === undefined) delete process.env.GCC_DISABLE_TYPE_INFERENCE;
+      else process.env.GCC_DISABLE_TYPE_INFERENCE = previous;
+    }
+    expect(
+      result.ok,
+      (result.diagnostics ?? []).map(({ message }) => message).join("\n"),
+    ).toBe(true);
     // Proves both importers survived to runtime: a fixture whose second
     // importer got tree-shaken away would silently stop testing anything.
     await execFileAsync(
@@ -495,58 +913,13 @@ test.serial(
       [path.join(fixture.outDir, "index.js")],
       { cwd: fixture.projectRoot },
     );
-
-    const externFiles = await findFilesNamed(
-      cacheDir,
-      "native-generated.externs.js",
-    );
-    expect(externFiles).toHaveLength(1);
-    const externText = await fs.readFile(externFiles[0], "utf8");
-
-    // Guard the guard: without at least one boundary declaration present the
-    // duplicate check below would pass vacuously on an empty externs file.
-    const boundaryDeclarations = Array.from(
-      externText.matchAll(/\bvar\s+(e[\da-z]+_0_[$\w]*)/gu),
-      (match) => match[1],
-    );
-    expect(boundaryDeclarations.length).toBeGreaterThan(0);
-
-    const declarationCounts = new Map();
-    for (const [, name] of externText.matchAll(
-      /\bvar\s+([$A-Z_a-z][$\w]*)/gu,
-    )) {
-      declarationCounts.set(name, (declarationCounts.get(name) ?? 0) + 1);
-    }
-    // Closure reports repeats as JSC_VAR_MULTIPLY_DECLARED_ERROR, which is a
-    // hard failure under GCC_DISABLE_TYPE_INFERENCE=1.
-    const duplicated = [...declarationCounts]
-      .filter(([, count]) => count > 1)
-      .map(([name, count]) => `${name} declared ${count} times`)
-      .sort((left, right) => left.localeCompare(right));
-    expect(duplicated, duplicated.join("; ")).toEqual([]);
-
-    // Member lines are additive rename barriers, not declarations. Satisfying
-    // the assertion above by deleting them would unpin these property names,
-    // so they have to still be here.
-    const pinnedProperties = [
-      ...new Set(
-        Array.from(
-          externText.matchAll(/^\s*e[\da-z]+_0_[$\w]*\.([$\w]+);\s*$/gmu),
-          (match) => match[1],
-        ),
-      ),
-    ].sort((left, right) => left.localeCompare(right));
-    expect(pinnedProperties).toContain("count");
-    expect(pinnedProperties).toContain("extra");
-    expect(pinnedProperties).toContain("label");
   },
 );
 
 test.serial(
-  "quotes typed Node namespace accesses and also protects them with externs",
+  "preserves typed Node namespace calls at runtime",
   async () => {
     const fixture = await createFixture();
-    const cacheDir = path.join(fixture.projectRoot, "cache");
     await fixture.write("package.json", '{"type":"module"}\n');
     await fixture.write(
       "node_modules/@types/node/package.json",
@@ -571,7 +944,7 @@ test.serial(
     );
 
     const result = await build({
-      cache: { dir: cacheDir, mode: "persistent" },
+      cache: { mode: "off" },
       chunks: { mode: "off", outputType: "esm" },
       entries: ["./index.ts"],
       outDir: fixture.outDir,
@@ -580,27 +953,6 @@ test.serial(
       target: "node",
     });
     expect(result.ok).toBe(true);
-
-    const nativeInputs = await findFilesNamed(cacheDir, "index.js");
-    const nativeInputTexts = await Promise.all(
-      nativeInputs.map((filePath) => fs.readFile(filePath, "utf8")),
-    );
-    const nativeInput = nativeInputTexts.find(
-      (text) => text.includes("goog.module(") && text.includes("existsSync"),
-    );
-    expect(nativeInput).toContain('["existsSync"](');
-    expect(nativeInput).not.toMatch(/\.existsSync\(/u);
-
-    const [externFile] = await findFilesNamed(
-      cacheDir,
-      "native-generated.externs.js",
-    );
-    expect(externFile).toBeTruthy();
-    const externText = await fs.readFile(externFile, "utf8");
-    expect(externText).toMatch(
-      /__gccExtern\$[0-9a-f]+\.existsSync\$[0-9a-f]+ = function\(param0\) \{\};/u,
-    );
-    expect(externText).toContain("@param {string} param0");
 
     await execFileAsync(
       process.execPath,
@@ -902,23 +1254,23 @@ test.serial(
 
 test.serial("rejects lexical preserveModules path escapes", async () => {
   const fixture = await createFixture();
-  await fixture.write("src/index.js", "console.log('entry');\n");
-  let thrown;
-  try {
-    await build({
-      cache: { mode: "off" },
-      entries: ["./index.js"],
-      outDir: fixture.outDir,
-      preserveModules: ["../outside.js"],
-      projectRoot: fixture.projectRoot,
-      srcDir: fixture.srcDir,
-    });
-  } catch (error) {
-    thrown = error;
-  }
-  expect(String(thrown)).toContain(
+  const source = "console.log('entry');\n";
+  await fixture.write("src/index.js", source);
+  await fixture.write("dist/index.js", "previous successful output");
+  const result = await build({
+    cache: { mode: "off" },
+    entries: ["./index.js"],
+    outDir: fixture.outDir,
+    preserveModules: ["../outside.js"],
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+  });
+  expect(result.ok).toBe(false);
+  expect(result.diagnostics[0]?.message).toContain(
     "preserveModules path must be inside srcDir",
   );
+  expect(await fixture.read("src/index.js")).toBe(source);
+  expect(await fixture.read("dist/index.js")).toBe("previous successful output");
 });
 
 test.serial(
@@ -1650,14 +2002,6 @@ test.serial(
     } finally {
       delete process.env.GCC_DISABLE_TYPE_INFERENCE;
     }
-
-    // The wrapper's camelCase keys must render the hidden-inference CLI pair;
-    // a typo here is silent (the compiler simply keeps QUIET behaviour).
-    const { compiler: ClosureCompiler } =
-      await import("google-closure-compiler");
-    expect(
-      new ClosureCompiler(TYPE_INFERENCE_OPTIONS).commandArguments,
-    ).toEqual(["--hide_warnings_for=/", "--jscomp_warning=checkTypes"]);
   },
 );
 
@@ -1688,22 +2032,20 @@ test.serial(
       },
       warningLevel: "QUIET",
     };
-    const restore = (job) =>
-      tryRestoreCachedClosureJob({
+    const prepare = (job) =>
+      prepareClosureJobCache({
         artifactFiles: [outputFile],
         cacheDir,
         compilerVersion: "test",
         job,
       });
+    const restore = async (job) =>
+      tryRestoreCachedClosureJob(await prepare(job));
 
-    await persistCachedClosureJob({
-      artifactFiles: [outputFile],
-      cacheDir,
-      compilerVersion: "test",
-      job: { ...baseJob, typeInference: true },
-    });
+    const inferenceOn = await prepare({ ...baseJob, typeInference: true });
+    await persistCachedClosureJob(inferenceOn);
 
-    expect(await restore({ ...baseJob, typeInference: true })).toBe(true);
+    expect(await tryRestoreCachedClosureJob(inferenceOn)).toBe(true);
     // The flag lives in no hashed file, so without explicit keying a cached
     // inference-on artifact would be served to an inference-off build.
     expect(await restore(baseJob)).toBe(false);

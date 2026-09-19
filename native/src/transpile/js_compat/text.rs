@@ -1,4 +1,6 @@
-use super::*;
+use std::collections::HashSet;
+
+use super::super::compat::collect_class_static_assignments;
 
 pub(crate) fn apply_js_compat_text_fixes(source_text: String) -> String {
     let mut source_text = rewrite_async_function_comment_placement(
@@ -90,7 +92,7 @@ pub(crate) fn apply_js_compat_text_fixes(source_text: String) -> String {
 }
 
 pub(super) fn rewrite_async_function_comment_placement(source_text: String) -> String {
-    regex::Regex::new(r#"(?s)async\s*(/\*\*.*?\*/)\s*function"#)
+    regex::Regex::new(r"(?s)async\s*(/\*\*.*?\*/)\s*function")
         .map(|regex| {
             regex
                 .replace_all(&source_text, "$1\nasync function")

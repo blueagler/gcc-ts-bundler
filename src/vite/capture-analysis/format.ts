@@ -6,12 +6,10 @@ import { getCapturedModuleAnalysis } from "./code";
 import { isDependencyModuleId, stripQuery } from "../capture/specifiers";
 import type { CapturedModule, CapturedModuleFormat } from "../internal-types";
 
-const packageFormatByDirectory = new Map<
-  string,
-  Promise<CapturedModuleFormat>
->();
-
-export async function resolveCapturedModuleFormat(record: CapturedModule) {
+export async function resolveCapturedModuleFormat(
+  record: CapturedModule,
+  packageFormatByDirectory?: Map<string, Promise<CapturedModuleFormat>>,
+) {
   const syntaxFormat = getCapturedModuleAnalysis(record).moduleFormat;
   if (syntaxFormat !== "unknown") {
     return syntaxFormat;
@@ -28,11 +26,16 @@ export async function resolveCapturedModuleFormat(record: CapturedModule) {
   if (!isDependencyModuleId(cleanId) || !path.isAbsolute(cleanId)) {
     return "unknown";
   }
-  return await resolvePackageModuleFormat(path.dirname(cleanId));
+  return await resolvePackageModuleFormat(
+    path.dirname(cleanId),
+    packageFormatByDirectory ??
+      new Map<string, Promise<CapturedModuleFormat>>(),
+  );
 }
 
 async function resolvePackageModuleFormat(
   directory: string,
+  packageFormatByDirectory: Map<string, Promise<CapturedModuleFormat>>,
 ): Promise<CapturedModuleFormat> {
   const normalizedDirectory = path.normalize(directory);
   const cached = packageFormatByDirectory.get(normalizedDirectory);
@@ -64,7 +67,7 @@ async function resolvePackageModuleFormat(
     ) {
       return "unknown";
     }
-    return await resolvePackageModuleFormat(parent);
+    return await resolvePackageModuleFormat(parent, packageFormatByDirectory);
   })();
   packageFormatByDirectory.set(normalizedDirectory, pending);
   return await pending;

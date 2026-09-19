@@ -1,46 +1,59 @@
-import { runCommand } from "./command.mjs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { rolldown } from "rolldown";
+import { dts } from "rolldown-plugin-dts";
+import { runCommand } from "./command.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = path.resolve(root, process.argv[2] ?? "dist");
 const entries = [
-  ["index.ts", "index.d.ts"],
-  ["vite/index.ts", "vite/index.d.ts"],
-  ["presets/react.ts", "presets/react.d.ts"],
-  ["presets/svelte.ts", "presets/svelte.d.ts"],
-  ["presets/vue.ts", "presets/vue.d.ts"],
+  "index",
+  "vite/index",
+  "presets/react",
+  "presets/svelte",
+  "presets/vue",
 ];
-const temporaryRoot = await mkdtemp(path.join(root, "src", ".dts-rollup-"));
+const rawDir = await mkdtemp(path.join(os.tmpdir(), "gcc-declarations-"));
 
 try {
-  for (const [index, [entry, output]] of entries.entries()) {
-    const wrapperPath = path.join(temporaryRoot, `entry-${index}.ts`);
-    await writeFile(
-      wrapperPath,
-      `/// <reference path="../types/google-closure-compiler-utils.d.ts" />\nexport * from "../${entry.replace(/\.ts$/u, "")}";\n`, 
-    );
-    await mkdir(path.dirname(path.join(outDir, output)), { recursive: true });
-    await runCommand(
-      process.execPath,
-      [
-        "--require",
-        "./scripts/typescript-dts-register.cjs",
-        "./node_modules/dts-bundle-generator/dist/bin/dts-bundle-generator.js",
-        "--project",
-        "./tsconfig.dts-bundle.json",
-        "--no-banner",
-        "--export-referenced-types",
-        "false",
-        "--out-file",
-        path.join(outDir, output),
-        wrapperPath,
+  await runCommand(process.execPath, [
+    "./scripts/run-typescript.mjs",
+    "--noEmit", "false",
+    "--declaration",
+    "--emitDeclarationOnly",
+    "-p", "tsconfig.dts-bundle.json",
+    "--outDir", rawDir,
+    "--rootDir", root,
+    "--noCheck",
+  ], { cwd: root });
+
+  for (const entry of entries) {
+    const bundle = await rolldown({
+      // Match the declaration emitter's relative region paths.
+      cwd: rawDir,
+      input: path.join(rawDir, "src", `${entry}.d.ts`),
+      external: (id) =>
+        !id.startsWith("\0") && !id.startsWith(".") && !path.isAbsolute(id),
+      plugins: [
+        dts({
+          cwd: root,
+          tsconfig: "./tsconfig.dts-bundle.json",
+          dtsInput: true,
+          emitDtsOnly: true,
+        }),
       ],
-      { cwd: root },
-    );
+    });
+    try {
+      await bundle.write({
+        dir: path.dirname(path.join(outDir, `${entry}.d.ts`)),
+        format: "es",
+      });
+    } finally {
+      await bundle.close();
+    }
   }
 } finally {
-  await rm(temporaryRoot, { force: true, recursive: true });
+  await rm(rawDir, { force: true, recursive: true });
 }

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use oxc_ast::ast::*;
+use oxc_ast::ast::{CallExpression, Expression};
 
 use super::super::wrappers_types::{DynamicImportObjectWrapper, DynamicImportWrappers};
 use super::extract::merge_wrapper_map_into;
@@ -23,7 +23,7 @@ pub(crate) fn resolve_dynamic_import_object_wrapper(
                 object_carriers
                     .get(&binding)
                     .cloned()
-                    .or_else(|| wrappers.object_wrappers.get(&binding).cloned())
+                    .or_else(|| wrappers.objects.get(&binding).cloned())
             })
         }
         Expression::CallExpression(call) => resolve_dynamic_import_object_wrapper_from_call(
@@ -89,7 +89,7 @@ fn resolve_dynamic_import_object_wrapper_from_call(
     match &call.callee {
         Expression::Identifier(identifier) => identity
             .key_of_reference(identifier)
-            .and_then(|binding| wrappers.object_function_wrappers.get(&binding).cloned())
+            .and_then(|binding| wrappers.object_factories.get(&binding).cloned())
             .or_else(|| {
                 (call.arguments.len() == 1)
                     .then(|| call.arguments[0].as_expression())

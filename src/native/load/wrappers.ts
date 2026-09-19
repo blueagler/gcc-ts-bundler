@@ -1,24 +1,13 @@
-import { toRecord } from "../../shared/records";
 import type {
-  NativeChunkPlanEntryInput,
-  NativeDependencyGraphEntry,
   NativeFileStateEntry,
-  NativeLazyImportEntry,
+  NativePlanChunksInput,
   NativePrepareClosureJobsInput,
   NativeResolveGraphOutput,
-  NativeRollupChunkInput,
+  NativeShimEntry,
 } from "../abi";
 import { loadBinding } from "./binding";
 
 export { transpileSources } from "./transpile";
-
-type NativeResolvedGraphOutput = Omit<
-  NativeResolveGraphOutput,
-  "fileHashes" | "graph"
-> & {
-  fileHashes: Record<string, string>;
-  graph: Record<string, string[]>;
-};
 
 export function closureCompilerCapabilities() {
   return loadBinding().closureCompilerCapabilities();
@@ -36,8 +25,8 @@ export function resolveGraph(input: {
   srcDir: string;
   target?: string | undefined;
   workspaceDir: string;
-}): NativeResolvedGraphOutput {
-  const result = loadBinding().resolveGraph(
+}): NativeResolveGraphOutput {
+  return loadBinding().resolveGraph(
     input.entries,
     input.srcDir,
     input.workspaceDir,
@@ -47,77 +36,41 @@ export function resolveGraph(input: {
     input.externalSpecifiers ?? [],
     input.preservedFilePaths ?? [],
   );
-  return {
-    entries: result.entries,
-    externalBoundaries: result.externalBoundaries,
-    fileHashes: toRecord(
-      result.fileHashes.map((entry): readonly [string, string] => [
-        entry.filePath,
-        entry.hash,
-      ]),
-    ),
-    graph: toRecord(
-      result.graph.map((entry): readonly [string, string[]] => [
-        entry.filePath,
-        entry.dependencies,
-      ]),
-    ),
-    lazyImports: result.lazyImports,
-    packageAliases: result.packageAliases,
-    resolvedImports: result.resolvedImports,
-    packageJsonFiles: result.packageJsonFiles,
-    preservedModules: result.preservedModules,
-    sourceFiles: result.sourceFiles,
-    trackedFiles: result.trackedFiles,
-  };
 }
 
-export function planChunks(input: {
-  baseChunkName: string;
-  chunkMode: string;
-  entryFiles: NativeChunkPlanEntryInput[];
-  graphEntries: NativeDependencyGraphEntry[];
-  lazyImports: NativeLazyImportEntry[];
-  /** Rollup's own chunk graph; present only under Vite, and mirrored when it is. */
-  rollupChunks: NativeRollupChunkInput[];
-  shimFiles: string[];
-  /** Already gated by `resolveVendorChunk`; native ignores it off bundler-runtime. */
-  vendorChunk: boolean;
-  workspaceDir: string;
-}) {
+export function planChunks(input: NativePlanChunksInput) {
   // Spelled out rather than rest-spread: these keys reach the native addon,
   // and only a literal written against the boundary type keeps its property
   // names through the self-build's renaming.
-  return loadBinding().planChunks(
-    input.chunkMode,
-    input.baseChunkName,
-    input.workspaceDir,
-    input.entryFiles.map((entry) => ({
-      chunkName: entry.chunkName,
+  const nativeInput: NativePlanChunksInput = {
+    chunkMode: input.chunkMode,
+    baseChunkName: input.baseChunkName,
+    workspaceDir: input.workspaceDir,
+    entryFiles: input.entryFiles.map((entry) => ({
       outputName: entry.outputName,
       sourcePath: entry.sourcePath,
+      shimPath: entry.shimPath,
     })),
-    input.graphEntries.map((entry) => ({
+    graphEntries: input.graphEntries.map((entry) => ({
       dependencies: entry.dependencies,
       filePath: entry.filePath,
     })),
-    input.lazyImports.map((entry) => ({
+    lazyImports: input.lazyImports.map((entry) => ({
       importerFilePath: entry.importerFilePath,
       moduleId: entry.moduleId,
       specifier: entry.specifier,
       targetPath: entry.targetPath,
     })),
-    input.rollupChunks.map((chunk) => ({
-      dynamicImportedChunkFileNames: chunk.dynamicImportedChunkFileNames,
+    rollupChunks: input.rollupChunks.map((chunk) => ({
       fileName: chunk.fileName,
       importedChunkFileNames: chunk.importedChunkFileNames,
       isEntry: chunk.isEntry,
       moduleFiles: chunk.moduleFiles,
       name: chunk.name,
     })),
-    input.shimFiles,
-    input.vendorChunk,
-  );
+    vendorChunk: input.vendorChunk,
+  };
+  return loadBinding().planChunks(nativeInput);
 }
 
 export function minifyJavaScript(filePath: string, source: string) {
@@ -136,15 +89,16 @@ export function prepareClosureJobs(input: NativePrepareClosureJobsInput) {
   return loadBinding().prepareClosureJobs(input);
 }
 
-export function writeEntryShims(input: {
-  entries: Array<{
-    exportNames: string[];
-    hasDefaultExport: boolean;
-    importPath: string;
-    shimPath: string;
-  }>;
-}) {
-  return loadBinding().writeEntryShims(input.entries);
+export function writeEntryShims(input: { entries: NativeShimEntry[] }) {
+  return loadBinding().writeEntryShims(
+    input.entries.map((entry) => ({
+      constEnumExportNames: entry.constEnumExportNames,
+      exportNames: entry.exportNames,
+      hasDefaultExport: entry.hasDefaultExport,
+      importPath: entry.importPath,
+      shimPath: entry.shimPath,
+    })),
+  );
 }
 
 export function collectFileStates(filePaths: string[]) {

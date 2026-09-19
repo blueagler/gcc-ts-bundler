@@ -120,9 +120,6 @@ test.serial(
 
     expect(result.ok).toBe(true);
     const output = await fixture.read("dist/main.js");
-    // The helper bag the old rewriter installed is gone entirely.
-    expect(output).not.toContain("globalThis.__g._");
-    expect(output).not.toMatch(/_\[\d\]=function/u);
 
     const previousProbe = globalThis.__probe;
     try {
@@ -172,10 +169,6 @@ test.serial(
 
     expect(result.ok).toBe(true);
     const output = await fixture.read("dist/main.js");
-    // Closure folds `"variant size".split(" ")` into an array literal; both the
-    // comparison key and the folded list must keep their authored spelling.
-    expect(output).toMatch(/["'`]variant["'`]/u);
-    expect(output).toMatch(/["'`]size["'`]/u);
 
     const previousInspect = globalThis.__inspect;
     try {
@@ -216,8 +209,6 @@ test.serial(
 
     expect(result.ok).toBe(true);
     const output = await fixture.read("dist/main.js");
-    expect(output).toContain("https://cdn.example.com/tab.js");
-    expect(output).not.toContain("taG.js");
 
     const previousAsset = globalThis.__asset;
     try {

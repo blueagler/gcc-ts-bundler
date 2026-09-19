@@ -10,7 +10,7 @@
 
 use oxc_allocator::Allocator;
 use oxc_allocator::FromIn;
-use oxc_allocator::TakeIn;
+use oxc_allocator::ReplaceWith;
 use oxc_allocator::Vec as ArenaVec;
 use oxc_ast::ast::{Expression, Program, TSLiteral, TSType, TSTypeName, UnaryOperator};
 use oxc_ast::builder::AstBuilder;
@@ -69,16 +69,20 @@ fn wrap_type_assertion<'a>(
         }
         _ => return false,
     };
-    let inner = match expression {
-        Expression::TSAsExpression(node) => node.expression.take_in(builder),
-        Expression::TSTypeAssertion(node) => node.expression.take_in(builder),
-        Expression::TSSatisfiesExpression(node) => node.expression.take_in(builder),
-        _ => return false,
-    };
-    *expression = match type_string {
-        Some(type_string) => synthesized_cast_expression(allocator, builder, &type_string, inner),
-        None => inner,
-    };
+    expression.replace_with(|expression| {
+        let inner = match expression {
+            Expression::TSAsExpression(node) => node.unbox().expression,
+            Expression::TSTypeAssertion(node) => node.unbox().expression,
+            Expression::TSSatisfiesExpression(node) => node.unbox().expression,
+            expression => return expression,
+        };
+        match type_string {
+            Some(type_string) => {
+                synthesized_cast_expression(allocator, builder, &type_string, inner)
+            }
+            None => inner,
+        }
+    });
     true
 }
 
@@ -337,90 +341,101 @@ fn parse_js_string(source: &str, quote: char) -> Option<(String, &str)> {
 #[cfg(test)]
 mod synthesize_casts {
     use super::super::lower_with_oxc;
-    use super::*;
+    use super::{
+        closure_input_codegen_options, materialize_closure_casts, synthesize_closure_casts,
+        Allocator, Codegen, Path, SourceType, CAST_MARKER_PREFIX,
+    };
 
-    fn emit(source: &str) -> String {
-        lower_with_oxc(Path::new("cast.ts"), source).expect("lowering")
+    fn emit(source: &str) -> Result<String, String> {
+        lower_with_oxc(Path::new("cast.ts"), source)
     }
 
     #[test]
-    fn as_number_becomes_parenthesized_type_cast() {
-        let code = emit("const n = value as number;\n");
+    fn as_number_becomes_parenthesized_type_cast() -> Result<(), Box<dyn std::error::Error>> {
+        let code = emit("const n = value as number;\n")?;
         assert!(
             code.contains("/** @type {number} */") && code.contains("(value)"),
             "{code}"
         );
         assert!(!code.contains(CAST_MARKER_PREFIX), "{code}");
+        Ok(())
     }
 
     #[test]
-    fn angle_bracket_assertion_becomes_type_cast() {
-        let code = emit("const n = <string>value;\n");
+    fn angle_bracket_assertion_becomes_type_cast() -> Result<(), Box<dyn std::error::Error>> {
+        let code = emit("const n = <string>value;\n")?;
         assert!(
             code.contains("/** @type {string} */") && code.contains("(value)"),
             "{code}"
         );
+        Ok(())
     }
 
     #[test]
-    fn satisfies_becomes_type_cast() {
-        let code = emit("const n = value satisfies boolean;\n");
+    fn satisfies_becomes_type_cast() -> Result<(), Box<dyn std::error::Error>> {
+        let code = emit("const n = value satisfies boolean;\n")?;
         assert!(
             code.contains("/** @type {boolean} */") && code.contains("(value)"),
             "{code}"
         );
+        Ok(())
     }
 
     #[test]
-    fn named_and_array_types_render() {
-        let code = emit("const n = value as Foo[];\n");
+    fn named_and_array_types_render() -> Result<(), Box<dyn std::error::Error>> {
+        let code = emit("const n = value as Foo[];\n")?;
         assert!(code.contains("/** @type {!Array<Foo>} */"), "{code}");
+        Ok(())
     }
 
     #[test]
-    fn const_assertion_is_not_a_cast() {
-        let code = emit("const n = value as const;\n");
+    fn const_assertion_is_not_a_cast() -> Result<(), Box<dyn std::error::Error>> {
+        let code = emit("const n = value as const;\n")?;
         assert!(!code.contains("@type"), "{code}");
         assert!(code.contains("value"), "{code}");
+        Ok(())
     }
 
     #[test]
-    fn any_and_unknown_assertions_erase() {
-        let any_code = emit("const n = value as any;\n");
+    fn any_and_unknown_assertions_erase() -> Result<(), Box<dyn std::error::Error>> {
+        let any_code = emit("const n = value as any;\n")?;
         assert!(!any_code.contains("@type"), "{any_code}");
         assert!(any_code.contains("value"), "{any_code}");
-        let unknown_code = emit("const n = value as unknown;\n");
+        let unknown_code = emit("const n = value as unknown;\n")?;
         assert!(!unknown_code.contains("@type"), "{unknown_code}");
         assert!(unknown_code.contains("value"), "{unknown_code}");
+        Ok(())
     }
 
     #[test]
-    fn nullish_any_unknown_assertions_keep_wildcard() {
+    fn nullish_any_unknown_assertions_keep_wildcard() -> Result<(), Box<dyn std::error::Error>> {
         for source in [
             "const n = null as any;\n",
             "const n = undefined as unknown;\n",
             "const n = void 0 as any;\n",
             "const n = (null) as any;\n",
         ] {
-            let code = emit(source);
+            let code = emit(source)?;
             assert!(
                 code.contains("/** @type {?} */"),
                 "expected wildcard for {source:?}: {code}"
             );
             assert!(!code.contains(CAST_MARKER_PREFIX), "{code}");
         }
+        Ok(())
     }
 
     #[test]
-    fn string_any_assertion_still_erases() {
-        let code = emit(r#"const n = "bad" as any;"#);
+    fn string_any_assertion_still_erases() -> Result<(), Box<dyn std::error::Error>> {
+        let code = emit(r#"const n = "bad" as any;"#)?;
         assert!(!code.contains("@type"), "{code}");
         assert!(!code.contains(CAST_MARKER_PREFIX), "{code}");
         assert!(code.contains("bad"), "{code}");
+        Ok(())
     }
 
     #[test]
-    fn hostile_source_jsdoc_is_still_dropped() {
+    fn hostile_source_jsdoc_is_still_dropped() -> Result<(), Box<dyn std::error::Error>> {
         let allocator = Allocator::default();
         let source = "export const cast = /** @type {string} */ (String(2));\n";
         let parsed = oxc_parser::Parser::new(&allocator, source, SourceType::ts()).parse();
@@ -435,5 +450,6 @@ mod synthesize_casts {
         );
         assert!(!code.contains("@type"), "{code}");
         assert!(!code.contains("HOSTILE"), "{code}");
+        Ok(())
     }
 }

@@ -55,15 +55,13 @@ export async function rewriteDirectDependencyModules(input: {
         };
 
         for (const statement of sourceFile.statements) {
-          if (
-            !(
-              (ts.isImportDeclaration(statement) ||
-                ts.isExportDeclaration(statement)) &&
-              statement.moduleSpecifier &&
-              ts.isStringLiteralLike(statement.moduleSpecifier) &&
-              statement.moduleSpecifier.text.startsWith(".")
-            )
-          ) {
+          if (!(
+            (ts.isImportDeclaration(statement) ||
+              ts.isExportDeclaration(statement)) &&
+            statement.moduleSpecifier &&
+            ts.isStringLiteralLike(statement.moduleSpecifier) &&
+            statement.moduleSpecifier.text.startsWith(".")
+          )) {
             continue;
           }
           const atomOutput = resolveAtomOutput(statement.moduleSpecifier.text);

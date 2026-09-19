@@ -61,13 +61,25 @@ test("final OXC pass keeps no-DCE/safe-mangle contracts and skips preserved modu
   expect(compiled).toContain("console.log");
   expect(compiled).toContain("debugger");
   expect(preserved).toBe(preservedSource);
+});
 
-  const nativeSource = await fs.readFile(
-    path.join(import.meta.dir, "../../native/src/minify.rs"),
-    "utf8",
+test("final OXC pass preserves reflected function and class expression names", async () => {
+  const fixture = await createFixture();
+  const outputPath = path.join(fixture.outDir, "names.js");
+  await fs.mkdir(fixture.outDir, { recursive: true });
+  await fs.writeFile(
+    outputPath,
+    [
+      "const f = function retainedName() {};",
+      "const C = class RetainedClass {};",
+      "result.names = [f.name, C.name];",
+      "",
+    ].join("\n"),
   );
-  expect(nativeSource).toContain("top_level: Some(false)");
-  expect(nativeSource).toContain(
-    "keep_names: MangleOptionsKeepNames::all_true()",
-  );
+
+  await finalizeJavaScriptOutputs({ outputFiles: [outputPath] });
+
+  const result = {};
+  new Function("result", await fs.readFile(outputPath, "utf8"))(result);
+  expect(result.names).toEqual(["retainedName", "RetainedClass"]);
 });

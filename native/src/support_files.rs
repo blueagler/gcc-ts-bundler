@@ -10,15 +10,15 @@ pub fn collect_commonjs_specifiers(
 ) -> std::result::Result<BTreeSet<String>, String> {
     let mut specifiers = BTreeSet::new();
     for alias in package_aliases {
-        if !is_commonjs_package_target(Path::new(&alias.targetPath))? {
+        if !is_commonjs_package_target(Path::new(&alias.target_path))? {
             continue;
         }
         let specifier = if alias.subpath == "." {
-            alias.packageName.clone()
+            alias.package_name.clone()
         } else {
             format!(
                 "{}/{}",
-                alias.packageName,
+                alias.package_name,
                 alias.subpath.trim_start_matches("./")
             )
         };
@@ -42,7 +42,7 @@ pub fn emit_package_support_files(
     let root_package_names = package_aliases
         .iter()
         .filter(|alias| alias.subpath == ".")
-        .map(|alias| alias.packageName.clone())
+        .map(|alias| alias.package_name.clone())
         .collect::<BTreeSet<_>>();
 
     for package_json_file in package_json_files {
@@ -72,13 +72,13 @@ pub fn emit_package_support_files(
     }
 
     for alias in package_aliases {
-        let target_path = to_emitted_path(Path::new(&alias.targetPath), out_dir, workspace_dir);
-        let package_dir = out_dir.join("node_modules").join(&alias.packageName);
+        let target_path = to_emitted_path(Path::new(&alias.target_path), out_dir, workspace_dir);
+        let package_dir = out_dir.join("node_modules").join(&alias.package_name);
         if alias.subpath == "." {
             fs::create_dir_all(&package_dir).map_err(|error| error.to_string())?;
             let entry_file = package_dir.join("__gcc_entry__.js");
             let package_json_output = package_dir.join("package.json");
-            let module_text = if is_commonjs_package_target(Path::new(&alias.targetPath))? {
+            let module_text = if is_commonjs_package_target(Path::new(&alias.target_path))? {
                 create_commonjs_reexport_module(&entry_file, &target_path, out_dir)
             } else {
                 create_reexport_module(&entry_file, &target_path, out_dir)
@@ -90,7 +90,7 @@ pub fn emit_package_support_files(
                     "browser": "./__gcc_entry__.js",
                     "main": "./__gcc_entry__.js",
                     "module": "./__gcc_entry__.js",
-                    "name": alias.packageName,
+                    "name": alias.package_name,
                 }))
                 .map_err(|error| error.to_string())?,
             )
@@ -107,7 +107,7 @@ pub fn emit_package_support_files(
         if let Some(parent) = alias_file.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
-        let module_text = if is_commonjs_package_target(Path::new(&alias.targetPath))? {
+        let module_text = if is_commonjs_package_target(Path::new(&alias.target_path))? {
             create_commonjs_reexport_module(&alias_file, &target_path, out_dir)
         } else {
             create_reexport_module(&alias_file, &target_path, out_dir)
@@ -121,13 +121,11 @@ pub fn emit_package_support_files(
 
 fn is_commonjs_package_target(target_path: &Path) -> std::result::Result<bool, String> {
     let source_text = fs::read_to_string(target_path).map_err(|error| error.to_string())?;
-    Ok(
-        target_path.extension().and_then(|value| value.to_str()) == Some("cjs")
-            || source_text.contains("module.exports")
-            || source_text.contains("exports.")
-            || source_text.contains("exports[")
-            || source_text.contains("require("),
-    )
+    let analysis = crate::commonjs::analyze_commonjs_source(target_path, &source_text)?;
+    Ok(crate::transpile::should_normalize_commonjs(
+        target_path,
+        &analysis,
+    ))
 }
 
 fn create_reexport_module(from_path: &Path, target_path: &Path, out_dir: &Path) -> String {

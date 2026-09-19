@@ -4,6 +4,7 @@ import type { ClosureEnumDeclaration } from "../types";
 import {
   getPropertyNameText,
   hasModifier,
+  preservesConstEnumObjects,
 } from "../../../../shared/typescript";
 import { canonicalSymbolId } from "./type-render/index";
 
@@ -166,20 +167,14 @@ export function buildEnumDeclarationMetadata(
  * runs, so inlining is independent of type-metadata emission and survives
  * `GCC_DISABLE_TYPE_INFERENCE=1`.
  *
- * Decided by the two compiler options that own the question, never by a name
- * list: `preserveConstEnums` asks for the object explicitly, and
- * `isolatedModules` forbids cross-file inlining, so TypeScript itself emits a
- * real enum object in that mode and so must we.
+ * Runtime export filtering shares this policy: explicit preservation, isolated
+ * modules and verbatim module syntax retain the object TypeScript emits.
  */
 export function isErasableConstEnum(
   node: ts.EnumDeclaration,
   compilerOptions: ts.CompilerOptions,
 ) {
-  return (
-    hasConstModifier(node) &&
-    !compilerOptions.preserveConstEnums &&
-    !compilerOptions.isolatedModules
-  );
+  return hasConstModifier(node) && !preservesConstEnumObjects(compilerOptions);
 }
 
 function hasConstModifier(node: ts.EnumDeclaration) {

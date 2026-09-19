@@ -3,11 +3,8 @@ import fs from "fs/promises";
 import path from "path";
 
 import { collectFileStates } from "../native/load";
-import {
-  listRelativeFiles,
-  normalizeRelativePath,
-  uniqueSortedStrings,
-} from "./files";
+import { runWithConcurrency } from "./concurrency";
+import { normalizeRelativePath, uniqueSortedStrings } from "./files";
 
 export interface ContentIdentity {
   digest: string;
@@ -16,10 +13,6 @@ export interface ContentIdentity {
 
 export type FileContentSnapshot = Record<string, ContentIdentity>;
 
-export interface FileStateSnapshot extends ContentIdentity {
-  mtimeMs: number;
-}
-
 export interface PublishedOutputSnapshot extends ContentIdentity {
   name: string;
 }
@@ -27,8 +20,10 @@ export interface PublishedOutputSnapshot extends ContentIdentity {
 export async function collectFileContentSnapshot(
   filePaths: string[],
 ): Promise<FileContentSnapshot> {
-  const entries = await Promise.all(
-    uniqueSortedStrings(filePaths).map(async (filePath) => {
+  const entries = await runWithConcurrency(
+    uniqueSortedStrings(filePaths),
+    8,
+    async (filePath) => {
       const stat = await fs.stat(filePath);
       return [
         filePath,
@@ -37,7 +32,7 @@ export async function collectFileContentSnapshot(
           size: stat.size,
         } satisfies ContentIdentity,
       ] as const;
-    }),
+    },
   );
   return Object.fromEntries(entries);
 }
@@ -57,74 +52,9 @@ export async function fileContentSnapshotMatches(
   return fileStatesMatchSnapshot(expected, snapshot);
 }
 
-export async function collectTrackedFiles(
-  filePaths: string[],
-): Promise<Record<string, FileStateSnapshot>> {
-  const states = collectFileStates(uniqueSortedStrings(filePaths)).filter(
-    (state) => state.exists,
-  );
-  const entries = await Promise.all(
-    states.map(
-      async (state) =>
-        [
-          state.filePath,
-          {
-            digest: await hashFile(state.filePath),
-            mtimeMs: state.mtimeMs,
-            size: state.size,
-          } satisfies FileStateSnapshot,
-        ] as const,
-    ),
-  );
-  return Object.fromEntries(entries);
-}
-
-export async function trackedFilesMatch(
-  trackedFiles: Record<string, FileStateSnapshot>,
-): Promise<boolean> {
-  const expected = uniqueSortedStrings(Object.keys(trackedFiles));
-  return fileStatesMatchSnapshot(expected, trackedFiles);
-}
-
 export async function filesExist(filePaths: string[]): Promise<boolean> {
   return collectFileStates(uniqueSortedStrings(filePaths)).every(
     (state) => state.exists,
-  );
-}
-
-export async function publishedOutputsMatchSnapshot(
-  publishedOutputs: PublishedOutputSnapshot[],
-  outDir: string,
-): Promise<boolean> {
-  const expectedNames = publishedOutputs
-    .map((output) => output.name)
-    .sort((left, right) => left.localeCompare(right));
-  const actualNames = await listRelativeFiles(outDir, { onError: "empty" });
-  if (
-    actualNames.length !== expectedNames.length ||
-    actualNames.some((name, index) => name !== expectedNames[index])
-  ) {
-    return false;
-  }
-
-  const outputPaths = publishedOutputs.map(({ name }) =>
-    path.join(outDir, name),
-  );
-  const states = collectFileStates(outputPaths);
-  if (
-    states.some(
-      (state, index) =>
-        !state.exists || state.size !== publishedOutputs[index]?.size,
-    )
-  ) {
-    return false;
-  }
-
-  const digests = await Promise.all(
-    outputPaths.map((filePath) => hashFile(filePath).catch(() => null)),
-  );
-  return publishedOutputs.every(
-    (output, index) => digests[index] === output.digest,
   );
 }
 
@@ -132,8 +62,10 @@ export async function collectPublishedOutputStats(
   outputFiles: string[],
   outDir: string,
 ) {
-  const outputs = await Promise.all(
-    uniqueSortedStrings(outputFiles).map(async (filePath) => {
+  const outputs = await runWithConcurrency(
+    uniqueSortedStrings(outputFiles),
+    8,
+    async (filePath) => {
       const stat = await fs.stat(filePath);
       const name = normalizeRelativePath(path.relative(outDir, filePath));
       if (name === ".." || name.startsWith("../") || path.isAbsolute(name)) {
@@ -144,7 +76,7 @@ export async function collectPublishedOutputStats(
         name,
         size: stat.size,
       } satisfies PublishedOutputSnapshot;
-    }),
+    },
   );
   const names = new Set(outputs.map((output) => output.name));
   if (names.size !== outputs.length) {
@@ -167,8 +99,8 @@ async function fileStatesMatchSnapshot(
     return false;
   }
 
-  const digests = await Promise.all(
-    expected.map((filePath) => hashFile(filePath).catch(() => null)),
+  const digests = await runWithConcurrency(expected, 8, (filePath) =>
+    hashFile(filePath).catch(() => null),
   );
   return expected.every(
     (filePath, index) => digests[index] === snapshot[filePath]?.digest,

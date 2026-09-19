@@ -1,15 +1,13 @@
 import ts from "@typescript/typescript6";
 
 import { transpileDecoratedSource } from "../../decorators";
-import {
-  buildInterfaceDeclarationSnippet,
-  buildTypeAliasDeclarationSnippet,
-} from "../docs";
+import { buildTypeDeclarationSnippet } from "../docs";
 import {
   canonicalSymbolId,
   createClosureDocRenderContext,
 } from "../type-render/index";
 import { buildEnumDeclarationMetadata, isErasableConstEnum } from "../enums";
+import { getClosureIrSyntaxIndex } from "../scan";
 import type {
   ClosureEnumDeclaration,
   ClosureTypeDeclaration,
@@ -47,47 +45,21 @@ export function collectTypeDeclarationsForSourceFile(
     return true;
   };
 
-  for (const statement of sourceFile.statements) {
-    if (ts.isInterfaceDeclaration(statement)) {
-      if (isFirstDeclarationOfSymbol(statement)) {
-        typeDeclarations.push(
-          classifyInterfaceDeclarationSnippet(
-            buildInterfaceDeclarationSnippet(statement, checker, renderContext),
-            statement,
-            checker,
-            classOnlyInterfaceSymbolIds,
-          ),
-        );
-      }
-      continue;
-    }
-
-    if (ts.isTypeAliasDeclaration(statement)) {
-      if (isFirstDeclarationOfSymbol(statement)) {
-        typeDeclarations.push(
-          buildTypeAliasDeclarationSnippet(statement, checker, renderContext),
-        );
-      }
+  for (const statement of getClosureIrSyntaxIndex(sourceFile)
+    .typeDeclarations) {
+    if (isFirstDeclarationOfSymbol(statement)) {
+      typeDeclarations.push(
+        buildTypeDeclarationSnippet(
+          statement,
+          checker,
+          renderContext,
+          classOnlyInterfaceSymbolIds,
+        ),
+      );
     }
   }
 
   return typeDeclarations;
-}
-
-function classifyInterfaceDeclarationSnippet(
-  declaration: ClosureTypeDeclaration,
-  statement: ts.InterfaceDeclaration,
-  checker: ts.TypeChecker,
-  classOnlyInterfaceSymbolIds: ReadonlySet<string>,
-): ClosureTypeDeclaration {
-  const symbol = checker.getSymbolAtLocation(statement.name);
-  if (!symbol || !classOnlyInterfaceSymbolIds.has(canonicalSymbolId(symbol))) {
-    return declaration;
-  }
-  return {
-    ...declaration,
-    template: declaration.template.replace(" * @record\n", " * @interface\n"),
-  };
 }
 
 export function collectClassOnlyInterfaceSymbolIds(
@@ -139,7 +111,7 @@ export function collectClassOnlyInterfaceSymbolIds(
     if (program.isSourceFileDefaultLibrary(sourceFile)) {
       continue;
     }
-    const visit = (node: ts.Node) => {
+    for (const node of getClosureIrSyntaxIndex(sourceFile).interfaceUses) {
       if (ts.isClassDeclaration(node) && isAnnotatedClass(node, sourceFile)) {
         for (const clause of node.heritageClauses ?? []) {
           if (clause.token !== ts.SyntaxKind.ImplementsKeyword) {
@@ -184,10 +156,7 @@ export function collectClassOnlyInterfaceSymbolIds(
           // keep @record
         }
       }
-
-      ts.forEachChild(node, visit);
-    };
-    visit(sourceFile);
+    }
   }
 
   const classOnly = new Set<string>();
@@ -207,11 +176,7 @@ export function collectEnumDeclarationsForSourceFile(
 ) {
   const enumDeclarations: ClosureEnumDeclaration[] = [];
 
-  for (const statement of sourceFile.statements) {
-    if (!ts.isEnumDeclaration(statement)) {
-      continue;
-    }
-
+  for (const statement of getClosureIrSyntaxIndex(sourceFile).enums) {
     if (isErasableConstEnum(statement, compilerOptions)) {
       continue;
     }

@@ -1,4 +1,8 @@
+import ts from "@typescript/typescript6";
+
 import { hashContent } from "../../shared/hash";
+import { applyTextEdits, type TextEdit } from "../../shared/text-edits";
+import { getCapturedSourceFile } from "../capture-analysis";
 
 import { normalizeRetainedCapturedModules } from "../capture";
 import type { CapturedModuleResolutionCache } from "../capture";
@@ -65,6 +69,7 @@ export async function normalizeCapturedGraph(
       this,
       normalizedCapturedModules,
       input.bundle,
+      input.buildMetrics,
     );
     return {
       assetPlaceholders,
@@ -80,11 +85,16 @@ function canonicalizeViteAssetPlaceholders(
   this: PluginContext,
   capturedModules: Map<string, CapturedModule>,
   bundle: OutputBundle,
+  metrics: ViteBuildMetrics,
 ): ViteAssetPlaceholder[] {
   const canonicalByCurrent: Record<string, string> = {};
   const assetDigestByReferenceId: Record<string, string> = {};
+  const fileReferences: ViteAssetPlaceholder[] = [];
 
   for (const record of capturedModules.values()) {
+    fileReferences.push(
+      ...canonicalizeFileUrlReferences.call(this, record, bundle, metrics),
+    );
     for (const match of record.code.matchAll(VITE_ASSET_PLACEHOLDER)) {
       collectCanonicalAssetToken.call(
         this,
@@ -98,16 +108,79 @@ function canonicalizeViteAssetPlaceholders(
 
   const replacements = Object.entries(canonicalByCurrent);
   if (replacements.length === 0) {
-    return [];
+    return fileReferences;
   }
 
   for (const record of capturedModules.values()) {
     rewriteAssetPlaceholderTokens(record, replacements);
   }
 
-  return replacements
-    .map(([current, canonical]) => ({ canonical, current }))
-    .sort((left, right) => left.canonical.localeCompare(right.canonical));
+  return [
+    ...fileReferences,
+    ...replacements.map(([current, canonical]) => ({ canonical, current })),
+  ].sort((left, right) => left.canonical.localeCompare(right.canonical));
+}
+
+function canonicalizeFileUrlReferences(
+  this: PluginContext,
+  record: CapturedModule,
+  bundle: OutputBundle,
+  metrics: ViteBuildMetrics,
+): ViteAssetPlaceholder[] {
+  if (!record.code.includes("import.meta")) return [];
+  const sourceFile = getCapturedSourceFile(record, record.code, metrics);
+  const placeholders: ViteAssetPlaceholder[] = [];
+  const edits: TextEdit[] = [];
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      ts.isMetaProperty(node.expression) &&
+      node.expression.keywordToken === ts.SyntaxKind.ImportKeyword
+    ) {
+      const match = /^(ROLLDOWN|ROLLUP)_FILE_URL_(.*)$/u.exec(node.name.text);
+      if (match?.[2]) {
+        // Rolldown's file_url parser uses the fixed 22-character base64url
+        // reference width, not an underscore delimiter within the reference.
+        // The Rollup-compatible prefix never carries separate URL metadata.
+        const reference = match[2];
+        const hasUrlId = match[1] === "ROLLDOWN" && reference[22] === "_";
+        const referenceId = hasUrlId ? reference.slice(0, 22) : reference;
+        const urlId = hasUrlId ? reference.slice(23) || undefined : undefined;
+        const fileName = this.getFileName(referenceId);
+        const output = bundle[fileName];
+        if (!output) {
+          this.error(
+            `gccTsBundler() could not identify emitted file ${referenceId}.`,
+          );
+        }
+        const content = output.type === "asset" ? output.source : output.code;
+        // The host's reference/url ids belong to this output. Only the asset
+        // content and reference kind enter compiler input; resolveFileUrl reads
+        // the current host metadata again after chunk placement is known.
+        const canonical = `__GCC_VITE_FILE_URL__${hashContent(
+          `${fileName}\0${String(content)}\0${urlId === undefined ? "asset" : "url"}`,
+        )}__`;
+        placeholders.push({
+          canonical,
+          current: node.getText(sourceFile),
+          fileReference: { moduleId: record.id, referenceId, urlId },
+        });
+        edits.push({
+          start: node.getStart(sourceFile),
+          end: node.end,
+          text: JSON.stringify(canonical),
+        });
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  if (edits.length > 0) {
+    record.code = applyTextEdits(record.code, edits);
+    record.normalizedCode = record.code;
+  }
+  return placeholders;
 }
 
 function collectCanonicalAssetToken(

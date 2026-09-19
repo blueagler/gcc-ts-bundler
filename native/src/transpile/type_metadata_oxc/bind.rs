@@ -1,8 +1,11 @@
 //! Oxc binding of type metadata onto program identities.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    BindingIdentifier, Declaration, ExportDefaultDeclarationKind, Program, Statement,
+};
 
 use super::super::emit_runtime::binding_names_with_ids;
 use super::super::identity::{BindingKey, BindingKeyMap, ModuleIdentity};
@@ -13,35 +16,34 @@ use crate::closure_metadata::{
 };
 
 #[derive(Clone, Debug)]
-pub(crate) struct BoundTypeMetadata {
-    pub(super) binding_annotations: BindingKeyMap<Vec<ClosureAnnotation>>,
+pub(crate) struct BoundTypeMetadata<'m> {
+    pub(super) binding_annotations: BindingKeyMap<Vec<&'m ClosureAnnotation>>,
     pub(super) declared_value_bindings: HashMap<String, BindingKey>,
     pub(super) diagnostics: Vec<TypeMetadataDiagnostic>,
     pub(super) enabled: bool,
-    pub(super) member_annotations: BindingKeyMap<Vec<ClosureAnnotation>>,
-    pub(super) metadata: ClosureFileMetadata,
+    pub(super) member_annotations: BindingKeyMap<Vec<&'m ClosureAnnotation>>,
+    pub(super) metadata: Cow<'m, ClosureFileMetadata>,
     pub(super) runtime_symbol_bindings: HashMap<String, BindingKey>,
-    pub(super) symbols_by_id: HashMap<String, ClosureTypeSymbol>,
+    pub(super) symbols_by_id: HashMap<&'m str, &'m ClosureTypeSymbol>,
 }
 
-impl BoundTypeMetadata {
+impl<'m> BoundTypeMetadata<'m> {
     pub(crate) fn bind(
         program: &Program<'_>,
-        identity: &ModuleIdentity,
-        metadata: Option<&ClosureFileMetadata>,
+        metadata: Option<&'m ClosureFileMetadata>,
         enabled: bool,
-    ) -> Self {
-        let metadata = metadata.cloned().unwrap_or_else(empty_metadata);
+    ) -> Result<Self, String> {
+        let annotations = metadata.map_or(&[][..], |metadata| metadata.annotations.as_slice());
         let symbols_by_id = metadata
-            .symbols
-            .iter()
-            .cloned()
-            .map(|symbol| (symbol.id.clone(), symbol))
+            .into_iter()
+            .flat_map(|metadata| &metadata.symbols)
+            .map(|symbol| (symbol.id.as_str(), symbol))
             .collect::<HashMap<_, _>>();
-        let top_level_bindings = collect_top_level_bindings(program, identity);
+        let metadata = metadata.map_or_else(|| Cow::Owned(empty_metadata()), Cow::Borrowed);
+        let top_level_bindings = collect_top_level_bindings(program)?;
         let mut diagnostics = metadata.diagnostics.clone();
-        let mut binding_annotations = BindingKeyMap::<Vec<ClosureAnnotation>>::new();
-        let mut member_annotations = BindingKeyMap::<Vec<ClosureAnnotation>>::new();
+        let mut binding_annotations = BindingKeyMap::<Vec<&ClosureAnnotation>>::new();
+        let mut member_annotations = BindingKeyMap::<Vec<&ClosureAnnotation>>::new();
         let mut runtime_symbol_bindings = HashMap::new();
 
         for symbol in &metadata.symbols {
@@ -60,7 +62,7 @@ impl BoundTypeMetadata {
         // meaning through the same specifier. Annotating with a synthesized
         // record instead mints a second, nominally incompatible type for a
         // class that the job already compiles.
-        let import_bindings = collect_import_bindings(program, identity);
+        let import_bindings = collect_import_bindings(program)?;
         let mut declared_value_bindings = HashMap::new();
         for symbol in &metadata.symbols {
             if symbol.kind != "declared" {
@@ -76,14 +78,14 @@ impl BoundTypeMetadata {
         }
 
         if enabled {
-            for annotation in &metadata.annotations {
+            for annotation in annotations {
                 match &annotation.target {
                     ClosureAnnotationTarget::Binding { binding_name } => {
                         if let Some(binding) = unique_binding(&top_level_bindings, binding_name) {
                             binding_annotations
                                 .entry(binding)
                                 .or_default()
-                                .push(annotation.clone());
+                                .push(annotation);
                         } else {
                             diagnostics.push(TypeMetadataDiagnostic::delivery(
                                 &metadata,
@@ -105,7 +107,7 @@ impl BoundTypeMetadata {
                             member_annotations
                                 .entry(binding)
                                 .or_default()
-                                .push(annotation.clone());
+                                .push(annotation);
                         } else {
                             diagnostics.push(TypeMetadataDiagnostic::delivery(
                                 &metadata,
@@ -125,7 +127,7 @@ impl BoundTypeMetadata {
             }
         }
 
-        Self {
+        Ok(Self {
             binding_annotations,
             declared_value_bindings,
             diagnostics,
@@ -134,7 +136,7 @@ impl BoundTypeMetadata {
             metadata,
             runtime_symbol_bindings,
             symbols_by_id,
-        }
+        })
     }
 
     pub(crate) fn runtime_binding_ids(&self) -> impl Iterator<Item = &BindingKey> {
@@ -146,10 +148,9 @@ impl BoundTypeMetadata {
 
 pub(crate) fn runtime_type_names_from_program(
     program: &Program<'_>,
-    identity: &ModuleIdentity,
-    bound: &BoundTypeMetadata,
-) -> BindingKeyMap<RuntimeTypeName> {
-    let current_names = collect_top_level_bindings(program, identity)
+    bound: &BoundTypeMetadata<'_>,
+) -> Result<BindingKeyMap<RuntimeTypeName>, String> {
+    let current_names = collect_top_level_bindings(program)?
         .into_iter()
         .flat_map(|(name, bindings)| {
             bindings
@@ -157,7 +158,7 @@ pub(crate) fn runtime_type_names_from_program(
                 .map(move |binding| (binding, RuntimeTypeName::Name(name.clone())))
         })
         .collect::<BindingKeyMap<_>>();
-    bound
+    Ok(bound
         .runtime_binding_ids()
         .filter_map(|binding| {
             current_names
@@ -165,128 +166,125 @@ pub(crate) fn runtime_type_names_from_program(
                 .cloned()
                 .map(|name| (*binding, name))
         })
-        .collect()
+        .collect())
 }
 
-pub(crate) fn declared_statement_ids(
-    statement: &Statement<'_>,
-    identity: &ModuleIdentity,
-) -> Vec<BindingKey> {
+pub(crate) fn declared_statement_ids(statement: &Statement<'_>) -> Result<Vec<BindingKey>, String> {
     match statement {
         Statement::FunctionDeclaration(function) => function
             .id
             .iter()
-            .map(|binding| identity.key_of_binding(binding))
+            .map(ModuleIdentity::key_of_binding)
             .collect(),
         Statement::ClassDeclaration(class) => class
             .id
             .iter()
-            .map(|binding| identity.key_of_binding(binding))
+            .map(ModuleIdentity::key_of_binding)
             .collect(),
-        Statement::VariableDeclaration(declaration) => declaration
-            .declarations
-            .iter()
-            .flat_map(|declarator| binding_names_with_ids(&declarator.id, identity))
-            .map(|(binding, _)| binding)
-            .collect(),
-        _ => Vec::new(),
+        Statement::VariableDeclaration(declaration) => {
+            let mut bindings = Vec::new();
+            for declarator in &declaration.declarations {
+                bindings.extend(
+                    binding_names_with_ids(&declarator.id)?
+                        .into_iter()
+                        .map(|(binding, _)| binding),
+                );
+            }
+            Ok(bindings)
+        }
+        _ => Ok(Vec::new()),
     }
 }
 
 pub(super) fn collect_top_level_bindings(
     program: &Program<'_>,
-    identity: &ModuleIdentity,
-) -> HashMap<String, Vec<BindingKey>> {
+) -> Result<HashMap<String, Vec<BindingKey>>, String> {
     let mut bindings = HashMap::<String, Vec<BindingKey>>::new();
     for statement in &program.body {
         match statement {
             Statement::ImportDeclaration(import) => {
                 for specifier in import.specifiers.iter().flatten() {
                     let local = specifier.local();
-                    push_binding(&mut bindings, local, identity);
+                    push_binding(&mut bindings, local)?;
                 }
             }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(declaration) = &export.declaration {
-                    add_declaration_bindings(&mut bindings, declaration, identity);
-                }
+            Statement::ExportDeclaration(export) => {
+                add_declaration_bindings(&mut bindings, &export.declaration)?;
             }
             Statement::ExportDefaultDeclaration(export) => match &export.declaration {
                 ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
                     if let Some(binding) = &function.id {
-                        push_binding(&mut bindings, binding, identity);
+                        push_binding(&mut bindings, binding)?;
                     }
                 }
                 ExportDefaultDeclarationKind::ClassDeclaration(class) => {
                     if let Some(binding) = &class.id {
-                        push_binding(&mut bindings, binding, identity);
+                        push_binding(&mut bindings, binding)?;
                     }
                 }
                 _ => {}
             },
             _ => {
                 if let Some(declaration) = statement.as_declaration() {
-                    add_declaration_bindings(&mut bindings, declaration, identity);
+                    add_declaration_bindings(&mut bindings, declaration)?;
                 }
             }
         }
     }
-    bindings
+    Ok(bindings)
 }
 
 fn collect_import_bindings(
     program: &Program<'_>,
-    identity: &ModuleIdentity,
-) -> HashMap<String, Vec<BindingKey>> {
+) -> Result<HashMap<String, Vec<BindingKey>>, String> {
     let mut bindings = HashMap::<String, Vec<BindingKey>>::new();
     for statement in &program.body {
         if let Statement::ImportDeclaration(import) = statement {
             for specifier in import.specifiers.iter().flatten() {
-                push_binding(&mut bindings, specifier.local(), identity);
+                push_binding(&mut bindings, specifier.local())?;
             }
         }
     }
-    bindings
+    Ok(bindings)
 }
 
 fn add_declaration_bindings(
     bindings: &mut HashMap<String, Vec<BindingKey>>,
     declaration: &Declaration<'_>,
-    identity: &ModuleIdentity,
-) {
+) -> Result<(), String> {
     match declaration {
         Declaration::VariableDeclaration(declaration) => {
-            for (binding, name) in declaration
-                .declarations
-                .iter()
-                .flat_map(|declarator| binding_names_with_ids(&declarator.id, identity))
-            {
-                bindings.entry(name).or_default().push(binding);
+            for declarator in &declaration.declarations {
+                for (binding, name) in binding_names_with_ids(&declarator.id)? {
+                    bindings.entry(name).or_default().push(binding);
+                }
             }
         }
         Declaration::FunctionDeclaration(function) => {
             if let Some(binding) = &function.id {
-                push_binding(bindings, binding, identity);
+                push_binding(bindings, binding)?;
             }
         }
         Declaration::ClassDeclaration(class) => {
             if let Some(binding) = &class.id {
-                push_binding(bindings, binding, identity);
+                push_binding(bindings, binding)?;
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn push_binding(
     bindings: &mut HashMap<String, Vec<BindingKey>>,
     binding: &BindingIdentifier<'_>,
-    identity: &ModuleIdentity,
-) {
+) -> Result<(), String> {
+    let key = ModuleIdentity::key_of_binding(binding)?;
     bindings
         .entry(binding.name.to_string())
         .or_default()
-        .push(identity.key_of_binding(binding));
+        .push(key);
+    Ok(())
 }
 
 pub(super) fn unique_binding(

@@ -1,4 +1,8 @@
-use super::*;
+use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
+
+use super::LazyImportEntry;
+use crate::utils::path_relative_to;
 
 mod bundler;
 mod off;
@@ -10,10 +14,10 @@ pub(crate) fn dedupe_lazy_imports(lazy_imports: &[LazyImportEntry]) -> Vec<LazyI
     let mut positions = HashMap::<String, usize>::new();
     let mut deduped = Vec::new();
     for lazy_import in lazy_imports {
-        if let Some(position) = positions.get(&lazy_import.moduleId).copied() {
+        if let Some(position) = positions.get(&lazy_import.module_id).copied() {
             deduped[position] = lazy_import.clone();
         } else {
-            positions.insert(lazy_import.moduleId.clone(), deduped.len());
+            positions.insert(lazy_import.module_id.clone(), deduped.len());
             deduped.push(lazy_import.clone());
         }
     }

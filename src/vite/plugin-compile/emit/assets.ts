@@ -18,7 +18,7 @@ import {
 
 function finalizeBaseFromRename(
   compiled: CompiledViteGraph,
-  renamed: CompiledEmitRenames,
+  renamed: Omit<CompiledEmitRenames, "chunkModuleIds">,
   outputOptions: NormalizedOutputOptions,
 ) {
   return finalizeBaseJsOutputName({
@@ -27,6 +27,7 @@ function finalizeBaseFromRename(
     chunkOutputType: compiled.chunkOutputType,
     deferredChunkSeeds: renamed.deferredChunkSeeds,
     emittedOutputFiles: renamed.emittedOutputFiles,
+    manifest: renamed.manifest,
     manifestFilePath: compiled.manifestFilePath,
     outputOptions,
     outDir: compiled.compiledCoreOutputs.finalOutDir,
@@ -62,7 +63,11 @@ export async function resolveCompiledEmitAssets(
     return preliminaryBaseOutput;
   }
   const finalRenamedOutputs = await renameCompiledNonBaseJsOutputs(
-    compiledRenameInput(input, preliminaryBaseOutput.emittedOutputFiles),
+    compiledRenameInput(
+      input,
+      preliminaryBaseOutput.emittedOutputFiles,
+      renamedNonBaseOutputs,
+    ),
   );
   return finalizeBaseFromRename(
     compiled,

@@ -1,7 +1,11 @@
 //! JavaScript pass-through compatibility emitter.
 
-use oxc_allocator::{Allocator, FromIn, TakeIn};
-use oxc_ast::ast::*;
+use oxc_allocator::{Allocator, FromIn, ReplaceWith};
+use oxc_ast::ast::{
+    ArrowFunctionExpression, BindingPattern, ExportAllDeclaration, ExportFromDeclaration,
+    Expression, Function, ImportDeclaration, ImportExpression, NumberBase, Program, Statement,
+    StringLiteral, VariableDeclaration, VariableDeclarationKind,
+};
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_span::SPAN;
@@ -18,19 +22,19 @@ pub(crate) fn apply_program_transforms<'a>(
     program: &mut Program<'a>,
     identity: &ModuleIdentity,
     source: &str,
-) {
-    strip_helper_global_fallback(allocator, program);
-    let properties = collect_global_this_compat_property_names(program, identity);
+) -> Result<(), String> {
+    strip_helper_global_fallback(program);
+    let properties = collect_global_this_compat_property_names(program, identity)?;
     if !properties.is_empty() {
         GlobalThisCompatVisitor::new(allocator, identity, properties).visit_program(program);
     }
     ProcessEnvNodeEnvVisitor::new(allocator, identity).visit_program(program);
     JsCompatAstVisitor::new(allocator, source_declares_ident(source, "T")).visit_program(program);
     DirectoryModuleSpecifierVisitor::new(allocator).visit_program(program);
+    Ok(())
 }
 
-fn strip_helper_global_fallback<'a>(allocator: &'a Allocator, program: &mut Program<'a>) {
-    let builder = AstBuilder::new(allocator);
+fn strip_helper_global_fallback(program: &mut Program<'_>) {
     for statement in &mut program.body {
         let Statement::VariableDeclaration(declaration) = statement else {
             continue;
@@ -42,11 +46,15 @@ fn strip_helper_global_fallback<'a>(allocator: &'a Allocator, program: &mut Prog
             if !super::super::emit_helpers::is_shared_helper_base_name(binding.name.as_str()) {
                 continue;
             }
-            let Some(Expression::LogicalExpression(initializer)) = &mut declarator.init else {
-                continue;
-            };
-            if initializer.operator == LogicalOperator::Or {
-                declarator.init = Some(initializer.right.take_in(&builder));
+            if let Some(initializer) = &mut declarator.init {
+                if matches!(initializer, Expression::LogicalExpression(logical)
+                    if logical.operator == LogicalOperator::Or)
+                {
+                    initializer.replace_with(|expression| match expression {
+                        Expression::LogicalExpression(logical) => logical.unbox().right,
+                        expression => expression,
+                    });
+                }
             }
         }
     }
@@ -116,10 +124,6 @@ impl<'a> JsCompatAstVisitor<'a> {
         Statement::new_empty_statement(SPAN, &self.builder)
     }
 
-    fn empty_expression(&self) -> Expression<'a> {
-        Expression::new_null_literal(SPAN, &self.builder)
-    }
-
     fn void_zero(&self) -> Expression<'a> {
         Expression::new_unary_expression(
             SPAN,
@@ -147,14 +151,19 @@ impl<'a> VisitMut<'a> for JsCompatAstVisitor<'a> {
         if dropped.is_some_and(branch_declares_hoisted_bindings) {
             return;
         }
-        *statement = if test_value {
-            std::mem::replace(&mut if_statement.consequent, self.empty_statement())
-        } else {
-            if_statement
-                .alternate
-                .take()
-                .unwrap_or_else(|| self.empty_statement())
-        };
+        statement.replace_with(|statement| match statement {
+            Statement::IfStatement(if_statement) => {
+                let if_statement = if_statement.unbox();
+                if test_value {
+                    if_statement.consequent
+                } else {
+                    if_statement
+                        .alternate
+                        .unwrap_or_else(|| self.empty_statement())
+                }
+            }
+            statement => statement,
+        });
     }
 
     fn visit_expression(&mut self, expression: &mut Expression<'a>) {
@@ -162,11 +171,17 @@ impl<'a> VisitMut<'a> for JsCompatAstVisitor<'a> {
 
         if let Expression::ConditionalExpression(conditional) = expression {
             if let Some(test_value) = evaluate_boolean_expr(&conditional.test) {
-                *expression = if test_value {
-                    std::mem::replace(&mut conditional.consequent, self.empty_expression())
-                } else {
-                    std::mem::replace(&mut conditional.alternate, self.empty_expression())
-                };
+                expression.replace_with(|expression| match expression {
+                    Expression::ConditionalExpression(conditional) => {
+                        let conditional = conditional.unbox();
+                        if test_value {
+                            conditional.consequent
+                        } else {
+                            conditional.alternate
+                        }
+                    }
+                    expression => expression,
+                });
                 return;
             }
         }
@@ -178,11 +193,17 @@ impl<'a> VisitMut<'a> for JsCompatAstVisitor<'a> {
                     LogicalOperator::Or => left_value,
                     LogicalOperator::Coalesce => return,
                 };
-                *expression = if take_left {
-                    std::mem::replace(&mut logical.left, self.empty_expression())
-                } else {
-                    std::mem::replace(&mut logical.right, self.empty_expression())
-                };
+                expression.replace_with(|expression| match expression {
+                    Expression::LogicalExpression(logical) => {
+                        let logical = logical.unbox();
+                        if take_left {
+                            logical.left
+                        } else {
+                            logical.right
+                        }
+                    }
+                    expression => expression,
+                });
                 return;
             }
         }
@@ -298,11 +319,9 @@ impl<'a> VisitMut<'a> for DirectoryModuleSpecifierVisitor<'a> {
         walk_mut::walk_import_declaration(self, declaration);
     }
 
-    fn visit_export_named_declaration(&mut self, declaration: &mut ExportNamedDeclaration<'a>) {
-        if let Some(source) = &mut declaration.source {
-            self.rewrite(source);
-        }
-        walk_mut::walk_export_named_declaration(self, declaration);
+    fn visit_export_from_declaration(&mut self, declaration: &mut ExportFromDeclaration<'a>) {
+        self.rewrite(&mut declaration.source);
+        walk_mut::walk_export_from_declaration(self, declaration);
     }
 
     fn visit_export_all_declaration(&mut self, declaration: &mut ExportAllDeclaration<'a>) {
@@ -320,10 +339,8 @@ impl<'a> VisitMut<'a> for DirectoryModuleSpecifierVisitor<'a> {
 
 fn source_declares_ident(source: &str, name: &str) -> bool {
     let pattern = format!(
-        r#"(?m)\b(?:var|let|const|function|class|import)\s+{}\b"#,
+        r"(?m)\b(?:var|let|const|function|class|import)\s+{}\b",
         regex::escape(name)
     );
-    regex::Regex::new(&pattern)
-        .map(|regex| regex.is_match(source))
-        .unwrap_or(false)
+    regex::Regex::new(&pattern).is_ok_and(|regex| regex.is_match(source))
 }

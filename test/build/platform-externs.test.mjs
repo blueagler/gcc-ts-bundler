@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 
 import { generatePlatformExternsText } from "../../src/build/closure/platform-externs/generate.ts";
 import {
@@ -21,28 +21,16 @@ import { platformExternParserDigest } from "../../src/build/closure/platform-ext
  */
 const FILE_TOKEN = `${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
 
-/**
- * One cache root for this whole file.
- *
- * The unit cache is keyed by jar + parser only, so its entries are shared by
- * every project on the machine. A test that let it default once left a
- * `units.*.<jarHash>-changed.json.gz` fixture sitting in the developer's real
- * cache directory. Scoping is per *file* rather than per call because the
- * process-wide memo in `loadPlatformExternArchive` means only the first
- * caller's root is ever honoured anyway — a fresh root per call created an
- * illusion of isolation that the memo silently discarded.
- */
+// All fixture cache roots live under one owned temporary tree. Most cases
+// reuse its root; memo-isolation cases create distinct children.
 const FILE_CACHE_ROOT = await fs.mkdtemp(
   path.join(os.tmpdir(), `gcc-extern-cache-${FILE_TOKEN}-`),
 );
 const testCacheRoot = { cacheRoot: FILE_CACHE_ROOT };
 
-/** For the one test that needs two roots to prove they do not share a memo. */
 async function makeDistinctCacheRoot() {
   return {
-    cacheRoot: await fs.mkdtemp(
-      path.join(os.tmpdir(), `gcc-extern-cache-${FILE_TOKEN}-alt-`),
-    ),
+    cacheRoot: await fs.mkdtemp(path.join(FILE_CACHE_ROOT, "alt-")),
   };
 }
 
@@ -59,31 +47,16 @@ async function listSharedCacheEntries() {
   }
 }
 
-/**
- * The only two things that may legitimately appear in the machine-shared root.
- *
- * Both are keyed by `(compiler jar, parser)` alone, so they are genuinely
- * machine-global and any project may warm them. Everything else is a leak —
- * including `slice.*`, which is keyed by *program content* and therefore lives
- * in the project cache, never here.
- */
-function isLegitimateSharedEntry(name) {
-  return (
-    name === "archive-id.json" ||
-    /^units\.[0-9a-f]{16}\.[0-9a-f]+\.json\.gz$/u.test(name)
+afterAll(async () => {
+  const ownedSharedEntries = (await listSharedCacheEntries()).filter((entry) =>
+    entry.includes(FILE_TOKEN),
   );
-}
-
-// Taken at module load, before any test body runs, so the assertion cannot
-// pass merely because an earlier test in this file already wrote the entry.
-const sharedCacheBeforeFile = new Set(await listSharedCacheEntries());
-
-test("loads the compiler extern archive through its package dependency context", async () => {
-  const archive = await loadPlatformExternArchive(testCacheRoot);
-  expect(archive).not.toBeNull();
-  expect((await archive?.entries()).some((entry) => entry.name.startsWith("browser/"))).toBe(
-    true,
-  );
+  await Promise.all([
+    fs.rm(FILE_CACHE_ROOT, { force: true, recursive: true }),
+    ...ownedSharedEntries.map((entry) =>
+      fs.rm(path.join(SHARED_CACHE_DIR, entry), { force: true, recursive: true }),
+    ),
+  ]);
 });
 
 test("indexes typed declarations, owners, heritage, and overrides", async () => {
@@ -167,42 +140,26 @@ test("caches indexes by compiler jar hash", async () => {
   expect(otherRoot).not.toBe(first);
 });
 
-/**
- * The regression for the defect itself: this file must never write the
-  * machine-shared cache.
- *
- * It cannot assert byte-identity of that directory. `bun test` runs test files
-  * concurrently in one process, and files that call the real `build()`
-  * legitimately warm the shared unit cache mid-window — so byte-identity
-  * failed intermittently and told us nothing about this file (W2-mangle note 1).
-  * The assertion is therefore by *attribution*: nothing bearing this file's
-  * token may appear, and anything that did appear must be one of the two
-  * genuinely machine-global entry shapes. That is immune to concurrent warms
-  * and strictly stronger where it counts — it also fails on a `slice.*` entry,
-  * which is keyed by program content and must live in the project cache.
- */
+// Attribute writes to this fixture's token, never to unrelated machine-cache
+// entries that another test, process, or previous invocation may have created.
 test("test runs never write the machine-shared extern cache", async () => {
   const archive = await loadPlatformExternArchive(testCacheRoot);
   expect(archive).not.toBeNull();
-  await getPlatformExternIndex(archive, testCacheRoot);
+  const jarHash = `${archive.jarHash}-changed-${FILE_TOKEN}`;
+  await getPlatformExternIndex(
+    { entries: archive.entries, jarHash },
+    testCacheRoot,
+  );
   await generatePlatformExternsText([], [], testCacheRoot);
 
-  const after = await listSharedCacheEntries();
-
-  // Nothing this file fabricated may reach the shared root. The token makes
-  // this unambiguous: no concurrent build can invent it.
-  expect(after.filter((entry) => entry.includes(FILE_TOKEN))).toEqual([]);
-  // The specific fixture shape that leaked before this was fixed, in the
-  // whole directory rather than only the pre-file snapshot.
-  expect(after.filter((entry) => entry.includes("-changed"))).toEqual([]);
-
-  // Anything that appeared during the window must be a legitimate warm by a
-  // concurrent test file, not a new or misplaced entry shape.
-  expect(
-    after
-      .filter((entry) => !sharedCacheBeforeFile.has(entry))
-      .filter((entry) => !isLegitimateSharedEntry(entry)),
-  ).toEqual([]);
+  const written = await fs.readdir(
+    path.join(FILE_CACHE_ROOT, "platform-externs"),
+  );
+  expect(written).toContain(
+    `units.${platformExternParserDigest()}.${jarHash}.json.gz`,
+  );
+  const sharedEntries = await listSharedCacheEntries();
+  expect(sharedEntries.filter((entry) => entry.includes(FILE_TOKEN))).toEqual([]);
 });
 
 /**

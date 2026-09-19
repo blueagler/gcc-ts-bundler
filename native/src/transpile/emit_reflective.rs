@@ -2,7 +2,12 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    AssignmentExpression, BinaryExpression, BindingPattern, CallExpression,
+    ComputedMemberExpression, Declaration, Expression, ForInStatement, ForStatementLeft,
+    FormalParameters, Function, FunctionBody, Program, SimpleAssignmentTarget, Statement,
+    VariableDeclarator,
+};
 use oxc_ast_visit::{walk, Visit};
 use oxc_syntax::operator::BinaryOperator;
 
@@ -11,22 +16,30 @@ use super::identity::{BindingKey, BindingKeyMap, BindingKeySet, ModuleIdentity};
 pub(crate) fn collect_reflective_property_names(
     program: &Program<'_>,
     identity: &ModuleIdentity,
-) -> BTreeSet<String> {
+) -> Result<BTreeSet<String>, String> {
     let mut lists = ReflectiveListBindings {
-        identity,
+        error: None,
         lists: HashMap::new(),
     };
     lists.visit_program(program);
+    if let Some(error) = lists.error {
+        return Err(error);
+    }
 
     let mut functions = LocalFunctionRoles {
+        error: None,
         ambiguous: HashSet::new(),
         identity,
         roles: HashMap::new(),
     };
     functions.visit_program(program);
+    if let Some(error) = functions.error.take() {
+        return Err(error);
+    }
     functions.drop_ambiguous_bindings();
 
     let mut collector = ReflectiveKeys {
+        error: None,
         for_in_bindings: HashSet::new(),
         functions,
         identity,
@@ -34,7 +47,7 @@ pub(crate) fn collect_reflective_property_names(
         names: BTreeSet::new(),
     };
     collector.visit_program(program);
-    collector.names
+    collector.error.map_or(Ok(collector.names), Err)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,12 +56,12 @@ enum ParameterRole {
     ExclusionList,
 }
 
-struct ReflectiveListBindings<'a> {
-    identity: &'a ModuleIdentity,
+struct ReflectiveListBindings {
+    error: Option<String>,
     lists: BindingKeyMap<Vec<String>>,
 }
 
-impl<'a> Visit<'a> for ReflectiveListBindings<'_> {
+impl<'a> Visit<'a> for ReflectiveListBindings {
     fn visit_variable_declarator(&mut self, declarator: &VariableDeclarator<'a>) {
         walk::walk_variable_declarator(self, declarator);
         let BindingPattern::BindingIdentifier(binding) = &declarator.id else {
@@ -58,13 +71,20 @@ impl<'a> Visit<'a> for ReflectiveListBindings<'_> {
             return;
         };
         if let Some(values) = string_list(initializer) {
-            self.lists
-                .insert(self.identity.key_of_binding(binding), values);
+            match ModuleIdentity::key_of_binding(binding) {
+                Ok(binding) => {
+                    self.lists.insert(binding, values);
+                }
+                Err(error) => {
+                    self.error.get_or_insert(error);
+                }
+            }
         }
     }
 }
 
 struct LocalFunctionRoles<'a> {
+    error: Option<String>,
     roles: BindingKeyMap<Vec<Option<ParameterRole>>>,
     ambiguous: BindingKeySet,
     identity: &'a ModuleIdentity,
@@ -77,15 +97,16 @@ impl LocalFunctionRoles<'_> {
         }
     }
 
-    fn record_function(&mut self, function: &Function<'_>) {
+    fn record_function(&mut self, function: &Function<'_>) -> Result<(), String> {
         let (Some(binding), Some(body)) = (&function.id, &function.body) else {
-            return;
+            return Ok(());
         };
-        let parameters = formal_parameter_ids(&function.params, self.identity);
+        let parameters = formal_parameter_ids(&function.params)?;
         self.record(
-            self.identity.key_of_binding(binding),
-            classify_parameters(&parameters, body, self.identity),
+            ModuleIdentity::key_of_binding(binding)?,
+            classify_parameters(&parameters, body, self.identity)?,
         );
+        Ok(())
     }
 
     fn drop_ambiguous_bindings(&mut self) {
@@ -102,14 +123,16 @@ impl LocalFunctionRoles<'_> {
 impl<'a> Visit<'a> for LocalFunctionRoles<'_> {
     fn visit_statement(&mut self, statement: &Statement<'a>) {
         walk::walk_statement(self, statement);
-        match statement {
+        let result = match statement {
             Statement::FunctionDeclaration(function) => self.record_function(function),
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(Declaration::FunctionDeclaration(function)) = &export.declaration {
-                    self.record_function(function);
-                }
-            }
-            _ => {}
+            Statement::ExportDeclaration(export) => match &export.declaration {
+                Declaration::FunctionDeclaration(function) => self.record_function(function),
+                _ => Ok(()),
+            },
+            _ => Ok(()),
+        };
+        if let Err(error) = result {
+            self.error.get_or_insert(error);
         }
     }
 
@@ -126,21 +149,25 @@ impl<'a> Visit<'a> for LocalFunctionRoles<'_> {
                 let Some(body) = &function.body else {
                     return;
                 };
-                (
-                    formal_parameter_ids(&function.params, self.identity),
-                    &**body,
-                )
+                (formal_parameter_ids(&function.params), &**body)
             }
-            Expression::ArrowFunctionExpression(arrow) if !arrow.expression => (
-                formal_parameter_ids(&arrow.params, self.identity),
-                &*arrow.body,
-            ),
+            Expression::ArrowFunctionExpression(arrow) => {
+                let Some(body) = arrow.get_function_body() else {
+                    return;
+                };
+                (formal_parameter_ids(&arrow.params), body)
+            }
             _ => return,
         };
-        self.record(
-            self.identity.key_of_binding(binding),
-            classify_parameters(&parameters, body, self.identity),
-        );
+        let result = parameters.and_then(|parameters| {
+            let binding = ModuleIdentity::key_of_binding(binding)?;
+            let roles = classify_parameters(&parameters, body, self.identity)?;
+            self.record(binding, roles);
+            Ok(())
+        });
+        if let Err(error) = result {
+            self.error.get_or_insert(error);
+        }
     }
 
     fn visit_assignment_expression(&mut self, assignment: &AssignmentExpression<'a>) {
@@ -158,43 +185,44 @@ impl<'a> Visit<'a> for LocalFunctionRoles<'_> {
 
 fn formal_parameter_ids(
     parameters: &FormalParameters<'_>,
-    identity: &ModuleIdentity,
-) -> Vec<Option<BindingKey>> {
+) -> Result<Vec<Option<BindingKey>>, String> {
     let mut ids = parameters
         .items
         .iter()
-        .map(|parameter| binding_id(&parameter.pattern, identity))
-        .collect::<Vec<_>>();
+        .map(|parameter| binding_id(&parameter.pattern))
+        .collect::<Result<Vec<_>, _>>()?;
     if let Some(rest) = &parameters.rest {
-        ids.push(binding_id(&rest.rest.argument, identity));
+        ids.push(binding_id(&rest.rest.argument)?);
     }
-    ids
+    Ok(ids)
 }
 
 fn classify_parameters(
     parameters: &[Option<BindingKey>],
     body: &FunctionBody<'_>,
     identity: &ModuleIdentity,
-) -> Vec<Option<ParameterRole>> {
+) -> Result<Vec<Option<ParameterRole>>, String> {
     let indices = parameters
         .iter()
         .enumerate()
         .filter_map(|(index, binding)| binding.map(|binding| (binding, index)))
         .collect::<HashMap<_, _>>();
     if indices.is_empty() {
-        return vec![None; parameters.len()];
+        return Ok(vec![None; parameters.len()]);
     }
     let mut scan = ParameterUseScan {
+        error: None,
         for_in_keys: Vec::new(),
         identity,
         parameters: indices,
         roles: vec![None; parameters.len()],
     };
     scan.visit_function_body(body);
-    scan.roles
+    scan.error.map_or(Ok(scan.roles), Err)
 }
 
 struct ParameterUseScan<'a> {
+    error: Option<String>,
     for_in_keys: Vec<(BindingKey, usize)>,
     identity: &'a ModuleIdentity,
     parameters: BindingKeyMap<usize>,
@@ -220,7 +248,13 @@ impl<'a> Visit<'a> for ParameterUseScan<'_> {
                 .and_then(|binding| self.parameters.get(&binding).copied()),
             _ => None,
         };
-        let binding = for_in_binding_id(&statement.left, self.identity);
+        let binding = match for_in_binding_id(&statement.left, self.identity) {
+            Ok(binding) => binding,
+            Err(error) => {
+                self.error.get_or_insert(error);
+                return;
+            }
+        };
         let tracked = match (binding, iterated) {
             (Some(binding), Some(iterated)) => {
                 self.for_in_keys.push((binding, iterated));
@@ -281,6 +315,7 @@ impl<'a> Visit<'a> for ParameterUseScan<'_> {
 }
 
 struct ReflectiveKeys<'a> {
+    error: Option<String>,
     for_in_bindings: BindingKeySet,
     functions: LocalFunctionRoles<'a>,
     identity: &'a ModuleIdentity,
@@ -330,7 +365,13 @@ impl ReflectiveKeys<'_> {
 
 impl<'a> Visit<'a> for ReflectiveKeys<'_> {
     fn visit_for_in_statement(&mut self, statement: &ForInStatement<'a>) {
-        let binding = for_in_binding_id(&statement.left, self.identity);
+        let binding = match for_in_binding_id(&statement.left, self.identity) {
+            Ok(binding) => binding,
+            Err(error) => {
+                self.error.get_or_insert(error);
+                return;
+            }
+        };
         if let Some(binding) = binding {
             self.for_in_bindings.insert(binding);
         }
@@ -412,25 +453,28 @@ fn membership_test<'a>(
     })
 }
 
-fn binding_id(pattern: &BindingPattern<'_>, identity: &ModuleIdentity) -> Option<BindingKey> {
+fn binding_id(pattern: &BindingPattern<'_>) -> Result<Option<BindingKey>, String> {
     let BindingPattern::BindingIdentifier(binding) = pattern else {
-        return None;
+        return Ok(None);
     };
-    Some(identity.key_of_binding(binding))
+    ModuleIdentity::key_of_binding(binding).map(Some)
 }
 
-fn for_in_binding_id(left: &ForStatementLeft<'_>, identity: &ModuleIdentity) -> Option<BindingKey> {
+fn for_in_binding_id(
+    left: &ForStatementLeft<'_>,
+    identity: &ModuleIdentity,
+) -> Result<Option<BindingKey>, String> {
     match left {
         ForStatementLeft::VariableDeclaration(declaration) => {
             let [declarator] = declaration.declarations.as_slice() else {
-                return None;
+                return Ok(None);
             };
-            binding_id(&declarator.id, identity)
+            binding_id(&declarator.id)
         }
         ForStatementLeft::AssignmentTargetIdentifier(identifier) => {
-            identity.key_of_reference(identifier)
+            Ok(identity.key_of_reference(identifier))
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -484,18 +528,20 @@ fn string_list(expression: &Expression<'_>) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::collect_reflective_property_names;
+    use crate::transpile::identity::ModuleIdentity;
     use oxc_allocator::Allocator;
     use oxc_semantic::SemanticBuilder;
     use oxc_span::SourceType;
+    use std::collections::BTreeSet;
 
-    fn collect(source: &str) -> BTreeSet<String> {
+    fn collect(source: &str) -> Result<BTreeSet<String>, String> {
         let allocator = Allocator::default();
         let parsed = oxc_parser::Parser::new(&allocator, source, SourceType::mjs()).parse();
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         let identity = ModuleIdentity::new(
             SemanticBuilder::new()
-                .with_build_nodes(true)
+                .with_build_nodes(false)
                 .with_enum_eval(true)
                 .build(&parsed.program)
                 .semantic
@@ -504,12 +550,13 @@ mod tests {
         collect_reflective_property_names(&parsed.program, &identity)
     }
 
-    fn assert_names(source: &str, expected: BTreeSet<String>) {
-        assert_eq!(collect(source), expected);
+    fn assert_names(source: &str, expected: BTreeSet<String>) -> Result<(), String> {
+        assert_eq!(collect(source)?, expected);
+        Ok(())
     }
 
     #[test]
-    fn direct_and_cross_function_reflective_flows_are_collected() {
+    fn direct_and_cross_function_reflective_flows_are_collected() -> Result<(), String> {
         assert_names(
             r#"
 for (const key in attrs) {
@@ -542,11 +589,11 @@ ignored(props, "wrong");
                 "x".to_string(),
                 "y".to_string(),
             ]),
-        );
+        )
     }
 
     #[test]
-    fn shadowed_callee_binding_does_not_inherit_outer_function_roles() {
+    fn shadowed_callee_binding_does_not_inherit_outer_function_roles() -> Result<(), String> {
         assert_names(
             r#"
 function prop(object, key) { return object[key]; }
@@ -554,6 +601,6 @@ function invoke(prop) { prop(source, "shadowed"); }
 prop(source, "real");
 "#,
             BTreeSet::from(["real".to_string()]),
-        );
+        )
     }
 }

@@ -1,3 +1,5 @@
+import os from "os";
+
 export type ClosureCompilerOption = string | boolean;
 export type ClosureCompilerOptions = Record<
   string,
@@ -36,13 +38,16 @@ const MANAGED_CLOSURE_FLAGS = new Set(
 
 export function resolveClosureCompilerEnvironment(): ClosureCompilerEnvironment {
   const options: ClosureCompilerOptions = {};
+  options["numParallelThreads"] = String(
+    Math.min(4, os.availableParallelism()),
+  );
   if (process.env["GCC_CLOSURE_DEBUG"] === "1") {
     options["debug"] = true;
     options["formatting"] = "PRETTY_PRINT";
   }
 
-  // Space-separated `--flag[=value]` pairs appended verbatim, for measuring
-  // candidate Closure flags without a rebuild (see docs/development.md).
+  // Space-separated `--flag[=value]` pairs for measuring candidate Closure
+  // flags without a rebuild (see docs/development/workflows.md).
   const extraFlags = process.env["GCC_CLOSURE_EXTRA_FLAGS"];
   if (extraFlags) {
     for (const flag of extraFlags.split(/\s+/u)) {
@@ -51,12 +56,18 @@ export function resolveClosureCompilerEnvironment(): ClosureCompilerEnvironment 
       }
       const separator = flag.indexOf("=");
       const name = flag.slice(2, separator === -1 ? undefined : separator);
-      if (MANAGED_CLOSURE_FLAGS.has(normalizeClosureFlagName(name))) {
+      const normalizedName = normalizeClosureFlagName(name);
+      if (MANAGED_CLOSURE_FLAGS.has(normalizedName)) {
         throw new TypeError(
           `GCC_CLOSURE_EXTRA_FLAGS may not override managed Closure flag --${name}.`,
         );
       }
       const value = separator === -1 ? true : flag.slice(separator + 1);
+      if (normalizedName === "numparallelthreads") {
+        // This scalar override replaces the default regardless of spelling.
+        options["numParallelThreads"] = value;
+        continue;
+      }
       const previous = options[name];
       options[name] =
         previous === undefined

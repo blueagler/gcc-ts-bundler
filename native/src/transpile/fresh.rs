@@ -84,7 +84,7 @@ struct IdentifierNameCollector<'a> {
 
 impl IdentifierNameCollector<'_> {
     fn excluded_global_reference(&self, identifier: &IdentifierReference<'_>) -> bool {
-        self.identity.is_synthesized_reference(identifier)
+        ModuleIdentity::is_synthesized_reference(identifier)
             && self
                 .excluded_global_names
                 .is_some_and(|excluded| excluded.contains(identifier.name.as_str()))

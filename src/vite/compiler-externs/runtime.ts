@@ -17,6 +17,7 @@ import {
   analyzeRuntimeUsage,
   mergeRuntimeHazards,
 } from "../../externs/runtime";
+import { runWithConcurrency } from "../../shared/concurrency";
 import { writeFileIfChanged } from "../../shared/files";
 import { logInternalDetail } from "../../shared/timing";
 import { classifyModuleId, stripQuery } from "../capture";
@@ -32,7 +33,7 @@ export async function generateViteRuntimeAwareExterns(input: {
   generatedExternFile: string;
   modules: string[];
   options: GccTsBundlerVitePluginOptions;
-  postPrebundleMaterialized: Promise<MaterializedGraph>;
+  materialized: MaterializedGraph;
   propertyPolicy?: PropertyPolicy | undefined;
   protocolHelpers: {
     keyExclusionListCallees: string[];
@@ -46,57 +47,45 @@ export async function generateViteRuntimeAwareExterns(input: {
     options: input.options,
   });
   await fs.mkdir(cacheRoot, { recursive: true });
-  // Every scan reads the post-prebundle graph, and none of them may start
-  // before it resolves. Prebundling rewrites authored and direct-dependency
-  // modules *in place* (`prebundle/direct-esm/rewrite.ts`), so an app-side scan
-  // overlapping it read pre-rewrite text on one build and post-rewrite text on
-  // the next, purely on interleaving. That made `generated.externs.js` unstable
-  // between a cold build and its first rebuild, and the extern file is a
-  // cache-key input for the resolve snapshot, native emit and Closure — so the
-  // first rebuild paid a full recompile it had already earned. The rewritten
-  // text is also the only text that matters: it is what Closure compiles.
-  const postPrebundle = await input.postPrebundleMaterialized;
-  const { appRuntimeFiles, dependencyFilesByPackage } =
-    splitRuntimeModules(postPrebundle);
-  const appRuntimeUsagePromise = analyzeRuntimeUsage(
-    appRuntimeFiles,
-    input.protocolHelpers,
+  const { appRuntimeFiles, dependencyFilesByPackage } = splitRuntimeModules(
+    input.materialized,
   );
   // The CSS custom-property taint crosses package boundaries — the token
   // literal, the merge and the enumeration each live in a different package —
   // so it cannot be cached per package and runs once over the whole graph.
-  const cssVariablePromise = analyzeCssVariableProtocol(
-    [...postPrebundle.modules.map((module) => module.filePath)].sort(),
-  );
+  const [appRuntimeUsage, cssVariables] = await Promise.all([
+    analyzeRuntimeUsage(appRuntimeFiles, input.protocolHelpers),
+    analyzeCssVariableProtocol(
+      input.materialized.modules.map((module) => module.filePath).sort(),
+    ),
+  ]);
   const cacheStats = {
     hits: 0,
     misses: 0,
   };
-  const packageHazards = await Promise.all(
-    [...dependencyFilesByPackage.entries()]
-      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-      .map(async ([packageName, filePaths]) => {
-        const hazards = await loadCachedPackageRuntimeHazards({
-          cacheRoot,
-          filePaths,
-          packageName,
-          packageSignature,
-          protocolHelpers: input.protocolHelpers,
-        });
-        if (hazards.cacheHit) {
-          cacheStats.hits += 1;
-        } else {
-          cacheStats.misses += 1;
-        }
-        return hazards.value;
-      }),
+  const packageHazards = await runWithConcurrency(
+    [...dependencyFilesByPackage.entries()].sort(([left], [right]) =>
+      left < right ? -1 : left > right ? 1 : 0,
+    ),
+    8,
+    async ([packageName, filePaths]) => {
+      const hazards = await loadCachedPackageRuntimeHazards({
+        cacheRoot,
+        filePaths,
+        packageName,
+        packageSignature,
+        protocolHelpers: input.protocolHelpers,
+      });
+      if (hazards.cacheHit) {
+        cacheStats.hits += 1;
+      } else {
+        cacheStats.misses += 1;
+      }
+      return hazards.value;
+    },
   );
 
-  const cssVariables = await cssVariablePromise;
-  const runtimeUsage = mergeRuntimeHazards(
-    await appRuntimeUsagePromise,
-    ...packageHazards,
-  );
+  const runtimeUsage = mergeRuntimeHazards(appRuntimeUsage, ...packageHazards);
   for (const member of cssVariables.keyNames) {
     runtimeUsage.cssVariableKeyNames.add(member);
   }
@@ -125,7 +114,7 @@ export async function generateViteRuntimeAwareExterns(input: {
     emittedLines,
     mode: "runtime-aware",
     modules: input.modules,
-    runtimeEntryFiles: postPrebundle.runtimeEntries,
+    runtimeEntryFiles: input.materialized.runtimeEntries,
     scannedFiles: [],
   });
 
@@ -135,10 +124,12 @@ export async function generateViteRuntimeAwareExterns(input: {
 
 /**
  * Splits a materialized graph into app runtime files and dependency files
- * grouped by package. File lists and package keys are sorted so later
- * analysis walks a stable order regardless of module insertion order.
+ * grouped by the complete sorted contributing-package set. A fused emitted
+ * file that several packages produced is analyzed once under that set, not
+ * once per package. File lists and package keys are sorted so later analysis
+ * walks a stable order regardless of module insertion order.
  */
-function splitRuntimeModules(materialized: MaterializedGraph) {
+export function splitRuntimeModules(materialized: MaterializedGraph) {
   const appRuntimeFiles: string[] = [];
   const dependencyFilesByPackage = new Map<string, string[]>();
   for (const module of materialized.modules) {
@@ -146,27 +137,38 @@ function splitRuntimeModules(materialized: MaterializedGraph) {
       appRuntimeFiles.push(module.filePath);
       continue;
     }
-    const packageNames = [
-      ...new Set(
-        module.sourceModuleIds
-          .map((moduleId) => classifyModuleId(moduleId))
-          .filter((packageName) => packageName !== "app"),
-      ),
-    ].sort();
-    for (const packageName of packageNames) {
-      const current = dependencyFilesByPackage.get(packageName);
-      if (current) {
-        current.push(module.filePath);
-      } else {
-        dependencyFilesByPackage.set(packageName, [module.filePath]);
-      }
+    const packageNames = contributingPackageNames(module.sourceModuleIds);
+    const packageKey = packageNames.join("\0");
+    const current = dependencyFilesByPackage.get(packageKey);
+    if (current) {
+      current.push(module.filePath);
+    } else {
+      dependencyFilesByPackage.set(packageKey, [module.filePath]);
     }
   }
-  appRuntimeFiles.sort();
-  for (const filePaths of dependencyFilesByPackage.values()) {
-    filePaths.sort();
+  const uniqueAppRuntimeFiles = [...new Set(appRuntimeFiles)].sort(
+    (left, right) => left.localeCompare(right),
+  );
+  for (const [packageKey, filePaths] of dependencyFilesByPackage) {
+    dependencyFilesByPackage.set(
+      packageKey,
+      [...new Set(filePaths)].sort((left, right) => left.localeCompare(right)),
+    );
   }
-  return { appRuntimeFiles, dependencyFilesByPackage };
+  return {
+    appRuntimeFiles: uniqueAppRuntimeFiles,
+    dependencyFilesByPackage,
+  };
+}
+
+function contributingPackageNames(sourceModuleIds: string[]) {
+  return [
+    ...new Set(
+      sourceModuleIds
+        .map((moduleId) => classifyModuleId(moduleId))
+        .filter((packageName) => packageName !== "app"),
+    ),
+  ].sort((left, right) => left.localeCompare(right));
 }
 
 function isDependencyRuntimeModule(sourceModuleIds: string[]) {

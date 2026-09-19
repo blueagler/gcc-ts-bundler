@@ -51,8 +51,7 @@ export interface GccTsBundlerVitePluginOptions {
          * Caller-supplied values are type errors rather than no-ops.
          */
         chunks?:
-          | Omit<ChunkOptions, "mode" | "publicPath" | "vendorChunk">
-          | undefined;
+          Omit<ChunkOptions, "mode" | "publicPath" | "vendorChunk"> | undefined;
       })
     | undefined;
   runtime?:

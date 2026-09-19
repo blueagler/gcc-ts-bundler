@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use oxc_ast::ast::*;
+use oxc_ast::ast::{CallExpression, Expression};
 
 use super::super::wrappers_types::{DynamicImportObjectWrapper, DynamicImportWrappers};
 use super::dynamic_import_module_ids_from_call;
@@ -111,7 +111,7 @@ fn resolve_dynamic_import_call_module_ids(
     match &call.callee {
         Expression::Identifier(identifier) if call.arguments.is_empty() => identity
             .key_of_reference(identifier)
-            .and_then(|binding| wrappers.function_wrappers.get(&binding).cloned()),
+            .and_then(|binding| wrappers.functions.get(&binding).cloned()),
         callee if is_member_expression(callee) && call.arguments.is_empty() => {
             collect_member_wrapper_module_ids(callee, object_carriers, wrappers, identity)
         }

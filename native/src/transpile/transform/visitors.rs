@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 
-use oxc_allocator::Allocator;
-use oxc_allocator::FromIn;
+use oxc_allocator::{Allocator, FromIn, ReplaceWith};
 use oxc_ast::ast::{
     AccessorProperty, BindingProperty, Expression, MethodDefinition, ObjectProperty,
     PropertyDefinition, PropertyKey, SimpleAssignmentTarget, UnaryOperator,
@@ -63,47 +62,47 @@ impl<'a> VisitMut<'a> for PreservedPropertyVisitor<'a, '_> {
         if !self.names.contains(member.property.name.as_str()) {
             return;
         }
-        let property = member.property.name.to_string();
-        let optional = member.optional;
-        let object = std::mem::replace(
-            &mut member.object,
-            Expression::new_null_literal(SPAN, &self.builder),
-        );
-        *expression = Expression::new_computed_member_expression(
-            SPAN,
-            object,
-            Expression::new_string_literal(
-                SPAN,
-                Str::from_in(&property, self.allocator),
-                None,
-                &self.builder,
-            ),
-            optional,
-            &self.builder,
-        );
+        expression.replace_with(|expression| match expression {
+            Expression::StaticMemberExpression(member) => {
+                let member = member.unbox();
+                Expression::new_computed_member_expression(
+                    SPAN,
+                    member.object,
+                    Expression::new_string_literal(
+                        SPAN,
+                        Str::from_in(member.property.name.as_str(), self.allocator),
+                        None,
+                        &self.builder,
+                    ),
+                    member.optional,
+                    &self.builder,
+                )
+            }
+            expression => expression,
+        });
     }
 
     fn visit_simple_assignment_target(&mut self, target: &mut SimpleAssignmentTarget<'a>) {
         if let SimpleAssignmentTarget::StaticMemberExpression(member) = target {
             if self.names.contains(member.property.name.as_str()) {
-                let property = member.property.name.to_string();
-                let optional = member.optional;
-                let object = std::mem::replace(
-                    &mut member.object,
-                    Expression::new_null_literal(SPAN, &self.builder),
-                );
-                *target = SimpleAssignmentTarget::new_computed_member_expression(
-                    SPAN,
-                    object,
-                    Expression::new_string_literal(
-                        SPAN,
-                        Str::from_in(&property, self.allocator),
-                        None,
-                        &self.builder,
-                    ),
-                    optional,
-                    &self.builder,
-                );
+                target.replace_with(|target| match target {
+                    SimpleAssignmentTarget::StaticMemberExpression(member) => {
+                        let member = member.unbox();
+                        SimpleAssignmentTarget::new_computed_member_expression(
+                            SPAN,
+                            member.object,
+                            Expression::new_string_literal(
+                                SPAN,
+                                Str::from_in(member.property.name.as_str(), self.allocator),
+                                None,
+                                &self.builder,
+                            ),
+                            member.optional,
+                            &self.builder,
+                        )
+                    }
+                    target => target,
+                });
                 return;
             }
         }

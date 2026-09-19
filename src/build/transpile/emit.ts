@@ -20,22 +20,26 @@ import type {
   ResolvedBuildOptions,
   ResolvedImport,
 } from "../types";
-import type { NativeEmittedTypeMetadata } from "../../native/load";
+import {
+  collectFileStates,
+  type NativeEmittedTypeMetadata,
+} from "../../native/load";
 import type { TypeWorld } from "../../externs/context";
 import {
-  analysisFromSidecar,
-  collectExistingContentSnapshot,
-  collectNativeAnalysis,
   createNativeEmitPaths,
-  getMissingInputDiagnostics,
-  logDeliveredTypeMetadata,
-  logTypeMetadataCounts,
   persistNativeEmitMetadata,
   resetNativeEmitOutDir,
   restoreCachedNativeEmitResult,
-  runNativeTranspile,
+} from "./emit-native/cache";
+import { runNativeTranspile } from "./emit-native/transpile";
+import { collectNativeAnalysis } from "./emit-native/analysis/collect";
+import {
+  analysisFromSidecar,
+  getMissingInputDiagnostics,
+  logDeliveredTypeMetadata,
+  logTypeMetadataCounts,
   toNativeTypeMetadataFile,
-} from "./emit-native";
+} from "./emit-native/analysis/sidecar";
 
 export interface NativeEmitStageResult {
   diagnostics: ts.Diagnostic[];
@@ -46,7 +50,8 @@ export interface NativeEmitStageResult {
   preservedImports: PreservedImport[];
   supportFiles: string[];
   typeMetadata: NativeEmittedTypeMetadata[];
-  typeMetadataDependencies: FileContentSnapshot;
+  /** Paths protect inputs; only persistent builds need their content identities. */
+  typeMetadataDependencies: string[] | FileContentSnapshot;
   warnings: string[];
 }
 
@@ -155,7 +160,10 @@ export async function emitNativeStage({
   }
 
   const missingInputDiagnostics = await getMissingInputDiagnostics({
-    externFileNames: [...options.externs, ...options.typedExterns],
+    externFileNames: [
+      ...options.externs,
+      ...options.typedExterns.map((extern) => extern.path),
+    ],
     fileNames: combinedFileNames,
     preflight: options.diagnostics.preflight,
     tsConfigPath,
@@ -217,9 +225,12 @@ export async function emitNativeStage({
       warnings: [],
     };
   }
-  const typeMetadataDependencies = await collectExistingContentSnapshot(
-    analysis.dependencies,
-  );
+  const dependencyFiles = collectFileStates(analysis.dependencies)
+    .filter((state) => state.exists)
+    .map((state) => state.filePath);
+  const typeMetadataDependencies = usesPersistentCache
+    ? await collectFileContentSnapshot(dependencyFiles)
+    : dependencyFiles;
   logTypeMetadataCounts(
     "native-emit:type-metadata-extracted",
     analysis.extractedCounts,
@@ -267,7 +278,7 @@ export async function emitNativeStage({
   logDeliveredTypeMetadata(result.typeMetadata);
   logNamespaceWarnings(result.warnings);
 
-  if (usesPersistentCache) {
+  if (!Array.isArray(typeMetadataDependencies)) {
     await persistNativeEmitMetadata({
       artifacts: await collectFileContentSnapshot([
         result.externsPath,

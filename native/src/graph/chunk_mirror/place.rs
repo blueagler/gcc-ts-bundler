@@ -1,5 +1,5 @@
-use super::super::*;
 use super::input::RollupChunkInput;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Assigns every materialized file to exactly one chunk.
 ///
@@ -21,7 +21,7 @@ pub(crate) fn place_files(
     let mut owners = BTreeMap::<String, BTreeSet<usize>>::new();
     for (index, chunk) in rollup_chunks.iter().enumerate() {
         for file_path in chunk
-            .moduleFiles
+            .module_files
             .iter()
             .filter(|file_path| graph.contains_key(*file_path))
         {

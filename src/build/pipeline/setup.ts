@@ -1,32 +1,44 @@
 import type { BuildFailure, BuildResult } from "../../api/types";
-import { createBuildTypeWorld } from "../../externs/build-plan/create-type-world";
-import { deriveExternalExternPlan } from "../../externs/build-plan/external-plan";
+import {
+  createBuildTypeWorld,
+  loadBuildTypeWorldOptions,
+} from "../../externs/build-plan/create-type-world";
+import {
+  deriveExternalExternPlan,
+  probeExternalExternSpecifiers,
+} from "../../externs/build-plan/external-plan";
 import type { ExternalExternPlan } from "../../externs/build-plan/external-plan";
+import { collectReachableTypeFiles } from "../../externs/compiler";
 import type { TypeWorld } from "../../externs/context";
 import { acquireProjectCacheLock } from "../../shared/cache-store";
-import type { FileContentSnapshot } from "../../shared/file-state";
+import type { NativeEmitStageResult } from "../transpile/emit";
+import { uniqueSortedStrings } from "../../shared/files";
 import type { ClosureStageResult } from "../closure/run-closure";
 import {
-  getFinalCachePaths,
   persistFinalCache,
-  publishOffModeEntryOutFiles,
   publishStagedClosureResult,
   restoreCachedBuild,
   successfulBuild,
 } from "../cache/final";
-import type { FinalCachePaths, InvocationStaging } from "../cache/final";
+import type { InvocationStaging } from "../cache/final";
 import type { BuildContext, ResolvedBuild } from "../types";
 import { validateBuildShape, writeBuildEntryShims } from "./shape";
+import { validateOutputPathBoundaries } from "../resolve/options";
+import {
+  countInternalWork,
+  PROFILE_INTERNAL_TIMINGS,
+  withInternalTiming,
+  withInternalTimingSync,
+} from "../../shared/timing";
 
 export type PipelineEmitPrep =
   | { kind: "cached"; result: BuildResult }
   | { kind: "failed"; result: BuildFailure }
   | {
-      cachePaths: FinalCachePaths;
       emitFileNames: string[];
       externalExternPlan: ExternalExternPlan;
       kind: "ready";
-      typeWorld: TypeWorld;
+      typeWorld?: TypeWorld | undefined;
     };
 
 export async function lockPersistentProjectCache(
@@ -42,8 +54,9 @@ export async function preparePipelineEmit(
   context: BuildContext,
   resolved: ResolvedBuild,
 ): Promise<PipelineEmitPrep> {
-  const cachePaths = getFinalCachePaths(context, resolved);
-  const cachedResult = await restoreCachedBuild(context, resolved, cachePaths);
+  const cachedResult = await withInternalTiming("cache:restore-final", () =>
+    restoreCachedBuild(context, resolved),
+  );
   if (cachedResult) {
     return { kind: "cached", result: cachedResult };
   }
@@ -53,27 +66,91 @@ export async function preparePipelineEmit(
     return { kind: "failed", result: validationFailure };
   }
 
-  writeBuildEntryShims(context, resolved);
+  withInternalTimingSync("build:entry-shims", () =>
+    writeBuildEntryShims(context, resolved),
+  );
   const emitFileNames = listNativeEmitFileNames(context, resolved);
+  countInternalWork("emitFiles", emitFileNames.length);
   const specifiers = resolved.externalBoundaries.map(
     (boundary) => boundary.specifier,
   );
-  const typeWorld = await createBuildTypeWorld({
-    emitFileNames,
-    options: context.options,
-    specifiers,
-    tsConfigPath: resolved.tsConfigPath,
-    tsxRuntimeSourceFiles: resolved.tsxRuntimeSourceFiles,
-    workspaceDir: resolved.workspaceDir,
-  });
-  const externalExternPlan = await deriveExternalExternPlan({
-    appEntryFiles: emitFileNames,
-    options: context.options,
-    specifiers,
-    typeWorld,
-  });
+  const { compilerOptions, declarationRoots } = await withInternalTiming(
+    "type-world:options",
+    () =>
+      loadBuildTypeWorldOptions({
+        emitFileNames,
+        tsConfig: resolved.tsConfig,
+        tsConfigPath: resolved.tsConfigPath,
+        workspaceDir: resolved.workspaceDir,
+      }),
+  );
+  countInternalWork("declarationRoots", declarationRoots.length);
+  countInternalWork("externalSpecifiers", specifiers.length);
+  const probed = await withInternalTiming("externs:probe", () =>
+    probeExternalExternSpecifiers({
+      compilerOptions,
+      options: context.options,
+      specifiers,
+    }),
+  );
+  const typeWorld =
+    probed.typedSpecifiers.length > 0 ||
+    context.options.typeMetadata === undefined ||
+    context.options.target === "node"
+      ? await withInternalTiming("type-world:create", () =>
+          createBuildTypeWorld({
+            compilerOptions,
+            declarationRoots,
+            emitFileNames,
+            options: context.options,
+            specifiers,
+            tsxRuntimeSourceFiles: resolved.tsxRuntimeSourceFiles,
+          }),
+        )
+      : undefined;
+  if (PROFILE_INTERNAL_TIMINGS && typeWorld) {
+    countInternalWork(
+      "typeWorldFiles",
+      typeWorld.program.getSourceFiles().length,
+    );
+    countInternalWork(
+      "typeWorldRoots",
+      typeWorld.program.getRootFileNames().length,
+    );
+  }
+  await withInternalTiming("build:validate-boundaries", async () =>
+    validateOutputPathBoundaries(
+      context.options,
+      resolved.workspaceDir,
+      uniqueSortedStrings([
+        ...emitFileNames,
+        ...resolved.sourceFiles,
+        ...resolved.tsxRuntimeSourceFiles,
+        ...declarationRoots,
+        ...(context.options.authoredFiles ?? []),
+        ...(context.options.typeMetadata?.dependencies ?? []),
+        ...(typeWorld
+          ? typeWorld.program
+              .getSourceFiles()
+              .map((sourceFile) => sourceFile.fileName)
+          : await collectReachableTypeFiles({
+              compilerOptions,
+              entryFiles: declarationRoots,
+              includeDependencies: true,
+            })),
+      ]),
+    ),
+  );
+  const externalExternPlan = await withInternalTiming("externs:plan", () =>
+    deriveExternalExternPlan({
+      appEntryFiles: emitFileNames,
+      options: context.options,
+      opaqueSpecifiers: probed.opaqueSpecifiers,
+      typedSpecifiers: probed.typedSpecifiers,
+      typeWorld,
+    }),
+  );
   return {
-    cachePaths,
     emitFileNames,
     externalExternPlan,
     kind: "ready",
@@ -82,31 +159,39 @@ export async function preparePipelineEmit(
 }
 
 export async function finalizePipelineBuild(input: {
-  cachePaths: FinalCachePaths;
   closureResult: ClosureStageResult;
   context: BuildContext;
   resolved: ResolvedBuild;
   staging: InvocationStaging;
-  typeMetadataDependencies: FileContentSnapshot;
+  typeMetadataDependencies: NativeEmitStageResult["typeMetadataDependencies"];
 }): Promise<BuildResult> {
-  const publishedResult = await publishStagedClosureResult(
-    input.closureResult,
-    input.staging,
-    input.resolved.finalCacheDir,
-    input.context.options.outDir,
+  const dependencies = input.typeMetadataDependencies;
+  await withInternalTiming("build:validate-final-boundaries", () =>
+    validateOutputPathBoundaries(
+      input.context.options,
+      input.resolved.workspaceDir,
+      Array.isArray(dependencies) ? dependencies : Object.keys(dependencies),
+    ),
   );
-  await persistFinalCache(
-    input.context,
-    input.resolved,
-    input.cachePaths,
-    publishedResult,
-    input.typeMetadataDependencies,
-  );
+  if (!Array.isArray(dependencies)) {
+    await withInternalTiming("cache:persist-final", () =>
+      persistFinalCache(
+        input.context,
+        input.resolved,
+        input.staging.finalCacheDir,
+        input.closureResult,
+        dependencies,
+      ),
+    );
+  }
   return successfulBuild(
-    await publishOffModeEntryOutFiles(
-      input.context,
-      input.resolved,
-      publishedResult.outputFiles,
+    await withInternalTiming("build:publish", () =>
+      publishStagedClosureResult(
+        input.context,
+        input.resolved,
+        input.closureResult,
+        input.staging,
+      ),
     ),
     false,
   );

@@ -1,8 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 
-import { renderNodeAmbientGlobals } from "../../../externs/ambient-globals";
-import type { TypeWorld } from "../../../externs/context";
+import type { NodeAmbientGlobalsRenderer } from "../../../externs/ambient-globals";
 import { ensureParentDirectory } from "../../../shared/files";
 import { logInternalDetail } from "../../../shared/timing";
 import type { ResolvedBuildOptions } from "../../types";
@@ -40,11 +39,10 @@ export async function applyMinimalPlatformExterns(
   platformExterns: string,
   target: ResolvedBuildOptions["target"],
   packageRoot: string,
-  projectRoot: string,
   typeInferenceDisabled: boolean,
   projectCacheDir: string,
   warnPlatformExternFallback: () => void,
-  typeWorld?: TypeWorld,
+  renderNodeAmbientGlobals: NodeAmbientGlobalsRenderer,
 ): Promise<PreparedCompileJob> {
   if (target !== "browser") {
     const externs = job.externs.filter(
@@ -54,12 +52,7 @@ export async function applyMinimalPlatformExterns(
     if (target !== "node") {
       return { ...job, env: "CUSTOM", externs };
     }
-    const rendered = await renderNodeAmbientGlobals({
-      jsFiles: job.js,
-      packageRoot,
-      projectRoot,
-      typeWorld,
-    });
+    const rendered = await renderNodeAmbientGlobals(job.js);
     if (!rendered || rendered.text.length === 0) {
       return { ...job, env: "CUSTOM", externs };
     }
@@ -134,6 +127,7 @@ export async function applyMinimalPlatformExterns(
     ...job,
     env: "CUSTOM",
     externs: [...job.externs, externsPath],
+    browserExternSlice: externsPath,
   };
 }
 
@@ -142,16 +136,19 @@ export function preparedJobForPlatformExternRetry(
   job: PreparedCompileJob,
   capturedStdErr: string,
 ): PreparedCompileJob | null {
-  if (job.env !== "CUSTOM" || !isMissingPlatformExternFailure(capturedStdErr)) {
+  if (
+    !job.browserExternSlice ||
+    !isMissingPlatformExternFailure(capturedStdErr)
+  ) {
     return null;
   }
   const fullJob = { ...job };
   delete fullJob.env;
+  delete fullJob.browserExternSlice;
   return {
     ...fullJob,
     externs: fullJob.externs.filter(
-      (externPath) =>
-        !path.basename(externPath).startsWith("platform-externs."),
+      (externPath) => externPath !== job.browserExternSlice,
     ),
   };
 }

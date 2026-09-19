@@ -3,13 +3,13 @@ use oxc_allocator::FromIn;
 use oxc_allocator::Vec as ArenaVec;
 use oxc_ast::ast::{
     BindingIdentifier, Expression, IdentifierReference, NewExpression, PrivateIdentifier, Program,
+    StaticMemberExpression,
 };
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{SourceType, Span};
 use oxc_str::Ident;
-use oxc_transformer::Helper;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
 const PRIVATE_CLASS_HELPERS: &str = r#"
@@ -121,7 +121,7 @@ struct SynthesizedSpanOffset {
     offset: u32,
 }
 
-impl<'a> VisitMut<'a> for SynthesizedSpanOffset {
+impl VisitMut<'_> for SynthesizedSpanOffset {
     fn visit_span(&mut self, span: &mut Span) {
         span.start = span.start.saturating_add(self.offset);
         span.end = span.end.saturating_add(self.offset);
@@ -239,7 +239,7 @@ pub(super) fn prepare_private_class_lowering<'a>(
     program.body = body;
 
     let semantic = SemanticBuilder::new()
-        .with_build_nodes(true)
+        .with_build_nodes(false)
         .with_enum_eval(true)
         .build(program);
     if !semantic.diagnostics.is_empty() {
@@ -258,21 +258,99 @@ pub(super) fn prepare_private_class_lowering<'a>(
     ))
 }
 
-pub(super) fn supports_private_class_helper(helper: Helper) -> bool {
-    matches!(
-        helper,
-        Helper::AssertClassBrand
-            | Helper::CheckInRHS
-            | Helper::ClassPrivateFieldGet2
-            | Helper::ClassPrivateFieldInitSpec
-            | Helper::ClassPrivateFieldSet2
-            | Helper::ClassPrivateMethodInitSpec
-            | Helper::DefineProperty
-            | Helper::ReadOnlyError
-            | Helper::SuperPropGet
-            | Helper::SuperPropSet
-            | Helper::ToPropertyKey
-            | Helper::ToSetter
-            | Helper::WriteOnlyError
-    )
+pub(super) fn validate_private_class_helpers(
+    program: &Program<'_>,
+    path: &Path,
+) -> Result<(), String> {
+    #[derive(Default)]
+    struct HelperValidator {
+        unsupported: BTreeSet<String>,
+    }
+
+    impl<'a> Visit<'a> for HelperValidator {
+        fn visit_static_member_expression(&mut self, member: &StaticMemberExpression<'a>) {
+            if matches!(&member.object, Expression::Identifier(object) if object.name == "babelHelpers")
+            {
+                let name = member.property.name.as_str();
+                if !matches!(
+                    name,
+                    "assertClassBrand"
+                        | "checkInRHS"
+                        | "classPrivateFieldGet2"
+                        | "classPrivateFieldInitSpec"
+                        | "classPrivateFieldSet2"
+                        | "classPrivateMethodInitSpec"
+                        | "defineProperty"
+                        | "readOnlyError"
+                        | "superPropGet"
+                        | "superPropSet"
+                        | "toPropertyKey"
+                        | "toSetter"
+                        | "writeOnlyError"
+                ) {
+                    self.unsupported.insert(name.to_string());
+                }
+                return;
+            }
+            walk::walk_static_member_expression(self, member);
+        }
+
+        fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+            // External mode emits static helper members. Any other namespace
+            // use is unknown, not evidence that the runtime can service it.
+            if identifier.name == "babelHelpers" {
+                self.unsupported
+                    .insert("non-static babelHelpers reference".to_string());
+            }
+        }
+    }
+
+    // Authored references were rejected before injecting the runtime, so every
+    // remaining namespace reference belongs to the runtime or Oxc's lowering.
+    let mut validator = HelperValidator::default();
+    validator.visit_program(program);
+    if validator.unsupported.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Private class element lowering requested unsupported Oxc helpers in {}: {}",
+            path.display(),
+            validator
+                .unsupported
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_private_class_helpers;
+    use crate::transpile::lowering::lower_with_oxc;
+    use oxc_allocator::Allocator;
+    use oxc_span::SourceType;
+    use std::path::Path;
+
+    #[test]
+    fn unsupported_generated_helper_is_rejected() {
+        let allocator = Allocator::default();
+        let parsed = oxc_parser::Parser::new(
+            &allocator,
+            "babelHelpers.objectSpread2({}, source);",
+            SourceType::mjs(),
+        )
+        .parse();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        assert!(validate_private_class_helpers(&parsed.program, Path::new("private.js")).is_err());
+    }
+
+    #[test]
+    fn authored_helper_namespace_cannot_be_injected_over() {
+        assert!(lower_with_oxc(
+            Path::new("private.ts"),
+            "const babelHelpers = {}; class Box { #value = 1; read() { return this.#value; } }",
+        )
+        .is_err());
+    }
 }

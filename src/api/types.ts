@@ -31,10 +31,11 @@ export const CACHE_MODES = defineValues("off", "temp", "persistent");
 export type CacheMode = (typeof CACHE_MODES)[number];
 
 /**
- * `minimal` compiles typed ADVANCED jobs with `--env CUSTOM` plus a
- * dependency-closed slice of the exact browser extern declarations shipped
- * with Closure. Untyped jobs and any failed slice/compile use Closure's full
- * browser externs.
+ * `minimal` uses `--env CUSTOM` and a dependency-closed browser extern slice
+ * for eligible ADVANCED jobs; delivered type metadata is not required.
+ * Disabled type inference, polyfills, explicit environments, and unavailable
+ * slices bypass slicing. A failed sliced compile can retry with full externs.
+ * Non-browser targets use their own extern environment.
  */
 export const PLATFORM_EXTERNS_MODES = defineValues("minimal", "full");
 export type PlatformExternsMode = (typeof PLATFORM_EXTERNS_MODES)[number];
@@ -59,8 +60,8 @@ export type ChunkMode = (typeof CHUNK_MODES)[number];
  * `$gcc` namespace object, loaded by injecting `<script>` elements.
  * `esm` is Closure's `ES_MODULES` output: native `import`/`export` between
  * chunks, loaded with dynamic `import()`.
- * `auto` uses the integration default: standalone builds resolve to `script`;
- * Vite resolves to `esm` when its target supports modules.
+ * `auto` resolves to `esm` in chunked builds (including Vite), or `script`
+ * in off mode. ES3/ES5 and worker gates force `script`.
  */
 export const CHUNK_OUTPUT_TYPES = defineValues("auto", "script", "esm");
 export type ChunkOutputType = (typeof CHUNK_OUTPUT_TYPES)[number];
@@ -88,14 +89,12 @@ export interface ChunkOptions {
    * Move eagerly reachable dependency modules out of the base chunk into a
    * separate `<baseChunkName>-vendor` chunk.
    *
-   * Under ES module output the base chunk's name is embedded in every other
-   * chunk's `import` statement, so any edit to app code re-hashes the base
-   * chunk and cascades new file names through the whole graph. Splitting the
-   * dependency half out means an app edit only re-hashes the entry, and the
-   * vendor and lazy chunks keep their names (and their cache entries).
+   * This can reduce dependency invalidation across application edits, at the
+   * cost of another chunk; stable output names are not guaranteed.
    *
-   * `"auto"` resolves to `false`. Explicit `true` is still gated to
-   * `bundler-runtime` chunks whose resolved `outputType` is `"esm"`.
+   * `"auto"` resolves to `false`. Explicit `true` applies to either chunked
+   * mode only when the resolved `outputType` is `"esm"`. Vite owns its chunk
+   * graph and does not accept this option.
    */
   vendorChunk?: boolean | "auto" | undefined;
 }
@@ -190,8 +189,14 @@ export interface BuildOptions {
   srcDir?: string | undefined;
   /** Additive target policy; browser is the unchanged default. */
   target?: TargetName | undefined;
-  /** Closure-only typed declarations. Native preservation never scans these. */
-  typedExterns?: readonly string[] | undefined;
+  /**
+   * Closure-only typed declarations. Strings apply to every job; scoped entries
+   * are configured source entry paths resolved against projectRoot.
+   * Native preservation never scans these.
+   */
+  typedExterns?:
+    | readonly (string | { path: string; entries: readonly string[] })[]
+    | undefined;
 }
 
 export interface CleanCacheOptions {
@@ -251,7 +256,7 @@ export interface ResolvedBuildOptions {
   projectRoot: string;
   srcDir: string;
   target: TargetName;
-  typedExterns: string[];
+  typedExterns: Array<{ path: string; entryFiles: string[] }>;
 }
 
 function deepFreeze<T extends object>(value: T): T {
@@ -289,12 +294,12 @@ export const DEFAULT_BUILD_OPTIONS = deepFreeze({
   externs: [],
   js: [],
   languageOut: "ECMASCRIPT_NEXT",
-  outDir: "",
+  outDir: "dist",
   packages: "esm-only",
   platformExterns: "minimal",
   preserveModules: [],
-  projectRoot: "",
-  srcDir: "",
+  projectRoot: undefined,
+  srcDir: "src",
   target: "browser",
   typedExterns: [],
-} satisfies ResolvedBuildOptions);
+} satisfies BuildOptions);

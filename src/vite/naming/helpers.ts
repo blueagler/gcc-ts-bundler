@@ -12,4 +12,4 @@ export {
   findPreferredRollupChunkSeed,
 } from "./seeds";
 export { applyFileRenames, mapOutputFiles, writeManifest } from "./files";
-export { isRuntimeModuleSourceMap, patchRuntimeChunkUrls } from "./runtime";
+export { patchRuntimeChunkUrls } from "./runtime";

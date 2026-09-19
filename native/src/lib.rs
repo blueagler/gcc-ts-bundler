@@ -49,31 +49,8 @@ pub fn resolve_graph(
 }
 
 #[napi(js_name = "planChunks")]
-// napi positional contract: the TS side calls these by argument
-// position, so the parameter list is the published signature.
-#[allow(clippy::too_many_arguments)]
-pub fn plan_chunks(
-    chunk_mode: String,
-    base_chunk_name: String,
-    workspace_dir: String,
-    entry_files: Vec<graph::ChunkPlanEntryInput>,
-    graph_entries: Vec<graph::DependencyGraphEntry>,
-    lazy_imports: Vec<graph::LazyImportEntry>,
-    rollup_chunks: Vec<graph::RollupChunkInput>,
-    shim_files: Vec<String>,
-    vendor_chunk: bool,
-) -> Result<Vec<graph::ChunkPlanChunkOutput>> {
-    into_napi(graph::plan_chunks(
-        chunk_mode,
-        base_chunk_name,
-        workspace_dir,
-        entry_files,
-        graph_entries,
-        lazy_imports,
-        rollup_chunks,
-        shim_files,
-        vendor_chunk,
-    ))
+pub fn plan_chunks(input: graph::PlanChunksInput) -> Result<Vec<graph::ChunkPlanChunkOutput>> {
+    into_napi(graph::plan_chunks(input))
 }
 
 #[napi(js_name = "prepareClosureJobs")]
@@ -94,53 +71,10 @@ pub fn emit_preserved_module(file_path: String, source: String) -> Result<String
 }
 
 #[napi(js_name = "transpileSources")]
-// napi positional contract: the TS side calls these by argument
-// position, so the parameter list is the published signature.
-#[allow(clippy::too_many_arguments)]
 pub fn transpile_sources(
-    file_names: Vec<String>,
-    explicit_extern_paths: Vec<String>,
-    out_dir: String,
-    externs_path: String,
-    metadata_path: String,
-    chunk_mode: String,
-    target: String,
-    runtime_module_source_map_file: Option<String>,
-    workspace_dir: String,
-    package_aliases: Vec<transpile::PackageAliasInput>,
-    resolved_imports: Vec<transpile::ResolvedImportInput>,
-    external_boundaries: Vec<transpile::ExternalBoundaryInput>,
-    opaque_external_specifiers: Vec<String>,
-    package_json_files: Vec<String>,
-    preserved_modules: Vec<transpile::PreservedModuleInput>,
-    lazy_imports: Vec<transpile::LazyImportInput>,
-    chunk_graph: Vec<transpile::TranspileChunkInput>,
-    class_map_calls: Vec<transpile::ClassMapCallInput>,
-    pure_callees: Vec<String>,
-    type_inference_disabled: bool,
+    input: transpile::TranspileSourcesInput,
 ) -> Result<transpile::TranspileOutput> {
-    into_napi(transpile::transpile_sources(
-        file_names,
-        explicit_extern_paths,
-        out_dir,
-        externs_path,
-        metadata_path,
-        chunk_mode,
-        target,
-        runtime_module_source_map_file,
-        workspace_dir,
-        package_aliases,
-        resolved_imports,
-        external_boundaries,
-        opaque_external_specifiers,
-        package_json_files,
-        preserved_modules,
-        lazy_imports,
-        chunk_graph,
-        class_map_calls,
-        pure_callees,
-        type_inference_disabled,
-    ))
+    into_napi(transpile::transpile_sources(input))
 }
 
 #[napi(js_name = "minifyJavaScript")]

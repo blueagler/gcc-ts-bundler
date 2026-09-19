@@ -26,7 +26,14 @@ export function resolveRetainedModuleIds(
   const moduleIds = new Set<string>(entryModuleIds);
   for (const chunk of chunks) {
     for (const moduleId of Object.keys(chunk.modules)) {
-      moduleIds.add(moduleId);
+      // Rolldown's public RUNTIME_MODULE_ID identifies linker-generated helpers,
+      // not a load/transform module. We rebuild interop from the captured ESM/CJS
+      // inputs with native emit and dependency prebundling, not Rolldown's output.
+      // Exclude only this chunk-membership evidence: an explicit entry or import
+      // still needs a real capture and must fail closed if it is missing.
+      if (moduleId !== "\0rolldown/runtime.js") {
+        moduleIds.add(moduleId);
+      }
     }
   }
   return [...moduleIds].sort((left, right) => left.localeCompare(right));
@@ -71,6 +78,7 @@ export async function resolveRetainedCapturedModuleIds(
     const prunedModuleCount = pruneShakenReexports({
       capturedModules: input.capturedModules,
       demand: walked.demand,
+      metrics: input.metrics,
       moduleIds: walked.materializedModuleIds,
       projectRoot: input.projectRoot,
     });

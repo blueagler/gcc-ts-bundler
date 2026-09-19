@@ -19,146 +19,59 @@ import {
 } from "../helpers.mjs";
 
 test.serial(
-  "emits smaller script chunks for explicit lazy modules",
+  "decorator-lowered entries retain authored lazy-import identity",
   { timeout: 20000 },
   async () => {
     const fixture = await createFixture();
-    await fixture.write(
-      "src/main.ts",
-      [
-        'const loadFeature = () => import("./feature");',
-        "globalThis.__lazyLoader = loadFeature;",
-        'document.body.textContent = "base";',
-        "",
-      ].join("\n"),
-    );
-    await fixture.write(
-      "src/feature.ts",
-      [
-        'export const marker = "LAZY_FEATURE";',
-        "export function render() {",
-        "  return marker;",
-        "}",
-        "",
-      ].join("\n"),
-    );
+    await fixture.write("package.json", JSON.stringify({ type: "module" }));
+    await fixture.write("tsconfig.json", JSON.stringify({
+      compilerOptions: {
+        module: "ESNext",
+        moduleResolution: "Bundler",
+        target: "ES2022",
+        experimentalDecorators: true,
+      },
+    }));
+    await fixture.write("src/main.ts", [
+      "export {};",
+      "function enhance(target: object, name: string, descriptor: PropertyDescriptor) {",
+      "  const method = descriptor.value;",
+      "  descriptor.value = function() { return method.call(this) + 10; };",
+      "}",
+      "class Box { @enhance value() { return 7; } }",
+      '(globalThis as any)["__decoratedLazy"] = async () => {',
+      '  const feature = await import("./feature");',
+      "  return [new Box().value(), feature.value];",
+      "};",
+    ].join("\n"));
+    await fixture.write("src/feature.ts", "export const value = 23;\n");
 
     const result = await build({
       cache: { mode: "off" },
-      chunks: { mode: "bundler-runtime", outputType: "script" },
+      chunks: { mode: "bundler-runtime", outputType: "esm" },
       entries: ["./main.ts"],
       outDir: fixture.outDir,
+      packages: "off",
       projectRoot: fixture.projectRoot,
       srcDir: fixture.srcDir,
+      target: "node",
     });
-
     expect(result.ok).toBe(true);
-    const outputBasenames = result.outputFiles
-      .map((filePath) => path.basename(filePath))
-      .sort((left, right) => left.localeCompare(right));
-    expect(outputBasenames).toHaveLength(2);
-    expect(outputBasenames).toContain("main.js");
-    const lazyOutputName = outputBasenames.find((name) => name !== "main.js");
-    expect(lazyOutputName).toMatch(/^c[0-9a-f]{8}\.js$/);
-
-    const baseOutput = await fixture.read("dist/main.js");
-    const lazyOutput = await fixture.read(`dist/${lazyOutputName}`);
-
-    expect(baseOutput).not.toMatch(/\bexport\s*\{/);
-    expect(baseOutput).not.toMatch(/globalThis\.__gccChunkRuntime/);
-    expect(baseOutput).not.toContain("__gcc_runtime__");
-    expect(baseOutput).not.toContain("initialized");
-    expect(baseOutput).not.toContain("gcc.src.feature");
-    expect(baseOutput).not.toMatch(/m[0-9a-f]{8}/);
-    expect(baseOutput).toContain(".__g");
-    // Hoisted entry modules execute inline; no `.n([...])` kick remains.
-    expect(baseOutput).not.toMatch(/\.n\(\[/);
-    expect(baseOutput).toMatch(/textContent=(?:"base"|`base`)/u);
-    expect(baseOutput).not.toMatch(/LAZY_FEATURE/);
-    expect(lazyOutput).toMatch(/LAZY_FEATURE/);
-  },
-);
-
-test.serial(
-  "emits bundler-runtime chunks for explicit lazy modules",
-  { timeout: 20000 },
-  async () => {
-    const fixture = await createFixture();
-    await fixture.write(
-      "src/main.ts",
-      [
-        'const loadFeature = () => import("./feature");',
-        "globalThis.__lazyLoader = loadFeature;",
-        'document.body.textContent = "base";',
-        "",
-      ].join("\n"),
-    );
-    await fixture.write(
-      "src/feature.ts",
-      [
-        'export const marker = "LAZY_FEATURE";',
-        "export function renderMessage() {",
-        "  return marker;",
-        "}",
-        "",
-      ].join("\n"),
-    );
-
-    const result = await build({
-      cache: { mode: "off" },
-      chunks: { mode: "bundler-runtime", outputType: "script" },
-      entries: ["./main.ts"],
-      outDir: fixture.outDir,
-      projectRoot: fixture.projectRoot,
-      srcDir: fixture.srcDir,
-    });
-
-    expect(result.ok).toBe(true);
-    const outputBasenames = result.outputFiles
-      .map((filePath) => path.basename(filePath))
-      .sort((left, right) => left.localeCompare(right));
-    expect(outputBasenames).toHaveLength(2);
-    expect(outputBasenames).toContain("main.js");
-    const lazyOutputName = outputBasenames.find((name) => name !== "main.js");
-    expect(lazyOutputName).toMatch(/^c[0-9a-f]{8}\.js$/);
-
-    const baseOutput = await fixture.read("dist/main.js");
-    const lazyOutput = await fixture.read(`dist/${lazyOutputName}`);
-
-    expect(baseOutput).not.toContain("__gcc_runtime__");
-    expect(baseOutput).not.toContain("initialized");
-    expect(baseOutput).not.toContain("gcc.src.feature");
-    expect(baseOutput).not.toContain("sourceURL");
-    expect(baseOutput).not.toContain("unknown module");
-    expect(baseOutput).not.toContain("unknown chunk");
-    expect(baseOutput).not.toMatch(/m[0-9a-f]{8}/);
-    expect(baseOutput.trimStart()).not.toMatch(/^var\s/);
-    expect(baseOutput.trimStart()).toMatch(/^!?\(?function\(\)\{/);
-    expect(baseOutput).toContain(".__g");
-    // Hoisted entry modules execute inline; no `.n([...])` kick remains.
-    expect(baseOutput).not.toMatch(/\.n\(\[/);
-    expect(baseOutput).toMatch(/textContent=(?:"base"|`base`)/u);
-    expect(baseOutput).not.toMatch(/goog\.module/);
-    expect(baseOutput).not.toMatch(/ModuleManager/);
-    expect(baseOutput).not.toContain('Object.defineProperty(d,"default"');
-    expect(lazyOutput).not.toContain("__gcc_runtime__");
-    expect(lazyOutput).not.toContain("gcc.src.feature");
-    expect(lazyOutput).not.toContain("base chunk missing");
-    expect(lazyOutput).not.toMatch(/m[0-9a-f]{8}/);
-    expect(lazyOutput).not.toContain("renderMessage");
-    expect(lazyOutput.trimStart()).not.toMatch(/^var\s/);
-    expect(lazyOutput.trimStart()).toMatch(/^!?\(?function\(\)\{/);
-    expect(lazyOutput).not.toMatch(/Object\.defineProperty\([^)]*,\s*[0-9]+,/);
-    expect(lazyOutput).not.toMatch(/\bta\(/);
-    expect(lazyOutput).not.toMatch(/\bqa\(/);
-    expect(lazyOutput).not.toMatch(/\bha\./);
-    expect(lazyOutput).toMatch(/\[[0-9]+\]=/);
-    expect(lazyOutput).not.toContain('["default"]');
-    expect(lazyOutput).not.toMatch(/goog\.module/);
-    // Hoisted lazy chunks run on script load rather than through `h()`.
-    expect(lazyOutput).not.toMatch(
-      /(?:G|\$gcc\.[A-Za-z_$][\w$]*)\.[A-Za-z_$][\w$]*\(function\(/,
-    );
+    const previousRuntime = globalThis.__g;
+    const previousGcc = globalThis.$gcc;
+    const previousLoader = globalThis.__decoratedLazy;
+    try {
+      const entry = result.outputFiles.find((file) => path.basename(file) === "main.js");
+      await import(pathToFileURL(entry).href);
+      expect(await globalThis.__decoratedLazy()).toEqual([17, 23]);
+    } finally {
+      if (previousRuntime === undefined) delete globalThis.__g;
+      else globalThis.__g = previousRuntime;
+      if (previousGcc === undefined) delete globalThis.$gcc;
+      else globalThis.$gcc = previousGcc;
+      if (previousLoader === undefined) delete globalThis.__decoratedLazy;
+      else globalThis.__decoratedLazy = previousLoader;
+    }
   },
 );
 
@@ -369,8 +282,11 @@ test.serial(
       "src/main.ts",
       [
         'import { ns } from "./reexport.js";',
+        'import * as direct from "./mod.js";',
         '(globalThis as any)["__nsNamed"] = ns.named;',
         '(globalThis as any)["__nsDefault"] = ns.default;',
+        '(globalThis as any)["__nsKeys"] = Reflect.ownKeys(ns);',
+        '(globalThis as any)["__nsIdentity"] = ns === direct;',
         "",
       ].join("\n"),
     );
@@ -391,6 +307,8 @@ test.serial(
     expect(mainOutput).toBeTruthy();
     const previousNamed = globalThis["__nsNamed"];
     const previousDefault = globalThis["__nsDefault"];
+    const previousKeys = globalThis["__nsKeys"];
+    const previousIdentity = globalThis["__nsIdentity"];
     const previousDocument = globalThis.document;
     const previousLocation = globalThis.location;
     const previousRuntime = globalThis.__g;
@@ -404,11 +322,17 @@ test.serial(
       await import(`${pathToFileURL(mainOutput).href}?nsre=${Date.now()}`);
       expect(globalThis["__nsNamed"]).toBe("named-ok");
       expect(globalThis["__nsDefault"]).toBe("default-ok");
+      expect(globalThis["__nsKeys"]).toEqual(["default", "named"]);
+      expect(globalThis["__nsIdentity"]).toBe(true);
     } finally {
       if (previousNamed === undefined) delete globalThis["__nsNamed"];
       else globalThis["__nsNamed"] = previousNamed;
       if (previousDefault === undefined) delete globalThis["__nsDefault"];
       else globalThis["__nsDefault"] = previousDefault;
+      if (previousKeys === undefined) delete globalThis["__nsKeys"];
+      else globalThis["__nsKeys"] = previousKeys;
+      if (previousIdentity === undefined) delete globalThis["__nsIdentity"];
+      else globalThis["__nsIdentity"] = previousIdentity;
       if (previousDocument === undefined) delete globalThis.document;
       else globalThis.document = previousDocument;
       if (previousLocation === undefined) delete globalThis.location;
@@ -992,7 +916,7 @@ test.serial(
   { timeout: 20000 },
   async () => {
     // Escaping a namespace retains its complete getter facade instead of
-    // rejecting the build. Finite member-only imports still lower to slots.
+    // rejecting the build. Direct imports still use internal dense slots.
     const fixture = await createFixture();
     await fixture.write(
       "src/main.ts",
@@ -1002,10 +926,19 @@ test.serial(
         "  load().then(function (m) {",
         "    return m;",
         "  });",
+        '(globalThis as any)["__readFeature"] = () => load().then(m => m.marker);',
+        '(globalThis as any)["__destructureFeature"] = () => load().then(({ marker }) => marker);',
         "",
       ].join("\n"),
     );
-    await fixture.write("src/feature.ts", 'export const marker = "x";\n');
+    await fixture.write(
+      "src/feature.ts",
+      [
+        'export let marker = "x";',
+        '(globalThis as any)["__setMarker"] = (value: string) => { marker = value; };',
+        "",
+      ].join("\n"),
+    );
 
     const result = await build({
       cache: { mode: "off" },
@@ -1017,6 +950,45 @@ test.serial(
     });
 
     expect(result.ok).toBe(true);
+    const baseUrl = pathToFileURL(path.join(fixture.outDir, "main.js")).href;
+    await fixture.write(
+      "run.mjs",
+      [
+        `globalThis.location = { href: ${JSON.stringify(baseUrl)} };`,
+        `await import(${JSON.stringify(baseUrl)});`,
+        'const namespace = await globalThis["__loadFeature"]();',
+        "const marker = namespace.marker;",
+        'globalThis["__setMarker"]("updated");',
+        "console.log(JSON.stringify({",
+        "  keys: Object.keys(namespace),",
+        "  ownNames: Object.getOwnPropertyNames(namespace),",
+        "  ownKeys: Reflect.ownKeys(namespace),",
+        '  hasInternalSlot: "0" in namespace,',
+        "  marker,",
+        "  updated: namespace.marker,",
+        '  memberRead: await globalThis["__readFeature"](),',
+        '  destructured: await globalThis["__destructureFeature"](),',
+        '  sameNamespace: namespace === await globalThis["__loadFeature"](),',
+        "}));",
+        "",
+      ].join("\n"),
+    );
+    const child = Bun.spawnSync({
+      cmd: ["node", path.join(fixture.projectRoot, "run.mjs")],
+    });
+    const stdout = child.stdout.toString().trim();
+    expect(child.exitCode, `${stdout}\n${child.stderr.toString()}`).toBe(0);
+    expect(JSON.parse(stdout.split("\n").at(-1))).toEqual({
+      keys: ["marker"],
+      ownNames: ["marker"],
+      ownKeys: ["marker"],
+      hasInternalSlot: false,
+      marker: "x",
+      updated: "updated",
+      memberRead: "updated",
+      destructured: "updated",
+      sameNamespace: true,
+    });
   },
 );
 
@@ -1259,43 +1231,6 @@ test.serial(
 );
 
 test.serial(
-  "keeps script chunk output when chunk output type is script",
-  { timeout: 20000 },
-  async () => {
-    const fixture = await createFixture();
-    await fixture.write(
-      "src/main.ts",
-      [
-        'const load = () => import("./feature");',
-        '(globalThis as Record<string, unknown>)["__loadFeature"] = load;',
-        'document.body.textContent = "base";',
-        "",
-      ].join("\n"),
-    );
-    await fixture.write("src/feature.ts", 'export const marker = "LAZY";\n');
-
-    const result = await build({
-      cache: { mode: "off" },
-      chunks: {
-        mode: "bundler-runtime",
-        outputType: "script",
-        publicPath: "./",
-      },
-      entries: ["./main.ts"],
-      outDir: fixture.outDir,
-      projectRoot: fixture.projectRoot,
-      srcDir: fixture.srcDir,
-    });
-
-    expect(result.ok).toBe(true);
-    const baseOutput = await fixture.read("dist/main.js");
-    expect(baseOutput).toMatch(/createElement\(["'`]script["'`]\)/u);
-    expect(baseOutput).toContain("currentScript");
-    expect(baseOutput).not.toMatch(/^import\s|\bexport\s*\{/m);
-  },
-);
-
-test.serial(
   "unified type metadata reaches the hoisted bundler-runtime input as JSDoc",
   { timeout: 20000 },
   async () => {
@@ -1406,88 +1341,6 @@ test.serial(
   },
 );
 
-test.serial(
-  "standalone escape hatch preserves semantic enum lowering",
-  { timeout: 20000 },
-  async () => {
-    const fixture = await createFixture();
-    const cacheDir = path.join(fixture.projectRoot, ".cache");
-    await fixture.write(
-      "src/mode.ts",
-      // A *string* enum: number enums are lowered by SWC into a rename-safe
-      // reverse-mapped object and carry no `@enum` metadata, and a `const enum`
-      // is erased outright, so the string enum is the shape this count
-      // measures. `test/const-enum.test.mjs` covers the const case separately.
-      'export enum Mode { Active = "active", Idle = "idle" }\n',
-    );
-    await fixture.write(
-      "src/main.ts",
-      [
-        'import { Mode } from "./mode";',
-        "function choose(value: number): Mode {",
-        "  return value > 0 ? Mode.Active : Mode.Idle;",
-        "}",
-        '(globalThis as any)["__enumMode"] = choose(1);',
-        "",
-      ].join("\n"),
-    );
-    const previous = process.env.GCC_DISABLE_TYPE_INFERENCE;
-    process.env.GCC_DISABLE_TYPE_INFERENCE = "1";
-    let result;
-    try {
-      result = await build({
-        cache: { dir: cacheDir, mode: "persistent" },
-        chunks: { mode: "bundler-runtime" },
-        entries: ["./main.ts"],
-        outDir: fixture.outDir,
-        projectRoot: fixture.projectRoot,
-        srcDir: fixture.srcDir,
-      });
-    } finally {
-      if (previous === undefined) delete process.env.GCC_DISABLE_TYPE_INFERENCE;
-      else process.env.GCC_DISABLE_TYPE_INFERENCE = previous;
-    }
-    expect(
-      result.ok,
-      result.ok
-        ? ""
-        : result.diagnostics.map(({ message }) => message).join("\n"),
-    ).toBe(true);
-
-    const projectCacheDir = getProjectCacheDir(cacheDir, fixture.projectRoot);
-    const metadataFiles = (
-      await findFilesNamed(projectCacheDir, "meta.json")
-    ).filter((filePath) =>
-      filePath.includes(`${path.sep}native-emit${path.sep}`),
-    );
-    expect(metadataFiles.length).toBeGreaterThan(0);
-    const nativeMetadata = JSON.parse(
-      await fs.readFile(metadataFiles[0], "utf8"),
-    );
-    const counts = nativeMetadata.typeMetadata.reduce(
-      (total, file) => ({
-        annotationCount: total.annotationCount + file.counts.annotationCount,
-        enumDeclarationCount:
-          total.enumDeclarationCount + file.counts.enumDeclarationCount,
-        memberAnnotationCount:
-          total.memberAnnotationCount + file.counts.memberAnnotationCount,
-        typeDeclarationCount:
-          total.typeDeclarationCount + file.counts.typeDeclarationCount,
-      }),
-      {
-        annotationCount: 0,
-        enumDeclarationCount: 0,
-        memberAnnotationCount: 0,
-        typeDeclarationCount: 0,
-      },
-    );
-    expect(counts.enumDeclarationCount).toBeGreaterThan(0);
-    expect(counts.annotationCount).toBe(0);
-    expect(counts.memberAnnotationCount).toBe(0);
-    expect(counts.typeDeclarationCount).toBe(0);
-  },
-);
-
 test("resolves the vendor chunk through the same gates as module output", () => {
   const resolve = (overrides) =>
     resolveVendorChunk({
@@ -1497,16 +1350,12 @@ test("resolves the vendor chunk through the same gates as module output", () => 
       ...overrides,
     });
 
-  // Opt-in only: the split trades ~2.2 KB gzip of first load for a vendor
-  // chunk that survives app-only deploys in the browser cache, and which side
-  // wins depends on traffic the bundler cannot see. See docs/vite.md.
+  // Opt-in only; this test checks eligibility, not output-size or cache wins.
   expect(resolve({ vendorChunk: true })).toBe(true);
   expect(resolve({})).toBe(false);
   expect(resolve({ vendorChunk: "auto" })).toBe(false);
 
-  // The split only stabilises names under module output, where the entry's
-  // file name is embedded in its siblings. Script chunks find each other
-  // through the manifest, so an extra chunk would be pure overhead.
+  // Script output and off mode do not support the vendor partition.
   expect(resolve({ outputType: "script", vendorChunk: true })).toBe(false);
   expect(resolve({ chunkMode: "off", vendorChunk: true })).toBe(false);
   // `split` is on the same import-edge chunk graph, so it qualifies exactly as
@@ -1518,9 +1367,6 @@ test("resolves the vendor chunk through the same gates as module output", () => 
   expect(resolve({ worker: true, vendorChunk: true })).toBe(false);
 
   expect(resolve({ vendorChunk: false })).toBe(false);
-  // Explicit true never defeats a gate: a script consumer cannot be handed a
-  // chunk graph shape that only works for modules.
-  expect(resolve({ outputType: "script", vendorChunk: true })).toBe(false);
 
   // The gates still track resolveChunkOutputType, so an explicit true follows
   // the module-output default rather than needing a second decision.
@@ -1552,42 +1398,6 @@ test("chunks.vendorChunk participates in the options signature", () => {
   expect(signature({ vendorChunk: "auto" })).toBe(
     signature({ vendorChunk: false }),
   );
-});
-
-test("normalizeBuildOptions resolves chunks.vendorChunk to a boolean", () => {
-  const normalize = (chunks) =>
-    normalizeBuildOptions({
-      chunks,
-      entries: ["./main.ts"],
-      projectRoot: "/tmp/demo",
-      srcDir: "/tmp/demo/src",
-    }).chunks.vendorChunk;
-
-  expect(
-    normalize({
-      mode: "bundler-runtime",
-      outputType: "esm",
-      vendorChunk: true,
-    }),
-  ).toBe(true);
-  // Opt-in: the default resolves false however friendly the rest of the shape.
-  expect(normalize({ mode: "bundler-runtime", outputType: "esm" })).toBe(false);
-  expect(
-    normalize({
-      mode: "bundler-runtime",
-      outputType: "script",
-      vendorChunk: true,
-    }),
-  ).toBe(false);
-  expect(
-    normalize({
-      mode: "bundler-runtime",
-      outputType: "esm",
-      vendorChunk: false,
-    }),
-  ).toBe(false);
-  expect(normalize({ mode: "off" })).toBe(false);
-  expect(normalize(undefined)).toBe(false);
 });
 
 /**

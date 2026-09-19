@@ -6,10 +6,18 @@ use std::path::{Path, PathBuf};
 use crate::closure_metadata::closure_metadata_key;
 use crate::closure_metadata::{ClosureAnnotationTarget, ClosureFileMetadata};
 use oxc_allocator::Allocator;
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    AccessorProperty, Argument, AssignmentExpression, BinaryExpression, BindingPattern,
+    CallExpression, Class, ClassElement, Declaration, Decorator, ExportDefaultDeclarationKind,
+    Expression, FormalParameters, Function, ImportDeclarationSpecifier, MemberExpression,
+    MethodDefinition, ModuleExportName, ObjectExpression, ObjectPropertyKind, Program,
+    PropertyDefinition, PropertyKey, PropertyKind, Statement, TSAccessibility, TemplateLiteral,
+    VariableDeclaration, VariableDeclarator,
+};
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
+use oxc_syntax::operator::BinaryOperator;
 use oxc_syntax::scope::ScopeFlags;
 
 const HARD_PLATFORM_CALLBACK_PROPERTY_NAMES: &[&str] = &[
@@ -34,26 +42,10 @@ fn is_hard_static_interop_name(name: &str) -> bool {
 
 #[derive(Default)]
 pub(crate) struct ExternPropertyAnalysis {
-    pub(crate) program_declared_names: HashSet<String>,
+    pub(crate) declared_bindings: HashSet<String>,
     pub(crate) explicit_extern_property_names: HashSet<String>,
     pub(crate) preserved_property_names: HashSet<String>,
     pub(crate) static_property_names: HashSet<String>,
-}
-
-#[derive(Default)]
-struct ParsedExternFileAnalysis {
-    accessed_hazard_names: HashSet<String>,
-    callback_record_names: HashSet<String>,
-    constructor_read_names: HashSet<String>,
-    defined_hazard_names: HashSet<String>,
-    platform_callback_names: HashSet<String>,
-    proven_definition_names: HashSet<String>,
-    proven_monomorphic_access_names: HashSet<String>,
-    reflective_property_names: HashSet<String>,
-    static_assigned_names: HashSet<String>,
-    static_property_names: HashSet<String>,
-    unproven_definition_names: HashSet<String>,
-    unproven_monomorphic_access_names: HashSet<String>,
 }
 
 /// One file's contribution to the extern-property analysis.
@@ -81,10 +73,8 @@ pub(crate) fn analyze_extern_file_program<'a>(
     metadata: Option<&ClosureFileMetadata>,
 ) -> ExternFileFacts {
     crate::transpile::emit_helpers::rewrite_this_field_helper_assignments(allocator, program);
-    let mut collector = ExternPropertyCollector::new(metadata);
-    collector.visit_program(program);
-    let analysis = collector.finish();
-    let static_property_names = analysis.static_property_names.clone();
+    let mut analysis = ExternPropertyCollector::new(metadata);
+    analysis.visit_program(program);
     let mut preserved_property_names = HashSet::new();
     preserved_property_names.extend(analysis.platform_callback_names);
     preserved_property_names.extend(analysis.reflective_property_names);
@@ -119,7 +109,7 @@ pub(crate) fn analyze_extern_file_program<'a>(
     ExternFileFacts {
         declared_names: collect_program_declared_names(program),
         preserved_property_names,
-        static_property_names,
+        static_property_names: analysis.static_property_names,
         class_surface_facts,
     }
 }
@@ -146,7 +136,7 @@ pub(crate) fn merge_extern_property_facts(
     preserved_property_names.extend(static_property_names.iter().cloned());
 
     Ok(ExternPropertyAnalysis {
-        program_declared_names,
+        declared_bindings: program_declared_names,
         explicit_extern_property_names,
         preserved_property_names,
         static_property_names,
@@ -323,23 +313,6 @@ impl ExternPropertyCollector {
         Self {
             nominal_member_names,
             ..Self::default()
-        }
-    }
-
-    fn finish(self) -> ParsedExternFileAnalysis {
-        ParsedExternFileAnalysis {
-            accessed_hazard_names: self.accessed_hazard_names,
-            callback_record_names: self.callback_record_names,
-            constructor_read_names: self.constructor_read_names,
-            defined_hazard_names: self.defined_hazard_names,
-            platform_callback_names: self.platform_callback_names,
-            proven_definition_names: self.proven_definition_names,
-            proven_monomorphic_access_names: self.proven_monomorphic_access_names,
-            reflective_property_names: self.reflective_property_names,
-            static_assigned_names: self.static_assigned_names,
-            static_property_names: self.static_property_names,
-            unproven_definition_names: self.unproven_definition_names,
-            unproven_monomorphic_access_names: self.unproven_monomorphic_access_names,
         }
     }
 
@@ -641,8 +614,7 @@ impl<'a> Visit<'a> for ExternPropertyCollector {
                         }
                         if matches!(
                             (object_name, method_name),
-                            (Some("Object"), Some("defineProperty"))
-                                | (Some("Reflect"), Some("defineProperty"))
+                            (Some("Object" | "Reflect"), Some("defineProperty"))
                         ) {
                             self.insert_defined_hazard_name(string_name, false);
                         }
@@ -716,7 +688,7 @@ fn collect_nested_record_names(object: &ObjectExpression<'_>) -> HashSet<String>
         }
         match property.value.without_parentheses() {
             Expression::ObjectExpression(record) => {
-                names.extend(object_literal_direct_keys(record))
+                names.extend(object_literal_direct_keys(record));
             }
             Expression::ArrayExpression(record) => {
                 for element in &record.elements {
@@ -913,24 +885,21 @@ fn collect_program_class_surface_facts(program: &Program<'_>, facts: &mut Vec<Cl
                 &registrations.class_names,
                 facts,
             ),
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(declaration) = &export.declaration {
-                    collect_decl_class_surface_facts(
-                        declaration,
-                        &import_aliases,
-                        &export_aliases,
-                        &registrations.class_names,
-                        facts,
-                    );
-                }
+            Statement::ExportDeclaration(export) => {
+                collect_decl_class_surface_facts(
+                    &export.declaration,
+                    &import_aliases,
+                    &export_aliases,
+                    &registrations.class_names,
+                    facts,
+                );
             }
             Statement::ExportDefaultDeclaration(export) => {
                 if let ExportDefaultDeclarationKind::ClassDeclaration(class) = &export.declaration {
-                    let local_name = class
-                        .id
-                        .as_ref()
-                        .map(|identifier| identifier.name.to_string())
-                        .unwrap_or_else(|| "default".to_string());
+                    let local_name = class.id.as_ref().map_or_else(
+                        || "default".to_string(),
+                        |identifier| identifier.name.to_string(),
+                    );
                     push_class_surface_fact(
                         local_name,
                         class,
@@ -1024,8 +993,7 @@ fn push_class_surface_fact(
         names.insert(extra_export.to_string());
     }
     let super_name = class
-        .super_class
-        .as_ref()
+        .heritage_expression()
         .and_then(class_reference_name)
         .map(|name| import_aliases.get(&name).cloned().unwrap_or(name));
     facts.push(ClassSurfaceFact {
@@ -1072,9 +1040,6 @@ fn collect_program_export_aliases(program: &Program<'_>) -> HashMap<String, Hash
         let Statement::ExportNamedDeclaration(export) = statement else {
             continue;
         };
-        if export.source.is_some() {
-            continue;
-        }
         for specifier in &export.specifiers {
             aliases
                 .entry(module_export_name(&specifier.local))
@@ -1345,17 +1310,23 @@ mod tests {
 
     use crate::closure_metadata::ClosureAnnotation;
 
-    use super::*;
+    use super::{
+        closure_metadata_key, collect_extern_property_names_with_externs, fs,
+        ClosureAnnotationTarget, ClosureFileMetadata, ExternPropertyAnalysis, HashMap,
+    };
 
     static NEXT_FIXTURE_ID: AtomicUsize = AtomicUsize::new(0);
 
-    fn analyze_fixture(source: &str, typed_member: Option<(&str, &str)>) -> ExternPropertyAnalysis {
+    fn analyze_fixture(
+        source: &str,
+        typed_member: Option<(&str, &str)>,
+    ) -> Result<ExternPropertyAnalysis, Box<dyn std::error::Error>> {
         let fixture_id = NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "gcc-ts-bundler-extern-analysis-{}-{fixture_id}.js",
             std::process::id()
         ));
-        fs::write(&path, source).unwrap();
+        fs::write(&path, source)?;
         let file_name = path.to_string_lossy().to_string();
         let mut metadata_by_file = HashMap::new();
         if let Some((owner_binding_name, member_name)) = typed_member {
@@ -1387,72 +1358,79 @@ mod tests {
             );
         }
         let analysis =
-            collect_extern_property_names_with_externs(&[file_name], &[], &metadata_by_file)
-                .unwrap();
-        fs::remove_file(path).unwrap();
-        analysis
+            collect_extern_property_names_with_externs(&[file_name], &[], &metadata_by_file);
+        fs::remove_file(path)?;
+        Ok(analysis?)
     }
 
     #[test]
-    fn identifier_this_field_helper_is_not_pinned() {
+    fn identifier_this_field_helper_is_not_pinned() -> Result<(), Box<dyn std::error::Error>> {
         let analysis = analyze_fixture(
             r#"class Box {
                 constructor() { __publicField(this, "value", 1); }
                 read() { return this.value; }
             }"#,
             None,
-        );
+        )?;
 
         assert!(!analysis.preserved_property_names.contains("value"));
+        Ok(())
     }
 
     #[test]
-    fn metadata_backed_monomorphic_class_member_is_not_pinned() {
+    fn metadata_backed_monomorphic_class_member_is_not_pinned(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let analysis = analyze_fixture(
             r#"class Box {
                 constructor() { __publicField(this, "value", 1); }
                 read() { return this.value; }
             }"#,
             Some(("Box", "value")),
-        );
+        )?;
 
         assert!(!analysis.preserved_property_names.contains("value"));
+        Ok(())
     }
 
     #[test]
-    fn structural_object_member_remains_pinned() {
+    fn structural_object_member_remains_pinned() -> Result<(), Box<dyn std::error::Error>> {
         let analysis = analyze_fixture(
             r#"const box = { "value": 1 };
             consume(box.value);"#,
             None,
-        );
+        )?;
 
         assert!(analysis.preserved_property_names.contains("value"));
+        Ok(())
     }
 
     #[test]
-    fn unknown_receiver_does_not_pin_rewritten_this_field() {
+    fn unknown_receiver_does_not_pin_rewritten_this_field() -> Result<(), Box<dyn std::error::Error>>
+    {
         let analysis = analyze_fixture(
             r#"class Box {
                 constructor() { __publicField(this, "value", 1); }
                 read(other) { return this.value + other.value; }
             }"#,
             Some(("Box", "value")),
-        );
+        )?;
 
         assert!(!analysis.preserved_property_names.contains("value"));
+        Ok(())
     }
 
     #[test]
-    fn object_define_property_descriptor_remains_pinned() {
+    fn object_define_property_descriptor_remains_pinned() -> Result<(), Box<dyn std::error::Error>>
+    {
         let analysis = analyze_fixture(
             r#"class Box {
                 constructor() { Object.defineProperty(this, "value", { value: 1 }); }
                 read() { return this.value; }
             }"#,
             None,
-        );
+        )?;
 
         assert!(analysis.preserved_property_names.contains("value"));
+        Ok(())
     }
 }

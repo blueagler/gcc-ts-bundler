@@ -13,17 +13,22 @@ export type ResolvedModuleTypeEntry = {
 export async function resolveModuleTypeEntry({
   compilerOptions,
   projectRoot,
+  resolutionCache,
+  resolutionHost = ts.sys,
   specifier,
   target = "browser",
 }: {
   compilerOptions: ts.CompilerOptions;
   projectRoot: string;
+  resolutionCache?: ts.ModuleResolutionCache | undefined;
+  resolutionHost?: ts.ModuleResolutionHost | undefined;
   specifier: string;
   target?: TargetName | undefined;
 }): Promise<ResolvedModuleTypeEntry> {
   const targetEntry = resolveTargetDeclarationEntry({
     compilerOptions,
     projectRoot,
+    resolutionHost,
     specifier,
     target,
   });
@@ -33,7 +38,8 @@ export async function resolveModuleTypeEntry({
     specifier,
     containingFile,
     compilerOptions,
-    ts.sys,
+    resolutionHost,
+    resolutionCache,
   ).resolvedModule;
   const resolvedFromTypescript =
     resolution && normalizeResolvedTypeFile(resolution.resolvedFileName);
@@ -41,7 +47,8 @@ export async function resolveModuleTypeEntry({
     return { declarationEntry: resolvedFromTypescript };
   }
 
-  const require = ts.createModuleResolutionCache(
+  // The legacy node resolver must not reuse results from a different strategy.
+  const fallbackCache = ts.createModuleResolutionCache(
     projectRoot,
     (fileName) => fileName,
     compilerOptions,
@@ -50,8 +57,8 @@ export async function resolveModuleTypeEntry({
     specifier,
     containingFile,
     compilerOptions,
-    ts.sys,
-    require,
+    resolutionHost,
+    fallbackCache,
   ).resolvedModule;
   const resolvedFromFallback =
     fallbackResolution &&
@@ -68,11 +75,13 @@ export async function resolveModuleTypeEntry({
 function resolveTargetDeclarationEntry({
   compilerOptions,
   projectRoot,
+  resolutionHost,
   specifier,
   target,
 }: {
   compilerOptions: ts.CompilerOptions;
   projectRoot: string;
+  resolutionHost: ts.ModuleResolutionHost;
   specifier: string;
   target: TargetName;
 }): ResolvedModuleTypeEntry | null {
@@ -84,13 +93,13 @@ function resolveTargetDeclarationEntry({
         path.dirname(ts.getDefaultLibFilePath(compilerOptions)),
         "lib.webworker.d.ts",
       );
-      return ts.sys.fileExists(candidate) ? candidate : undefined;
+      return resolutionHost.fileExists(candidate) ? candidate : undefined;
     }
     return ts.resolveTypeReferenceDirective(
       root.replace(/^@types\//u, ""),
       containingFile,
       compilerOptions,
-      ts.sys,
+      resolutionHost,
     ).resolvedTypeReferenceDirective?.resolvedFileName;
   };
   const root = descriptor.ambientDeclarationRoots.find((candidate) => {

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { collectOutputChunkStats } from "../../shared/lifecycle-size";
-import { logInternalDetail } from "../../shared/timing";
+import { logInternalDetail, SHOW_INTERNAL_TIMINGS } from "../../shared/timing";
 
 import type { OutputBundle } from "../internal-types";
 
@@ -51,6 +51,10 @@ export async function logOutputStats(input: {
   finalOutDir: string;
   finalScriptFileName: string;
 }) {
+  if (!SHOW_INTERNAL_TIMINGS) {
+    return;
+  }
+
   const outputBytes = await collectOutputByteBreakdown({
     bundle: input.bundle,
     emittedOutputFiles: input.emittedOutputFiles,

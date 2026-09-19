@@ -11,8 +11,6 @@ import type { ViteTypeMetadataSidecar } from "./type-metadata";
 const INTERNAL_VITE_MANIFEST_FILE = ".gcc-ts-bundler-vite-manifest.json";
 export const INTERNAL_VITE_RUNTIME_MODULE_SOURCES_FILE =
   ".gcc-ts-bundler-vite-runtime-module-sources.json";
-export const INTERNAL_VITE_AUTHORED_FILES_FILE =
-  ".gcc-ts-bundler-vite-authored-files.json";
 export const VITE_LANGUAGE_OUT_ERROR =
   "gccTsBundler() does not accept compiler.languageOut. Set Vite build.target instead.";
 
@@ -111,7 +109,7 @@ export function createCompilerOptions(input: {
   publicPath: string;
   srcDir: string;
   typeMetadata?: ViteTypeMetadataSidecar | undefined;
-  typedExterns?: string[] | undefined;
+  typedExterns?: BuildOptions["typedExterns"];
 }): ViteCompilerOptions {
   assertNoViteLanguageOut(input.options);
   const compiler = { ...(input.options.compiler ?? {}) };

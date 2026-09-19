@@ -1,12 +1,10 @@
-import fs from "node:fs/promises";
-
-import { parseGccRuntimeManifest } from "../../../build/closure/runtime-manifest/parse";
 import type { OutputBundle, PluginContext } from "../../internal-types";
 import { preserveCompiledChunkIdentities } from "../../naming";
 import { logOutputStats } from "../../output";
 import type { ViteTimingTotals } from "../../plugin-graph";
 import type { CompiledViteGraph } from "../compile";
 import { measureAsync } from "../measure";
+import type { CompiledEmitRenames } from "./rename";
 
 function filterInternalOutputs(
   outputFiles: string[],
@@ -28,6 +26,7 @@ export async function finalizeCompiledEmit(
     timingTotals: ViteTimingTotals;
   },
   finalizedBaseOutput: { emittedOutputFiles: string[] },
+  runtime: Pick<CompiledEmitRenames, "manifest" | "chunkModuleIds">,
 ) {
   const { compiled } = input;
   const emittedOutputFiles = filterInternalOutputs(
@@ -40,18 +39,14 @@ export async function finalizeCompiledEmit(
     async () =>
       preserveCompiledChunkIdentities({
         bundle: input.bundle,
+        chunkModuleIds: runtime.chunkModuleIds,
         jsChunks: compiled.jsChunks,
-        manifest: parseGccRuntimeManifest(
-          await fs.readFile(compiled.manifestFilePath, "utf8"),
-          compiled.manifestFilePath,
-        ),
+        manifest: runtime.manifest,
         manifestFilePath: compiled.manifestFilePath,
-        materialized: compiled.materialized,
         outDir: compiled.compiledCoreOutputs.finalOutDir,
         outputFiles: emittedOutputFiles,
         pluginContext,
         publicPath: compiled.publicPath,
-        runtimeModuleSourceMapFilePath: compiled.runtimeModuleSourceMapFilePath,
       }),
   );
   await logOutputStats({

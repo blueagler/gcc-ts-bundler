@@ -2,7 +2,12 @@ import ts from "@typescript/typescript6";
 
 import { uniqueSortedStrings } from "../../shared/files";
 import { logInternalDetail } from "../../shared/timing";
-import { loadCompilerOptions } from "../../build/resolve/compiler-options";
+import {
+  loadCompilerOptions,
+  loadTsConfigDeclarationFiles,
+  parseTsConfig,
+  type ParsedTsConfig,
+} from "../../build/resolve/compiler-options";
 import type { ResolvedBuildOptions } from "../../build/types";
 import {
   collectReachableTypeFiles,
@@ -11,23 +16,49 @@ import {
 } from "../compiler";
 import { createTypeWorld, type TypeWorld } from "../context";
 
+export async function loadBuildTypeWorldOptions(input: {
+  emitFileNames: string[];
+  tsConfig?: ParsedTsConfig | undefined;
+  tsConfigPath: string;
+  workspaceDir: string;
+}): Promise<{
+  compilerOptions: ts.CompilerOptions;
+  declarationRoots: string[];
+}> {
+  const tsConfig =
+    input.tsConfig ?? parseTsConfig(input.tsConfigPath, input.emitFileNames);
+  const compilerOptions = await loadCompilerOptions(
+    input.tsConfigPath,
+    {
+      allowJs: true,
+      ignoreDeprecations: "6.0",
+      module: ts.ModuleKind.ESNext,
+      moduleResolution: ts.ModuleResolutionKind.Bundler,
+      noEmit: true,
+      rootDir: input.workspaceDir,
+      skipLibCheck: true,
+      target: ts.ScriptTarget.ESNext,
+    },
+    tsConfig,
+  );
+  return {
+    compilerOptions,
+    declarationRoots: await loadTsConfigDeclarationFiles(
+      input.tsConfigPath,
+      tsConfig,
+    ),
+  };
+}
+
 export async function createBuildTypeWorld(input: {
+  compilerOptions: ts.CompilerOptions;
+  declarationRoots: readonly string[];
   emitFileNames: string[];
   options: ResolvedBuildOptions;
   specifiers: string[];
-  tsConfigPath: string;
   tsxRuntimeSourceFiles: string[];
-  workspaceDir: string;
 }): Promise<TypeWorld> {
-  const compilerOptions = await loadCompilerOptions(input.tsConfigPath, {
-    allowJs: true,
-    ignoreDeprecations: "6.0",
-    moduleResolution: ts.ModuleResolutionKind.Bundler,
-    noEmit: true,
-    rootDir: input.workspaceDir,
-    skipLibCheck: true,
-    target: ts.ScriptTarget.ESNext,
-  });
+  const { compilerOptions, declarationRoots } = input;
   const packageSpecifiers = [...new Set(input.specifiers)].filter(
     (specifier) =>
       input.options.target !== "browser" || !isPlatformBuiltin(specifier),
@@ -61,6 +92,7 @@ export async function createBuildTypeWorld(input: {
     uniqueSortedStrings([
       ...input.emitFileNames,
       ...input.tsxRuntimeSourceFiles,
+      ...declarationRoots,
       ...scannedDecls,
     ]),
     compilerOptions,

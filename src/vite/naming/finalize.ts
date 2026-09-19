@@ -1,4 +1,5 @@
 import type {
+  GccRuntimeManifest,
   NormalizedOutputOptions,
   ViteChunkOutputType,
 } from "../internal-types";
@@ -12,6 +13,7 @@ export async function finalizeBaseJsOutputName(input: {
   chunkOutputType: ViteChunkOutputType;
   deferredChunkSeeds: DeferredChunkSeed[];
   emittedOutputFiles: string[];
+  manifest: GccRuntimeManifest;
   manifestFilePath: string;
   outputOptions: NormalizedOutputOptions;
   outDir: string;

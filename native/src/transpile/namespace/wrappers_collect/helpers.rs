@@ -2,7 +2,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty, BindingPattern,
+    CallExpression, Expression, ForStatementLeft, IdentifierReference, Program,
+    SimpleAssignmentTarget, VariableDeclarator,
+};
 use oxc_ast_visit::{walk, Visit};
 
 use super::super::wrappers_rewrite::literal_property_name;
@@ -11,13 +15,17 @@ use crate::transpile::identity::{BindingKey, BindingKeyMap, BindingKeySet, Modul
 pub(crate) fn collect_flow_storage_cells(
     program: &Program<'_>,
     identity: &ModuleIdentity,
-) -> BindingKeySet {
+) -> Result<BindingKeySet, String> {
     let mut collector = FlowStorageCellCollector {
         identity,
         initialized_by_call: HashMap::new(),
         read_by_unary_call: HashSet::new(),
+        error: None,
     };
     collector.visit_program(program);
+    if let Some(error) = collector.error {
+        return Err(error);
+    }
     let evidenced_initializers = collector
         .initialized_by_call
         .iter()
@@ -28,12 +36,12 @@ pub(crate) fn collect_flow_storage_cells(
                 .then_some(callee.clone())
         })
         .collect::<HashSet<_>>();
-    collector
+    Ok(collector
         .initialized_by_call
         .into_iter()
         .filter(|(callee, _)| evidenced_initializers.contains(callee))
         .flat_map(|(_, bindings)| bindings)
-        .collect()
+        .collect())
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -52,6 +60,7 @@ struct FlowStorageCellCollector<'a> {
     identity: &'a ModuleIdentity,
     initialized_by_call: HashMap<FlowCalleeKey, BindingKeySet>,
     read_by_unary_call: BindingKeySet,
+    error: Option<String>,
 }
 
 impl<'a> Visit<'a> for FlowStorageCellCollector<'_> {
@@ -62,10 +71,17 @@ impl<'a> Visit<'a> for FlowStorageCellCollector<'_> {
         ) = (&declarator.id, &declarator.init)
         {
             if let Some(callee) = flow_callee_key(&call.callee, self.identity) {
-                self.initialized_by_call
-                    .entry(callee)
-                    .or_default()
-                    .insert(self.identity.key_of_binding(binding));
+                match ModuleIdentity::key_of_binding(binding) {
+                    Ok(binding) => {
+                        self.initialized_by_call
+                            .entry(callee)
+                            .or_default()
+                            .insert(binding);
+                    }
+                    Err(error) => {
+                        self.error.get_or_insert(error);
+                    }
+                }
             }
         }
         walk::walk_variable_declarator(self, declarator);
@@ -87,10 +103,10 @@ fn flow_reference_key(
     identifier: &IdentifierReference<'_>,
     identity: &ModuleIdentity,
 ) -> FlowReferenceKey {
-    identity
-        .key_of_reference(identifier)
-        .map(FlowReferenceKey::Binding)
-        .unwrap_or_else(|| FlowReferenceKey::Global(identifier.name.to_string()))
+    identity.key_of_reference(identifier).map_or_else(
+        || FlowReferenceKey::Global(identifier.name.to_string()),
+        FlowReferenceKey::Binding,
+    )
 }
 
 fn flow_callee_key(callee: &Expression<'_>, identity: &ModuleIdentity) -> Option<FlowCalleeKey> {

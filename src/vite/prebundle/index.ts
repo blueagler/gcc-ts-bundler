@@ -21,7 +21,21 @@ export async function prebundleMaterializedDependencies(input: {
   materialized: MaterializedGraph;
   outputSrcDir?: string;
 }): Promise<MaterializedGraph> {
-  const context = createPrebundleContext(input);
+  const authoredFiles = new Set(
+    input.materialized.authoredFiles.map((filePath) => normalizePath(filePath)),
+  );
+  if (
+    input.materialized.modules.every((module) =>
+      authoredFiles.has(normalizePath(module.filePath)),
+    )
+  ) {
+    return await stageGraphWithoutBundles({
+      materialized: input.materialized,
+      runtimeSrcDir: input.outputSrcDir ?? input.materialized.srcDir,
+    });
+  }
+
+  const context = createPrebundleContext(input, authoredFiles);
   const hasFusionSensitiveTypes = context.materialized.modules.some(
     (module) =>
       !context.authoredFiles.has(normalizePath(module.filePath)) &&
@@ -89,13 +103,13 @@ export async function prebundleMaterializedDependencies(input: {
   );
 }
 
-function createPrebundleContext(input: {
-  materialized: MaterializedGraph;
-  outputSrcDir?: string | undefined;
-}): PrebundleContext {
-  const authoredFiles = new Set(
-    input.materialized.authoredFiles.map((filePath) => normalizePath(filePath)),
-  );
+function createPrebundleContext(
+  input: {
+    materialized: MaterializedGraph;
+    outputSrcDir?: string | undefined;
+  },
+  authoredFiles: Set<string>,
+): PrebundleContext {
   const moduleByFilePath = new Map(
     input.materialized.modules.map((module) => [
       normalizePath(module.filePath),

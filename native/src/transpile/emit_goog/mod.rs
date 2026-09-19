@@ -6,7 +6,7 @@
 
 mod external;
 mod imports;
-mod live_bindings;
+pub(crate) mod live_bindings;
 mod print;
 
 #[cfg(test)]

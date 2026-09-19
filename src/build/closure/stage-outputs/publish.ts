@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 
 import { ensureDirectory, ensureParentDirectory } from "../../../shared/files";
+import { runWithConcurrency } from "../../../shared/concurrency";
 import type { BuildEntry, ChunkPlanChunk } from "../../types";
 import { prepareClosureJobs } from "../../../native/load";
 
@@ -72,14 +73,11 @@ export async function prepareClosureStageDirectories({
   finalCacheDir: string;
   outDir: string;
 }) {
-  await fs.rm(finalCacheDir, { force: true, recursive: true });
-  await ensureDirectory(finalCacheDir);
-
   const rawDir = path.join(finalCacheDir, "raw");
   const cacheOutputDir = path.join(finalCacheDir, "outputs");
+  await ensureDirectory(finalCacheDir);
   await ensureDirectory(rawDir);
   await ensureDirectory(cacheOutputDir);
-  await fs.rm(outDir, { force: true, recursive: true });
   await ensureDirectory(outDir);
 
   return { cacheOutputDir, rawDir };
@@ -88,32 +86,30 @@ export async function prepareClosureStageDirectories({
 export async function writeGeneratedAssets(
   assets: ReturnType<typeof prepareClosureJobs>["generatedAssets"],
 ) {
-  await Promise.all(
-    assets.map(async (asset) => {
-      await ensureParentDirectory(asset.path);
-      await fs.writeFile(asset.path, asset.text, "utf-8");
-    }),
-  );
+  await runWithConcurrency(assets, 16, async (asset) => {
+    await ensureParentDirectory(asset.path);
+    await fs.writeFile(asset.path, asset.text, "utf-8");
+  });
 }
 
 export async function publishPreparedClosureOutputs(
   outputFiles: string[],
   outDir: string,
   cacheOutputDir: string,
+  copyCanonicalOutputs: boolean,
 ) {
-  await Promise.all(
-    outputFiles.map(async (outputFile) => {
-      const relativePath = path.relative(outDir, outputFile);
-      if (
-        relativePath === ".." ||
-        relativePath.startsWith(`..${path.sep}`) ||
-        path.isAbsolute(relativePath)
-      ) {
-        throw new Error(`Published output escaped outDir: ${outputFile}`);
-      }
-      const cacheFile = path.join(cacheOutputDir, relativePath);
-      await ensureParentDirectory(cacheFile);
-      await fs.copyFile(outputFile, cacheFile);
-    }),
-  );
+  if (!copyCanonicalOutputs) return;
+  await runWithConcurrency(outputFiles, 16, async (outputFile) => {
+    const relativePath = path.relative(outDir, outputFile);
+    if (
+      relativePath === ".." ||
+      relativePath.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relativePath)
+    ) {
+      throw new Error(`Published output escaped outDir: ${outputFile}`);
+    }
+    const cacheFile = path.join(cacheOutputDir, relativePath);
+    await ensureParentDirectory(cacheFile);
+    await fs.copyFile(outputFile, cacheFile);
+  });
 }

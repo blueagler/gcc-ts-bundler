@@ -56,6 +56,13 @@ export interface GenerateExternsOptions {
   tsConfigPath?: string | undefined;
   typeWorld?: TypeWorld | undefined;
   typedOutputFile?: string | undefined;
+  /**
+   * Directory for disjoint typed extern fragments, resolved relative to
+   * projectRoot. Select every fragment whose `modules` intersects the desired
+   * external module specifiers. Shared declarations occur in only one fragment.
+   * The full typed artifact and diagnostics are unchanged.
+   */
+  typedModuleFragmentsDir?: string | undefined;
 }
 
 export interface GenerateExternsResult {
@@ -99,6 +106,7 @@ export type ResolvedExternOptions = {
   maxSymbolDepth: number | undefined;
   target: TargetName;
   typedOutputFile: string | undefined;
+  typedModuleFragmentsDir: string | undefined;
   unresolvedDeclarationDependencies: Map<string, number>;
   warnings: string[];
   typeWorld: TypeWorld | undefined;
@@ -110,6 +118,12 @@ export async function resolveExternOptions(
   if (options.modules.length === 0) {
     throw new Error("generateExterns requires at least one module specifier.");
   }
+  if (
+    options.maxSymbolDepth !== undefined &&
+    (!Number.isInteger(options.maxSymbolDepth) || options.maxSymbolDepth < 0)
+  ) {
+    throw new Error("maxSymbolDepth must be a finite nonnegative integer.");
+  }
   const mode = requireChoice(
     options.mode ?? "boundary-aware",
     EXTERN_MODES,
@@ -117,14 +131,13 @@ export async function resolveExternOptions(
   );
   const projectRoot = path.resolve(options.projectRoot ?? process.cwd());
   const srcDir = path.resolve(projectRoot, options.srcDir ?? ".");
-  const moduleInputs = options.modules.map(
-    (module): ExternModuleInput =>
-      isString(module)
-        ? { runtime: "compiled", specifier: module }
-        : {
-            ...module,
-            runtimeEntryFiles: [...(module.runtimeEntryFiles ?? [])],
-          },
+  const moduleInputs = options.modules.map((module): ExternModuleInput =>
+    isString(module)
+      ? { runtime: "compiled", specifier: module }
+      : {
+          ...module,
+          runtimeEntryFiles: [...(module.runtimeEntryFiles ?? [])],
+        },
   );
   const modules = moduleInputs.map((module) => module.specifier);
   const appEntryFiles = resolveAnalysisEntryFiles({
@@ -156,6 +169,21 @@ export async function resolveExternOptions(
     options.outputFile === undefined
       ? undefined
       : path.resolve(projectRoot, options.outputFile);
+  const typedOutputFile =
+    options.typedOutputFile === undefined
+      ? outputFile && externalModules.length > 0
+        ? siblingTypedOutput(outputFile)
+        : undefined
+      : path.resolve(projectRoot, options.typedOutputFile);
+  if (outputFile !== undefined && outputFile === typedOutputFile) {
+    throw new Error(
+      "outputFile and typedOutputFile must resolve to distinct paths.",
+    );
+  }
+  const typedModuleFragmentsDir = resolveTypedModuleFragmentsDir(
+    options.typedModuleFragmentsDir,
+    projectRoot,
+  );
   return {
     appEntryFiles,
     compilerOptions:
@@ -189,14 +217,21 @@ export async function resolveExternOptions(
     target: options.target ?? "browser",
     unresolvedDeclarationDependencies: new Map(),
     warnings: [],
-    typedOutputFile:
-      options.typedOutputFile === undefined
-        ? outputFile && externalModules.length > 0
-          ? siblingTypedOutput(outputFile)
-          : undefined
-        : path.resolve(projectRoot, options.typedOutputFile),
+    typedOutputFile,
+    typedModuleFragmentsDir,
     typeWorld: options.typeWorld,
   };
+}
+
+function resolveTypedModuleFragmentsDir(
+  directory: GenerateExternsOptions["typedModuleFragmentsDir"],
+  projectRoot: string,
+): string | undefined {
+  if (directory === undefined) return undefined;
+  if (!isString(directory) || directory.trim().length === 0) {
+    throw new Error("typedModuleFragmentsDir must be a nonempty path.");
+  }
+  return path.resolve(projectRoot, directory);
 }
 
 function validateModeInputs(

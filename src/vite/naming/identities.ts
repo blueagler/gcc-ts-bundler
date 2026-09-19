@@ -3,19 +3,12 @@ import path from "node:path";
 
 import type {
   GccRuntimeManifest,
-  MaterializedGraph,
   OutputBundle,
   OutputChunk,
   PluginContext,
 } from "../internal-types";
-import { buildChunkModuleIdLookup } from "../chunk-modules";
 import { stripPublicPathPrefix } from "../output";
-import {
-  countOverlap,
-  isRuntimeModuleSourceMap,
-  relativeSpecifier,
-  writeManifest,
-} from "./helpers";
+import { countOverlap, relativeSpecifier, writeManifest } from "./helpers";
 import {
   applyChunkMetadata,
   rewriteAndRenameCompiledFiles,
@@ -23,33 +16,20 @@ import {
 
 export async function preserveCompiledChunkIdentities(input: {
   bundle: OutputBundle;
+  chunkModuleIds: Map<string, Set<string>>;
   jsChunks: OutputChunk[];
   manifest: GccRuntimeManifest;
   manifestFilePath: string;
-  materialized: MaterializedGraph;
   outDir: string;
   outputFiles: string[];
   pluginContext: PluginContext;
   publicPath: string;
-  runtimeModuleSourceMapFilePath: string;
 }) {
-  const parsedRuntimeSourceMap: unknown = JSON.parse(
-    await fs.readFile(input.runtimeModuleSourceMapFilePath, "utf8"),
-  );
-  if (!isRuntimeModuleSourceMap(parsedRuntimeSourceMap)) {
-    throw new Error("gccTsBundler() found an invalid runtime source map.");
-  }
-  const chunkModuleIds = buildChunkModuleIdLookup({
-    jsChunks: input.jsChunks,
-    manifest: input.manifest,
-    materialized: input.materialized,
-    runtimeModuleSourceMap: parsedRuntimeSourceMap,
-  });
   const compiledChunks = Object.entries(input.manifest.chunks).map(
     ([chunkId, chunk]) => ({
       chunkId,
       fileName: stripPublicPathPrefix(chunk.url, input.publicPath),
-      moduleIds: chunkModuleIds.get(chunkId) ?? new Set<string>(),
+      moduleIds: input.chunkModuleIds.get(chunkId) ?? new Set<string>(),
     }),
   );
   const base =

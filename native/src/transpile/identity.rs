@@ -6,10 +6,10 @@
 //!
 //! # The two shape changes the swap forces on every call site
 //!
-//! 1. **A key is no longer derivable from a node alone.** swc carries identity
-//!    inside `Ident` (`ident.to_id()`); oxc keeps it in `Scoping`, so every
-//!    lookup needs the model. That is why the constructors below are methods on
-//!    `ModuleIdentity` rather than associated functions on `BindingKey`.
+//! 1. **A reference key requires the semantic model.** swc carries identity
+//!    inside `Ident` (`ident.to_id()`); oxc references resolve through `Scoping`.
+//!    Binding declarations already carry their semantic `SymbolId`, so their
+//!    key accessor does not need to borrow `ModuleIdentity`.
 //!
 //! 2. **A reference may have no key at all.** `Scoping::get_reference(..)
 //!    .symbol_id()` returns `Option<SymbolId>`: `None` means the reference
@@ -83,17 +83,21 @@ impl ModuleIdentity {
 
     /// True only for a node built after semantic analysis. Authored unresolved
     /// globals still have a reference id whose symbol is `None`.
-    pub(crate) fn is_synthesized_reference(&self, ident: &IdentifierReference<'_>) -> bool {
+    pub(crate) fn is_synthesized_reference(ident: &IdentifierReference<'_>) -> bool {
         ident.reference_id.get().is_none()
     }
 
     /// The binding this declaration introduces.
     ///
-    /// Infallible: a `BindingIdentifier` always has a symbol once the semantic
-    /// model is built (the panic path means the model was not built for this
-    /// program, which is a programming error, not input-dependent).
-    pub(crate) fn key_of_binding(&self, binding: &BindingIdentifier<'_>) -> BindingKey {
-        BindingKey(binding.symbol_id())
+    /// Required binding work must reject a declaration without semantic
+    /// identity rather than inventing a key or silently leaving it unchanged.
+    pub(crate) fn key_of_binding(binding: &BindingIdentifier<'_>) -> Result<BindingKey, String> {
+        binding.symbol_id.get().map(BindingKey).ok_or_else(|| {
+            format!(
+                "Missing semantic identity for binding {:?} at {}..{}",
+                binding.name, binding.span.start, binding.span.end,
+            )
+        })
     }
 
     /// The source-level name of a binding. Renders and name-based lookups only.
@@ -104,7 +108,9 @@ impl ModuleIdentity {
     /// True when the binding is never written after its declaration and every
     /// reference stays in the declaring function.
     pub(crate) fn is_stable_local_binding(&self, key: BindingKey) -> bool {
-        let owner = self.enclosing_function_scope(self.scoping.symbol_scope_id(key.0));
+        let Some(owner) = self.enclosing_function_scope(self.scoping.symbol_scope_id(key.0)) else {
+            return false;
+        };
         if self.scoping.scope_flags(owner).contains_direct_eval() {
             return false;
         }
@@ -112,24 +118,18 @@ impl ModuleIdentity {
             .get_resolved_references(key.0)
             .all(|reference| {
                 !reference.flags().is_write()
-                    && self.enclosing_function_scope(reference.scope_id()) == owner
+                    && self.enclosing_function_scope(reference.scope_id()) == Some(owner)
             })
     }
 
     fn enclosing_function_scope(
         &self,
-        mut scope: oxc_syntax::scope::ScopeId,
-    ) -> oxc_syntax::scope::ScopeId {
-        loop {
-            let flags = self.scoping.scope_flags(scope);
-            if flags.is_function() || flags.is_top() {
-                return scope;
-            }
-            scope = self
-                .scoping
-                .scope_parent_id(scope)
-                .expect("non-root scope must have a parent");
-        }
+        scope: oxc_syntax::scope::ScopeId,
+    ) -> Option<oxc_syntax::scope::ScopeId> {
+        self.scoping.scope_ancestors(scope).find(|&ancestor| {
+            let flags = self.scoping.scope_flags(ancestor);
+            flags.is_function() || flags.is_top()
+        })
     }
 
     /// True when this reference resolves to no declaration in this file: oxc's
@@ -165,7 +165,7 @@ mod flagged_sites {
     //! settled against the real oxc model before 20k lines are rewritten around
     //! them. Each test names the site it retires.
 
-    use super::*;
+    use super::{IdentifierReference, ModuleIdentity};
     use oxc_allocator::{Allocator, FromIn};
     use oxc_ast::ast::Statement;
     use oxc_semantic::SemanticBuilder;
@@ -188,7 +188,7 @@ mod flagged_sites {
     /// gives this per-module, which matches `emit_hoist`'s per-module renaming —
     /// no global identity space is required, which was the open question.
     #[test]
-    fn an_imported_binding_and_a_shadowing_local_are_different_symbols() {
+    fn an_imported_binding_and_a_shadowing_local_are_different_symbols() -> Result<(), String> {
         // feature.ts from the OX-A fixture: `label` here is the import.
         let (allocator, source) = model(
             "import { label } from './shared';\nconst inner = 'FEATURE_LOCAL';\nexport function describe() { return label() + inner; }\n",
@@ -204,22 +204,22 @@ mod flagged_sites {
 
         // The import's local binding.
         let Statement::ImportDeclaration(import) = &parsed.program.body[0] else {
-            panic!("expected an import declaration");
+            return Err("expected an import declaration".to_string());
         };
-        let specifiers = import.specifiers.as_ref().expect("named import");
+        let specifiers = import.specifiers.as_ref().ok_or("named import")?;
         let imported_local = specifiers[0].local();
-        let imported_key = identity.key_of_binding(imported_local);
+        let imported_key = ModuleIdentity::key_of_binding(imported_local)?;
 
         // The module's own top-level const.
         let Statement::VariableDeclaration(inner_decl) = &parsed.program.body[1] else {
-            panic!("expected a variable declaration");
+            return Err("expected a variable declaration".to_string());
         };
-        let inner_key = identity.key_of_binding(
+        let inner_key = ModuleIdentity::key_of_binding(
             inner_decl.declarations[0]
                 .id
                 .get_binding_identifier()
-                .expect("plain binding"),
-        );
+                .ok_or("plain binding")?,
+        )?;
 
         assert_ne!(imported_key, inner_key);
         assert_eq!(identity.symbol(imported_key), "label");
@@ -233,6 +233,7 @@ mod flagged_sites {
                 .count(),
             1,
         );
+        Ok(())
     }
 
     /// Site 2: keys built from *synthesised* identifiers.
@@ -257,9 +258,18 @@ mod flagged_sites {
     /// `SemanticBuilder` after synthesis if it needs real symbols. It must not
     /// ask this API about a node it just built.
     #[test]
-    fn a_synthesised_identifier_has_no_key_and_reads_as_global() {
+    fn unanalysed_declarations_and_synthesised_references_have_no_identity() -> Result<(), String> {
         let (allocator, source) = model("const authored = 1;\n");
         let parsed = oxc_parser::Parser::new(&allocator, &source, SourceType::mjs()).parse();
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let Statement::VariableDeclaration(declaration) = &parsed.program.body[0] else {
+            return Err("expected a variable declaration".to_string());
+        };
+        let binding = declaration.declarations[0]
+            .id
+            .get_binding_identifier()
+            .ok_or("plain binding")?;
+        assert!(ModuleIdentity::key_of_binding(binding).is_err());
         let scoping = SemanticBuilder::new()
             .with_build_nodes(true)
             .build(&parsed.program)
@@ -273,6 +283,8 @@ mod flagged_sites {
 
         assert!(identity.key_of_reference(&synthesised).is_none());
         assert!(identity.is_global(&synthesised));
+        assert!(ModuleIdentity::key_of_binding(binding).is_ok());
+        Ok(())
     }
 
     /// Site 1: `type_metadata`'s key re-spelling, and `remap_id_keyed_map`.
@@ -281,7 +293,7 @@ mod flagged_sites {
     /// survives a rename then both are dead code under oxc rather than work to
     /// port — this test is the evidence for deleting them.
     #[test]
-    fn a_symbol_keeps_its_key_across_a_rename() {
+    fn a_symbol_keeps_its_key_across_a_rename() -> Result<(), String> {
         let (allocator, source) =
             model("let value = 1;\nexport function read() { return value; }\n");
         let parsed = oxc_parser::Parser::new(&allocator, &source, SourceType::mjs()).parse();
@@ -293,18 +305,27 @@ mod flagged_sites {
         let mut identity = ModuleIdentity::new(scoping);
 
         let Statement::VariableDeclaration(decl) = &parsed.program.body[0] else {
-            panic!("expected a variable declaration");
+            return Err("expected a variable declaration".to_string());
         };
-        let key =
-            identity.key_of_binding(decl.declarations[0].id.get_binding_identifier().unwrap());
+        let key = ModuleIdentity::key_of_binding(
+            decl.declarations[0]
+                .id
+                .get_binding_identifier()
+                .ok_or("plain binding")?,
+        )?;
         assert_eq!(identity.symbol(key), "value");
 
         identity.rename(key, FromIn::from_in("value_3", &allocator));
 
         // Same key, new name: nothing keyed on it needs remapping.
         assert_eq!(identity.symbol(key), "value_3");
-        let key_again =
-            identity.key_of_binding(decl.declarations[0].id.get_binding_identifier().unwrap());
+        let key_again = ModuleIdentity::key_of_binding(
+            decl.declarations[0]
+                .id
+                .get_binding_identifier()
+                .ok_or("plain binding")?,
+        )?;
         assert_eq!(key, key_again);
+        Ok(())
     }
 }

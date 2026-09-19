@@ -1,6 +1,6 @@
 //! Member-expression helpers for wrapper-flow resolve.
 
-use oxc_ast::ast::*;
+use oxc_ast::ast::Expression;
 
 use super::literal_property_name;
 

@@ -1,45 +1,70 @@
 import fs from "fs/promises";
 import path from "path";
 
-import type { BuildContext, ResolvedBuild } from "../../types";
-
-export interface FinalCachePaths {
-  fastSnapshotPath: string;
-  metadataPath: string;
-}
+import { runWithConcurrency } from "../../../shared/concurrency";
 
 export interface InvocationStaging {
   finalCacheDir: string;
+  inputsDir: string;
   outDir: string;
-}
-
-export function getFinalCachePaths(
-  context: BuildContext,
-  resolved: ResolvedBuild,
-): FinalCachePaths {
-  return {
-    fastSnapshotPath: path.join(context.projectCacheDir, "final-fast.json"),
-    metadataPath: path.join(resolved.finalCacheDir, "meta.json"),
-  };
 }
 
 export async function createInvocationStaging(
   outDir: string,
   finalCacheDir: string,
 ): Promise<InvocationStaging> {
-  await Promise.all([
-    fs.mkdir(path.dirname(outDir), { recursive: true }),
-    fs.mkdir(path.dirname(finalCacheDir), { recursive: true }),
-  ]);
-  return {
-    finalCacheDir: await fs.mkdtemp(
-      path.join(
-        path.dirname(finalCacheDir),
-        `.${path.basename(finalCacheDir)}.staging-`,
-      ),
-    ),
-    outDir: await fs.mkdtemp(
-      path.join(path.dirname(outDir), `.${path.basename(outDir)}.staging-`),
-    ),
-  };
+  await runWithConcurrency(
+    [path.dirname(outDir), path.dirname(finalCacheDir)],
+    2,
+    async (dir) => {
+      await fs.mkdir(dir, { recursive: true });
+    },
+  );
+  const acquired: string[] = [];
+  try {
+    for (const target of [finalCacheDir, outDir]) {
+      acquired.push(
+        await fs.mkdtemp(
+          path.join(path.dirname(target), `.${path.basename(target)}.staging-`),
+        ),
+      );
+    }
+    const stagedFinalCacheDir = acquired[0]!;
+    const stagedOutDir = acquired[1]!;
+    const inputsDir = path.join(stagedFinalCacheDir, "raw");
+    await fs.mkdir(inputsDir, { recursive: true });
+    return {
+      finalCacheDir: stagedFinalCacheDir,
+      outDir: stagedOutDir,
+      inputsDir,
+    };
+  } catch (error) {
+    const failures: unknown[] = [error];
+    for (const dir of acquired) {
+      try {
+        await fs.rm(dir, { force: true, recursive: true });
+      } catch (cleanupError) {
+        failures.push(cleanupError);
+      }
+    }
+    if (failures.length > 1)
+      throw new AggregateError(
+        failures,
+        "Failed to acquire and unwind invocation staging.",
+      );
+    throw error;
+  }
+}
+
+export async function cleanupInvocationStaging(staging: InvocationStaging) {
+  const failures: unknown[] = [];
+  for (const dir of [staging.outDir, staging.finalCacheDir]) {
+    try {
+      await fs.rm(dir, { force: true, recursive: true });
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length)
+    throw new AggregateError(failures, "Failed to clean invocation staging.");
 }

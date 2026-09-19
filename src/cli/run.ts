@@ -1,34 +1,45 @@
 import { build, cleanCache, generateExterns } from "../api/build";
+import { getErrorMessage } from "../shared/validation";
+import { parseCleanCacheCliArgs } from "./parse/clean-cache";
 import { parseExternsCliArgs } from "./parse/externs";
 import { parseCliArgs } from "./parse/options";
 import { usage } from "./usage";
 
 export async function runCli(args: string[]): Promise<number> {
+  try {
+    return await runCommand(args);
+  } catch (error) {
+    console.error(`gcc-ts-bundler: ${getErrorMessage(error)}`);
+    return 1;
+  }
+}
+
+async function runCommand(args: string[]): Promise<number> {
   const [firstArg, ...restArgs] = args;
-  if (!firstArg || firstArg === "-h" || firstArg === "--help") {
+  if (firstArg === undefined) {
     usage();
     return 0;
   }
 
   if (firstArg === "clean-cache") {
-    const { options, showHelp } = parseCliArgs(restArgs);
+    const { options, showHelp } = parseCleanCacheCliArgs(restArgs);
     if (showHelp) {
       usage();
       return 0;
     }
 
-    await cleanCache({
-      cacheDir: options.cache?.dir,
-      projectRoot: options.projectRoot,
-    });
+    await cleanCache(options);
     return 0;
   }
 
   if (firstArg === "externs") {
     const { options, showHelp } = parseExternsCliArgs(restArgs);
-    if (showHelp || options.modules.length === 0) {
+    if (showHelp) {
       usage();
-      return showHelp ? 0 : 1;
+      return 0;
+    }
+    if (options.modules.length === 0) {
+      throw new Error("externs requires at least one --module");
     }
 
     const result = await generateExterns(options);
@@ -41,6 +52,9 @@ export async function runCli(args: string[]): Promise<number> {
     return 0;
   }
 
+  if (firstArg !== "build" && !firstArg.startsWith("-")) {
+    throw new Error(`Unknown command: ${firstArg}`);
+  }
   const buildArgs = firstArg === "build" ? restArgs : args;
   const { options, showHelp } = parseCliArgs(buildArgs);
   if (showHelp) {

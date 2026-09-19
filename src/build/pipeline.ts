@@ -1,19 +1,26 @@
 import path from "path";
 
-import type { BuildResult, CleanCacheOptions } from "../api/types";
+import type {
+  BuildDiagnostic,
+  BuildResult,
+  CleanCacheOptions,
+} from "../api/types";
 import {
   acquireProjectCacheLock,
+  createCacheStore,
+  type CacheStore,
   getDefaultPersistentCacheRoot,
   getProjectCacheDir,
 } from "../shared/cache-store";
-import { logInternalDetail, withInternalTiming } from "../shared/timing";
+import {
+  countInternalWork,
+  logInternalDetail,
+  withInternalBuildProfile,
+  withInternalTiming,
+} from "../shared/timing";
 import type { ClosureCompilerEnvironment } from "./closure/compiler";
-import type {
-  BuildContext,
-  InternalBuildOptions,
-  ResolvedBuild,
-} from "./types";
-import { appendExternalTypedExterns } from "../externs/build-plan/external-plan";
+import type { BuildContext, InternalBuildOptions } from "./types";
+import { assembleExternalExterns } from "../externs/build-plan/external-plan";
 import { runClosureStage } from "./closure/run-closure";
 import { emitNativeStage } from "./transpile/emit";
 import {
@@ -49,128 +56,181 @@ type PipelineBuildContext = BuildContext & {
 export async function build(
   options: InternalBuildOptions,
 ): Promise<BuildResult> {
-  const normalizedOptions = normalizeBuildOptions(options);
-  let context: PipelineBuildContext;
-  try {
-    context = await createBuildContext(normalizedOptions);
-  } catch (error) {
-    return failedBuild([createBuildDiagnostic(error)]);
-  }
+  return withInternalBuildProfile("build", () => buildInvocation(options));
+}
 
+async function buildInvocation(
+  options: InternalBuildOptions,
+): Promise<BuildResult> {
   let releaseCacheLock: (() => Promise<void>) | null = null;
-  try {
-    releaseCacheLock = await lockPersistentProjectCache(context);
-  } catch (error) {
-    return failedBuild([createBuildDiagnostic(error)]);
-  }
-
-  let resolved: ResolvedBuild | null = null;
+  let cacheStore: CacheStore | null = null;
   let staging: InvocationStaging | null = null;
+  let result: BuildResult;
   try {
-    resolved = await withInternalTiming("resolve-build", () =>
-      resolveBuild(context),
+    const context: PipelineBuildContext = await withInternalTiming(
+      "build:context",
+      () => createBuildContext(normalizeBuildOptions(options)),
     );
-    const prep = await preparePipelineEmit(context, resolved);
-    if (prep.kind !== "ready") {
-      return prep.result;
-    }
-
-    const nativeEmitResult = await emitNativeStage({
-      cacheDir: resolved.nativeEmitCacheDir,
-      chunkPlan: resolved.chunkPlan,
-      entryFiles: resolved.entryFiles,
-      externalBoundaries: resolved.externalBoundaries,
-      fileNames: prep.emitFileNames,
-      lazyImports: resolved.lazyImports,
-      metadataPath: path.join(resolved.nativeEmitCacheDir, "meta.json"),
-      opaqueExternalSpecifiers: prep.externalExternPlan.opaqueSpecifiers,
-      options: context.options,
-      optionsSignature: context.optionsSignature,
-      packageAliases: resolved.packageAliases,
-      packageJsonFiles: resolved.packageJsonFiles,
-      preservedModules: resolved.preservedModules,
-      resolvedImports: resolved.resolvedImports,
-      tsConfigPath: resolved.tsConfigPath,
-      tsxRuntimeSourceFiles: resolved.tsxRuntimeSourceFiles,
-      typeInferenceDisabled:
-        context.closureCompilerEnvironment.typeInferenceDisabled,
-      typeWorld: prep.typeWorld,
-      workspaceDir: resolved.workspaceDir,
-    });
-    if (nativeEmitResult.emitSkipped || nativeEmitResult.diagnostics.length) {
-      return failedBuild(
-        toBuildDiagnostics(
-          nativeEmitResult.diagnostics,
-          createAuthoredPathMapper(context, resolved),
-        ),
+    releaseCacheLock = await withInternalTiming("cache:lock", () =>
+      lockPersistentProjectCache(context),
+    );
+    const ownedCacheStore = await withInternalTiming("cache:store", () =>
+      createCacheStore({
+        cacheDir: context.options.cache.dir || undefined,
+        mode: context.options.cache.mode,
+        projectRoot: context.options.projectRoot,
+      }),
+    );
+    cacheStore = ownedCacheStore;
+    result = await (async (): Promise<BuildResult> => {
+      const resolved = await withInternalTiming("resolve-build", () =>
+        resolveBuild(context, ownedCacheStore),
       );
-    }
+      countInternalWork("sourceFiles", resolved.sourceFiles.length);
+      countInternalWork("entryFiles", resolved.entryFiles.length);
+      const prep = await withInternalTiming("build:prepare", () =>
+        preparePipelineEmit(context, resolved),
+      );
+      if (prep.kind !== "ready") {
+        return prep.result;
+      }
 
-    await appendExternalTypedExterns({
-      externsPath: nativeEmitResult.externsPath,
-      imports: nativeEmitResult.preservedImports,
-      typedResolutions: prep.externalExternPlan.typedResolutions,
-    });
+      const nativeEmitResult = await withInternalTiming(
+        "native-emit:stage",
+        () =>
+          emitNativeStage({
+            cacheDir: resolved.nativeEmitCacheDir,
+            chunkPlan: resolved.chunkPlan,
+            entryFiles: resolved.entryFiles,
+            externalBoundaries: resolved.externalBoundaries,
+            fileNames: prep.emitFileNames,
+            lazyImports: resolved.lazyImports,
+            metadataPath: path.join(resolved.nativeEmitCacheDir, "meta.json"),
+            opaqueExternalSpecifiers: prep.externalExternPlan.opaqueSpecifiers,
+            options: context.options,
+            optionsSignature: context.optionsSignature,
+            packageAliases: resolved.packageAliases,
+            packageJsonFiles: resolved.packageJsonFiles,
+            preservedModules: resolved.preservedModules,
+            resolvedImports: resolved.resolvedImports,
+            tsConfigPath: resolved.tsConfigPath,
+            tsxRuntimeSourceFiles: resolved.tsxRuntimeSourceFiles,
+            typeInferenceDisabled:
+              context.closureCompilerEnvironment.typeInferenceDisabled,
+            typeWorld: prep.typeWorld,
+            workspaceDir: resolved.workspaceDir,
+          }),
+      );
+      if (nativeEmitResult.emitSkipped || nativeEmitResult.diagnostics.length) {
+        return failedBuild(
+          toBuildDiagnostics(
+            nativeEmitResult.diagnostics,
+            createAuthoredPathMapper(context, resolved),
+          ),
+        );
+      }
 
-    staging = await createInvocationStaging(
-      context.options.outDir,
-      resolved.finalCacheDir,
-    );
-    const closureResult = await runClosureStage({
-      chunkPlan: resolved.chunkPlan,
-      closureCompilerEnvironment: context.closureCompilerEnvironment,
-      emittedOutDir: nativeEmitResult.outDir,
-      entryFiles: resolved.entryFiles,
-      entryShebangs:
-        context.options.target === "node"
-          ? await collectEntryShebangs(resolved.entryFiles)
-          : [],
-      explicitExternPaths: context.options.externs,
-      finalCacheDir: staging.finalCacheDir,
-      generatedExternPaths: context.options.typedExterns,
-      nativeExternPath: nativeEmitResult.externsPath,
-      options: context.options,
-      outDir: staging.outDir,
-      preservedImports: nativeEmitResult.preservedImports,
-      preservedModules: resolved.preservedModules,
-      packageRoot: context.packageRoot,
-      projectCacheDir: path.dirname(path.dirname(resolved.finalCacheDir)),
-      supportFiles: nativeEmitResult.supportFiles,
-      typeMetadata: nativeEmitResult.typeMetadata,
-      typeWorld: prep.typeWorld,
-    });
-    if (closureResult.exitCode !== 0) {
-      return failedBuild([
-        createBuildDiagnostic(
-          `Closure compilation failed with exit code ${closureResult.exitCode}.`,
-        ),
-      ]);
-    }
+      const invocationStaging = await withInternalTiming("build:staging", () =>
+        createInvocationStaging(context.options.outDir, resolved.finalCacheDir),
+      );
+      staging = invocationStaging;
+      const nativeExternPath = await withInternalTiming(
+        "externs:assemble",
+        () =>
+          assembleExternalExterns({
+            externsPath: nativeEmitResult.externsPath,
+            imports: nativeEmitResult.preservedImports,
+            plan: prep.externalExternPlan,
+            outputPath: path.join(invocationStaging.inputsDir, "externs.js"),
+          }),
+      );
+      const closureResult = await withInternalTiming(
+        "closure:stage",
+        async () =>
+          runClosureStage({
+            chunkPlan: resolved.chunkPlan,
+            closureCompilerEnvironment: context.closureCompilerEnvironment,
+            emittedOutDir: nativeEmitResult.outDir,
+            entryFiles: resolved.entryFiles,
+            entryShebangs:
+              context.options.target === "node"
+                ? await collectEntryShebangs(resolved.entryFiles)
+                : [],
+            explicitExternPaths: context.options.externs,
+            finalCacheDir: invocationStaging.finalCacheDir,
+            generatedExterns: context.options.typedExterns,
+            nativeExternPath,
+            options: context.options,
+            outDir: invocationStaging.outDir,
+            preservedImports: nativeEmitResult.preservedImports,
+            preservedModules: resolved.preservedModules,
+            packageRoot: context.packageRoot,
+            projectCacheDir: path.dirname(path.dirname(resolved.finalCacheDir)),
+            supportFiles: nativeEmitResult.supportFiles,
+            typeMetadata: nativeEmitResult.typeMetadata,
+            typeWorld: prep.typeWorld,
+          }),
+      );
+      if (closureResult.exitCode !== 0) {
+        return failedBuild(
+          (closureResult.diagnostics.length
+            ? closureResult.diagnostics
+            : [
+                `Closure compilation failed with exit code ${closureResult.exitCode}.`,
+              ]
+          ).map((message) => createBuildDiagnostic(message)),
+        );
+      }
 
-    return await finalizePipelineBuild({
-      cachePaths: prep.cachePaths,
-      closureResult,
-      context,
-      resolved,
-      staging,
-      typeMetadataDependencies: nativeEmitResult.typeMetadataDependencies,
-    });
+      return await withInternalTiming("build:finalize", () =>
+        finalizePipelineBuild({
+          closureResult,
+          context,
+          resolved,
+          staging: invocationStaging,
+          typeMetadataDependencies: nativeEmitResult.typeMetadataDependencies,
+        }),
+      );
+    })();
   } catch (error) {
     logInternalDetail(
       "build:error",
       error instanceof Error ? (error.stack ?? error.message) : String(error),
     );
-    return failedBuild([createBuildDiagnostic(error)]);
-  } finally {
-    if (staging) {
-      await cleanupInvocationStaging(staging);
-    }
+    result = failedBuild(errorDiagnostics(error));
+  }
+  const cleanupDiagnostics = [];
+  // Every owned resource is attempted, with the lock held until mutations drain.
+  for (const [label, cleanup] of [
+    [
+      "cleanup:staging",
+      () => (staging ? cleanupInvocationStaging(staging) : undefined),
+    ],
+    ["cleanup:cache", () => cacheStore?.cleanup()],
+    ["cleanup:lock", () => releaseCacheLock?.()],
+  ] as const) {
     try {
-      await resolved?.cleanup();
-    } finally {
-      await releaseCacheLock?.();
+      await withInternalTiming(label, cleanup);
+    } catch (error) {
+      cleanupDiagnostics.push(...errorDiagnostics(error));
     }
   }
+  return cleanupDiagnostics.length
+    ? failedBuild([
+        ...(result.ok ? [] : result.diagnostics),
+        ...cleanupDiagnostics,
+      ])
+    : result;
+}
+
+function errorDiagnostics(error: unknown): BuildDiagnostic[] {
+  if (error instanceof AggregateError) {
+    return [
+      createBuildDiagnostic(error),
+      ...error.errors.flatMap((cause: unknown) => errorDiagnostics(cause)),
+    ];
+  }
+  return [createBuildDiagnostic(error)];
 }
 
 export async function cleanCache(options: CleanCacheOptions = {}) {
@@ -180,9 +240,21 @@ export async function cleanCache(options: CleanCacheOptions = {}) {
     : getDefaultPersistentCacheRoot();
   const projectCacheDir = getProjectCacheDir(cacheRoot, projectRoot);
   const releaseCacheLock = await acquireProjectCacheLock(projectCacheDir);
+  const failures: unknown[] = [];
   try {
     await removeProjectCacheDir(projectCacheDir);
-  } finally {
-    await releaseCacheLock();
+  } catch (error) {
+    failures.push(error);
   }
+  try {
+    await releaseCacheLock();
+  } catch (error) {
+    failures.push(error);
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1)
+    throw new AggregateError(
+      failures,
+      `Failed to clean cache and release its lock at ${projectCacheDir}.`,
+    );
 }

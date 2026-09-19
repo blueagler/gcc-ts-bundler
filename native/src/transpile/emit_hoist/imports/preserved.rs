@@ -1,6 +1,7 @@
-use oxc_ast::ast::*;
+use oxc_ast::ast::{ImportDeclaration, ImportDeclarationSpecifier, ImportOrExportKind};
 
 use super::super::super::emit::PreservedImportPlan;
+use super::super::super::identity::ModuleIdentity;
 use super::super::super::is_valid_js_identifier;
 use super::super::import_plan::{ImportBindingRewrite, ImportReplacement};
 use super::planner::HoistedImportPlanner;
@@ -32,7 +33,7 @@ impl HoistedImportPlanner<'_> {
         for (specifier_index, specifier) in import.specifiers.iter().flatten().enumerate() {
             let preferred = format!(
                 "__gcc_preserved_{}_{}_{}",
-                &crate::utils::hash_content(&preserved.moduleId)[..12],
+                &crate::utils::hash_content(&preserved.module_id)[..12],
                 self.consumer_ordinal,
                 import_index * 16 + specifier_index
             );
@@ -41,18 +42,17 @@ impl HoistedImportPlanner<'_> {
             extern_lines.push(format!("var {boundary};"));
             match specifier {
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(default) => {
-                    if !preserved.hasDefaultExport {
+                    if !preserved.has_default_export {
                         return Err(format!(
                             "Preserved module {} has no default export",
-                            preserved.filePath
+                            preserved.file_path
                         ));
                     }
                     boundary_exports.push("default".to_string());
                     default_binding = Some(boundary.clone());
                     rewrites.push(ImportBindingRewrite {
-                        binding_id: self.identity.key_of_binding(&default.local),
+                        binding_id: ModuleIdentity::key_of_binding(&default.local)?,
                         replacement: ImportReplacement::Name(boundary.clone()),
-                        replacement_code: boundary,
                     });
                 }
                 ImportDeclarationSpecifier::ImportSpecifier(named) => {
@@ -60,41 +60,39 @@ impl HoistedImportPlanner<'_> {
                         continue;
                     }
                     let imported_name = module_export_name(&named.imported);
-                    if !preserved.exportNames.contains(&imported_name) {
+                    if !preserved.export_names.contains(&imported_name) {
                         return Err(format!(
                             "Preserved module {} does not export {imported_name:?}",
-                            preserved.filePath
+                            preserved.file_path
                         ));
                     }
                     if !is_valid_js_identifier(&imported_name) {
                         return Err(format!(
                             "Preserved module {} exports unsupported non-identifier name {imported_name:?}",
-                            preserved.filePath
+                            preserved.file_path
                         ));
                     }
                     boundary_exports.push(imported_name.clone());
                     named_bindings.push(format!("{imported_name} as {boundary}"));
                     rewrites.push(ImportBindingRewrite {
-                        binding_id: self.identity.key_of_binding(&named.local),
+                        binding_id: ModuleIdentity::key_of_binding(&named.local)?,
                         replacement: ImportReplacement::Name(boundary.clone()),
-                        replacement_code: boundary,
                     });
                 }
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) => {
                     boundary_exports.push("*".to_string());
                     namespace_binding = Some(boundary.clone());
-                    for export_name in &preserved.exportNames {
+                    for export_name in &preserved.export_names {
                         if is_valid_js_identifier(export_name) {
                             extern_lines.push(format!("{boundary}.{export_name};"));
                         }
                     }
-                    if preserved.hasDefaultExport {
+                    if preserved.has_default_export {
                         extern_lines.push(format!("{boundary}.default;"));
                     }
                     rewrites.push(ImportBindingRewrite {
-                        binding_id: self.identity.key_of_binding(&namespace.local),
+                        binding_id: ModuleIdentity::key_of_binding(&namespace.local)?,
                         replacement: ImportReplacement::Name(boundary.clone()),
-                        replacement_code: boundary,
                     });
                 }
             }
@@ -117,7 +115,7 @@ impl HoistedImportPlanner<'_> {
             (_, Some(_), false) => {
                 return Err(format!(
                     "Preserved module import in {} has an unsupported namespace/named combination",
-                    preserved.filePath
+                    preserved.file_path
                 ));
             }
         };
@@ -129,7 +127,7 @@ impl HoistedImportPlanner<'_> {
                 boundary_names,
                 external_specifier: None,
                 import_clause,
-                target_module_id: preserved.moduleId.clone(),
+                target_module_id: preserved.module_id.clone(),
             }],
             rewrites,
         })

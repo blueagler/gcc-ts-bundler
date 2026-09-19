@@ -31,6 +31,7 @@ const VITE_EXTERN_PACKAGE_CACHE_VERSION = 13;
 export async function loadCachedPackageRuntimeHazards(input: {
   cacheRoot: string;
   filePaths: string[];
+  /** Complete sorted contributing-package set, NUL-joined when fused. */
   packageName: string;
   packageSignature: string;
   protocolHelpers: {
@@ -38,8 +39,11 @@ export async function loadCachedPackageRuntimeHazards(input: {
     keyReadCallees: string[];
   };
 }) {
+  const filePaths = [...new Set(input.filePaths)].sort((left, right) =>
+    left.localeCompare(right),
+  );
   const fileHashes = await Promise.all(
-    [...input.filePaths].sort().map((filePath) => hashFileInput(filePath)),
+    filePaths.map((filePath) => hashFileInput(filePath)),
   );
   const cacheKey = hashJson({
     cacheVersion: VITE_EXTERN_PACKAGE_CACHE_VERSION,
@@ -58,10 +62,7 @@ export async function loadCachedPackageRuntimeHazards(input: {
     };
   }
 
-  const analyzed = await analyzeRuntimeUsage(
-    input.filePaths,
-    input.protocolHelpers,
-  );
+  const analyzed = await analyzeRuntimeUsage(filePaths, input.protocolHelpers);
   const serialized = serializeRuntimeHazards(analyzed);
   await writeJson(cacheFile, serialized);
   return {

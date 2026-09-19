@@ -19,17 +19,19 @@ use super::identity::{BindingKeySet, ModuleIdentity};
 pub(crate) fn collect_global_this_compat_property_names(
     program: &Program<'_>,
     identity: &ModuleIdentity,
-) -> HashSet<String> {
+) -> Result<HashSet<String>, String> {
     let mut collector = GlobalThisCompatCollector {
+        error: None,
         aliases: BindingKeySet::new(),
         identity,
         properties: HashSet::new(),
     };
     collector.visit_program(program);
-    collector.properties
+    collector.error.map_or(Ok(collector.properties), Err)
 }
 
 struct GlobalThisCompatCollector<'i> {
+    error: Option<String>,
     aliases: BindingKeySet,
     identity: &'i ModuleIdentity,
     properties: HashSet<String>,
@@ -57,7 +59,15 @@ impl<'a> Visit<'a> for GlobalThisCompatCollector<'_> {
             declarator.init.as_ref(),
         ) {
             if self.is_global_object_expr(init) {
-                self.aliases.insert(self.identity.key_of_binding(binding));
+                match ModuleIdentity::key_of_binding(binding) {
+                    Ok(binding) => {
+                        self.aliases.insert(binding);
+                    }
+                    Err(error) => {
+                        self.error.get_or_insert(error);
+                        return;
+                    }
+                }
             }
         }
         walk::walk_variable_declarator(self, declarator);
@@ -154,26 +164,28 @@ fn is_valid_identifier(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{collect_global_this_compat_property_names, GlobalThisCompatVisitor};
+    use crate::transpile::identity::ModuleIdentity;
     use oxc_allocator::Allocator;
+    use oxc_ast_visit::VisitMut;
     use oxc_codegen::Codegen;
     use oxc_semantic::SemanticBuilder;
     use oxc_span::SourceType;
 
     /// Parse -> semantic -> our ported passes -> print, on the real oxc stack.
-    fn run(source: &str) -> (Vec<String>, String) {
+    fn run(source: &str) -> Result<(Vec<String>, String), String> {
         let allocator = Allocator::default();
         let parsed = oxc_parser::Parser::new(&allocator, source, SourceType::mjs()).parse();
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         let mut program = parsed.program;
         let scoping = SemanticBuilder::new()
-            .with_build_nodes(true)
+            .with_build_nodes(false)
             .build(&program)
             .semantic
             .into_scoping();
         let identity = ModuleIdentity::new(scoping);
 
-        let mut names = collect_global_this_compat_property_names(&program, &identity)
+        let mut names = collect_global_this_compat_property_names(&program, &identity)?
             .into_iter()
             .collect::<Vec<_>>();
         names.sort();
@@ -181,40 +193,44 @@ mod tests {
         let mut visitor =
             GlobalThisCompatVisitor::new(&allocator, &identity, names.iter().cloned().collect());
         visitor.visit_program(&mut program);
-        (names, Codegen::new().build(&program).code)
+        Ok((names, Codegen::new().build(&program).code))
     }
 
     #[test]
-    fn collects_properties_through_globalthis_and_its_aliases() {
+    fn collects_properties_through_globalthis_and_its_aliases() -> Result<(), String> {
         // The swc original keyed "is this globalThis" on the unresolved mark and
         // an alias set. Same two arms here, split on whether the reference
         // resolves to a symbol at all.
-        let (names, _) = run("const g = globalThis;\ng.myFlag;\nglobalThis.other;\n");
+        let (names, _) = run("const g = globalThis;\ng.myFlag;\nglobalThis.other;\n")?;
         assert_eq!(names, vec!["myFlag".to_string(), "other".to_string()]);
+        Ok(())
     }
 
     #[test]
-    fn a_shadowing_local_is_not_globalthis() {
+    fn a_shadowing_local_is_not_globalthis() -> Result<(), String> {
         // The property of the whole exercise: a *bound* `globalThis` is not the
         // global one. Under swc this needed the resolver's contexts; here the
         // reference simply resolves to a symbol.
-        let (names, _) = run("function f(globalThis) { return globalThis.shadowed; }\n");
+        let (names, _) = run("function f(globalThis) { return globalThis.shadowed; }\n")?;
         assert!(names.is_empty(), "{names:?}");
+        Ok(())
     }
 
     #[test]
-    fn rewrites_a_free_reference_to_a_globalthis_property_read() {
+    fn rewrites_a_free_reference_to_a_globalthis_property_read() -> Result<(), String> {
         // The mutating half: a free `myFlag` becomes `globalThis.myFlag`, built
         // with the builder on the program's own arena (a snippet parsed in a
         // separate arena could not be spliced in).
-        let (_, code) = run("const g = globalThis;\ng.myFlag;\nmyFlag;\n");
+        let (_, code) = run("const g = globalThis;\ng.myFlag;\nmyFlag;\n")?;
         assert!(code.contains("globalThis.myFlag"), "{code}");
+        Ok(())
     }
 
     #[test]
-    fn a_non_identifier_property_becomes_a_computed_read() {
-        let (_, code) = run("globalThis[\"has-dash\"];\n");
+    fn a_non_identifier_property_becomes_a_computed_read() -> Result<(), String> {
+        let (_, code) = run("globalThis[\"has-dash\"];\n")?;
         assert!(code.contains("globalThis[\"has-dash\"]"), "{code}");
+        Ok(())
     }
 }
 

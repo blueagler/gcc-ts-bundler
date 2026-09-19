@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { accountBarriers } from "../externs/barriers";
 import { gzipByteLength } from "../shared/lifecycle-size";
+import { isString } from "../shared/validation";
 import type { CompilerExternArtifacts } from "./compiler-externs";
 import type {
   CapturedModule,
@@ -151,8 +152,11 @@ export async function writeViteBuildReport(input: {
       renameBarrierFiles: input.externs.renameBarriers.map((filePath) =>
         toReportModuleId(filePath, input.projectRoot),
       ),
-      typedExternFiles: input.externs.typedDeclarations.map((filePath) =>
-        toReportModuleId(filePath, input.projectRoot),
+      typedExternFiles: input.externs.typedDeclarations.map((extern) =>
+        toReportModuleId(
+          isString(extern) ? extern : extern.path,
+          input.projectRoot,
+        ),
       ),
     },
   };

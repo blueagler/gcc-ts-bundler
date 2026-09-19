@@ -6,8 +6,7 @@ import type {
   ClosureTypeMetadataFile,
   TypeMetadataCounts,
 } from "./transpile/type-metadata";
-import type { FileStateSnapshot } from "../shared/file-state";
-import { defineValues } from "../shared/validation";
+import type { ParsedTsConfig } from "./resolve/compiler-options";
 
 export interface BuildTypeMetadataSidecar {
   dependencies: string[];
@@ -25,7 +24,6 @@ export interface BuildTypeMetadataSidecar {
  * resolver rebases them onto the build workspace.
  */
 export interface RollupChunkInput {
-  dynamicImportedChunkFileNames: string[];
   fileName: string;
   importedChunkFileNames: string[];
   isEntry: boolean;
@@ -56,8 +54,8 @@ export interface HostBuildExtensions {
    */
   rollupChunks?: readonly RollupChunkInput[] | undefined;
   typeMetadata?: BuildTypeMetadataSidecar | undefined;
-  /** Vite-only sidecar listing authored source files for preflight. */
-  viteAuthoredFilesFile?: string | undefined;
+  /** Authored source files supplied by the host for this invocation. */
+  authoredFiles?: readonly string[] | undefined;
   /** Vite-only sidecar mapping runtime modules to original sources. */
   viteRuntimeSourceMapFile?: string | undefined;
 }
@@ -75,19 +73,19 @@ export interface ResolvedBuildOptions extends PublicResolvedBuildOptions {
   finalMinify: boolean;
   rollupChunks: readonly RollupChunkInput[];
   typeMetadata: BuildTypeMetadataSidecar | undefined;
-  viteAuthoredFilesFile: string | undefined;
+  authoredFiles: readonly string[] | undefined;
   viteRuntimeSourceMapFile: string | undefined;
 }
 
 export interface BuildEntry {
   chunkName: string;
+  constEnumExportNames: string[];
   exportNames: string[];
   hasDefaultExport: boolean;
   outputName: string;
   /** Project-root-relative or absolute published path outside `outDir`. */
   outFile?: string;
   sourcePath: string;
-  sourceRelativePath: string;
 }
 
 export interface PackageAlias {
@@ -125,14 +123,7 @@ export interface PreservedModule {
   outputRelativePath: string;
 }
 
-export const CHUNK_KINDS = defineValues(
-  "base",
-  "entry",
-  "lazy",
-  "shared",
-  "vendor",
-);
-export type ChunkKind = (typeof CHUNK_KINDS)[number];
+export type ChunkKind = "base" | "entry" | "lazy" | "shared" | "vendor";
 
 export interface ChunkPlanChunk {
   dependencies: string[];
@@ -160,7 +151,6 @@ export interface BuildContext {
 }
 
 export interface ResolvedBuild {
-  cleanup(): Promise<void>;
   chunkPlan: ChunkPlanChunk[];
   entryFiles: BuildEntry[];
   externalBoundaries: ExternalBoundary[];
@@ -176,7 +166,7 @@ export interface ResolvedBuild {
   nativeEmitCacheDir: string;
   shimDir: string;
   shimFiles: string[];
-  trackedFiles: Record<string, FileStateSnapshot>;
   tsConfigPath: string;
+  tsConfig: ParsedTsConfig;
   workspaceDir: string;
 }

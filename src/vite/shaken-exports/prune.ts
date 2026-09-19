@@ -4,7 +4,7 @@ import { applyTextEdits } from "../../shared/text-edits";
 import { toMaterializedRelativePath } from "../capture";
 import { getCapturedSourceFile } from "../capture-analysis";
 import type { ExportDemand } from "../graph";
-import type { CapturedModule } from "../internal-types";
+import type { CapturedModule, ViteBuildMetrics } from "../internal-types";
 import { shakeModuleOnce } from "./shake";
 
 /**
@@ -27,6 +27,7 @@ import { shakeModuleOnce } from "./shake";
 export function pruneShakenReexports(input: {
   capturedModules: Map<string, CapturedModule>;
   demand: Map<string, ExportDemand>;
+  metrics: ViteBuildMetrics | undefined;
   moduleIds: Iterable<string>;
   projectRoot: string;
 }) {
@@ -42,8 +43,8 @@ export function pruneShakenReexports(input: {
     }
 
     const shakenCode = demand.all
-      ? dropUnreachableTails(moduleId, record.code)
-      : shakeModuleReexports(moduleId, record.code, demand.names);
+      ? dropUnreachableTails(record, record.code, input.metrics)
+      : shakeModuleReexports(record, demand.names, input.metrics);
     if (shakenCode === record.code) {
       continue;
     }
@@ -102,28 +103,38 @@ function collectDemandPerMaterializedFile(input: {
  * otherwise kept.
  */
 function shakeModuleReexports(
-  moduleId: string,
-  code: string,
+  record: CapturedModule,
   demandedNames: ReadonlySet<string>,
+  metrics: ViteBuildMetrics | undefined,
 ) {
-  let shaken = code;
+  let shaken = record.code;
   // Names this module has already lost. An import binding is only removed once
   // the shake itself stranded it, never because it merely looked unused: an
   // import Rollup kept may still be the only thing running a side effect.
   const stranded = new Set<string>();
   for (let round = 0; round < 8; round += 1) {
-    const next = shakeModuleOnce(moduleId, shaken, demandedNames, stranded);
+    const next = shakeModuleOnce(
+      record,
+      shaken,
+      demandedNames,
+      stranded,
+      metrics,
+    );
     if (next === shaken) {
       break;
     }
     shaken = next;
   }
-  return dropUnreachableTails(moduleId, shaken);
+  return dropUnreachableTails(record, shaken, metrics);
 }
 
 /** Drops a function tail that cannot run after an expressionless return. */
-function dropUnreachableTails(moduleId: string, code: string) {
-  const sourceFile = getCapturedSourceFile(moduleId, code);
+function dropUnreachableTails(
+  record: CapturedModule,
+  code: string,
+  metrics: ViteBuildMetrics | undefined,
+) {
+  const sourceFile = getCapturedSourceFile(record, code, metrics);
   const edits: Array<{ end: number; start: number; text: string }> = [];
   const visit = (node: ts.Node) => {
     if (

@@ -1,22 +1,24 @@
 import path from "path";
+import ts from "@typescript/typescript6";
 
+import { loadBuildTypeWorldOptions } from "../../externs/build-plan/create-type-world";
+import {
+  resolveModuleTypeEntry,
+  type ResolvedModuleTypeEntry,
+} from "../../externs/compiler/target";
 import { resolveClosureCompilerEnvironment } from "../closure/compiler";
+import type { NativeChunkPlanEntryInput } from "../../native/abi";
 import { planChunks, resolveGraph } from "../../native/load";
 import { zipExact } from "../../shared/arrays";
 import {
-  createCacheStore,
+  type CacheStore,
   getDefaultPersistentCacheRoot,
   getProjectCacheDir,
-  readJsonIfExists,
-  writeJson,
 } from "../../shared/cache-store";
-import {
-  collectTrackedFiles,
-  trackedFilesMatch,
-} from "../../shared/file-state";
-import { uniqueSortedStrings } from "../../shared/files";
-import { hashJson } from "../../shared/hash";
-import { logInternalDetail } from "../../shared/timing";
+import { collectFileContentSnapshot } from "../../shared/file-state";
+import { normalizeRelativePath, uniqueSortedStrings } from "../../shared/files";
+import { hashContent, hashJson } from "../../shared/hash";
+import { preservesConstEnumObjects } from "../../shared/typescript";
 import type {
   BuildContext,
   BuildEntry,
@@ -29,14 +31,9 @@ import type {
   ResolvedImport,
   ResolvedBuildOptions,
 } from "../types";
-import type { ResolveMetadata, ResolveSnapshot } from "./cache";
-import { isResolveMetadata, isResolveSnapshot, readChunkPlan } from "./cache";
-import {
-  resolveOutputNames,
-  sanitizeChunkName,
-  toBuildEntry,
-  toShimFiles,
-} from "./entries";
+import { parseTsConfig, type ParsedTsConfig } from "./compiler-options";
+import { toImportPath } from "../helpers";
+import { resolveOutputNames, sanitizeChunkName, toShimFiles } from "./entries";
 import {
   collectTsxRuntimeSupport,
   mergePackageAliases,
@@ -47,7 +44,6 @@ import {
   getOptionsSignature,
   getPackageSignature,
   hashExternalInputs,
-  hashTsConfig,
 } from "./signatures";
 import {
   ensureDirectorySymlink,
@@ -59,8 +55,10 @@ import { normalizeBuildOptions, validateOutputPathBoundaries } from "./options";
 
 export { normalizeBuildOptions };
 interface ResolveEnv {
-  cacheStore: Awaited<ReturnType<typeof createCacheStore>>;
+  cacheStore: CacheStore;
   compilerOptionsHash: string;
+  configInputPaths: string[];
+  tsConfig: ParsedTsConfig;
   sourceRoot: string;
   tsConfigPath: string;
   usesPersistentCache: boolean;
@@ -112,114 +110,66 @@ export async function createBuildContext(
 
 export async function resolveBuild(
   context: BuildContext,
+  cacheStore: CacheStore,
 ): Promise<ResolvedBuild> {
   if (context.options.entries.length === 0) {
     throw new Error("At least one entry is required.");
   }
 
-  const env = await prepareResolveWorkspace(context);
-  const restored = await restoreResolveSnapshot(context, env);
-  if (restored) {
-    await validateResolvedOutputPaths(context, restored);
-    return restored;
-  }
-
+  const env = await prepareResolveWorkspace(context, cacheStore);
   const fresh = await resolveFreshGraph(context, env);
-  const metadata = await loadOrCreateResolveMetadata(context, env, fresh);
-  const resolved = await finalizeResolvedBuild(context, env, fresh, metadata);
-  await validateResolvedOutputPaths(context, resolved);
+  const plan = createResolvedPlan(context, env, fresh);
+  const resolved = await finalizeResolvedBuild(context, env, fresh, plan);
+  await validateOutputPathBoundaries(
+    context.options,
+    cacheStore.workspaceDir,
+    [
+      ...resolved.sourceFiles,
+      ...resolved.tsxRuntimeSourceFiles,
+      ...resolved.packageJsonFiles,
+      ...env.configInputPaths,
+      ...(context.options.authoredFiles ?? []),
+    ],
+    cacheStore.rootDir,
+    resolved.entryFiles.map((entry) => entry.outputName),
+  );
   return resolved;
 }
 
 async function prepareResolveWorkspace(
   context: BuildContext,
+  cacheStore: CacheStore,
 ): Promise<ResolveEnv> {
   const { options } = context;
-  const cacheStore = await createCacheStore({
-    cacheDir: options.cache.dir || undefined,
-    mode: options.cache.mode,
-    projectRoot: options.projectRoot,
-  });
   const usesPersistentCache = options.cache.mode === "persistent";
   const sourceRoot = path.join(cacheStore.workspaceDir, "src");
   await ensureDirectorySymlink(sourceRoot, options.srcDir);
   await ensureWorkspaceNodeModules(cacheStore.workspaceDir, options);
 
   const tsConfigPath = await resolveTsConfigPath(options.projectRoot);
+  const tsConfig = parseTsConfig(
+    tsConfigPath,
+    options.entries.map((entry) => entry.file),
+  );
+  const { configInputs, parsed } = tsConfig;
+  const declarationFiles = parsed.fileNames.filter((fileName) =>
+    fileName.endsWith(".d.ts"),
+  );
   return {
     cacheStore,
     compilerOptionsHash: usesPersistentCache
-      ? await hashTsConfig(tsConfigPath)
+      ? hashJson({
+          configInputs,
+          options: parsed.options,
+          declarations: await collectFileContentSnapshot(declarationFiles),
+        })
       : "",
+    configInputPaths: [...Object.keys(configInputs), ...declarationFiles],
+    tsConfig,
     sourceRoot,
     tsConfigPath,
     usesPersistentCache,
   };
-}
-
-async function restoreResolveSnapshot(
-  context: BuildContext,
-  env: ResolveEnv,
-): Promise<ResolvedBuild | null> {
-  if (!env.usesPersistentCache) {
-    return null;
-  }
-
-  const snapshot = await readJsonIfExists(
-    resolveSnapshotPath(env),
-    isResolveSnapshot,
-  );
-  if (!snapshot) {
-    logInternalDetail("cache:resolve-snapshot", "miss");
-    return null;
-  }
-  const externalInputHash = await hashExternalInputs([
-    ...context.options.externs,
-    ...context.options.js,
-    ...context.options.typedExterns,
-  ]);
-  const snapshotHit =
-    snapshot.packageSignature === context.packageSignature &&
-    snapshot.compilerOptionsHash === env.compilerOptionsHash &&
-    snapshot.optionsSignature === context.optionsSignature &&
-    snapshot.externalInputHash === externalInputHash &&
-    (await trackedFilesMatch(snapshot.trackedFiles));
-  logInternalDetail("cache:resolve-snapshot", snapshotHit ? "hit" : "miss");
-  if (!snapshotHit) {
-    return null;
-  }
-
-  const chunkPlan = await readChunkPlan(
-    env.cacheStore.projectCacheDir,
-    snapshot.resolveKey,
-    context.optionsSignature,
-  );
-  if (!chunkPlan) {
-    return null;
-  }
-
-  return assembleResolvedBuild(env, {
-    chunkPlan,
-    externalBoundaries: snapshot.externalBoundaries,
-    entryFiles: snapshot.entryFiles.map(
-      (entry, index): BuildEntry =>
-        toBuildEntry(
-          entry,
-          env.sourceRoot,
-          context.options.entries[index]?.outFile,
-        ),
-    ),
-    finalKey: snapshot.finalKey,
-    lazyImports: snapshot.lazyImports,
-    nativeEmitKey: snapshot.nativeEmitKey,
-    packageAliases: snapshot.packageAliases,
-    packageJsonFiles: snapshot.packageJsonFiles,
-    preservedModules: snapshot.preservedModules,
-    resolvedImports: snapshot.resolvedImports,
-    sourceFiles: snapshot.sourceFiles,
-    trackedFiles: snapshot.trackedFiles,
-    tsxRuntimeSourceFiles: snapshot.tsxRuntimeSourceFiles,
-  });
 }
 
 async function resolveFreshGraph(
@@ -243,6 +193,21 @@ async function resolveFreshGraph(
     target: options.target,
     workspaceDir: env.cacheStore.workspaceDir,
   });
+  // Native graph exports describe source bindings. Only this invocation's
+  // compiler options decide whether a const enum also owns a runtime object.
+  if (!preservesConstEnumObjects(env.tsConfig.parsed.options)) {
+    for (const entries of [graphResult.entries, graphResult.preservedModules]) {
+      for (const entry of entries) {
+        if (entry.constEnumExportNames.length === 0) continue;
+        const erasedNames = new Set(entry.constEnumExportNames);
+        entry.exportNames = entry.exportNames.filter(
+          (name) => !erasedNames.has(name),
+        );
+        entry.hasDefaultExport &&= !erasedNames.has("default");
+        entry.constEnumExportNames = [];
+      }
+    }
+  }
   const preservedModules = graphResult.preservedModules.map(
     (module): PreservedModule => ({
       // Spelled out rather than rest-spread: these keys reach the native addon,
@@ -266,8 +231,52 @@ async function resolveFreshGraph(
   const tsxRuntimeSupport = await collectTsxRuntimeSupport({
     fileNames: graphResult.sourceFiles,
     tsConfigPath: env.tsConfigPath,
+    tsConfig: env.tsConfig,
     workspaceDir: env.cacheStore.workspaceDir,
   });
+  let resolveKey = "active";
+  if (env.usesPersistentCache) {
+    // Native `fileHashes` cover every visited source and every consulted
+    // package.json, keyed by `path_relative_to(workspaceDir)` or, when the
+    // path is outside the workspace, the original path
+    // (`native/src/graph/resolve.rs`). `trackedFiles` are that same set as
+    // absolute paths, not a superset. A second `resolveGraph` for the TSX
+    // runtime, plus caller `authoredFiles`, can name paths never inserted
+    // into `graphResult.fileHashes`. Snapshot those extras. Graph edges,
+    // aliases, export metadata, and the TSX support object are functions of
+    // those bytes plus `optionsSignature` / `compilerOptionsHash` /
+    // `packageSignature`, so hashing `graphResult` itself is not an
+    // additional identity.
+    const fileHashes = [
+      ...graphResult.fileHashes,
+      ...tsxRuntimeSupport.fileHashes,
+    ];
+    const hashedPaths = new Set(fileHashes.map((entry) => entry.filePath));
+    const workspaceDir = env.cacheStore.workspaceDir;
+    resolveKey = hashJson({
+      optionsSignature: context.optionsSignature,
+      compilerOptionsHash: env.compilerOptionsHash,
+      entries: entryRelativePaths,
+      externalDeclarations: await observeExternalDeclarations(
+        context,
+        env,
+        graphResult.externalBoundaries,
+      ),
+      fileHashes,
+      inputContents: await collectFileContentSnapshot(
+        uniqueSortedStrings([
+          ...graphResult.trackedFiles,
+          ...tsxRuntimeSupport.trackedFiles,
+          ...tsxRuntimeSupport.sourceFiles,
+          ...(options.authoredFiles ?? []),
+        ]).filter(
+          (filePath) =>
+            !isCoveredByNativeFileHashes(filePath, workspaceDir, hashedPaths),
+        ),
+      ),
+      packageSignature: context.packageSignature,
+    });
+  }
   return {
     externalBoundaries: graphResult.externalBoundaries,
     graphResult,
@@ -285,58 +294,103 @@ async function resolveFreshGraph(
       ...graphResult.resolvedImports,
       ...tsxRuntimeSupport.resolvedImports,
     ]),
-    resolveKey: env.usesPersistentCache
-      ? hashJson({
-          optionsSignature: context.optionsSignature,
-          compilerOptionsHash: env.compilerOptionsHash,
-          entries: entryRelativePaths,
-          files: graphResult.fileHashes,
-          packageSignature: context.packageSignature,
-          tsxRuntimeSourceFiles: tsxRuntimeSupport.sourceFiles,
-        })
-      : "active",
+    resolveKey,
     tsxRuntimeSupport,
   };
 }
 
-async function loadOrCreateResolveMetadata(
+/**
+ * Explicit externals bypass native resolution. Old declaration snapshots cannot
+ * see a newly installed or nearer entry, so observe resolution before restoring
+ * either cache. The project-root probe and each importer's lookup can differ.
+ */
+async function observeExternalDeclarations(
   context: BuildContext,
   env: ResolveEnv,
-  fresh: FreshGraph,
-): Promise<ResolveMetadata> {
-  const resolveMetadataPath = path.join(
-    env.cacheStore.projectCacheDir,
-    "resolve",
-    `${fresh.resolveKey}.json`,
+  boundaries: readonly ExternalBoundary[],
+) {
+  if (boundaries.length === 0) return null;
+  const { compilerOptions } = await loadBuildTypeWorldOptions({
+    emitFileNames: [],
+    tsConfig: env.tsConfig,
+    tsConfigPath: env.tsConfigPath,
+    workspaceDir: env.cacheStore.workspaceDir,
+  });
+  const manifests: Record<string, string | null> = {};
+  const resolutionHost: ts.ModuleResolutionHost = {
+    ...ts.sys,
+    readFile(filePath) {
+      const content = ts.sys.readFile(filePath);
+      if (path.basename(filePath) === "package.json") {
+        manifests[path.resolve(filePath)] =
+          content === undefined ? null : hashContent(content);
+      }
+      return content;
+    },
+  };
+  // All memoized successes and misses die with this invocation. Reusing a cache
+  // across builds would hide exactly the newly installed entries observed here.
+  const resolutionCache = ts.createModuleResolutionCache(
+    context.options.projectRoot,
+    (fileName) =>
+      ts.sys.useCaseSensitiveFileNames ? fileName : fileName.toLowerCase(),
+    compilerOptions,
   );
-  const cached = env.usesPersistentCache
-    ? await readJsonIfExists(resolveMetadataPath, isResolveMetadata)
-    : null;
-  if (cached?.optionsSignature === context.optionsSignature) {
-    const needsUpgrade = !Array.isArray(cached.tsxRuntimeSourceFiles);
-    const metadata = {
-      ...cached,
-      tsxRuntimeSourceFiles:
-        cached.tsxRuntimeSourceFiles ?? fresh.tsxRuntimeSupport.sourceFiles,
-    };
-    if (env.usesPersistentCache && needsUpgrade) {
-      await writeJson(resolveMetadataPath, metadata);
+  const roots = new Map<string, Set<string>>();
+  for (const boundary of boundaries) {
+    for (const root of [
+      context.options.projectRoot,
+      path.dirname(boundary.importerFilePath),
+    ]) {
+      let specifiers = roots.get(root);
+      if (!specifiers) {
+        specifiers = new Set();
+        roots.set(root, specifiers);
+      }
+      specifiers.add(boundary.specifier);
     }
-    return metadata;
   }
-
-  const metadata = createResolveMetadata(context, env, fresh);
-  if (env.usesPersistentCache) {
-    await writeJson(resolveMetadataPath, metadata);
+  const entries = [];
+  const declarationFiles: string[] = [];
+  for (const [projectRoot, specifiers] of roots) {
+    for (const specifier of specifiers) {
+      let resolved: ResolvedModuleTypeEntry | null;
+      try {
+        resolved = await resolveModuleTypeEntry({
+          compilerOptions,
+          projectRoot,
+          resolutionCache,
+          resolutionHost,
+          specifier,
+          target: context.options.target,
+        });
+      } catch {
+        // Unresolvable externals retain the existing opaque fallback. A later
+        // successful lookup changes this null identity before any restore.
+        resolved = null;
+      }
+      entries.push({ projectRoot, specifier, resolved });
+      if (resolved) declarationFiles.push(resolved.declarationEntry);
+    }
   }
-  return metadata;
+  return {
+    entries,
+    manifests,
+    declarations: await collectFileContentSnapshot(declarationFiles),
+  };
 }
 
-function createResolveMetadata(
+interface ResolvedPlan {
+  chunkPlan: ChunkPlanChunk[];
+  entryFiles: BuildEntry[];
+  tsxRuntimeSourceFiles: string[];
+}
+
+function createResolvedPlan(
   context: BuildContext,
   env: ResolveEnv,
   fresh: FreshGraph,
-): ResolveMetadata {
+): ResolvedPlan {
   const { options } = context;
   const entryFiles = zipExact(
     zipExact(
@@ -346,46 +400,44 @@ function createResolveMetadata(
     ),
     options.entries,
     "resolved entries and entry options",
-  ).map(
-    ([[entry, outputName], option]): BuildEntry => ({
-      chunkName: sanitizeChunkName(outputName),
-      exportNames: entry.exportNames,
-      hasDefaultExport: entry.hasDefaultExport,
-      outputName,
-      ...(option.outFile === undefined ? {} : { outFile: option.outFile }),
-      sourcePath: entry.sourcePath,
-      sourceRelativePath: path.relative(env.sourceRoot, entry.sourcePath),
-    }),
-  );
+  ).map(([[entry, outputName], option]): BuildEntry => ({
+    chunkName: sanitizeChunkName(outputName),
+    constEnumExportNames: entry.constEnumExportNames,
+    exportNames: entry.exportNames,
+    hasDefaultExport: entry.hasDefaultExport,
+    outputName,
+    ...(option.outFile === undefined ? {} : { outFile: option.outFile }),
+    sourcePath: entry.sourcePath,
+  }));
   const shimDir = path.join(env.cacheStore.workspaceDir, "entries");
-  const shimFiles = toShimFiles(entryFiles, shimDir);
+  const planEntries = zipExact(
+    entryFiles,
+    toShimFiles(entryFiles, shimDir),
+    "resolved entries and entry shims",
+  ).map(([entry, shimPath]): NativeChunkPlanEntryInput => ({
+    outputName: entry.outputName,
+    sourcePath: entry.sourcePath,
+    shimPath,
+  }));
   const preservedFilePaths = new Set(
     fresh.preservedModules.map((module) => module.filePath),
   );
   const chunkPlan = planChunks({
     baseChunkName: options.chunks.baseChunkName,
     chunkMode: options.chunks.mode,
-    entryFiles: entryFiles.map((entry) => ({
-      chunkName: entry.chunkName,
-      outputName: entry.outputName,
-      sourcePath: entry.sourcePath,
-    })),
+    entryFiles: planEntries,
     graphEntries: [
-      ...Object.entries(fresh.graphResult.graph)
-        .filter(([filePath]) => !preservedFilePaths.has(filePath))
-        .map(([filePath, dependencies]) => ({
+      ...fresh.graphResult.graph
+        .filter(({ filePath }) => !preservedFilePaths.has(filePath))
+        .map(({ filePath, dependencies }) => ({
           dependencies: dependencies.filter(
             (dependency) => !preservedFilePaths.has(dependency),
           ),
           filePath,
         })),
-      ...zipExact(
-        shimFiles,
-        entryFiles,
-        "entry shims and resolved entries",
-      ).map(([shimFile, entry]) => ({
+      ...planEntries.map((entry) => ({
         dependencies: [entry.sourcePath],
-        filePath: shimFile,
+        filePath: entry.shimPath,
       })),
     ],
     lazyImports: fresh.graphResult.lazyImports,
@@ -396,7 +448,6 @@ function createResolveMetadata(
     // only a literal written against the boundary type keeps its property
     // names through the self-build's renaming.
     rollupChunks: options.rollupChunks.map((chunk) => ({
-      dynamicImportedChunkFileNames: chunk.dynamicImportedChunkFileNames,
       fileName: chunk.fileName,
       importedChunkFileNames: chunk.importedChunkFileNames,
       isEntry: chunk.isEntry,
@@ -405,22 +456,12 @@ function createResolveMetadata(
       ),
       name: chunk.name,
     })),
-    shimFiles,
     vendorChunk: options.chunks.vendorChunk,
     workspaceDir: env.cacheStore.workspaceDir,
   });
   return {
-    optionsSignature: context.optionsSignature,
     chunkPlan,
-    entryFiles: entryFiles.map(
-      (entry): ResolveMetadata["entryFiles"][number] => ({
-        chunkName: entry.chunkName,
-        exportNames: entry.exportNames,
-        hasDefaultExport: entry.hasDefaultExport,
-        outputName: entry.outputName,
-        sourceRelativePath: entry.sourceRelativePath,
-      }),
-    ),
+    entryFiles,
     tsxRuntimeSourceFiles: fresh.tsxRuntimeSupport.sourceFiles,
   };
 }
@@ -429,23 +470,28 @@ async function finalizeResolvedBuild(
   context: BuildContext,
   env: ResolveEnv,
   fresh: FreshGraph,
-  metadata: ResolveMetadata,
+  metadata: ResolvedPlan,
 ): Promise<ResolvedBuild> {
   const { options } = context;
   const tsxRuntimeSourceFiles = metadata.tsxRuntimeSourceFiles ?? [];
+  const externInputHash = env.usesPersistentCache
+    ? await hashExternalInputs(options.externs)
+    : "";
   const externalInputHash = env.usesPersistentCache
-    ? await hashExternalInputs([
-        ...options.externs,
-        ...options.js,
-        ...options.typedExterns,
-      ])
+    ? hashJson({
+        externs: externInputHash,
+        js: await hashExternalInputs(options.js),
+        typedExterns: await hashExternalInputs(
+          options.typedExterns.map((extern) => extern.path),
+        ),
+      })
     : "";
   const nativeEmitKey = env.usesPersistentCache
     ? hashJson({
         optionsSignature: context.optionsSignature,
         compilerOptionsHash: env.compilerOptionsHash,
         diagnostics: options.diagnostics,
-        externInputHash: await hashExternalInputs(options.externs),
+        externInputHash,
         packageSignature: context.packageSignature,
         resolveKey: fresh.resolveKey,
         tsxRuntimeSourceFiles,
@@ -462,57 +508,44 @@ async function finalizeResolvedBuild(
         tsxRuntimeSourceFiles,
       })
     : "active";
-  const trackedFiles = env.usesPersistentCache
-    ? await collectTrackedFiles([
-        ...uniqueSortedStrings([
-          ...fresh.graphResult.trackedFiles,
-          ...fresh.tsxRuntimeSupport.trackedFiles,
-        ]),
-        env.tsConfigPath,
-      ])
-    : {};
-  if (env.usesPersistentCache) {
-    await writeJson(resolveSnapshotPath(env), {
-      compilerOptionsHash: env.compilerOptionsHash,
-      entryFiles: metadata.entryFiles,
-      externalBoundaries: fresh.externalBoundaries,
-      externalInputHash,
-      finalKey,
-      lazyImports: fresh.graphResult.lazyImports,
-      nativeEmitKey,
-      optionsSignature: context.optionsSignature,
-      packageAliases: fresh.packageAliases,
-      packageJsonFiles: fresh.packageJsonFiles,
-      preservedModules: fresh.preservedModules,
-      resolvedImports: fresh.resolvedImports,
-      packageSignature: context.packageSignature,
-      resolveKey: fresh.resolveKey,
-      sourceFiles: fresh.graphResult.sourceFiles,
-      tsxRuntimeSourceFiles,
-      trackedFiles,
-    } satisfies ResolveSnapshot);
-  }
-
   return assembleResolvedBuild(env, {
     chunkPlan: metadata.chunkPlan,
     externalBoundaries: fresh.externalBoundaries,
-    entryFiles: metadata.entryFiles.map(
-      (entry, index): BuildEntry =>
-        toBuildEntry(
-          entry,
-          env.sourceRoot,
-          context.options.entries[index]?.outFile,
-        ),
-    ),
+    entryFiles: metadata.entryFiles,
     finalKey,
     lazyImports: fresh.graphResult.lazyImports,
     nativeEmitKey,
     packageAliases: fresh.packageAliases,
     packageJsonFiles: fresh.packageJsonFiles,
     preservedModules: fresh.preservedModules,
-    resolvedImports: fresh.resolvedImports,
+    resolvedImports:
+      context.options.chunks.mode === "off"
+        ? mergeResolvedImports([
+            ...fresh.resolvedImports,
+            ...zipExact(
+              toShimFiles(
+                metadata.entryFiles,
+                path.join(env.cacheStore.workspaceDir, "entries"),
+              ),
+              metadata.entryFiles,
+              "entry shim imports",
+            ).map(([shimFile, entry]) => ({
+              importerFilePath: shimFile,
+              moduleId: `gcc.${path
+                .relative(env.cacheStore.workspaceDir, entry.sourcePath)
+                .replace(/\\/gu, "/")
+                .replace(/\.[^/.]+$/u, "")
+                .split("/")
+                .map((segment) => segment.replace(/[^a-zA-Z0-9_$]/gu, "_"))
+                .join(".")}`,
+              specifier: toImportPath(
+                path.relative(path.dirname(shimFile), entry.sourcePath),
+              ),
+              targetPath: entry.sourcePath,
+            })),
+          ])
+        : fresh.resolvedImports,
     sourceFiles: fresh.graphResult.sourceFiles,
-    trackedFiles,
     tsxRuntimeSourceFiles,
   });
 }
@@ -531,13 +564,11 @@ function assembleResolvedBuild(
     preservedModules: PreservedModule[];
     resolvedImports: ResolvedImport[];
     sourceFiles: string[];
-    trackedFiles: ResolveSnapshot["trackedFiles"];
     tsxRuntimeSourceFiles: string[];
   },
 ): ResolvedBuild {
   const shimDir = path.join(env.cacheStore.workspaceDir, "entries");
   return {
-    cleanup: env.cacheStore.cleanup,
     chunkPlan: parts.chunkPlan,
     entryFiles: parts.entryFiles,
     externalBoundaries: parts.externalBoundaries,
@@ -561,10 +592,33 @@ function assembleResolvedBuild(
     shimFiles: toShimFiles(parts.entryFiles, shimDir),
     sourceFiles: parts.sourceFiles,
     tsxRuntimeSourceFiles: parts.tsxRuntimeSourceFiles,
-    trackedFiles: parts.trackedFiles,
     tsConfigPath: env.tsConfigPath,
+    tsConfig: env.tsConfig,
     workspaceDir: env.cacheStore.workspaceDir,
   };
+}
+
+function isCoveredByNativeFileHashes(
+  filePath: string,
+  workspaceDir: string,
+  hashedPaths: Set<string>,
+): boolean {
+  if (hashedPaths.has(filePath)) {
+    return true;
+  }
+  const relative = path.relative(workspaceDir, filePath);
+  if (
+    relative === "" ||
+    path.isAbsolute(relative) ||
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`)
+  ) {
+    return false;
+  }
+  return (
+    hashedPaths.has(relative) ||
+    hashedPaths.has(normalizeRelativePath(relative))
+  );
 }
 
 function toPreservedOutputRelativePath(sourceRoot: string, filePath: string) {
@@ -582,18 +636,4 @@ function toPreservedOutputRelativePath(sourceRoot: string, filePath: string) {
     "__gcc_preserved",
     relativePath.replace(/\.[^/.]+$/u, ".js"),
   );
-}
-
-function resolveSnapshotPath(env: ResolveEnv) {
-  return path.join(env.cacheStore.projectCacheDir, "resolve", "latest.json");
-}
-
-async function validateResolvedOutputPaths(
-  context: BuildContext,
-  resolved: ResolvedBuild,
-) {
-  await validateOutputPathBoundaries(context.options, resolved.workspaceDir, [
-    ...resolved.sourceFiles,
-    resolved.tsConfigPath,
-  ]);
 }

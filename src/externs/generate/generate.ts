@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import ts from "@typescript/typescript6";
 
+import { runWithConcurrency } from "../../shared/concurrency";
 import { writeFileIfChanged } from "../../shared/files";
 import { assertNever } from "../../shared/validation";
 import {
@@ -32,13 +33,20 @@ import {
   type GenerateExternsResult,
   type ResolvedExternOptions,
 } from "./options";
+import { collectUsedExportsByModule } from "./used-exports";
 
 export async function generateExterns(
   options: GenerateExternsOptions,
 ): Promise<GenerateExternsResult> {
   const resolved = await resolveExternOptions(options);
-  const scannedFiles = await resolveScannedFiles(resolved);
-  const typedSeeds = await resolveTypedModuleSeeds(resolved);
+  const resolutionCache = ts.createModuleResolutionCache(
+    resolved.projectRoot,
+    (fileName) =>
+      ts.sys.useCaseSensitiveFileNames ? fileName : fileName.toLowerCase(),
+    resolved.compilerOptions,
+  );
+  const scannedFiles = await resolveScannedFiles(resolved, resolutionCache);
+  const typedSeeds = await resolveTypedModuleSeeds(resolved, resolutionCache);
   const analysis = createExternAnalysisContext({
     appEntryFiles: resolved.appEntryFiles,
     compilerOptions: resolved.compilerOptions,
@@ -82,10 +90,33 @@ export async function generateExterns(
     },
   );
 
-  await Promise.all([
-    writeArtifact(resolved.outputFile, barrierText),
-    writeArtifact(resolved.typedOutputFile, typed.text),
-  ]);
+  const artifacts = [
+    { outputFile: resolved.outputFile, text: barrierText },
+    { outputFile: resolved.typedOutputFile, text: typed.text },
+  ];
+  const fragmentsDir = resolved.typedModuleFragmentsDir;
+  const moduleFragments =
+    fragmentsDir === undefined
+      ? undefined
+      : typed.moduleFragments?.map(({ modules, text }, index) => {
+          const outputFile = path.join(
+            fragmentsDir,
+            `fragment-${index}.externs.js`,
+          );
+          if (
+            outputFile === resolved.outputFile ||
+            outputFile === resolved.typedOutputFile
+          ) {
+            throw new Error(
+              `typedModuleFragmentsDir fragments must resolve to distinct artifact paths: ${outputFile}.`,
+            );
+          }
+          artifacts.push({ outputFile, text });
+          return { outputFile, modules };
+        });
+  await runWithConcurrency(artifacts, 2, ({ outputFile, text }) =>
+    writeArtifact(outputFile, text),
+  );
 
   const renameBarriers: GeneratedRenameBarrierArtifact = {
     outputFile: resolved.outputFile,
@@ -96,6 +127,7 @@ export async function generateExterns(
     degradations: typed.degradations,
     globalSurfaces: typed.globalSurfaces,
     moduleExports: typed.moduleExports,
+    moduleFragments,
     outputFile: resolved.typedOutputFile,
     propertyNames: typedAccounting.propertyNames,
     text: typed.text,
@@ -120,10 +152,14 @@ export async function generateExterns(
   };
 }
 
-async function resolveScannedFiles(options: ResolvedExternOptions) {
+async function resolveScannedFiles(
+  options: ResolvedExternOptions,
+  resolutionCache: ts.ModuleResolutionCache,
+) {
   const typeEntryFiles = await resolveModuleTypeEntries({
     compilerOptions: options.compilerOptions,
     projectRoot: options.projectRoot,
+    resolutionCache,
     specifiers: options.modules.filter(
       (specifier) => !isPlatformBuiltin(specifier),
     ),
@@ -158,12 +194,14 @@ interface TypedModuleSeed extends Omit<ModuleSeed, "selectedExports"> {
  */
 async function resolveTypedModuleSeeds(
   options: ResolvedExternOptions,
+  resolutionCache: ts.ModuleResolutionCache,
 ): Promise<TypedModuleSeed[]> {
   return Promise.all(
     options.externalModules.map(async (module) => {
       const declaration = await resolveModuleTypeEntry({
         compilerOptions: options.compilerOptions,
         projectRoot: options.projectRoot,
+        resolutionCache,
         specifier: module.specifier,
         target: options.target,
       });
@@ -186,15 +224,20 @@ function renderTypedDeclarations(
   analysis: ExternAnalysisContext,
   seeds: readonly TypedModuleSeed[],
 ) {
+  const usedExports = collectUsedExportsByModule(
+    analysis,
+    seeds.filter((seed) => seed.usedExportsOnly),
+  );
   const modules = seeds.map(({ usedExportsOnly, ...seed }) => ({
     ...seed,
     selectedExports: usedExportsOnly
-      ? collectUsedExports(analysis, seed.specifier)
+      ? usedExports.get(seed.specifier)
       : undefined,
   }));
   return renderTypedExternalDeclarations({
     checker: analysis.checker,
     maxSymbolDepth: options.maxSymbolDepth,
+    moduleFragments: options.typedModuleFragmentsDir !== undefined,
     modules,
     program: analysis.program,
     projectRoot: options.projectRoot,
@@ -217,51 +260,6 @@ function formatUnresolvedDeclarationWarnings(
       .map(([specifier, count]) => `${JSON.stringify(specifier)} ×${count}`)
       .join(", ")}).`,
   ];
-}
-
-function collectUsedExports(
-  analysis: ReturnType<typeof createExternAnalysisContext>,
-  specifier: string,
-) {
-  const exports = new Set<string>();
-  for (const filePath of analysis.appEntryFiles) {
-    const sourceFile = analysis.program.getSourceFile(filePath);
-    if (!sourceFile) continue;
-    const visit = (node: ts.Node) => {
-      if (
-        ts.isImportDeclaration(node) &&
-        ts.isStringLiteralLike(node.moduleSpecifier) &&
-        node.moduleSpecifier.text === specifier
-      ) {
-        const clause = node.importClause;
-        if (clause?.name) exports.add("default");
-        if (
-          clause?.namedBindings &&
-          ts.isNamespaceImport(clause.namedBindings)
-        ) {
-          exports.add("*");
-        } else if (
-          clause?.namedBindings &&
-          ts.isNamedImports(clause.namedBindings)
-        ) {
-          for (const element of clause.namedBindings.elements) {
-            exports.add((element.propertyName ?? element.name).text);
-          }
-        }
-      } else if (
-        ts.isImportEqualsDeclaration(node) &&
-        ts.isExternalModuleReference(node.moduleReference) &&
-        node.moduleReference.expression &&
-        ts.isStringLiteralLike(node.moduleReference.expression) &&
-        node.moduleReference.expression.text === specifier
-      ) {
-        exports.add("export=");
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(sourceFile);
-  }
-  return exports;
 }
 
 async function renderBarriers(

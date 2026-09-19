@@ -6,6 +6,17 @@ export interface ImportedBinding {
   specifier: string;
 }
 
+/** Isolated and verbatim modules implicitly retain const-enum runtime objects. */
+export function preservesConstEnumObjects(
+  options: ts.CompilerOptions,
+): boolean {
+  return Boolean(
+    options.preserveConstEnums ||
+    options.isolatedModules ||
+    options.verbatimModuleSyntax,
+  );
+}
+
 export function hasModifier(node: ts.Node, kind: ts.SyntaxKind) {
   return Boolean(
     ts.canHaveModifiers(node) &&
@@ -48,7 +59,10 @@ const NAME_SLOT_PARENT_KINDS: ReadonlySet<ts.SyntaxKind> = new Set([
   ts.SyntaxKind.PropertyAccessExpression,
   ts.SyntaxKind.PropertyAssignment,
   ts.SyntaxKind.MethodDeclaration,
+  ts.SyntaxKind.GetAccessor,
+  ts.SyntaxKind.SetAccessor,
   ts.SyntaxKind.PropertyDeclaration,
+  ts.SyntaxKind.BindingElement,
   ts.SyntaxKind.VariableDeclaration,
   ts.SyntaxKind.Parameter,
   ts.SyntaxKind.FunctionDeclaration,
@@ -61,7 +75,10 @@ const NAME_SLOT_PARENT_KINDS: ReadonlySet<ts.SyntaxKind> = new Set([
  */
 export function isValueIdentifier(node: ts.Identifier): boolean {
   const parent = node.parent;
-  if (NON_REFERENCING_PARENT_KINDS.has(parent.kind)) {
+  if (
+    NON_REFERENCING_PARENT_KINDS.has(parent.kind) ||
+    (ts.isBindingElement(parent) && parent.propertyName === node)
+  ) {
     return false;
   }
   if (!NAME_SLOT_PARENT_KINDS.has(parent.kind)) {

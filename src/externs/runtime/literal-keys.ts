@@ -221,8 +221,7 @@ type KeyTransform = (element: string) => string;
  * part that carries the element through a chain of total transformations.
  */
 type KeyPart =
-  | { apply: KeyTransform; kind: "element" }
-  | { kind: "literal"; text: string };
+  { apply: KeyTransform; kind: "element" } | { kind: "literal"; text: string };
 
 /** Keys the parameters of a callback argument build from a list element. */
 function parameterKeyTransforms(argument: ts.Expression | undefined) {

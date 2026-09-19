@@ -87,6 +87,8 @@ pub(super) fn render_grouped_live_slot_exports_with(
         .collect()
 }
 
+/// Namespace getters close over dense slots but live on a distinct public object.
+/// `"n"` is a fixed runtime transport key; quoting keeps chunk jobs in agreement.
 pub(crate) fn render_namespace_export_slots_with(
     exports_name: &str,
     export_slots: &[(String, usize)],
@@ -105,7 +107,9 @@ pub(crate) fn render_namespace_export_slots_with(
         })
         .collect::<Vec<_>>()
         .join(",");
-    format!("Object.defineProperties({exports_name},{{{descriptors}}});")
+    format!(
+        "Object.defineProperties({exports_name}[\"n\"]||({exports_name}[\"n\"]=Object.create(null)),{{{descriptors}}});"
+    )
 }
 
 pub(crate) fn render_reified_namespace_export_slots_with(
@@ -122,8 +126,7 @@ pub(crate) fn render_reified_namespace_export_slots_with(
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "{}\nObject.defineProperties({exports_name},{{{original_descriptors}}});",
-        render_namespace_export_slots_with(exports_name, export_slots)
+        "Object.defineProperties({exports_name}[\"n\"]||({exports_name}[\"n\"]=Object.create(null)),{{{original_descriptors}}});"
     )
 }
 

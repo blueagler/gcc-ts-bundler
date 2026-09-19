@@ -1,6 +1,7 @@
 import type { PreservedImport } from "../build/types";
 
 export interface NativeEntryExportMetadata {
+  constEnumExportNames: string[];
   exportNames: string[];
   hasDefaultExport: boolean;
   sourcePath: string;
@@ -22,9 +23,22 @@ export interface NativeDependencyGraphEntry {
 }
 
 export interface NativeChunkPlanEntryInput {
-  chunkName: string;
   outputName: string;
   sourcePath: string;
+  shimPath: string;
+}
+
+export interface NativePlanChunksInput {
+  chunkMode: string;
+  baseChunkName: string;
+  workspaceDir: string;
+  entryFiles: NativeChunkPlanEntryInput[];
+  graphEntries: NativeDependencyGraphEntry[];
+  lazyImports: NativeLazyImportEntry[];
+  /** Rollup's own chunk graph; present only under Vite, and mirrored when it is. */
+  rollupChunks: NativeRollupChunkInput[];
+  /** Already gated by `resolveVendorChunk`; native ignores it off bundler-runtime. */
+  vendorChunk: boolean;
 }
 
 export interface NativeChunkPlanChunkOutput {
@@ -98,7 +112,7 @@ export interface NativePrepareClosureJobsInput {
   explicitExternPaths: string[];
   explicitJsInputs: string[];
   finalCacheDir: string;
-  generatedExternPaths: string[];
+  generatedExterns: Array<{ path: string; entryFiles: string[] }>;
   languageOut: string;
   manifestFile: string;
   /** Whether the graph crosses a preserved ESM boundary. */
@@ -110,7 +124,7 @@ export interface NativePrepareClosureJobsInput {
   packageRoot: string;
   publicPath: string;
   supportFiles: string[];
-  typeMetadata: NativeEmittedTypeMetadata[];
+  typeMetadata: Pick<NativeEmittedTypeMetadata, "counts" | "emittedFile">[];
 }
 
 export interface NativePrepareClosureJobsOutput {
@@ -149,7 +163,6 @@ export interface NativeLazyImportEntry {
  * files, already joined from Rollup module ids and absolute.
  */
 export interface NativeRollupChunkInput {
-  dynamicImportedChunkFileNames: string[];
   fileName: string;
   importedChunkFileNames: string[];
   isEntry: boolean;
@@ -158,6 +171,7 @@ export interface NativeRollupChunkInput {
 }
 
 export interface NativePreservedModuleEntry {
+  constEnumExportNames: string[];
   exportNames: string[];
   filePath: string;
   hasDefaultExport: boolean;
@@ -186,6 +200,7 @@ export interface NativeFileStateEntry {
 }
 
 export interface NativeShimEntry {
+  constEnumExportNames: string[];
   exportNames: string[];
   hasDefaultExport: boolean;
   importPath: string;
@@ -222,6 +237,29 @@ export interface NativeEmittedTypeMetadata {
 }
 
 export type NativePreservedImportOutput = PreservedImport;
+
+export interface NativeTranspileSourcesInput {
+  fileNames: string[];
+  explicitExternPaths: string[];
+  outDir: string;
+  externsPath: string;
+  metadataPath: string;
+  chunkMode: string;
+  target: string;
+  runtimeModuleSourceMapFile: string | undefined;
+  workspaceDir: string;
+  packageAliases: NativeTranspilePackageAlias[];
+  resolvedImports: NativeResolvedImportEntry[];
+  externalBoundaries: NativeExternalBoundaryEntry[];
+  opaqueExternalSpecifiers: string[];
+  packageJsonFiles: string[];
+  preservedModules: NativeTranspilePreservedModule[];
+  lazyImports: NativeLazyImportInput[];
+  chunkGraph: NativeTranspileChunkInput[];
+  classMapCalls: NativeClassMapCallInput[];
+  pureCallees: string[];
+  typeInferenceDisabled: boolean;
+}
 
 export interface NativeTranspileOutput {
   emittedFiles: string[];
@@ -287,17 +325,7 @@ export interface NativeBinding {
   prepareClosureJobs(
     input: NativePrepareClosureJobsInput,
   ): NativePrepareClosureJobsOutput;
-  planChunks(
-    chunkMode: string,
-    baseChunkName: string,
-    workspaceDir: string,
-    entryFiles: NativeChunkPlanEntryInput[],
-    graphEntries: NativeDependencyGraphEntry[],
-    lazyImports: NativeLazyImportEntry[],
-    rollupChunks: NativeRollupChunkInput[],
-    shimFiles: string[],
-    vendorChunk: boolean,
-  ): NativeChunkPlanChunkOutput[];
+  planChunks(input: NativePlanChunksInput): NativeChunkPlanChunkOutput[];
   minifyJavaScript(filePath: string, source: string): string;
   resolveGraph(
     entries: string[],
@@ -309,27 +337,6 @@ export interface NativeBinding {
   ): NativeResolveGraphOutput;
   rewriteGccExports(code: string): NativeGccExportsRewrite;
   emitPreservedModule(filePath: string, source: string): string;
-  transpileSources(
-    fileNames: string[],
-    explicitExternPaths: string[],
-    outDir: string,
-    externsPath: string,
-    metadataPath: string,
-    chunkMode: string,
-    target: string,
-    runtimeModuleSourceMapFile: string | null,
-    workspaceDir: string,
-    packageAliases: NativeTranspilePackageAlias[],
-    resolvedImports: NativeResolvedImportEntry[],
-    externalBoundaries: NativeExternalBoundaryEntry[],
-    opaqueExternalSpecifiers: string[],
-    packageJsonFiles: string[],
-    preservedModules: NativeTranspilePreservedModule[],
-    lazyImports: NativeLazyImportInput[],
-    chunkGraph: NativeTranspileChunkInput[],
-    classMapCalls: NativeClassMapCallInput[],
-    pureCallees: string[],
-    typeInferenceDisabled: boolean,
-  ): NativeTranspileOutput;
+  transpileSources(input: NativeTranspileSourcesInput): NativeTranspileOutput;
   writeEntryShims(entries: NativeShimEntry[]): string[];
 }

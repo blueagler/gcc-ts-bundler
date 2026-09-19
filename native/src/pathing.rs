@@ -26,8 +26,7 @@ pub fn to_goog_module_id(file_path: &Path, root_dir: &Path) -> String {
         .replace('\\', "/");
     let without_extension = relative_path
         .rsplit_once('.')
-        .map(|(prefix, _)| prefix)
-        .unwrap_or(relative_path.as_ref());
+        .map_or(relative_path.as_ref(), |(prefix, _)| prefix);
     format!(
         "gcc.{}",
         without_extension
@@ -41,6 +40,48 @@ pub fn to_goog_module_id(file_path: &Path, root_dir: &Path) -> String {
             .collect::<Vec<_>>()
             .join(".")
     )
+}
+
+/// Validate the identities shared by graph planning and emission before either
+/// stage can replace a module's facts or write a colliding JavaScript artifact.
+pub(crate) fn validate_module_paths<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+    workspace_dir: &Path,
+) -> Result<(), String> {
+    let workspace_dir = normalize_path(workspace_dir);
+    let mut module_owners = std::collections::BTreeMap::new();
+    let mut output_owners = std::collections::BTreeMap::new();
+    for source in paths {
+        let path = normalize_path(Path::new(source));
+        let relative = path.strip_prefix(&workspace_dir).map_err(|_| {
+            format!(
+                "Source {} is outside workspace {}",
+                path.display(),
+                workspace_dir.display()
+            )
+        })?;
+        let output = relative.with_extension("js");
+        let module_id = to_goog_module_id(&path, &workspace_dir);
+        for (kind, key, owners) in [
+            (
+                "emitted path",
+                output.to_string_lossy().to_string(),
+                &mut output_owners,
+            ),
+            ("module ID", module_id, &mut module_owners),
+        ] {
+            if let Some(previous) = owners.insert(key.clone(), path.clone()) {
+                if previous != path {
+                    return Err(format!(
+                        "Conflicting {kind} {key:?}: {} and {}",
+                        previous.display(),
+                        path.display()
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn bundler_runtime_ids_are_readable() -> bool {

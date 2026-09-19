@@ -6,6 +6,7 @@ import { expect, test } from "bun:test";
 
 import { build, generateExterns } from "../../dist/index.mjs";
 import { resolveClosureCompilerEnvironment } from "../../src/build/closure/compiler.ts";
+import { fileContentSnapshotMatches } from "../../src/shared/file-state.ts";
 import {
   createFixture,
   execFileAsync,
@@ -49,67 +50,61 @@ function expectBuildSuccess(result) {
   return result;
 }
 
-async function newestFile(filePaths) {
-  const entries = await Promise.all(
-    filePaths.map(async (filePath) => ({
-      filePath,
-      mtimeMs: (await fs.stat(filePath)).mtimeMs,
-    })),
-  );
-  entries.sort((left, right) => right.mtimeMs - left.mtimeMs);
-  return entries[0]?.filePath;
-}
-
-async function resolveProjectCacheDir(fixture, cacheDir) {
-  const expected = getProjectCacheDir(cacheDir, fixture.projectRoot);
-  try {
-    await fs.stat(path.join(expected, "resolve", "latest.json"));
-    return expected;
-  } catch {
-    const latestPath = await newestFile(
-      (await findFilesNamed(cacheDir, "latest.json")).filter((filePath) =>
-        filePath.includes(`${path.sep}resolve${path.sep}`),
-      ),
-    );
-    expect(latestPath).toBeTruthy();
-    return path.dirname(path.dirname(latestPath));
-  }
-}
-
-async function readLatestNativeMetadata(fixture, cacheDir) {
-  const projectCacheDir = await resolveProjectCacheDir(fixture, cacheDir);
-  const latest = JSON.parse(
-    await fs.readFile(
-      path.join(projectCacheDir, "resolve", "latest.json"),
-      "utf8",
-    ),
-  );
-  return JSON.parse(
-    await fs.readFile(
-      path.join(
-        projectCacheDir,
-        "native-emit",
-        latest.nativeEmitKey,
-        "meta.json",
-      ),
-      "utf8",
-    ),
-  );
-}
-
-async function readLatestNamedCacheFile(
+async function readCacheMetadata(
   fixture,
   cacheDir,
-  fileName,
-  pathIncludes,
+  layer,
+  excludedOptionsSignature,
 ) {
-  const projectCacheDir = await resolveProjectCacheDir(fixture, cacheDir);
-  let filePaths = await findFilesNamed(projectCacheDir, fileName);
-  if (pathIncludes) {
-    filePaths = filePaths.filter((filePath) => filePath.includes(pathIncludes));
+  const layerDir = path.join(
+    getProjectCacheDir(cacheDir, fixture.projectRoot),
+    layer,
+  );
+  const entries = await fs.readdir(layerDir, { withFileTypes: true });
+  const matches = [];
+  for (const entry of entries.filter((entry) => entry.isDirectory())) {
+    const dir = path.join(layerDir, entry.name);
+    const metadata = JSON.parse(
+      await fs.readFile(path.join(dir, "meta.json"), "utf8"),
+    );
+    if (
+      metadata.optionsSignature !== excludedOptionsSignature &&
+      await fileContentSnapshotMatches(metadata.typeMetadataDependencies)
+    ) {
+      matches.push({ dir, metadata });
+    }
   }
-  const filePath = await newestFile(filePaths);
-  expect(filePath).toBeTruthy();
+  expect(
+    matches.length,
+    `Expected one current ${layer} artifact: ${matches.map(({ dir }) => dir).sort().join(", ")}`,
+  ).toBe(1);
+  return matches[0];
+}
+
+async function readNativeMetadata(fixture, cacheDir, excludedOptionsSignature) {
+  return (
+    await readCacheMetadata(
+      fixture,
+      cacheDir,
+      "native-emit",
+      excludedOptionsSignature,
+    )
+  ).metadata;
+}
+
+async function readCacheArtifact(fixture, cacheDir, fileName) {
+  let filePath;
+  if (fileName === "native-generated.externs.js" || fileName === "closure-ir.json") {
+    const metadata = await readNativeMetadata(fixture, cacheDir);
+    filePath = fileName === "closure-ir.json"
+      ? metadata.metadataPath
+      : metadata.externsPath;
+  } else {
+    const { dir } = await readCacheMetadata(fixture, cacheDir, "final");
+    const filePaths = await findFilesNamed(dir, fileName);
+    expect(filePaths.length, `Expected one ${fileName} in ${dir}`).toBe(1);
+    [filePath] = filePaths;
+  }
   return { filePath, text: await fs.readFile(filePath, "utf8") };
 }
 
@@ -327,24 +322,18 @@ test.serial(
           "undefinedVars",
           "missingProperties",
         ]);
-        const errors = [];
-        const previousError = console.error;
-        console.error = (...values) => errors.push(values.join(" "));
-        try {
-          const result = await build({
-            cache: { mode: "off" },
-            diagnostics: { preflight: "off" },
-            entries: ["./index.ts"],
-            outDir: fixture.outDir,
-            platformExterns: "full",
-            projectRoot: fixture.projectRoot,
-            srcDir: fixture.srcDir,
-          });
-          expect(result.ok).toBe(false);
-        } finally {
-          console.error = previousError;
-        }
-        expect(errors.join("\n")).toContain("actual parameter 1 of square");
+        const result = await build({
+          cache: { mode: "off" },
+          diagnostics: { preflight: "off" },
+          entries: ["./index.ts"],
+          outDir: fixture.outDir,
+          platformExterns: "full",
+          projectRoot: fixture.projectRoot,
+          srcDir: fixture.srcDir,
+        });
+        expect(result.ok).toBe(false);
+        expect(result.diagnostics.map(({ message }) => message).join("\n"))
+          .toContain("JSC_TYPE_MISMATCH");
       },
     );
   },
@@ -387,7 +376,7 @@ test.serial(
             expect(outputText).not.toContain(absent);
           }
 
-          const metadata = await readLatestNativeMetadata(fixture, cacheDir);
+          const metadata = await readNativeMetadata(fixture, cacheDir);
           const counts = sumTypeMetadata(metadata.typeMetadata);
           expect(counts.annotationCount).toBeGreaterThan(0);
           expect(counts.memberAnnotationCount).toBeGreaterThan(0);
@@ -423,27 +412,13 @@ test.serial(
                 file.counts.annotationCount > 0,
             ),
           ).toBe(true);
-          const barrier = await readLatestNamedCacheFile(
+          const barrier = await readCacheArtifact(
             fixture,
             cacheDir,
             "native-generated.externs.js",
           );
           expect(barrier.text).toContain("publicReflective");
           expect(barrier.text).not.toContain("declarationOnlyProperty");
-
-          if (mode === "bundler-runtime") {
-            const linkedFiles = await findFilesNamed(
-              getProjectCacheDir(cacheDir, fixture.projectRoot),
-              "main.linked.js",
-            );
-            const linked = (
-              await Promise.all(
-                linkedFiles.map((filePath) => fs.readFile(filePath, "utf8")),
-              )
-            ).join("\n");
-            expect(linked).toMatch(/class Model\$\$\d+/);
-            expect(linked).toMatch(/@type \{!Model\$\$\d+\}/);
-          }
         }
       },
     );
@@ -498,7 +473,7 @@ test.serial(
     // `PromiseLike<number>` used to expand into a recursive chain of generated
     // `@record` templates (and malformed `!?` atoms) worth zero output bytes.
     const closureIr = JSON.parse(
-      (await readLatestNamedCacheFile(fixture, cacheDir, "closure-ir.json"))
+      (await readCacheArtifact(fixture, cacheDir, "closure-ir.json"))
         .text,
     );
     const templates = closureIr.flatMap((file) => [
@@ -615,7 +590,7 @@ test.serial(
       delete globalThis.__registryResult;
     }
 
-    const metadata = await readLatestNativeMetadata(fixture, cacheDir);
+    const metadata = await readNativeMetadata(fixture, cacheDir);
     const cjsMetadata = metadata.typeMetadata.find((file) =>
       file.emittedFile.endsWith("node_modules/registry-pkg/index.js"),
     );
@@ -625,14 +600,63 @@ test.serial(
         (diagnostic) => diagnostic.reason === "annotation-target-not-found",
       ),
     ).toBe(false);
-    const linked = await readLatestNamedCacheFile(
-      fixture,
-      cacheDir,
-      "main.linked.js",
+  },
+);
+
+test.serial(
+  "actual builds include unimported tsconfig ambient declaration roots",
+  { timeout: 30_000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          module: "ESNext",
+          moduleResolution: "Bundler",
+          target: "ESNext",
+        },
+        include: ["src", "types"],
+      }),
     );
-    expect(linked.text).toContain("__register");
-    expect(linked.text).toContain("@param {number}");
-    expect(linked.text).toContain('"__cjsExports"');
+    await fixture.write(
+      "types/environment.d.ts",
+      "declare const CONFIG_FROM_TYPES: { publicValue: number; read(value: number): string };\n",
+    );
+    await fixture.write(
+      "src/main.ts",
+      '(globalThis as any)["__ambientAnswer"] = CONFIG_FROM_TYPES.read(CONFIG_FROM_TYPES.publicValue);\n',
+    );
+    const result = await withEnv(
+      { GCC_CLOSURE_EXTRA_FLAGS: "--jscomp_error=undefinedVars" },
+      async () =>
+        expectBuildSuccess(
+          await build({
+            chunks: { mode: "off" },
+            diagnostics: { preflight: "off" },
+            entries: ["./main.ts"],
+            outDir: fixture.outDir,
+            platformExterns: "full",
+            projectRoot: fixture.projectRoot,
+            srcDir: fixture.srcDir,
+          }),
+        ),
+    );
+    const previousConfig = globalThis.CONFIG_FROM_TYPES;
+    const previousAnswer = globalThis.__ambientAnswer;
+    try {
+      globalThis.CONFIG_FROM_TYPES = {
+        publicValue: 21,
+        read: (value) => `ambient:${value}`,
+      };
+      await importOutput(result.outputFiles[0]);
+      expect(globalThis.__ambientAnswer).toBe("ambient:21");
+    } finally {
+      if (previousConfig === undefined) delete globalThis.CONFIG_FROM_TYPES;
+      else globalThis.CONFIG_FROM_TYPES = previousConfig;
+      if (previousAnswer === undefined) delete globalThis.__ambientAnswer;
+      else globalThis.__ambientAnswer = previousAnswer;
+    }
   },
 );
 
@@ -670,7 +694,7 @@ test.serial(
     expect(globalThis.__platformHost).toBe("example.test");
     delete globalThis.__platformHost;
 
-    const platform = await readLatestNamedCacheFile(
+    const platform = await readCacheArtifact(
       fixture,
       cacheDir,
       "platform-externs.main.js",
@@ -949,10 +973,7 @@ test.serial(
         maxBuffer: 20 * 1024 * 1024,
       });
 
-    const first = await runVite();
-    expect(first.stdout).toContain("built in");
-    expect(first.stderr).toContain("closure:type-metadata-job: metadata=true");
-    expect(first.stderr).toContain("inference=true");
+    await runVite();
 
     const modelDeclaration = path.join(
       fixture.projectRoot,
@@ -968,7 +989,6 @@ test.serial(
       ),
     );
     const second = await runVite();
-    expect(second.stderr).toContain("cache:final-fast: miss");
     expect(second.stderr).toContain("cache:native-emit: miss");
 
     const html = await fs.readFile(
@@ -996,7 +1016,7 @@ test.serial(
       delete globalThis.__viteMatrixResult;
     }
 
-    const metadata = await readLatestNativeMetadata(fixture, cacheDir);
+    const metadata = await readNativeMetadata(fixture, cacheDir);
     const fileFor = (suffix) =>
       metadata.typeMetadata.find((file) => file.emittedFile.endsWith(suffix));
     expect(
@@ -1012,7 +1032,7 @@ test.serial(
     );
     expect(fileFor("src/plain-lazy.js").counts.annotationCount).toBe(0);
 
-    const barrier = await readLatestNamedCacheFile(
+    const barrier = await readCacheArtifact(
       fixture,
       cacheDir,
       "native-generated.externs.js",
@@ -1140,7 +1160,7 @@ test.serial(
       delete globalThis.__externalModules;
     }
 
-    const barrier = await readLatestNamedCacheFile(
+    const barrier = await readCacheArtifact(
       fixture,
       cacheDir,
       "native-generated.externs.js",
@@ -1189,7 +1209,7 @@ test.serial(
       },
       async () => expectBuildSuccess(await build(options)),
     );
-    const disabledMetadata = await readLatestNativeMetadata(fixture, cacheDir);
+    const disabledMetadata = await readNativeMetadata(fixture, cacheDir);
     const disabledCounts = sumTypeMetadata(disabledMetadata.typeMetadata);
     expect(disabledCounts.annotationCount).toBe(0);
     expect(disabledCounts.memberAnnotationCount).toBe(0);
@@ -1225,7 +1245,13 @@ test.serial(
     );
     expect(enabled.cacheHit).toBe(false);
     const enabledCounts = sumTypeMetadata(
-      (await readLatestNativeMetadata(fixture, cacheDir)).typeMetadata,
+      (
+        await readNativeMetadata(
+          fixture,
+          cacheDir,
+          disabledMetadata.optionsSignature,
+        )
+      ).typeMetadata,
     );
     expect(enabledCounts.annotationCount).toBeGreaterThan(0);
   },

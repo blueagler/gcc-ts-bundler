@@ -1,5 +1,5 @@
 use oxc_allocator::{Allocator, FromIn};
-use oxc_ast::ast::*;
+use oxc_ast::ast::{Expression, ObjectProperty, Program};
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_span::SPAN;
@@ -9,33 +9,23 @@ use oxc_syntax::number::NumberBase;
 use super::super::super::identity::{BindingKey, BindingKeyMap, ModuleIdentity};
 use super::super::super::imports_exports::ImportBindingSlotAlias;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) enum ImportReplacement {
     Name(String),
     Slot(ImportBindingSlotAlias),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct ImportBindingRewrite {
     pub(crate) binding_id: BindingKey,
     pub(crate) replacement: ImportReplacement,
-    pub(crate) replacement_code: String,
 }
 
-impl ImportBindingRewrite {
-    pub(crate) fn slot_alias(&self) -> Option<&ImportBindingSlotAlias> {
-        match &self.replacement {
-            ImportReplacement::Name(_) => None,
-            ImportReplacement::Slot(alias) => Some(alias),
-        }
-    }
-}
-
-pub(crate) fn apply_import_binding_rewrites<'a>(
+pub(crate) fn apply_import_binding_rewrites<'a, 'i>(
     allocator: &'a Allocator,
     program: &mut Program<'a>,
-    identity: &ModuleIdentity,
-    rewrites: &[ImportBindingRewrite],
+    identity: &'i ModuleIdentity,
+    rewrites: &'i [ImportBindingRewrite],
 ) {
     if rewrites.is_empty() {
         return;
@@ -46,7 +36,7 @@ pub(crate) fn apply_import_binding_rewrites<'a>(
         identity,
         rewrites: rewrites
             .iter()
-            .map(|rewrite| (rewrite.binding_id, rewrite.replacement.clone()))
+            .map(|rewrite| (rewrite.binding_id, &rewrite.replacement))
             .collect(),
     }
     .visit_program(program);
@@ -56,7 +46,7 @@ struct ImportBindingRewriteVisitor<'a, 'i> {
     allocator: &'a Allocator,
     builder: AstBuilder<'a>,
     identity: &'i ModuleIdentity,
-    rewrites: BindingKeyMap<ImportReplacement>,
+    rewrites: BindingKeyMap<&'i ImportReplacement>,
 }
 
 impl<'a> ImportBindingRewriteVisitor<'a, '_> {

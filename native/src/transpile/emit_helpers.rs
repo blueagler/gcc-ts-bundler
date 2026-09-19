@@ -5,7 +5,11 @@ use std::collections::{BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
 
 use oxc_allocator::{Allocator, FromIn, TakeIn, Vec as ArenaVec};
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    Argument, AssignmentTarget, BindingPattern, CallExpression, Expression, ExpressionStatement,
+    IdentifierName, ObjectPropertyKind, Program, PropertyKey, PropertyKind, Statement,
+    VariableDeclaration,
+};
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_codegen::{Codegen, Gen};
@@ -379,7 +383,13 @@ fn property_key_name(key: &PropertyKey<'_>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        canonical_shared_helper_name, collect_decorator_metadata_property_names,
+        collect_lowered_define_property_names, helper_initializer_source,
+        is_shared_helper_base_name, rewrite_this_field_helper_assignments,
+        take_shared_helper_declarations, Allocator, BTreeSet, Codegen, HashSet, Program, Statement,
+        SHARED_HELPER_BASE_NAMES,
+    };
     use oxc_parser::Parser;
     use oxc_span::SourceType;
 
@@ -409,11 +419,11 @@ mod tests {
     #[test]
     fn helper_initializer_printing_and_pooling_use_oxc_codegen() {
         let allocator = Allocator::default();
-        let source = r#"
+        let source = r"
 var __runInitializers = function(a) { return a; };
 var __esDecorate = (this && this.__esDecorate) || function(a, b) { return a; };
 var ordinary = function(a) { return a; };
-"#;
+";
         let program = parse(&allocator, source);
         let initializers = program
             .body

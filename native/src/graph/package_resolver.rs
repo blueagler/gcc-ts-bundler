@@ -2,7 +2,14 @@ mod exports;
 mod parse;
 mod paths;
 
-use super::*;
+use std::path::{Path, PathBuf};
+
+use serde_json::Value;
+
+use super::{
+    BuiltinPolicy, PackageAliasEntry, PackageImport, PackageMode, ResolveContext, ResolvedModule,
+};
+use crate::utils::normalize_path;
 
 #[cfg(test)]
 pub(crate) use self::exports::select_package_export_target;
@@ -88,17 +95,17 @@ fn resolve_relative_module(
             .get("name")
             .and_then(Value::as_str)
             .unwrap_or("<anonymous package>");
-        resolve_relative_package_path(
-            &base,
+        resolve_relative_package_path(RelativePackagePath {
+            base: &base,
             allow_commonjs,
             allowed_root,
-            &description,
+            description: &description,
             importer,
-            &package_dir,
-            &package_json,
+            package_dir: &package_dir,
+            package_json: &package_json,
             package_name,
             context,
-        )?
+        })?
     } else {
         resolve_module_base(&base, allow_commonjs, allowed_root, &description, importer)?
     };
@@ -148,9 +155,9 @@ fn resolve_package_import(
     )?;
     Ok(ResolvedModule {
         package_alias: Some(PackageAliasEntry {
-            packageName: package_import.package_name.clone(),
+            package_name: package_import.package_name.clone(),
             subpath: package_import.subpath.clone(),
-            targetPath: path.to_string_lossy().to_string(),
+            target_path: path.to_string_lossy().to_string(),
         }),
         package_json_files,
         path,
@@ -301,18 +308,32 @@ fn resolve_package_local_path_with_browser(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn resolve_relative_package_path(
-    base: &Path,
+struct RelativePackagePath<'a> {
+    base: &'a Path,
     allow_commonjs: bool,
-    allowed_root: &Path,
-    description: &str,
-    importer: &Path,
-    package_dir: &Path,
-    package_json: &Value,
-    package_name: &str,
-    context: &ResolveContext,
+    allowed_root: &'a Path,
+    description: &'a str,
+    importer: &'a Path,
+    package_dir: &'a Path,
+    package_json: &'a Value,
+    package_name: &'a str,
+    context: &'a ResolveContext<'a>,
+}
+
+fn resolve_relative_package_path(
+    input: RelativePackagePath<'_>,
 ) -> std::result::Result<Option<PathBuf>, String> {
+    let RelativePackagePath {
+        base,
+        allow_commonjs,
+        allowed_root,
+        description,
+        importer,
+        package_dir,
+        package_json,
+        package_name,
+        context,
+    } = input;
     if let Some(subpath) = package_subpath(base, package_dir) {
         if let Some(browser_target) = resolve_browser_subpath(package_json, &subpath)? {
             return resolve_package_target(

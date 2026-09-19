@@ -36,6 +36,7 @@ export interface ExportDemand {
  */
 interface DemandWalk {
   demands: Map<string, ExportDemand>;
+  metrics: ViteBuildMetrics | undefined;
   pending: string[];
   resolve: (specifier: string, importerId: string) => Promise<string | null>;
 }
@@ -391,7 +392,7 @@ async function seedMaterializedImportDemand(
   for (const importerId of materializedModuleIds) {
     const record = capturedModules.get(importerId);
     if (!record) continue;
-    const sourceFile = getCapturedSourceFile(importerId, record.code);
+    const sourceFile = getCapturedSourceFile(record, record.code, walk.metrics);
     await seedOpaqueImportDemand(walk, sourceFile, importerId);
     await seedStaticImportDemand(walk, sourceFile, importerId);
   }
@@ -417,7 +418,7 @@ async function drainDemandWorklist(
       walk,
       moduleId,
       demand,
-      getCapturedSourceFile(moduleId, record.code),
+      getCapturedSourceFile(record, record.code, walk.metrics),
     );
   }
 }
@@ -444,6 +445,7 @@ export async function collectExportDemand(
 ) {
   const walk: DemandWalk = {
     demands: new Map(),
+    metrics: input.metrics,
     pending: [],
     resolve: (specifier, importerId) =>
       resolveCapturedModuleId.call(this, {

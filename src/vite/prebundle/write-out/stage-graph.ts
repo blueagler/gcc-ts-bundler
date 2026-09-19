@@ -17,7 +17,7 @@ import type { PrebundleContext } from "../types";
  * compiler, the type-metadata mapping, and `debug.dumpCapturedGraphDir` read.
  */
 export async function stageGraphWithoutBundles(
-  context: PrebundleContext,
+  context: Pick<PrebundleContext, "materialized" | "runtimeSrcDir">,
 ): Promise<MaterializedGraph> {
   const { materialized, runtimeSrcDir } = context;
   if (normalizePath(runtimeSrcDir) === normalizePath(materialized.srcDir)) {

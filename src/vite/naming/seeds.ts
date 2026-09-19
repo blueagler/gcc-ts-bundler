@@ -39,6 +39,7 @@ export function deriveBaseOutputSeed(input: {
   const entryFacadeModuleId = input.entryModuleIds[0];
   const info: RenderableChunkInfo = {
     exports: [],
+    facadeModuleId: entryFacadeModuleId ?? null,
     isDynamicEntry: false,
     isEntry: true,
     moduleIds: [...input.entryModuleIds].sort((left, right) =>
@@ -46,9 +47,6 @@ export function deriveBaseOutputSeed(input: {
     ),
     name: sanitizeName(input.baseChunkName),
   };
-  if (entryFacadeModuleId !== undefined) {
-    info.facadeModuleId = entryFacadeModuleId;
-  }
   return {
     info,
     preferredName: null,
@@ -115,6 +113,7 @@ export function createFallbackChunkInfo(input: {
     : sanitizeName(`shared-${input.chunkId.slice(0, 8)}`);
   const info: RenderableChunkInfo = {
     exports: [],
+    facadeModuleId: dynamicRoot ?? null,
     isDynamicEntry: Boolean(dynamicRoot),
     isEntry: false,
     moduleIds: [...input.moduleIds].sort((left, right) =>
@@ -122,15 +121,13 @@ export function createFallbackChunkInfo(input: {
     ),
     name,
   };
-  if (dynamicRoot !== undefined) {
-    info.facadeModuleId = dynamicRoot;
-  }
   return info;
 }
 
 function toRenderableChunkInfo(chunk: OutputChunk): RenderableChunkInfo {
   const info: RenderableChunkInfo = {
     exports: [...chunk.exports],
+    facadeModuleId: chunk.facadeModuleId,
     isDynamicEntry: chunk.isDynamicEntry,
     isEntry: chunk.isEntry,
     moduleIds: Object.keys(chunk.modules).sort((left, right) =>
@@ -138,9 +135,6 @@ function toRenderableChunkInfo(chunk: OutputChunk): RenderableChunkInfo {
     ),
     name: sanitizeName(chunk.name),
   };
-  if (chunk.facadeModuleId !== undefined && chunk.facadeModuleId !== null) {
-    info.facadeModuleId = chunk.facadeModuleId;
-  }
   return info;
 }
 

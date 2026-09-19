@@ -61,12 +61,19 @@ export async function loadExternCompilerOptions({
 export async function resolveModuleTypeEntries({
   compilerOptions,
   projectRoot,
+  resolutionCache = ts.createModuleResolutionCache(
+    projectRoot,
+    (fileName) =>
+      ts.sys.useCaseSensitiveFileNames ? fileName : fileName.toLowerCase(),
+    compilerOptions,
+  ),
   specifiers,
   target = "browser",
   tolerateMissing,
 }: {
   compilerOptions: ts.CompilerOptions;
   projectRoot: string;
+  resolutionCache?: ts.ModuleResolutionCache | undefined;
   specifiers: string[];
   target?: TargetName | undefined;
   tolerateMissing: boolean;
@@ -78,6 +85,7 @@ export async function resolveModuleTypeEntries({
         await resolveModuleTypeEntry({
           compilerOptions,
           projectRoot,
+          resolutionCache,
           specifier,
           target,
         }).then((entry) => entry.declarationEntry),

@@ -1,44 +1,28 @@
 import fs from "node:fs/promises";
 
-import { isString, isUnknownArray, parseJson } from "../../shared/validation";
-import type {
-  GccRuntimeManifest,
-  MaterializedGraph,
-  ViteCssOwnership,
-} from "../internal-types";
-import { buildRuntimeModuleIdMap } from "../chunk-modules";
+import { isString, isUnknownArray } from "../../shared/validation";
+import type { GccRuntimeManifest, ViteCssOwnership } from "../internal-types";
 import { joinPublicPath, stripPublicPathPrefix } from "../output";
 import {
   extractRuntimeInitManifest,
   replaceRuntimeInitManifest,
   type RuntimeManifestValue,
 } from "../../build/closure/runtime-manifest/init";
-import { parseGccRuntimeManifest } from "../../build/closure/runtime-manifest/parse";
-import { isRuntimeModuleSourceMap } from "../naming/runtime";
 import { normalizePathForLookup } from "./ownership";
 
 export async function augmentCompiledViteCss(input: {
   baseChunkFilePath: string;
+  manifest: GccRuntimeManifest;
   manifestFilePath: string;
-  materialized: MaterializedGraph;
   ownership: ViteCssOwnership;
-  runtimeModuleSourceMapFilePath: string;
+  runtimeModuleIdToOriginalIds: Map<string, string[]>;
 }) {
-  const manifest = parseGccRuntimeManifest(
-    await fs.readFile(input.manifestFilePath, "utf8"),
-    input.manifestFilePath,
-  );
-  const runtimeModuleSourceMap = parseJson(
-    await fs.readFile(input.runtimeModuleSourceMapFilePath, "utf8"),
-    isRuntimeModuleSourceMap,
-    input.runtimeModuleSourceMapFilePath,
-  );
+  const { manifest } = input;
   const runtimeCssByChunkId = collectRuntimeChunkCss({
     htmlLinkedCss: input.ownership.htmlLinkedCss,
     manifest,
-    materialized: input.materialized,
     moduleCssById: input.ownership.moduleCssById,
-    runtimeModuleSourceMap,
+    runtimeModuleIdToOriginalIds: input.runtimeModuleIdToOriginalIds,
   });
 
   let manifestChanged = false;
@@ -94,17 +78,15 @@ export async function augmentCompiledViteCss(input: {
 function collectRuntimeChunkCss(input: {
   htmlLinkedCss: Set<string>;
   manifest: GccRuntimeManifest;
-  materialized: MaterializedGraph;
   moduleCssById: Map<string, string[]>;
-  runtimeModuleSourceMap: Record<string, string>;
+  runtimeModuleIdToOriginalIds: Map<string, string[]>;
 }) {
-  const runtimeModuleIdToOriginalIds = buildRuntimeModuleIdMap({
-    materialized: input.materialized,
-    runtimeModuleSourceMap: input.runtimeModuleSourceMap,
-  });
   const normalizedPathCache = new Map<string, string>();
   const moduleCssByRuntimeModuleId = new Map<string, string[]>();
-  for (const [runtimeModuleId, originalIds] of runtimeModuleIdToOriginalIds) {
+  for (const [
+    runtimeModuleId,
+    originalIds,
+  ] of input.runtimeModuleIdToOriginalIds) {
     const cssFiles = new Set<string>();
     for (const originalId of originalIds) {
       const ownedCssFiles = input.moduleCssById.get(

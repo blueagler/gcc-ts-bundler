@@ -2,7 +2,6 @@ import path from "path";
 import ts from "@typescript/typescript6";
 
 import type { DiagnosticsPreflight } from "../../../../api/types";
-import { collectFileContentSnapshot } from "../../../../shared/file-state";
 import { logInternalDetail } from "../../../../shared/timing";
 import type { BuildTypeMetadataSidecar } from "../../../types";
 import { collectFileStates } from "../../../../native/load";
@@ -58,13 +57,6 @@ function remapMetadataFilePath(
     !path.isAbsolute(relativePath)
     ? path.join(workspaceDir, "src", relativePath)
     : filePath;
-}
-
-export async function collectExistingContentSnapshot(filePaths: string[]) {
-  const existing = collectFileStates(filePaths)
-    .filter((state) => state.exists)
-    .map((state) => state.filePath);
-  return collectFileContentSnapshot(existing);
 }
 
 export function logTypeMetadataCounts(

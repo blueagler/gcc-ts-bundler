@@ -1,6 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    AssignmentExpression, AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty,
+    BindingPattern, Declaration, ExportDefaultDeclarationKind, Expression, IdentifierReference,
+    ImportDeclarationSpecifier, Program, SimpleAssignmentTarget, Statement, UpdateExpression,
+    VariableDeclaration, VariableDeclarationKind,
+};
 use oxc_ast_visit::{walk, Visit};
 
 use super::super::identity::{BindingKey, BindingKeyMap, BindingKeySet, ModuleIdentity};
@@ -9,7 +14,7 @@ use super::super::imports_exports::BundlerExportSlotMode;
 pub(crate) fn collect_local_export_modes(
     program: &Program<'_>,
     identity: &ModuleIdentity,
-) -> HashMap<String, BundlerExportSlotMode> {
+) -> Result<HashMap<String, BundlerExportSlotMode>, String> {
     let mut candidates = BindingKeyMap::<(String, BundlerExportSlotMode)>::new();
     for statement in &program.body {
         match statement {
@@ -25,21 +30,19 @@ pub(crate) fn collect_local_export_modes(
                         }
                     };
                     candidates.insert(
-                        identity.key_of_binding(local),
+                        ModuleIdentity::key_of_binding(local)?,
                         (local.name.to_string(), BundlerExportSlotMode::Live),
                     );
                 }
             }
-            Statement::ExportNamedDeclaration(export) => {
-                if let Some(declaration) = &export.declaration {
-                    collect_declaration_candidates(declaration, identity, &mut candidates);
-                }
+            Statement::ExportDeclaration(export) => {
+                collect_declaration_candidates(&export.declaration, &mut candidates)?;
             }
             Statement::ExportDefaultDeclaration(export) => match &export.declaration {
                 ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
                     if let Some(binding) = &function.id {
                         candidates.insert(
-                            identity.key_of_binding(binding),
+                            ModuleIdentity::key_of_binding(binding)?,
                             (binding.name.to_string(), BundlerExportSlotMode::Static),
                         );
                     }
@@ -47,7 +50,7 @@ pub(crate) fn collect_local_export_modes(
                 ExportDefaultDeclarationKind::ClassDeclaration(class) => {
                     if let Some(binding) = &class.id {
                         candidates.insert(
-                            identity.key_of_binding(binding),
+                            ModuleIdentity::key_of_binding(binding)?,
                             (binding.name.to_string(), BundlerExportSlotMode::Static),
                         );
                     }
@@ -55,12 +58,12 @@ pub(crate) fn collect_local_export_modes(
                 _ => {}
             },
             Statement::VariableDeclaration(declaration) => {
-                collect_variable_candidates(declaration, identity, &mut candidates)
+                collect_variable_candidates(declaration, &mut candidates)?;
             }
             Statement::FunctionDeclaration(function) => {
                 if let Some(binding) = &function.id {
                     candidates.insert(
-                        identity.key_of_binding(binding),
+                        ModuleIdentity::key_of_binding(binding)?,
                         (binding.name.to_string(), BundlerExportSlotMode::Static),
                     );
                 }
@@ -68,7 +71,7 @@ pub(crate) fn collect_local_export_modes(
             Statement::ClassDeclaration(class) => {
                 if let Some(binding) = &class.id {
                     candidates.insert(
-                        identity.key_of_binding(binding),
+                        ModuleIdentity::key_of_binding(binding)?,
                         (binding.name.to_string(), BundlerExportSlotMode::Static),
                     );
                 }
@@ -79,7 +82,7 @@ pub(crate) fn collect_local_export_modes(
 
     let tracked = candidates.keys().copied().collect();
     let reassigned = collect_reassigned_binding_ids(program, identity, tracked);
-    candidates
+    Ok(candidates
         .into_iter()
         .map(|(binding, (name, mode))| {
             let mode = if reassigned.contains(&binding) {
@@ -89,22 +92,21 @@ pub(crate) fn collect_local_export_modes(
             };
             (name, mode)
         })
-        .collect()
+        .collect())
 }
 
 fn collect_declaration_candidates(
     declaration: &Declaration<'_>,
-    identity: &ModuleIdentity,
     candidates: &mut BindingKeyMap<(String, BundlerExportSlotMode)>,
-) {
+) -> Result<(), String> {
     match declaration {
         Declaration::VariableDeclaration(declaration) => {
-            collect_variable_candidates(declaration, identity, candidates);
+            collect_variable_candidates(declaration, candidates)?;
         }
         Declaration::FunctionDeclaration(function) => {
             if let Some(binding) = &function.id {
                 candidates.insert(
-                    identity.key_of_binding(binding),
+                    ModuleIdentity::key_of_binding(binding)?,
                     (binding.name.to_string(), BundlerExportSlotMode::Static),
                 );
             }
@@ -112,67 +114,73 @@ fn collect_declaration_candidates(
         Declaration::ClassDeclaration(class) => {
             if let Some(binding) = &class.id {
                 candidates.insert(
-                    identity.key_of_binding(binding),
+                    ModuleIdentity::key_of_binding(binding)?,
                     (binding.name.to_string(), BundlerExportSlotMode::Static),
                 );
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn collect_variable_candidates(
     declaration: &VariableDeclaration<'_>,
-    identity: &ModuleIdentity,
     candidates: &mut BindingKeyMap<(String, BundlerExportSlotMode)>,
-) {
+) -> Result<(), String> {
     let mode = if declaration.kind == VariableDeclarationKind::Const {
         BundlerExportSlotMode::Static
     } else {
         BundlerExportSlotMode::Live
     };
     for declarator in &declaration.declarations {
-        for (binding, name) in binding_names_with_ids(&declarator.id, identity) {
+        for (binding, name) in binding_names_with_ids(&declarator.id)? {
             candidates.insert(binding, (name, mode));
         }
     }
+    Ok(())
 }
 
 pub(crate) fn binding_names_with_ids(
     pattern: &BindingPattern<'_>,
-    identity: &ModuleIdentity,
-) -> Vec<(BindingKey, String)> {
+) -> Result<Vec<(BindingKey, String)>, String> {
+    let mut bindings = Vec::new();
+    collect_binding_names_with_ids(pattern, &mut bindings)?;
+    Ok(bindings)
+}
+
+fn collect_binding_names_with_ids(
+    pattern: &BindingPattern<'_>,
+    bindings: &mut Vec<(BindingKey, String)>,
+) -> Result<(), String> {
     match pattern {
         BindingPattern::BindingIdentifier(binding) => {
-            vec![(identity.key_of_binding(binding), binding.name.to_string())]
+            bindings.push((
+                ModuleIdentity::key_of_binding(binding)?,
+                binding.name.to_string(),
+            ));
         }
         BindingPattern::ArrayPattern(array) => {
-            let mut bindings = array
-                .elements
-                .iter()
-                .flatten()
-                .flat_map(|element| binding_names_with_ids(element, identity))
-                .collect::<Vec<_>>();
-            if let Some(rest) = &array.rest {
-                bindings.extend(binding_names_with_ids(&rest.argument, identity));
+            for element in array.elements.iter().flatten() {
+                collect_binding_names_with_ids(element, bindings)?;
             }
-            bindings
+            if let Some(rest) = &array.rest {
+                collect_binding_names_with_ids(&rest.argument, bindings)?;
+            }
         }
         BindingPattern::ObjectPattern(object) => {
-            let mut bindings = object
-                .properties
-                .iter()
-                .flat_map(|property| binding_names_with_ids(&property.value, identity))
-                .collect::<Vec<_>>();
-            if let Some(rest) = &object.rest {
-                bindings.extend(binding_names_with_ids(&rest.argument, identity));
+            for property in &object.properties {
+                collect_binding_names_with_ids(&property.value, bindings)?;
             }
-            bindings
+            if let Some(rest) = &object.rest {
+                collect_binding_names_with_ids(&rest.argument, bindings)?;
+            }
         }
         BindingPattern::AssignmentPattern(assignment) => {
-            binding_names_with_ids(&assignment.left, identity)
+            collect_binding_names_with_ids(&assignment.left, bindings)?;
         }
     }
+    Ok(())
 }
 
 pub(crate) fn collect_reassigned_binding_ids(

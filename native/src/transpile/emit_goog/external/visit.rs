@@ -3,7 +3,9 @@
 use std::collections::HashSet;
 
 use oxc_allocator::{Allocator, FromIn, TakeIn};
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    BindingProperty, ChainElement, Expression, ObjectProperty, PropertyKey, SimpleAssignmentTarget,
+};
 use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_span::Span;
 use oxc_str::Ident;

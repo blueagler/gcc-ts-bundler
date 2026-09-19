@@ -4,18 +4,17 @@ use super::super::{render_static_export_slot_with, BundlerModuleSlots};
 use super::exports::RuntimeBindingNames;
 
 pub(crate) fn emit_runtime_type_prelude(
-    type_metadata: &mut PreparedTypeMetadata,
+    type_metadata: &mut PreparedTypeMetadata<'_>,
     current_slots: &BundlerModuleSlots,
     runtime_names: &RuntimeBindingNames,
     module_id: &str,
     output: &mut Vec<String>,
 ) -> std::result::Result<(), String> {
     output.extend(type_metadata.take_declaration_lines());
-    let enum_declarations = type_metadata.enum_declarations().to_vec();
+    let enum_declarations = type_metadata.enum_declarations();
     for declaration in enum_declarations {
-        let emitted_name = type_metadata.enum_name(&declaration);
-        output.push(render_closure_enum(&declaration, &emitted_name));
-        type_metadata.count_enum();
+        let emitted_name = type_metadata.enum_name(declaration);
+        output.push(render_closure_enum(declaration, &emitted_name));
         if declaration.exported {
             let slot = current_slots
                 .slot_for(&declaration.binding_name)
@@ -32,5 +31,6 @@ pub(crate) fn emit_runtime_type_prelude(
             ));
         }
     }
+    type_metadata.count_enums(enum_declarations.len());
     Ok(())
 }

@@ -59,7 +59,20 @@ export async function createCacheStore({
       path.join(os.tmpdir(), "gcc-ts-bundler-"),
     );
     const workspaceDir = path.join(rootDir, "workspace");
-    await fs.promises.mkdir(workspaceDir, { recursive: true });
+    try {
+      await fs.promises.mkdir(workspaceDir, { recursive: true });
+    } catch (error) {
+      try {
+        await fs.promises.rm(rootDir, { force: true, recursive: true });
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          `Failed to create workspace and remove ${rootDir}.`,
+          { cause: cleanupError },
+        );
+      }
+      throw error;
+    }
 
     return {
       async cleanup() {
@@ -98,27 +111,58 @@ export async function acquireProjectCacheLock(
   for (;;) {
     try {
       await fs.promises.mkdir(lockDir);
+    } catch (error) {
+      if (!hasErrorCode(error, "EEXIST")) throw error;
+      const owner = await readLockOwner(ownerPath);
+      let stat: fs.Stats;
+      try {
+        stat = await fs.promises.stat(lockDir);
+      } catch (statError) {
+        if (hasErrorCode(statError, "ENOENT")) continue;
+        throw statError;
+      }
+      if (
+        (owner && !processIsAlive(owner.pid)) ||
+        (!owner && Date.now() - stat.mtimeMs >= 60_000)
+      ) {
+        throw new Error(
+          `Cache lock ${lockDir} has ${owner ? `inactive owner pid=${owner.pid}, token=${owner.token}` : "no valid owner"}. Check that no build is active before manually removing this exact lock directory.`,
+          { cause: error },
+        );
+      }
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, 25);
+      await promise;
+      continue;
+    }
+    // Only this successful mkdir establishes ownership; never remove a contender's lock.
+    try {
       await fs.promises.writeFile(
         ownerPath,
-        JSON.stringify({ pid: process.pid, token: token }),
+        JSON.stringify({ pid: process.pid, token }),
         { encoding: "utf8", flag: "wx" },
       );
-      return async () => {
-        const owner = await readLockOwner(ownerPath);
-        if (owner?.["token"] === token) {
-          await fs.promises.rm(lockDir, { force: true, recursive: true });
-        }
-      };
     } catch (error) {
-      if (!hasErrorCode(error, "EEXIST")) {
+      try {
         await fs.promises.rm(lockDir, { force: true, recursive: true });
-        throw error;
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          `Failed to initialize and release cache lock ${lockDir}.`,
+          { cause: cleanupError },
+        );
       }
-      if (await removeAbandonedLock(lockDir, ownerPath)) {
-        continue;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      throw error;
     }
+    return async () => {
+      const owner = await readLockOwner(ownerPath);
+      if (owner?.token !== token) {
+        throw new Error(
+          `Cannot release cache lock ${lockDir}: acquired token ${token}, observed ${owner ? `pid=${owner.pid}, token=${owner.token}` : "no valid owner"}. Check that no build is active before manual recovery.`,
+        );
+      }
+      await fs.promises.rm(lockDir, { force: true, recursive: true });
+    };
   }
 }
 
@@ -138,18 +182,27 @@ export async function readJsonIfExists<T>(
 
   try {
     return parseJson(raw, validate, filePath);
-  } catch {
-    await fs.promises.rm(filePath, { force: true }).catch(() => {});
+  } catch (error) {
+    try {
+      await fs.promises.rm(filePath, { force: true });
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        `Failed to discard invalid cache metadata ${filePath}.`,
+        { cause: cleanupError },
+      );
+    }
     return null;
   }
 }
 
-export async function writeJson<Value>(filePath: string, value: Value) {
+export async function writeJson(filePath: string, value: unknown) {
   await ensureParentDirectory(filePath);
   const tempPath = path.join(
     path.dirname(filePath),
     `.${path.basename(filePath)}.${process.pid}.${randomUUID()}.tmp`,
   );
+  const failures: unknown[] = [];
   try {
     await fs.promises.writeFile(
       tempPath,
@@ -157,9 +210,20 @@ export async function writeJson<Value>(filePath: string, value: Value) {
       "utf-8",
     );
     await fs.promises.rename(tempPath, filePath);
-  } finally {
-    await fs.promises.rm(tempPath, { force: true }).catch(() => {});
+  } catch (error) {
+    failures.push(error);
   }
+  try {
+    await fs.promises.rm(tempPath, { force: true });
+  } catch (error) {
+    failures.push(error);
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1)
+    throw new AggregateError(
+      failures,
+      `Failed to write and clean temporary metadata for ${filePath}.`,
+    );
 }
 
 interface LockOwner {
@@ -167,10 +231,15 @@ interface LockOwner {
   token: string;
 }
 
-const validateLockOwner: Validator<LockOwner> = <Value>(
-  value: Value,
-): value is Value & LockOwner =>
-  isRecord(value) && isNumber(value["pid"]) && isString(value["token"]);
+const validateLockOwner: Validator<LockOwner> = (
+  value: unknown,
+): value is LockOwner =>
+  isRecord(value) &&
+  isNumber(value["pid"]) &&
+  Number.isInteger(value["pid"]) &&
+  value["pid"] > 0 &&
+  isString(value["token"]) &&
+  value["token"].length > 0;
 
 async function readLockOwner(ownerPath: string): Promise<LockOwner | null> {
   try {
@@ -179,40 +248,15 @@ async function readLockOwner(ownerPath: string): Promise<LockOwner | null> {
       validateLockOwner,
       ownerPath,
     );
-  } catch {
-    // The creator may still be writing owner.json; wait and revalidate.
-    return null;
-  }
-}
-
-async function removeAbandonedLock(lockDir: string, ownerPath: string) {
-  const owner = await readLockOwner(ownerPath);
-  if (owner && processIsAlive(owner["pid"])) {
-    return false;
-  }
-
-  const stat = await fs.promises.stat(lockDir).catch(() => null);
-  if (!stat || (!owner && Date.now() - stat.mtimeMs < 60_000)) {
-    return !stat;
-  }
-
-  const staleDir = `${lockDir}.stale-${randomUUID()}`;
-  try {
-    await fs.promises.rename(lockDir, staleDir);
   } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) {
-      return true;
-    }
-    return false;
+    if (
+      hasErrorCode(error, "ENOENT") ||
+      error instanceof SyntaxError ||
+      error instanceof TypeError
+    )
+      return null;
+    throw error;
   }
-
-  const movedOwner = await readLockOwner(path.join(staleDir, "owner.json"));
-  if (owner?.["token"] !== movedOwner?.["token"]) {
-    await fs.promises.rename(staleDir, lockDir).catch(() => {});
-    return false;
-  }
-  await fs.promises.rm(staleDir, { force: true, recursive: true });
-  return true;
 }
 
 function processIsAlive(pid: number) {

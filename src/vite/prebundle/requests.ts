@@ -42,7 +42,7 @@ export async function collectBundleRequests(
   prebundleFilePaths: Set<string>,
 ) {
   const entryFilePaths = context.materialized.entries.map((entry) =>
-    normalizePath(path.resolve(context.materialized.srcDir, entry)),
+    normalizePath(path.resolve(context.materialized.srcDir, entry.file)),
   );
   const dynamicRootModulesByFilePath = new Map<string, CapturedRuntimeModule>();
   for (const moduleId of dynamicRootModuleIds) {

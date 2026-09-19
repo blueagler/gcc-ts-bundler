@@ -22,7 +22,7 @@ import type {
 } from "../types";
 import { analyzeViteTypeMetadata } from "./analyze";
 import { assembleViteTypeMetadataFiles } from "./assemble";
-import { collectOverlayAttachments, readRuntimeModuleSources } from "./overlay";
+import { collectOverlayAttachments } from "./overlay";
 import { collectMaterializedExternalGlobalProtocol } from "./protocol";
 import { collectDirectTargets } from "./targets";
 
@@ -63,9 +63,8 @@ export async function collectViteTypeMetadata(input: {
       ? undefined
       : {
           key: await hashTypeMetadataSidecarDiskKey({
-            materialized: input.materialized,
             projectRoot: input.projectRoot,
-            sourceGraph,
+            sidecarKey: key,
           }),
           root: resolveViteTypeMetadataCacheRoot({
             captureRoot: input.cache.captureRoot,
@@ -121,16 +120,11 @@ export async function collectViteTypeMetadata(input: {
     diagnostics,
     dependencies,
   });
-  const sourceTextByModuleId = await readRuntimeModuleSources(
-    sourceGraph.modules,
-    dependencies,
-    diagnostics,
-  );
   const overlayAttachments = await collectOverlayAttachments({
+    dependencies,
     diagnostics,
     input,
     sourceGraph,
-    sourceTextByModuleId,
   });
   for (const overlay of overlayAttachments.results) {
     for (const cacheFile of overlay.cacheFiles) {

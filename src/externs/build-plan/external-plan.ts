@@ -1,22 +1,45 @@
 import fs from "fs/promises";
+import path from "node:path";
+import ts from "@typescript/typescript6";
 
 import type { ResolvedBuildOptions } from "../../build/types";
+import { ensureParentDirectory } from "../../shared/files";
 import { generateExterns } from "../index";
 import { isPlatformBuiltin, resolveModuleTypeEntry } from "../compiler";
 import type { TypeWorld } from "../context";
-import {
-  renderTypedBoundaryRecord,
-  type TypedBoundaryRecord,
-} from "../typed-render";
+import type {
+  GeneratedExternExport,
+  GeneratedTypedExternArtifact,
+} from "../types";
+import { renderTypedBoundaryDeclaration } from "../typed-render";
 
 type GeneratedExternalExterns = Awaited<ReturnType<typeof generateExterns>>;
 
 export interface ExternalExternPlan {
   opaqueSpecifiers: string[];
-  typedResolutions: Array<{
-    generated: GeneratedExternalExterns;
-    specifier: string;
-  }>;
+  typedDeclarations?: GeneratedTypedExternArtifact | undefined;
+}
+
+export async function probeExternalExternSpecifiers(input: {
+  compilerOptions: ts.CompilerOptions;
+  options: ResolvedBuildOptions;
+  specifiers: readonly string[];
+}): Promise<{ opaqueSpecifiers: string[]; typedSpecifiers: string[] }> {
+  const specifiers = selectExternCandidateSpecifiers(
+    input.specifiers,
+    input.options.target === "browser",
+  );
+  if (specifiers.length === 0) {
+    return { opaqueSpecifiers: [], typedSpecifiers: [] };
+  }
+
+  const probed = await probeSpecifierDeclarations(input, specifiers);
+  return {
+    opaqueSpecifiers: collectUnresolvedOpaqueSpecifiers(probed),
+    typedSpecifiers: probed
+      .filter(({ typed }) => typed)
+      .map(({ specifier }) => specifier),
+  };
 }
 
 export async function deriveExternalExternPlan(input: {
@@ -25,39 +48,35 @@ export async function deriveExternalExternPlan(input: {
    * and every `exports: "used"` surface renders empty. */
   appEntryFiles: readonly string[];
   options: ResolvedBuildOptions;
-  specifiers: string[];
-  typeWorld: TypeWorld;
+  opaqueSpecifiers: readonly string[];
+  typedSpecifiers: readonly string[];
+  typeWorld?: TypeWorld | undefined;
 }): Promise<ExternalExternPlan> {
-  const specifiers = selectExternCandidateSpecifiers(
-    input.specifiers,
-    input.options.target === "browser",
-  );
-  if (specifiers.length === 0) {
-    return { opaqueSpecifiers: [], typedResolutions: [] };
-  }
-
-  const probed = await probeSpecifierDeclarations(input, specifiers);
-  const opaqueSpecifiers = collectUnresolvedOpaqueSpecifiers(probed);
-  const typedResolutions: ExternalExternPlan["typedResolutions"] = [];
-  const typedSpecifiers = probed
-    .filter(({ typed }) => typed)
-    .map(({ specifier }) => specifier);
-  if (typedSpecifiers.length === 0) {
-    return { opaqueSpecifiers, typedResolutions };
+  if (input.typedSpecifiers.length === 0) {
+    return { opaqueSpecifiers: [...input.opaqueSpecifiers] };
   }
 
   try {
-    const resolved = await resolveTypedExternSurfaces(input, typedSpecifiers);
-    opaqueSpecifiers.push(...resolved.opaqueSpecifiers);
-    typedResolutions.push(...resolved.typedResolutions);
+    const resolved = await resolveTypedExternSurfaces(
+      input,
+      input.typedSpecifiers,
+    );
+    return {
+      opaqueSpecifiers: [
+        ...input.opaqueSpecifiers,
+        ...resolved.opaqueSpecifiers,
+      ],
+      typedDeclarations: resolved.typedDeclarations,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    for (const specifier of typedSpecifiers) {
+    const opaqueSpecifiers = [...input.opaqueSpecifiers];
+    for (const specifier of input.typedSpecifiers) {
       opaqueSpecifiers.push(specifier);
       warnOpaqueExtern(specifier, message);
     }
+    return { opaqueSpecifiers };
   }
-  return { opaqueSpecifiers, typedResolutions };
 }
 
 /**
@@ -85,15 +104,25 @@ interface ProbedSpecifier {
  * with no installed types force every other module opaque.
  */
 async function probeSpecifierDeclarations(
-  input: { options: ResolvedBuildOptions; typeWorld: TypeWorld },
+  input: {
+    compilerOptions: ts.CompilerOptions;
+    options: ResolvedBuildOptions;
+  },
   specifiers: readonly string[],
 ): Promise<ProbedSpecifier[]> {
+  const resolutionCache = ts.createModuleResolutionCache(
+    input.options.projectRoot,
+    (fileName) =>
+      ts.sys.useCaseSensitiveFileNames ? fileName : fileName.toLowerCase(),
+    input.compilerOptions,
+  );
   return Promise.all(
     specifiers.map(async (specifier) => ({
       specifier,
       typed: await hasResolvableDeclarations({
-        compilerOptions: input.typeWorld.compilerOptions,
+        compilerOptions: input.compilerOptions,
         projectRoot: input.options.projectRoot,
+        resolutionCache,
         specifier,
         target: input.options.target,
       }),
@@ -119,7 +148,7 @@ async function resolveTypedExternSurfaces(
   input: {
     appEntryFiles: readonly string[];
     options: ResolvedBuildOptions;
-    typeWorld: TypeWorld;
+    typeWorld?: TypeWorld | undefined;
   },
   typedSpecifiers: readonly string[],
 ): Promise<ExternalExternPlan> {
@@ -163,19 +192,15 @@ function partitionGeneratedTypedSurfaces(
   typedSpecifiers: readonly string[],
 ): ExternalExternPlan {
   const opaqueSpecifiers: string[] = [];
-  const typedResolutions: ExternalExternPlan["typedResolutions"] = [];
   for (const specifier of typedSpecifiers) {
     const hasModuleSurface = generated.typedDeclarations.moduleExports.some(
       (module) => module.specifier === specifier,
     );
-    if (hasModuleSurface) {
-      typedResolutions.push({ generated, specifier });
-      continue;
-    }
+    if (hasModuleSurface) continue;
     opaqueSpecifiers.push(specifier);
     warnOpaqueExtern(specifier, "no declaration module surface was produced");
   }
-  return { opaqueSpecifiers, typedResolutions };
+  return { opaqueSpecifiers, typedDeclarations: generated.typedDeclarations };
 }
 
 function warnGeneratedExternDiagnostics(generated: GeneratedExternalExterns) {
@@ -198,8 +223,9 @@ function warnOpaqueExtern(specifier: string, detail?: string) {
 }
 
 async function hasResolvableDeclarations(input: {
-  compilerOptions: TypeWorld["compilerOptions"];
+  compilerOptions: ts.CompilerOptions;
   projectRoot: string;
+  resolutionCache: ts.ModuleResolutionCache;
   specifier: string;
   target: ResolvedBuildOptions["target"];
 }) {
@@ -213,149 +239,162 @@ async function hasResolvableDeclarations(input: {
 
 const BOUNDARY_IDENTIFIER = /^[$A-Z_a-z][$\w]*$/u;
 
-export async function appendExternalTypedExterns(input: {
+/**
+ * Native externs are a published cache artifact. Assemble the Closure-only typed
+ * channel in caller-owned invocation scratch without ever rewriting that input.
+ */
+export async function assembleExternalExterns(input: {
   externsPath: string;
-  imports: Array<{
-    boundaryExports: string[];
-    boundaryNames: string[];
+  imports: readonly {
+    boundaryExports: readonly string[];
+    boundaryNames: readonly string[];
     externalSpecifier?: string | undefined;
-  }>;
-  typedResolutions: ExternalExternPlan["typedResolutions"];
-}) {
+  }[];
+  plan: ExternalExternPlan;
+  outputPath: string;
+}): Promise<string> {
+  const typed = input.plan.typedDeclarations;
+  if (!typed || typed.moduleExports.length === 0) return input.externsPath;
+  if (path.resolve(input.outputPath) === path.resolve(input.externsPath)) {
+    throw new Error("Assembled externs must not overwrite native externs.");
+  }
+
+  const modules = new Map(
+    typed.moduleExports.map((surface) => [surface.specifier, surface]),
+  );
   const seenTargets = new Set<string>();
   const typedDeclaredNames = new Set<string>();
-  const typedTexts = input.typedResolutions.map(({ generated, specifier }) => {
-    const moduleSurface = generated.typedDeclarations.moduleExports.find(
-      (module) => module.specifier === specifier,
+  const boundaryLines: string[] = [];
+  const take = (
+    exported: GeneratedExternExport,
+    target: string,
+    declareVariable = true,
+  ) => {
+    const lines = renderTypedBoundaryDeclaration(
+      exported,
+      target,
+      declareVariable,
     );
-    const boundaryLines = input.imports
-      .filter((item) => item.externalSpecifier === specifier)
-      .flatMap((item) =>
-        item.boundaryExports.flatMap((exportName, index) => {
-          const boundaryName = item.boundaryNames[index];
-          if (!boundaryName || !moduleSurface) return [];
-          if (exportName === "*") {
-            return moduleSurface.exports
-              .filter(({ exportName: name }) => BOUNDARY_IDENTIFIER.test(name))
-              .flatMap((exported) =>
-                takeTypedBoundaryRecord(
-                  renderTypedBoundaryRecord(
-                    exported,
-                    `${boundaryName}.${exported.exportName}`,
-                    false,
-                  ),
-                  seenTargets,
-                  typedDeclaredNames,
-                ),
-              );
-          }
-          const exported = moduleSurface.exports.find(
-            (item) => item.exportName === exportName,
-          );
-          return exported
-            ? takeTypedBoundaryRecord(
-                renderTypedBoundaryRecord(exported, boundaryName),
-                seenTargets,
-                typedDeclaredNames,
-              )
-            : [];
-        }),
-      );
-    return `${generated.typedDeclarations.text}\n// Exact typed external boundaries.\n${boundaryLines.join("\n")}\n`;
-  });
-  if (typedTexts.length === 0) return;
+    if (lines.length === 0 || seenTargets.has(target)) return;
+    seenTargets.add(target);
+    if (
+      declareVariable &&
+      exported.kind !== "type" &&
+      BOUNDARY_IDENTIFIER.test(target)
+    ) {
+      typedDeclaredNames.add(target);
+    }
+    boundaryLines.push(...lines);
+  };
+  for (const item of input.imports) {
+    const surface = item.externalSpecifier
+      ? modules.get(item.externalSpecifier)
+      : undefined;
+    if (!surface) continue;
+    for (const [index, exportName] of item.boundaryExports.entries()) {
+      const boundaryName = item.boundaryNames[index];
+      if (!boundaryName) continue;
+      if (exportName === "*") {
+        for (const exported of surface.exports) {
+          if (!BOUNDARY_IDENTIFIER.test(exported.exportName)) continue;
+          take(exported, `${boundaryName}.${exported.exportName}`, false);
+        }
+      } else {
+        const exported = surface.exports.find(
+          (candidate) => candidate.exportName === exportName,
+        );
+        if (exported) {
+          take(exported, boundaryName);
+        }
+      }
+    }
+  }
+
   const existing = await fs.readFile(input.externsPath, "utf8");
-  const assembled = `${stripUntypedBoundaryDeclarations(existing, typedDeclaredNames)}\n// Typed external runtime declarations.\n${typedTexts.join("\n")}`;
-  assertUniqueExternVarDeclarations(assembled, input.externsPath);
-  await fs.writeFile(input.externsPath, assembled, "utf8");
+  const nativeText = stripReplacedBoundaryDeclarations(
+    existing,
+    typedDeclaredNames,
+    seenTargets,
+  );
+  const assembled = [
+    nativeText,
+    "// Typed external runtime declarations.",
+    typed.text,
+    "// Exact typed external boundaries.",
+    ...boundaryLines,
+    "",
+  ].join("\n");
+  assertUniqueExternVarDeclarations(assembled, input.outputPath);
+  await ensureParentDirectory(input.outputPath);
+  await fs.writeFile(input.outputPath, assembled, "utf8");
+  return input.outputPath;
 }
 
 /**
- * Whole-file post-condition on the assembled extern file: every uninitialized
- * boundary declaration (`var X;`, bare or JSDoc-annotated) appears exactly
- * once. The file has two producers (the native emitter and this typed append
- * step); a duplicate declaration is
- * `JSC_VAR_MULTIPLY_DECLARED_ERROR`, which normal builds mask at their warning
- * level — so it must fail closed here, at assembly, not surface only under
- * `GCC_DISABLE_TYPE_INFERENCE=1`. Initialized namespace roots
- * (`var __gccExtern$… = {};`) legitimately repeat across typed sections and
- * are exempt.
+ * Replace only declarations for exact typed targets. Namespace roots are not
+ * declared by member records, and unrelated property carriers remain additive.
+ * Parse statements rather than making native JSDoc/initializer spelling an API.
  */
+function stripReplacedBoundaryDeclarations(
+  text: string,
+  declaredNames: ReadonlySet<string>,
+  targets: ReadonlySet<string>,
+) {
+  const source = ts.createSourceFile(
+    "native.externs.js",
+    text,
+    ts.ScriptTarget.Latest,
+    false,
+    ts.ScriptKind.JS,
+  );
+  const kept: string[] = [];
+  let cursor = 0;
+  for (const statement of source.statements) {
+    const declarations = ts.isVariableStatement(statement)
+      ? statement.declarationList.declarations
+      : undefined;
+    const replacedVariable =
+      declarations?.length === 1 &&
+      declarations.every(
+        (declaration) =>
+          ts.isIdentifier(declaration.name) &&
+          declaredNames.has(declaration.name.text),
+      );
+    const replacedMember =
+      ts.isExpressionStatement(statement) &&
+      ts.isPropertyAccessExpression(statement.expression) &&
+      targets.has(statement.expression.getText(source));
+    if (!replacedVariable && !replacedMember) continue;
+    kept.push(text.slice(cursor, statement.getStart(source, true)));
+    cursor = statement.end;
+  }
+  kept.push(text.slice(cursor));
+  return kept.join("");
+}
+
+/** Every variable, including initialized namespace roots and constructors, has
+ * exactly one producer in the complete Closure artifact. */
 function assertUniqueExternVarDeclarations(text: string, externsPath: string) {
+  const source = ts.createSourceFile(
+    externsPath,
+    text,
+    ts.ScriptTarget.Latest,
+    false,
+    ts.ScriptKind.JS,
+  );
   const seen = new Set<string>();
   const duplicated = new Set<string>();
-  for (const line of text.split("\n")) {
-    const match = /^(?:\/\*\*.*\*\/\s*)?var ([$A-Za-z_][$\w]*);$/u.exec(
-      line.trim(),
-    );
-    const name = match?.[1];
-    if (name === undefined) continue;
-    if (seen.has(name)) duplicated.add(name);
-    seen.add(name);
+  for (const statement of source.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(declaration.name)) continue;
+      const name = declaration.name.text;
+      if (seen.has(name)) duplicated.add(name);
+      seen.add(name);
+    }
   }
   if (duplicated.size === 0) return;
   throw new Error(
     `gcc-ts-bundler: assembled externs at ${externsPath} declare ${[...duplicated].sort().join(", ")} more than once; every producer must declare each boundary variable exactly once.`,
   );
-}
-
-function takeTypedBoundaryRecord(
-  record: TypedBoundaryRecord,
-  seenTargets: Set<string>,
-  typedDeclaredNames: Set<string>,
-) {
-  if (record.lines.length === 0 || seenTargets.has(record.target)) return [];
-  seenTargets.add(record.target);
-  if (record.declaredName) typedDeclaredNames.add(record.declaredName);
-  return record.lines;
-}
-
-function stripUntypedBoundaryDeclarations(
-  text: string,
-  names: ReadonlySet<string>,
-) {
-  if (names.size === 0) return text;
-  const lines = text.split("\n");
-  const kept: string[] = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (line === undefined) continue;
-    const trimmed = line.trim();
-    const untypedVar = untypedVarDeclarationName(trimmed);
-    if (untypedVar !== undefined && names.has(untypedVar)) continue;
-    if (startsStrippedBoundaryPair(trimmed, lines[index + 1], names)) {
-      index += 1;
-      continue;
-    }
-    kept.push(line);
-  }
-  return kept.join("\n");
-}
-/**
- * True when `trimmed` is a bare unknown-type JSDoc line whose following line
- * declares a boundary var being stripped. The declaration spans two lines, so
- * the caller consumes both.
- */
-function startsStrippedBoundaryPair(
-  trimmed: string,
-  next: string | undefined,
-  names: ReadonlySet<string>,
-) {
-  if (trimmed !== "/** @type {?} */" || next === undefined) return false;
-  const nextName = bareVarDeclarationName(next.trim());
-  return nextName !== undefined && names.has(nextName);
-}
-
-function untypedVarDeclarationName(trimmed: string) {
-  const prefix = "/** @type {?} */ var ";
-  if (!trimmed.startsWith(prefix) || !trimmed.endsWith(";")) return undefined;
-  const name = trimmed.slice(prefix.length, -1);
-  return BOUNDARY_IDENTIFIER.test(name) ? name : undefined;
-}
-
-function bareVarDeclarationName(trimmed: string) {
-  const prefix = "var ";
-  if (!trimmed.startsWith(prefix) || !trimmed.endsWith(";")) return undefined;
-  const name = trimmed.slice(prefix.length, -1);
-  return BOUNDARY_IDENTIFIER.test(name) ? name : undefined;
 }

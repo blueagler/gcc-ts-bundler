@@ -32,6 +32,22 @@ export type RenderState = {
   /** Unbounded when undefined. See `GenerateExternsOptions.maxSymbolDepth`. */
   maxSymbolDepth?: number | undefined;
   pending: ts.Symbol[];
+  /** Allocated only when disjoint module fragments are requested. */
+  projection?:
+    | {
+        roots: Map<string, Set<ts.Symbol>>;
+        symbols: Map<
+          ts.Symbol,
+          {
+            dependencies: ts.Symbol[];
+            namespace: string;
+            lineStart: number;
+            lineEnd: number;
+          }
+        >;
+        currentDependencies: ts.Symbol[] | undefined;
+      }
+    | undefined;
 };
 
 export function diagnostic(

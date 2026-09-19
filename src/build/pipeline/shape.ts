@@ -105,6 +105,7 @@ export function writeBuildEntryShims(
   }
   writeEntryShims({
     entries: resolved.entryFiles.map((entry) => ({
+      constEnumExportNames: entry.constEnumExportNames,
       exportNames: entry.exportNames,
       hasDefaultExport: entry.hasDefaultExport,
       importPath: toImportPath(

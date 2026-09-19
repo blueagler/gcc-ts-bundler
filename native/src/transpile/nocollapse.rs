@@ -144,10 +144,13 @@ fn collect_static_member_assignment_starts(program: &Program<'_>) -> Vec<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::NocollapseAssignments;
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
 
     #[test]
-    fn propagates_only_nocollapse_on_static_member_assignments() {
+    fn propagates_only_nocollapse_on_static_member_assignments() -> Result<(), String> {
         let allocator = Allocator::default();
         let source = concat!(
             "var _a;\n",
@@ -160,13 +163,12 @@ mod tests {
         let annotations = NocollapseAssignments::collect(&parsed.program);
         let statement = &parsed.program.body[1];
         let rendered = "let C = (_a = class {}, _a.value = \"retained\", _a);";
-        let annotated = annotations
-            .annotate_rendered_statement(statement, rendered.to_string())
-            .unwrap();
+        let annotated = annotations.annotate_rendered_statement(statement, rendered.to_string())?;
         assert!(
             annotated.contains("/** @nocollapse */ _a.value"),
             "{annotated}"
         );
         assert!(!annotated.contains("hostile"), "{annotated}");
+        Ok(())
     }
 }

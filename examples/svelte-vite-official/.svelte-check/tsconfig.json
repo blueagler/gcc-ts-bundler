@@ -1,0 +1,29 @@
+{
+  "extends": "../tsconfig.app.json",
+  "compilerOptions": {
+    "rootDirs": [
+      "..",
+      "svelte"
+    ],
+    "allowArbitraryExtensions": true,
+    "noEmit": true,
+    "incremental": false,
+    "tsBuildInfoFile": "tsbuildinfo.json"
+  },
+  "files": [
+    "../../../../../.bun/install/cache/links/svelte-check@4.7.6+49ee87feed2e5efd-21c6607726a72ea4/node_modules/svelte-check/dist/src/svelte-shims-v4.d.ts",
+    "../../../../../.bun/install/cache/links/svelte-check@4.7.6+49ee87feed2e5efd-21c6607726a72ea4/node_modules/svelte-check/dist/src/svelte-jsx-v4.d.ts"
+  ],
+  "include": [
+    "../src/**/*.ts",
+    "../src/**/*.js",
+    "../src/**/*.svelte",
+    "svelte/src/**/*.ts",
+    "svelte/src/**/*.js",
+    "svelte/src/**/*.d.svelte.ts"
+  ],
+  "exclude": [
+    "../src/App.svelte",
+    "../src/lib/Counter.svelte"
+  ]
+}

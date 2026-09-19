@@ -1,10 +1,126 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 import ts from "@typescript/typescript6";
 import { expect, test } from "bun:test";
 
 import { collectTypeMetadataFiles } from "../../src/build/transpile/type-metadata/metadata/index.ts";
 import { scanClosureIrSourceFiles } from "../../src/build/transpile/type-metadata/metadata/scan.ts";
+import {
+  collectNativeTypeMetadataFromContext,
+  createNativeTypeAnalysisContext,
+} from "../../src/build/transpile/type-metadata/index.ts";
 import { createFixture } from "../helpers.mjs";
+
+async function collectMetadata(fixture) {
+  const context = await createNativeTypeAnalysisContext({
+    fileNames: [path.join(fixture.srcDir, "index.ts")],
+    tsConfigPath: path.join(fixture.projectRoot, "tsconfig.json"),
+    workspaceDir: fixture.projectRoot,
+  });
+  return collectNativeTypeMetadataFromContext({ context, scan: undefined });
+}
+
+const config = JSON.stringify({
+  compilerOptions: {
+    module: "ESNext",
+    moduleResolution: "Bundler",
+    target: "ESNext",
+    noLib: true,
+    types: [],
+  },
+  include: ["src/**/*.ts"],
+});
+
+test("metadata rebuild reads equal-size source and imported declaration changes despite restored mtimes", async () => {
+  const fixture = await createFixture();
+  await fixture.write("tsconfig.json", config);
+  const source = (type) =>
+    [
+      'import type { Remote } from "./remote";',
+      `export function local(value: ${type}): ${type} { return value; }`,
+      "export function remote(value: Remote): Remote { return value; }",
+      "",
+    ].join("\n");
+  const timestamp = new Date("2025-01-01T00:00:00Z");
+  await fixture.write("src/index.ts", source("string"));
+  await fixture.write("src/remote.d.ts", "export type Remote = string;\n");
+  for (const name of ["index.ts", "remote.d.ts"]) {
+    await fs.utimes(path.join(fixture.srcDir, name), timestamp, timestamp);
+  }
+  const before = await collectMetadata(fixture);
+  for (const bindingName of ["local", "remote"]) {
+    const annotation = before.files[0].annotations.find(
+      (item) =>
+        item.target.kind === "binding" &&
+        item.target.bindingName === bindingName,
+    );
+    expect(annotation.template).toContain("@param {string} value");
+    expect(annotation.template).toContain("@return {string}");
+  }
+
+  await fixture.write("src/index.ts", source("number"));
+  await fixture.write("src/remote.d.ts", "export type Remote = number;\n");
+  for (const name of ["index.ts", "remote.d.ts"]) {
+    await fs.utimes(path.join(fixture.srcDir, name), timestamp, timestamp);
+  }
+  const after = await collectMetadata(fixture);
+  for (const bindingName of ["local", "remote"]) {
+    const annotation = after.files[0].annotations.find(
+      (item) =>
+        item.target.kind === "binding" &&
+        item.target.bindingName === bindingName,
+    );
+    expect(annotation.template).toContain("@param {number} value");
+    expect(annotation.template).toContain("@return {number}");
+  }
+});
+
+test("exported declaration modules contribute only explicit global augmentations", async () => {
+  const fixture = await createFixture();
+  await fixture.write("tsconfig.json", config);
+  await fixture.write("src/index.ts", "export const ok = 1;\n");
+  await fixture.write(
+    "src/module.d.ts",
+    [
+      "export declare const importedValue: number;",
+      "export declare namespace ImportedNamespace { const value: number; }",
+      "declare namespace PrivateNamespace { const value: number; }",
+      "declare global { var augmentedValue: number; }",
+      "",
+    ].join("\n"),
+  );
+  await fixture.write(
+    "src/ambient.d.ts",
+    [
+      "declare const environmentValue: number;",
+      "declare namespace Environment { const value: number; }",
+      "declare namespace TypesOnly { interface Value { value: number; } }",
+      "",
+    ].join("\n"),
+  );
+
+  const result = await collectMetadata(fixture);
+  expect(result.files[0].ambientGlobals).toEqual([
+    "Environment",
+    "augmentedValue",
+    "environmentValue",
+  ]);
+});
+
+test("metadata rebuild discovers new ambient declarations from the current config roots", async () => {
+  const fixture = await createFixture();
+  await fixture.write("tsconfig.json", config);
+  await fixture.write("src/index.ts", "export const ok = 1;\n");
+  const before = await collectMetadata(fixture);
+  expect(before.files[0].ambientGlobals).toEqual([]);
+
+  await fixture.write(
+    "src/ambient.d.ts",
+    "declare const newlyAvailable: number;\n",
+  );
+  const after = await collectMetadata(fixture);
+  expect(after.files[0].ambientGlobals).toEqual(["newlyAvailable"]);
+});
 
 function createProgram(fileNames, rootDir) {
   const compilerOptions = {
@@ -383,22 +499,9 @@ async function collectAmbient(fixture, files) {
   for (const [name, text] of Object.entries(files)) {
     await fixture.write(name, text);
   }
-  const {
-    createNativeTypeAnalysisContext,
-    collectNativeTypeMetadataFromContext,
-  } = await import("../../src/build/transpile/type-metadata/index.ts");
   // Only the graph root is handed in, exactly as the build does: ambient
   // declarations must arrive through tsconfig parity, not through this list.
-  const context = await createNativeTypeAnalysisContext({
-    fileNames: [path.join(fixture.srcDir, "index.ts")],
-    tsConfigPath: path.join(fixture.projectRoot, "tsconfig.json"),
-    workspaceDir: fixture.projectRoot,
-  });
-  const result = collectNativeTypeMetadataFromContext({
-    context,
-    scan: undefined,
-    targets: undefined,
-  });
+  const result = await collectMetadata(fixture);
   return new Set(result.files.flatMap((file) => file.ambientGlobals ?? []));
 }
 
@@ -508,15 +611,49 @@ test.serial(
   },
 );
 
-test.serial("a .d.ts module keeps its top-level declares module-scoped", async () => {
+test("external ownership keeps generic property instantiations distinct", async () => {
   const fixture = await createFixture();
-  const globals = await collectAmbient(fixture, {
-    "tsconfig.json": AMBIENT_TSCONFIG,
-    // `export declare const x` in a declaration module is a property of that
-    // module, reached by importing it — not a global.
-    "src/shape.d.ts": "export declare const notAGlobal: number;\nexport {};\n",
-    "src/index.ts": "export const ok = 1;\n",
+  const source = [
+    'import { accept } from "boundary";',
+    "interface Num { numberOnly: number; privateNum: boolean; }",
+    "interface Text { textOnly: string; privateText: boolean; }",
+    "interface Local<T> { item: T; }",
+    "const first: Local<Num> = { item: { numberOnly: 1, privateNum: true } };",
+    'const second: Local<Text> = { item: { textOnly: "ok", privateText: true } };',
+    "const forwarded = accept;",
+    "forwarded(first, second);",
+    "export const values = [first.item.numberOnly, second.item.textOnly, first.item.privateNum, second.item.privateText];",
+    "",
+  ].join("\n");
+  await fixture.write("src/index.ts", source);
+  await fixture.write(
+    "src/boundary.d.ts",
+    [
+      'declare module "boundary" {',
+      "  export interface Box<T> { item: T; }",
+      "  export function accept(first: Box<{ numberOnly: number }>, second: Box<{ textOnly: string }>): void;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  const entry = path.join(fixture.srcDir, "index.ts");
+  const { compilerOptions, program } = createProgram(
+    [entry, path.join(fixture.srcDir, "boundary.d.ts")],
+    fixture.srcDir,
+  );
+  const result = collectTypeMetadataFiles({
+    compilerOptions,
+    externalSpecifiers: ["boundary"],
+    fileNames: [entry],
+    program,
   });
-
-  expect(globals.has("notAGlobal")).toBe(false);
+  const offsets = new Set(result.files[0].externalOwnedMemberAccesses);
+  const offset = (access) =>
+    Buffer.byteLength(
+      source.slice(0, source.lastIndexOf(access) + access.lastIndexOf(".") + 1),
+    );
+  expect(offsets.has(offset("first.item.numberOnly"))).toBe(true);
+  expect(offsets.has(offset("second.item.textOnly"))).toBe(true);
+  expect(offsets.has(offset("first.item.privateNum"))).toBe(false);
+  expect(offsets.has(offset("second.item.privateText"))).toBe(false);
 });

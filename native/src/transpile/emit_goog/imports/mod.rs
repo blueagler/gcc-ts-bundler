@@ -1,11 +1,15 @@
 //! Import and export assembly for goog.module emit.
 
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    ImportDeclaration, ImportDeclarationSpecifier, ImportOrExportKind, ModuleExportName,
+};
 
 mod convert;
 mod external;
 
-pub(crate) use convert::{convert_export_all, convert_import_decl, convert_named_export};
+pub(crate) use convert::{
+    convert_export_all, convert_export_from, convert_import_decl, convert_named_export,
+};
 pub(crate) use external::{boundary_identity_token, convert_external_import_decl};
 
 pub(crate) fn validate_preserved_import(
@@ -15,21 +19,21 @@ pub(crate) fn validate_preserved_import(
     for specifier in import.specifiers.iter().flatten() {
         match specifier {
             ImportDeclarationSpecifier::ImportDefaultSpecifier(_)
-                if !preserved.hasDefaultExport =>
+                if !preserved.has_default_export =>
             {
                 return Err(format!(
                     "Preserved module {} has no default export",
-                    preserved.filePath
+                    preserved.file_path
                 ));
             }
             ImportDeclarationSpecifier::ImportSpecifier(named)
                 if named.import_kind != ImportOrExportKind::Type =>
             {
                 let imported_name = module_export_name(&named.imported);
-                if !preserved.exportNames.contains(&imported_name) {
+                if !preserved.export_names.contains(&imported_name) {
                     return Err(format!(
                         "Preserved module {} does not export {imported_name:?}",
-                        preserved.filePath
+                        preserved.file_path
                     ));
                 }
             }

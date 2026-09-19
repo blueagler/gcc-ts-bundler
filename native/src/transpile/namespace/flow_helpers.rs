@@ -2,8 +2,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use oxc_allocator::{Allocator, CloneIn, FromIn, TakeIn};
-use oxc_ast::ast::*;
+use oxc_allocator::{Allocator, CloneIn, FromIn};
+use oxc_ast::ast::{
+    AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty, Expression,
+    ForStatementLeft, FunctionBody, Program, PropertyKey, SimpleAssignmentTarget, Statement,
+    VariableDeclarator,
+};
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk, Visit};
 use oxc_codegen::Codegen;
@@ -22,27 +26,29 @@ pub(crate) struct NamespaceReification {
     pub(crate) warning: String,
 }
 
-pub(super) struct HoistNamespaceInfo<'i> {
-    pub(super) consumer_module_id: &'i str,
-    pub(super) direct_namespace_ids: &'i BindingKeySet,
-    pub(super) lexical_binding_names: &'i HashSet<String>,
-    pub(super) plan: &'i HoistPlan,
+pub(crate) struct HoistNamespaceInfo<'i> {
+    pub(crate) consumer_module_id: &'i str,
+    pub(crate) direct_namespace_ids: &'i BindingKeySet,
+    pub(crate) lexical_binding_names: &'i HashSet<String>,
+    pub(crate) plan: &'i HoistPlan,
 }
 
 pub(super) struct FinitePropertyBindingCollector<'i> {
     bindings: BindingKeyMap<Vec<String>>,
     identity: &'i ModuleIdentity,
     seen: BindingKeySet,
+    error: Option<String>,
 }
 
-impl<'a> Visit<'a> for FinitePropertyBindingCollector<'_> {
-    fn visit_variable_declarator(&mut self, declarator: &VariableDeclarator<'a>) {
+impl FinitePropertyBindingCollector<'_> {
+    fn collect_declarator(&mut self, declarator: &VariableDeclarator<'_>) -> Result<(), String> {
         let candidate = declarator
             .id
             .get_binding_identifier()
-            .map(|binding| self.identity.key_of_binding(binding));
+            .map(ModuleIdentity::key_of_binding)
+            .transpose()?;
         let mut candidate_is_unique = true;
-        for (key, _) in binding_names_with_ids(&declarator.id, self.identity) {
+        for (key, _) in binding_names_with_ids(&declarator.id)? {
             if !self.seen.insert(key) {
                 self.bindings.remove(&key);
                 candidate_is_unique &= candidate != Some(key);
@@ -55,6 +61,15 @@ impl<'a> Visit<'a> for FinitePropertyBindingCollector<'_> {
                 }
             }
         }
+        Ok(())
+    }
+}
+
+impl<'a> Visit<'a> for FinitePropertyBindingCollector<'_> {
+    fn visit_variable_declarator(&mut self, declarator: &VariableDeclarator<'a>) {
+        if let Err(error) = self.collect_declarator(declarator) {
+            self.error.get_or_insert(error);
+        }
         walk::walk_variable_declarator(self, declarator);
     }
 }
@@ -62,14 +77,18 @@ impl<'a> Visit<'a> for FinitePropertyBindingCollector<'_> {
 pub(crate) fn collect_finite_property_bindings(
     program: &Program<'_>,
     identity: &ModuleIdentity,
-) -> BindingKeyMap<Vec<String>> {
+) -> Result<BindingKeyMap<Vec<String>>, String> {
     let mut collector = FinitePropertyBindingCollector {
         bindings: HashMap::new(),
         identity,
         seen: HashSet::new(),
+        error: None,
     };
     collector.visit_program(program);
-    collector.bindings
+    match collector.error {
+        Some(error) => Err(error),
+        None => Ok(collector.bindings),
+    }
 }
 
 pub(super) fn single_return_argument<'b, 'a>(
@@ -162,10 +181,11 @@ pub(super) fn lower_finite_namespace_member<'a>(
     builder: &AstBuilder<'a>,
 ) -> Expression<'a> {
     match property {
-        Expression::ConditionalExpression(mut conditional) => {
-            let test = conditional.test.take_in(builder);
-            let consequent = conditional.consequent.take_in(builder);
-            let alternate = conditional.alternate.take_in(builder);
+        Expression::ConditionalExpression(conditional) => {
+            let conditional = conditional.unbox();
+            let test = conditional.test;
+            let consequent = conditional.consequent;
+            let alternate = conditional.alternate;
             let consequent_object = clone_namespace_object(&object, allocator);
             Expression::new_conditional_expression(
                 conditional.span,
@@ -181,9 +201,9 @@ pub(super) fn lower_finite_namespace_member<'a>(
                 builder,
             )
         }
-        Expression::ParenthesizedExpression(mut parenthesized) => lower_finite_namespace_member(
+        Expression::ParenthesizedExpression(parenthesized) => lower_finite_namespace_member(
             object,
-            parenthesized.expression.take_in(builder),
+            parenthesized.unbox().expression,
             optional,
             allocator,
             builder,
@@ -197,14 +217,12 @@ pub(super) fn lower_finite_namespace_member<'a>(
 pub(super) fn lower_bound_finite_namespace_member<'a>(
     object: Expression<'a>,
     property: Expression<'a>,
-    properties: &[String],
+    last: &str,
+    preceding: &[String],
     optional: bool,
     allocator: &'a Allocator,
     builder: &AstBuilder<'a>,
 ) -> Expression<'a> {
-    let (last, preceding) = properties
-        .split_last()
-        .expect("finite property binding must have a value");
     let string = |value: &str| {
         Expression::new_string_literal(SPAN, Str::from_in(value, allocator), None, builder)
     };
@@ -294,16 +312,17 @@ pub(super) fn remove_for_left_carriers<T>(
     left: &ForStatementLeft<'_>,
     identity: &ModuleIdentity,
     carriers: &mut BindingKeyMap<T>,
-) {
+) -> Result<(), String> {
     if let ForStatementLeft::VariableDeclaration(declaration) = left {
         for declarator in &declaration.declarations {
-            for (binding, _) in binding_names_with_ids(&declarator.id, identity) {
+            for (binding, _) in binding_names_with_ids(&declarator.id)? {
                 carriers.remove(&binding);
             }
         }
     } else if let Some(target) = left.as_assignment_target() {
         remove_assignment_target_carriers(target, identity, carriers);
     }
+    Ok(())
 }
 
 pub(super) fn remove_assignment_target_carriers<T>(
@@ -364,26 +383,38 @@ pub(super) fn remove_maybe_default_carriers<T>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::collections::HashMap;
+
+    use oxc_allocator::{Allocator, TakeIn};
+    use oxc_ast::ast::{ComputedMemberExpression, Expression, Program, Statement};
+    use oxc_ast::builder::AstBuilder;
     use oxc_parser::Parser;
     use oxc_semantic::SemanticBuilder;
     use oxc_span::SourceType;
 
+    use super::{
+        collect_finite_property_bindings, finite_computed_property, lower_finite_namespace_member,
+        print_node,
+    };
+    use crate::transpile::identity::ModuleIdentity;
+
     fn computed_initializer<'a>(
         program: &'a mut Program<'a>,
-    ) -> &'a mut ComputedMemberExpression<'a> {
-        let Statement::VariableDeclaration(declaration) = &mut program.body[0] else {
-            panic!("expected variable declaration");
+    ) -> Result<&'a mut ComputedMemberExpression<'a>, String> {
+        let Some(Statement::VariableDeclaration(declaration)) = program.body.first_mut() else {
+            return Err("expected variable declaration".to_string());
         };
-        let Some(Expression::ComputedMemberExpression(member)) =
-            declaration.declarations[0].init.as_mut()
+        let Some(Expression::ComputedMemberExpression(member)) = declaration
+            .declarations
+            .first_mut()
+            .and_then(|declarator| declarator.init.as_mut())
         else {
-            panic!("expected computed initializer");
+            return Err("expected computed initializer".to_string());
         };
-        member
+        Ok(member)
     }
 
-    fn finite_bindings(source: &str) -> HashMap<String, Vec<String>> {
+    fn finite_bindings(source: &str) -> Result<HashMap<String, Vec<String>>, String> {
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, source, SourceType::mjs()).parse();
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
@@ -394,60 +425,68 @@ mod tests {
                 .semantic
                 .into_scoping(),
         );
-        collect_finite_property_bindings(&parsed.program, &identity)
-            .into_iter()
-            .map(|(key, properties)| (identity.symbol(key).to_string(), properties))
-            .collect()
+        Ok(
+            collect_finite_property_bindings(&parsed.program, &identity)?
+                .into_iter()
+                .map(|(key, properties)| (identity.symbol(key).to_string(), properties))
+                .collect(),
+        )
     }
 
     #[test]
-    fn follows_a_bound_finite_ternary() {
+    fn follows_a_bound_finite_ternary() -> Result<(), String> {
         let bindings = finite_bindings(
             r#"function draw(condition) { const shapeType = condition ? "Circle" : "Arc"; return graphic[shapeType]; }"#,
-        );
+        )?;
         assert_eq!(bindings["shapeType"], ["Circle", "Arc"]);
+        Ok(())
     }
 
     #[test]
-    fn follows_a_bound_nested_finite_ternary() {
+    fn follows_a_bound_nested_finite_ternary() -> Result<(), String> {
         let bindings = finite_bindings(
             r#"function draw(first, second) { const shapeType = first ? "Circle" : second ? "Arc" : "Line"; return graphic[shapeType]; }"#,
-        );
+        )?;
         assert_eq!(bindings["shapeType"], ["Circle", "Arc", "Line"]);
+        Ok(())
     }
 
     #[test]
-    fn rejects_a_reassigned_finite_binding() {
+    fn rejects_a_reassigned_finite_binding() -> Result<(), String> {
         let bindings = finite_bindings(
             r#"function draw(condition) { let shapeType = condition ? "Circle" : "Arc"; shapeType = "Line"; return graphic[shapeType]; }"#,
-        );
+        )?;
         assert!(!bindings.contains_key("shapeType"));
+        Ok(())
     }
 
     #[test]
-    fn rejects_a_binding_with_multiple_declarations() {
+    fn rejects_a_binding_with_multiple_declarations() -> Result<(), String> {
         let bindings = finite_bindings(
             r#"function draw(condition, source) { var shapeType = condition ? "Circle" : "Arc"; var { shapeType } = source; return graphic[shapeType]; }"#,
-        );
+        )?;
         assert!(!bindings.contains_key("shapeType"));
+        Ok(())
     }
 
     #[test]
-    fn rejects_a_parameter_as_finite_binding() {
-        let bindings =
-            finite_bindings(r#"function draw(shapeType) { return graphic[shapeType]; }"#);
+    fn rejects_a_parameter_as_finite_binding() -> Result<(), String> {
+        let bindings = finite_bindings(r"function draw(shapeType) { return graphic[shapeType]; }")?;
         assert!(!bindings.contains_key("shapeType"));
+        Ok(())
     }
 
     #[test]
-    fn lowers_nested_finite_namespace_members_to_static_selections() {
+    fn lowers_nested_finite_namespace_members_to_static_selections() -> Result<(), String> {
         let allocator = Allocator::default();
         let source = r#"const value = ns[first ? "a" : second ? "b" : "c"];"#;
-        let mut program = Parser::new(&allocator, source, SourceType::mjs())
-            .parse()
-            .program;
+        let parsed = Parser::new(&allocator, source, SourceType::mjs()).parse();
+        if !parsed.diagnostics.is_empty() {
+            return Err(format!("{:?}", parsed.diagnostics));
+        }
+        let mut program = parsed.program;
         let builder = AstBuilder::new(&allocator);
-        let member = computed_initializer(&mut program);
+        let member = computed_initializer(&mut program)?;
         assert!(finite_computed_property(&member.expression));
         let object = member.object.take_in(&builder);
         let property = member.expression.take_in(&builder);
@@ -456,16 +495,20 @@ mod tests {
             print_node(&lowered),
             r#"first ? ns["a"] : second ? ns["b"] : ns["c"]"#
         );
+        Ok(())
     }
 
     #[test]
-    fn rejects_dynamic_namespace_member_evidence() {
+    fn rejects_dynamic_namespace_member_evidence() -> Result<(), String> {
         let allocator = Allocator::default();
         let source = r#"const value = ns[first ? "a" : dynamicKey];"#;
-        let mut program = Parser::new(&allocator, source, SourceType::mjs())
-            .parse()
-            .program;
-        let member = computed_initializer(&mut program);
+        let parsed = Parser::new(&allocator, source, SourceType::mjs()).parse();
+        if !parsed.diagnostics.is_empty() {
+            return Err(format!("{:?}", parsed.diagnostics));
+        }
+        let mut program = parsed.program;
+        let member = computed_initializer(&mut program)?;
         assert!(!finite_computed_property(&member.expression));
+        Ok(())
     }
 }

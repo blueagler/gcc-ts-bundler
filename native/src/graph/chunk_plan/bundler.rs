@@ -1,8 +1,12 @@
-use super::super::*;
+use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
+
+use super::super::{ChunkPlanChunkOutput, ChunkPlanEntryInput, LazyImportEntry};
 use super::{
     dedupe_lazy_imports, sanitize_chunk_name, to_relative_files, topological_sort,
     walk_reachable_files,
 };
+use crate::utils::path_relative_to;
 
 /// Path segments that mark a file as dependency-originated rather than app
 /// code. `node_modules/` is the direct case; `__dep-bundles/` and
@@ -25,7 +29,7 @@ fn partition_vendor_files(
 ) -> BTreeSet<String> {
     let entry_paths = entry_files
         .iter()
-        .map(|entry| entry.sourcePath.clone())
+        .map(|entry| entry.source_path.clone())
         .collect::<BTreeSet<_>>();
     let mut vendor_files = base_reachable
         .iter()
@@ -75,7 +79,7 @@ pub(crate) fn build_bundler_chunk_plan(
 ) -> Vec<ChunkPlanChunkOutput> {
     let mut base_reachable = BTreeSet::new();
     for entry in entry_files {
-        base_reachable.extend(walk_reachable_files(&entry.sourcePath, graph));
+        base_reachable.extend(walk_reachable_files(&entry.source_path, graph));
     }
 
     let vendor_files = if vendor_chunk {
@@ -107,15 +111,15 @@ pub(crate) fn build_bundler_chunk_plan(
             .iter()
             .map(|name| ChunkPlanChunkOutput {
                 dependencies: Vec::new(),
-                entryFiles: None,
+                entry_files: None,
                 files: to_relative_files(
                     &topological_sort(vendor_files.iter().cloned().collect(), graph),
                     workspace_dir,
                 ),
                 kind: Some("vendor".to_string()),
-                lazyModuleIds: None,
+                lazy_module_ids: None,
                 name: name.clone(),
-                outputName: None,
+                output_name: None,
             })
             .collect::<Vec<_>>()
     };
@@ -125,29 +129,29 @@ pub(crate) fn build_bundler_chunk_plan(
         let mut chunks = vendor_chunks();
         chunks.push(ChunkPlanChunkOutput {
             dependencies: base_dependencies(),
-            entryFiles: Some(
+            entry_files: Some(
                 entry_files
                     .iter()
-                    .map(|entry| path_relative_to(Path::new(&entry.sourcePath), workspace_dir))
+                    .map(|entry| path_relative_to(Path::new(&entry.source_path), workspace_dir))
                     .collect(),
             ),
             files: to_relative_files(&topological_sort(base_files, graph), workspace_dir),
             kind: Some("base".to_string()),
-            lazyModuleIds: None,
+            lazy_module_ids: None,
             name: base_chunk_name.to_string(),
-            outputName: None,
+            output_name: None,
         });
         return chunks;
     }
 
     let lazy_root_targets = unique_lazy_imports
         .iter()
-        .map(|item| item.targetPath.clone())
+        .map(|item| item.target_path.clone())
         .collect::<BTreeSet<_>>();
     let lazy_closures = unique_lazy_imports
         .iter()
         .map(|lazy_import| {
-            let reachable = walk_reachable_files(&lazy_import.targetPath, graph)
+            let reachable = walk_reachable_files(&lazy_import.target_path, graph)
                 .into_iter()
                 .filter(|file_path| !base_reachable.contains(file_path))
                 .collect::<BTreeSet<_>>();
@@ -172,46 +176,46 @@ pub(crate) fn build_bundler_chunk_plan(
     let mut chunks = vendor_chunks();
     chunks.push(ChunkPlanChunkOutput {
         dependencies: base_dependencies(),
-        entryFiles: Some(
+        entry_files: Some(
             entry_files
                 .iter()
-                .map(|entry| path_relative_to(Path::new(&entry.sourcePath), workspace_dir))
+                .map(|entry| path_relative_to(Path::new(&entry.source_path), workspace_dir))
                 .collect(),
         ),
         files: to_relative_files(&topological_sort(base_files, graph), workspace_dir),
         kind: Some("base".to_string()),
-        lazyModuleIds: Some(
+        lazy_module_ids: Some(
             unique_lazy_imports
                 .iter()
                 .filter_map(|item| {
                     base_reachable
-                        .contains(&item.targetPath)
-                        .then_some(item.moduleId.clone())
+                        .contains(&item.target_path)
+                        .then_some(item.module_id.clone())
                 })
                 .collect(),
         ),
         name: base_chunk_name.to_string(),
-        outputName: None,
+        output_name: None,
     });
 
     let shared_chunk_name = format!("{base_chunk_name}-shared");
     if !shared_lazy_files.is_empty() {
         chunks.push(ChunkPlanChunkOutput {
             dependencies: vec![base_chunk_name.to_string()],
-            entryFiles: None,
+            entry_files: None,
             files: to_relative_files(
                 &topological_sort(shared_lazy_files.iter().cloned().collect(), graph),
                 workspace_dir,
             ),
             kind: Some("shared".to_string()),
-            lazyModuleIds: None,
+            lazy_module_ids: None,
             name: shared_chunk_name.clone(),
-            outputName: None,
+            output_name: None,
         });
     }
 
     for (lazy_import, reachable) in lazy_closures {
-        if base_reachable.contains(&lazy_import.targetPath) {
+        if base_reachable.contains(&lazy_import.target_path) {
             continue;
         }
         let chunk_files = reachable
@@ -226,22 +230,24 @@ pub(crate) fn build_bundler_chunk_plan(
                 }
                 deps
             },
-            entryFiles: None,
+            entry_files: None,
             files: to_relative_files(&topological_sort(chunk_files, graph), workspace_dir),
             kind: Some("lazy".to_string()),
-            lazyModuleIds: Some(vec![lazy_import.moduleId.clone()]),
+            lazy_module_ids: Some(vec![lazy_import.module_id.clone()]),
             name: sanitize_chunk_name(&format!(
                 "{}-lazy",
-                path_relative_to(Path::new(&lazy_import.targetPath), workspace_dir)
+                path_relative_to(Path::new(&lazy_import.target_path), workspace_dir)
                     .replace(['\\', '/'], "-")
                     .rsplit_once('.')
-                    .map(|(head, _)| head.to_string())
-                    .unwrap_or_else(|| {
-                        path_relative_to(Path::new(&lazy_import.targetPath), workspace_dir)
-                            .replace(['\\', '/'], "-")
-                    })
+                    .map_or_else(
+                        || {
+                            path_relative_to(Path::new(&lazy_import.target_path), workspace_dir)
+                                .replace(['\\', '/'], "-")
+                        },
+                        |(head, _)| head.to_string(),
+                    )
             )),
-            outputName: None,
+            output_name: None,
         });
     }
 

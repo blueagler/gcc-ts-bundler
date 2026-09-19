@@ -1,8 +1,10 @@
 import fs from "node:fs/promises";
 
-import type { NormalizedOutputOptions } from "../internal-types";
+import type {
+  GccRuntimeManifest,
+  NormalizedOutputOptions,
+} from "../internal-types";
 import { joinPublicPath, stripPublicPathPrefix } from "../output";
-import { parseGccRuntimeManifest } from "../../build/closure/runtime-manifest/parse";
 import type { BaseOutputSeed } from "./helpers";
 import {
   applyFileRenames,
@@ -17,15 +19,13 @@ export async function finalizeScriptChunkNames(input: {
   baseChunkFilePath: string;
   baseSeed: BaseOutputSeed;
   emittedOutputFiles: string[];
+  manifest: GccRuntimeManifest;
   manifestFilePath: string;
   outputOptions: NormalizedOutputOptions;
   outDir: string;
   publicPath: string;
 }) {
-  const manifest = parseGccRuntimeManifest(
-    await fs.readFile(input.manifestFilePath, "utf8"),
-    input.manifestFilePath,
-  );
+  const { manifest } = input;
   const baseChunk = manifest.chunks[manifest.baseChunk];
   if (!baseChunk) {
     throw new Error("gccTsBundler() could not resolve the base runtime chunk.");

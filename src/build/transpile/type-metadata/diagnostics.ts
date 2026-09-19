@@ -1,6 +1,6 @@
 import ts from "@typescript/typescript6";
 
-const explicitTypeSignalCache = new WeakMap<ts.SourceFile, boolean>();
+import { getClosureIrSyntaxIndex } from "./metadata/scan";
 
 export function shouldIgnorePreflightDiagnostic(diagnostic: ts.Diagnostic) {
   const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n");
@@ -78,36 +78,10 @@ function getDiagnosticModuleSpecifier(diagnostic: ts.Diagnostic) {
 }
 
 function fileHasExplicitTypeSignals(sourceFile: ts.SourceFile) {
-  const cached = explicitTypeSignalCache.get(sourceFile);
-  if (cached != null) {
-    return cached;
-  }
-
-  const hasSignal =
-    sourceFile.text.includes("/**") ||
-    sourceFile.text.includes("@ts-check") ||
-    sourceFile.statements.some(containsExplicitTypeSignal);
-
-  explicitTypeSignalCache.set(sourceFile, hasSignal);
-  return hasSignal;
-}
-
-export function containsExplicitTypeSignal(node: ts.Node): boolean {
-  if (
-    ts.isEnumDeclaration(node) ||
-    ts.isInterfaceDeclaration(node) ||
-    ts.isTypeAliasDeclaration(node) ||
-    ts.isAsExpression(node) ||
-    ts.isSatisfiesExpression(node) ||
-    ts.isTypeAssertionExpression(node) ||
-    ts.isTypeParameterDeclaration(node)
-  ) {
-    return true;
-  }
-
-  if ("type" in node && node.type) {
-    return true;
-  }
-
-  return ts.forEachChild(node, containsExplicitTypeSignal) ?? false;
+  const index = getClosureIrSyntaxIndex(sourceFile);
+  return (
+    index.docEligibility.hasJsDocText ||
+    index.docEligibility.hasTsCheckText ||
+    index.hasExplicitTypeSignals
+  );
 }

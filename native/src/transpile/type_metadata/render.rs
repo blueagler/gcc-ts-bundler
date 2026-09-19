@@ -50,8 +50,8 @@ fn count_typed_members(template: &str) -> u32 {
 
 pub(in super::super) fn render_declarations(
     metadata: &ClosureFileMetadata,
-    declarations: &[ClosureTypeDeclaration],
-    symbols_by_id: &HashMap<String, ClosureTypeSymbol>,
+    declarations: &[&ClosureTypeDeclaration],
+    symbols_by_id: &HashMap<&str, &ClosureTypeSymbol>,
     declaration_names: &HashMap<String, String>,
     symbol_resolutions: &HashMap<String, RuntimeTypeName>,
     rename_declaration: impl Fn(&str, &str, &str) -> std::result::Result<String, String>,
@@ -69,32 +69,32 @@ pub(in super::super) fn render_declarations(
                 Some(target.clone()),
             );
             let authored_name = symbols_by_id
-                .get(&declaration.declared_symbol_id)
-                .map(|symbol| symbol.diagnostic_name.as_str())
-                .unwrap_or("ClosureType");
+                .get(declaration.declared_symbol_id.as_str())
+                .map_or("ClosureType", |symbol| symbol.diagnostic_name.as_str());
             let emitted_name = declaration_names
                 .get(&declaration.declared_symbol_id)
-                .map(String::as_str)
-                .unwrap_or(authored_name);
+                .map_or(authored_name, String::as_str);
             let mut diagnostics = rendered.diagnostics;
             let code = rename_declaration(&rendered.text, authored_name, emitted_name).ok();
             if code.is_none() {
                 diagnostics.push(TypeMetadataDiagnostic::delivery(
                     metadata,
                     "declaration-parse-failed",
-                    symbols_by_id.get(&declaration.declared_symbol_id),
+                    symbols_by_id
+                        .get(declaration.declared_symbol_id.as_str())
+                        .copied(),
                     Some(target),
                 ));
             }
             RenderedDeclaration {
                 rendered_counts: TypeMetadataCounts {
-                    typeDeclarationCount: u32::from(code.is_some()),
-                    memberAnnotationCount: if code.is_some() {
+                    type_declarations: u32::from(code.is_some()),
+                    member_annotations: if code.is_some() {
                         count_typed_members(&rendered.text)
                     } else {
                         0
                     },
-                    unresolvedTypeReferenceCount: rendered.unresolved_count,
+                    unresolved_type_references: rendered.unresolved_count,
                     ..Default::default()
                 },
                 code,
@@ -110,7 +110,7 @@ pub(in super::super) fn render_template(
     metadata: &ClosureFileMetadata,
     template: &str,
     references: &[ClosureTypeReference],
-    symbols_by_id: &HashMap<String, ClosureTypeSymbol>,
+    symbols_by_id: &HashMap<&str, &ClosureTypeSymbol>,
     symbol_resolutions: &HashMap<String, RuntimeTypeName>,
     target: Option<String>,
 ) -> RenderedTemplate {
@@ -133,7 +133,7 @@ pub(in super::super) fn render_template(
             diagnostics.push(TypeMetadataDiagnostic::delivery(
                 metadata,
                 reason,
-                symbols_by_id.get(&reference.symbol_id),
+                symbols_by_id.get(reference.symbol_id.as_str()).copied(),
                 target.clone(),
             ));
         }

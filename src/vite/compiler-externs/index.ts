@@ -1,9 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import type { BuildOptions } from "../../api/types";
 import { generateExterns } from "../../externs";
+import { stripQuery } from "../capture/specifiers";
 import { resolvePropertyPolicy } from "../../externs/property-policy";
 import { writeFileIfChanged } from "../../shared/files";
+import { isString } from "../../shared/validation";
 import { generateViteRuntimeAwareExterns } from "./runtime";
 import type { MaterializedGraph } from "../internal-types";
 import type {
@@ -13,7 +16,7 @@ import type {
 
 export interface CompilerExternArtifacts {
   renameBarriers: string[];
-  typedDeclarations: string[];
+  typedDeclarations: NonNullable<BuildOptions["typedExterns"]>;
 }
 
 /** Resolve caller-supplied extern paths against the project root, in order. */
@@ -41,7 +44,6 @@ async function writeGeneratedExternFile(input: {
   generateOptions: GccTsBundlerGeneratedExternsOptions;
   materialized: MaterializedGraph;
   options: GccTsBundlerVitePluginOptions;
-  postPrebundleMaterialized: Promise<MaterializedGraph>;
   projectRoot: string;
 }) {
   const protocolHelpers = {
@@ -61,14 +63,14 @@ async function writeGeneratedExternFile(input: {
       generatedExternFile: input.generatedExternFile,
       modules: [...input.generateOptions.modules],
       options: input.options,
-      postPrebundleMaterialized: input.postPrebundleMaterialized,
+      materialized: input.materialized,
       propertyPolicy,
       protocolHelpers,
     });
     return;
   }
   const result = await generateExterns({
-    appEntryFiles: input.materialized.entries,
+    appEntryFiles: input.materialized.entries.map((entry) => entry.file),
     includeDependencies: input.generateOptions.includeDependencies,
     mode: input.generateOptions.mode ?? "runtime-aware",
     modules: [...input.generateOptions.modules],
@@ -111,24 +113,53 @@ export async function resolveCompilerExterns(input: {
   captureRoot: string;
   materialized: MaterializedGraph;
   options: GccTsBundlerVitePluginOptions;
-  /**
-   * The graph Closure actually compiles. Every extern scan waits for this:
-   * esbuild's class-field lowering is what *creates* the string-keyed
-   * definitions (`__publicField(this, "name")`), and prebundling rewrites
-   * authored files in place, so a scan overlapping it is not a pure function
-   * of the graph. Kept as a promise so the caller can start prebundling
-   * without waiting for this function to be entered.
-   */
-  postPrebundleMaterialized: Promise<MaterializedGraph>;
   projectRoot: string;
 }) {
   const explicitExterns = resolveExplicitExternFiles(
     input.options.compiler?.externs,
     input.projectRoot,
   );
-  const explicitTypedExterns = resolveExplicitExternFiles(
-    input.options.compiler?.typedExterns,
-    input.projectRoot,
+  const explicitTypedExterns = (input.options.compiler?.typedExterns ?? []).map(
+    (extern, index) => {
+      if (isString(extern)) {
+        return path.resolve(input.projectRoot, extern);
+      }
+      if (
+        !extern ||
+        !isString(extern.path) ||
+        !Array.isArray(extern.entries) ||
+        extern.entries.length === 0
+      ) {
+        throw new TypeError(
+          `compiler.typedExterns[${index}] must provide a path and nonempty entries scope.`,
+        );
+      }
+      const entries = extern.entries.flatMap((sourceEntry) => {
+        if (!isString(sourceEntry) || sourceEntry.length === 0) {
+          throw new TypeError(
+            `compiler.typedExterns[${index}].entries must contain entry paths.`,
+          );
+        }
+        const sourcePath = path.resolve(input.projectRoot, sourceEntry);
+        const matches = input.materialized.entries.filter(
+          (entry) =>
+            path.isAbsolute(entry.sourceModuleId) &&
+            path.normalize(stripQuery(entry.sourceModuleId)) === sourcePath,
+        );
+        if (matches.length === 0) {
+          throw new TypeError(
+            `compiler.typedExterns[${index}] scope ${JSON.stringify(sourceEntry)} is not a configured Vite source entry.`,
+          );
+        }
+        return matches.map((entry) =>
+          path.resolve(input.materialized.srcDir, entry.file),
+        );
+      });
+      return {
+        path: path.resolve(input.projectRoot, extern.path),
+        entries: [...new Set(entries)].sort(),
+      };
+    },
   );
   const generateOptions = input.options.externs?.generate;
   if (!generateOptions) {
@@ -150,7 +181,6 @@ export async function resolveCompilerExterns(input: {
     generateOptions,
     materialized: input.materialized,
     options: input.options,
-    postPrebundleMaterialized: input.postPrebundleMaterialized,
     projectRoot: input.projectRoot,
   });
 

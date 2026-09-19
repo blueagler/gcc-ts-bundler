@@ -146,9 +146,10 @@ export function assembleMaterializedGraph(
     ),
     dependencySourceFileByMaterializedFile:
       input.dependencySourceFileByMaterializedFile,
-    entries: input.entryModuleIds.map((moduleId) =>
-      materializedSpecifier(moduleId, "entry"),
-    ),
+    entries: input.entryModuleIds.map((moduleId) => ({
+      file: materializedSpecifier(moduleId, "entry"),
+      sourceModuleId: moduleId,
+    })),
     modules: input.modules,
     prunedEmptyModuleIds: [...input.prunedEmptyModuleIds].sort((left, right) =>
       left.localeCompare(right),

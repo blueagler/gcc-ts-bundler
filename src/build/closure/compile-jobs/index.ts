@@ -1,14 +1,11 @@
 import path from "path";
 
+import { createNodeAmbientGlobalsRenderer } from "../../../externs/ambient-globals";
 import type { TypeWorld } from "../../../externs/context";
 import { logInternalDetail } from "../../../shared/timing";
 import type { ResolvedBuildOptions } from "../../types";
 import type { prepareClosureJobs } from "../../../native/load";
-import {
-  applyStableRenamingMaps,
-  persistPreparedClosureJob,
-  restorePreparedClosureJob,
-} from "./cache";
+import { applyStableRenamingMaps, persistRenamingMaps } from "./cache";
 import { invokePreparedClosureJob } from "./invoke";
 import {
   applyMinimalPlatformExterns,
@@ -16,13 +13,18 @@ import {
 } from "./platform-externs";
 import type { PreparedCompileJob } from "./types";
 import {
+  getCompileJobArtifactFiles,
+  persistCachedClosureJob,
+  prepareClosureJobCache,
+  tryRestoreCachedClosureJob,
+} from "../cache";
+import {
+  resolveClosureCompilerVersionTag,
   shouldEnableTypeInference,
   type ClosureCompilerEnvironment,
 } from "../compiler";
-import {
-  determineClosureConcurrency,
-  runWithConcurrency,
-} from "../concurrency";
+import { determineClosureConcurrency } from "../concurrency";
+import { runWithConcurrency } from "../../../shared/concurrency";
 
 function createPlatformExternFallbackWarning() {
   let warned = false;
@@ -61,6 +63,13 @@ export async function compilePreparedClosureJobs({
     : null;
   const concurrency = determineClosureConcurrency(prepared.compileJobs.length);
   const warnPlatformExternFallback = createPlatformExternFallbackWarning();
+  const renderNodeAmbientGlobals = createNodeAmbientGlobalsRenderer({
+    jsFiles:
+      target === "node" ? prepared.compileJobs.flatMap((job) => job.js) : [],
+    packageRoot,
+    projectRoot,
+    typeWorld,
+  });
   const results = await runWithConcurrency(
     prepared.compileJobs,
     concurrency,
@@ -77,11 +86,10 @@ export async function compilePreparedClosureJobs({
             platformExterns,
             target,
             packageRoot,
-            projectRoot,
             closureCompilerEnvironment.typeInferenceDisabled,
             projectCacheDir,
             warnPlatformExternFallback,
-            typeWorld,
+            renderNodeAmbientGlobals,
           ),
           cacheDir,
         ),
@@ -95,7 +103,7 @@ export async function compilePreparedClosureJobs({
       `hits=${hits} misses=${results.length - hits} jobs=${results.length}`,
     );
   }
-  return results.map((result) => result.exitCode);
+  return results;
 }
 
 /** Records the inference decision on the job so it reaches the cache key
@@ -127,24 +135,29 @@ async function runPreparedClosureJob({
   job: PreparedCompileJob;
   warnPlatformExternFallback: () => void;
 }) {
-  const restored = await restorePreparedClosureJob({
-    compilerEnvironment,
-    cacheDir,
-    job,
-  });
-  if (restored) {
-    return restored;
+  const cacheRequest = cacheDir
+    ? await prepareClosureJobCache({
+        artifactFiles: getCompileJobArtifactFiles(job),
+        cacheDir,
+        compilerVersion: resolveClosureCompilerVersionTag(),
+        job: {
+          ...job,
+          compilerEnvironment: compilerEnvironment.options,
+        },
+      })
+    : null;
+  if (cacheRequest && (await tryRestoreCachedClosureJob(cacheRequest))) {
+    await persistRenamingMaps(job, cacheDir);
+    return { cacheHit: true, exitCode: 0, diagnostics: [] as string[] };
   }
 
-  const { exitCode, capturedStdErr } = await invokePreparedClosureJob(
-    job,
-    compilerEnvironment,
-  );
+  const { exitCode, stderr, stdout, diagnostics } =
+    await invokePreparedClosureJob(job, compilerEnvironment);
   if (exitCode !== 0) {
     // Retry with the full browser externs only when the diagnostics say the
     // slice was incomplete. Retrying on *any* non-zero exit made every real
     // compile error cost two full Closure runs and print itself twice.
-    const retryJob = preparedJobForPlatformExternRetry(job, capturedStdErr);
+    const retryJob = preparedJobForPlatformExternRetry(job, stderr);
     if (retryJob) {
       warnPlatformExternFallback();
       logInternalDetail(
@@ -161,16 +174,22 @@ async function runPreparedClosureJob({
     return {
       cacheHit: false,
       exitCode,
+      diagnostics:
+        diagnostics.length > 0
+          ? diagnostics
+          : [`Closure compilation failed with exit code ${exitCode}.`],
     };
   }
 
-  await persistPreparedClosureJob({
-    compilerEnvironment,
-    cacheDir,
-    job,
-  });
+  if (stdout) console.log(stdout);
+  if (stderr) console.error(stderr);
+  if (cacheRequest) {
+    await persistCachedClosureJob(cacheRequest);
+  }
+  await persistRenamingMaps(job, cacheDir);
   return {
     cacheHit: false,
     exitCode: 0,
+    diagnostics: [] as string[],
   };
 }

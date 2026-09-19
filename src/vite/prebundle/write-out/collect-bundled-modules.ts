@@ -101,7 +101,29 @@ export async function collectBundledModules(input: {
     }),
   );
 
-  return modules.sort((left, right) =>
+  return mergeBundledModulesByEmittedFile(modules);
+}
+
+/**
+ * One materialized module per emitted file. Duplicate listings of the same
+ * fused output union their contributing source ids so later hazard analysis
+ * sees the complete package set once.
+ */
+function mergeBundledModulesByEmittedFile(
+  modules: CapturedRuntimeModule[],
+): CapturedRuntimeModule[] {
+  const merged = new Map<string, CapturedRuntimeModule>();
+  for (const module of modules) {
+    const existing = merged.get(module.filePath);
+    if (!existing) {
+      merged.set(module.filePath, module);
+      continue;
+    }
+    existing.sourceModuleIds = [
+      ...new Set([...existing.sourceModuleIds, ...module.sourceModuleIds]),
+    ].sort((left, right) => left.localeCompare(right));
+  }
+  return [...merged.values()].sort((left, right) =>
     left.relativePath.localeCompare(right.relativePath),
   );
 }

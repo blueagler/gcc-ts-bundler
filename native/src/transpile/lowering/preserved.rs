@@ -1,8 +1,8 @@
-use oxc_allocator::Allocator;
-use oxc_ast::ast::Statement;
+use oxc_allocator::{Allocator, FromIn};
+use oxc_ast::ast::{Program, Statement};
 use oxc_codegen::Codegen;
 use oxc_semantic::SemanticBuilder;
-use oxc_span::{GetSpan, SourceType};
+use oxc_span::SourceType;
 use oxc_transformer::{TransformOptions, Transformer};
 use std::path::Path;
 
@@ -17,12 +17,7 @@ pub(crate) fn emit_preserved_module(path: &Path, source: &str) -> Result<String,
             path.display()
         ));
     }
-    let source = if source_type.is_typescript() {
-        rewrite_preserved_module_specifiers(path, source, source_type)?
-    } else {
-        source.to_string()
-    };
-    let parsed = oxc_parser::Parser::new(&allocator, &source, source_type).parse();
+    let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
     if !parsed.diagnostics.is_empty() {
         return Err(parsed
             .diagnostics
@@ -33,8 +28,9 @@ pub(crate) fn emit_preserved_module(path: &Path, source: &str) -> Result<String,
     }
     let mut program = parsed.program;
     if source_type.is_typescript() {
+        rewrite_preserved_module_specifiers(&allocator, path, &mut program);
         let semantic = SemanticBuilder::new()
-            .with_build_nodes(true)
+            .with_build_nodes(false)
             .with_enum_eval(true)
             .build(&program);
         if !semantic.diagnostics.is_empty() {
@@ -63,27 +59,16 @@ pub(crate) fn emit_preserved_module(path: &Path, source: &str) -> Result<String,
         .code)
 }
 
-fn rewrite_preserved_module_specifiers(
+fn rewrite_preserved_module_specifiers<'a>(
+    allocator: &'a Allocator,
     path: &Path,
-    source: &str,
-    source_type: SourceType,
-) -> Result<String, String> {
-    let allocator = Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
-    if !parsed.diagnostics.is_empty() {
-        return Err(parsed
-            .diagnostics
-            .iter()
-            .map(|diagnostic| format!("{}: {diagnostic}", path.display()))
-            .collect::<Vec<_>>()
-            .join("\n"));
-    }
-    let mut edits = Vec::<(usize, usize, String)>::new();
-    for statement in &parsed.program.body {
+    program: &mut Program<'a>,
+) {
+    for statement in &mut program.body {
         let literal = match statement {
-            Statement::ImportDeclaration(import) => Some(&import.source),
-            Statement::ExportAllDeclaration(export) => Some(&export.source),
-            Statement::ExportNamedDeclaration(export) => export.source.as_ref(),
+            Statement::ImportDeclaration(import) => Some(&mut import.source),
+            Statement::ExportAllDeclaration(export) => Some(&mut export.source),
+            Statement::ExportFromDeclaration(export) => Some(&mut export.source),
             _ => None,
         };
         let Some(literal) = literal else {
@@ -92,19 +77,9 @@ fn rewrite_preserved_module_specifiers(
         let Some(specifier) = preserved_output_specifier(path, literal.value.as_str()) else {
             continue;
         };
-        let span = literal.span();
-        edits.push((
-            span.start as usize,
-            span.end as usize,
-            format!("{specifier:?}"),
-        ));
+        literal.value = oxc_str::Str::from_in(specifier.as_str(), allocator);
+        literal.raw = None;
     }
-    let mut output = source.to_string();
-    edits.sort_by_key(|(start, _, _)| *start);
-    for (start, end, replacement) in edits.into_iter().rev() {
-        output.replace_range(start..end, &replacement);
-    }
-    Ok(output)
 }
 
 fn preserved_output_specifier(path: &Path, specifier: &str) -> Option<String> {

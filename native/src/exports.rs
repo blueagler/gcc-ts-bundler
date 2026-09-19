@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, HashSet};
 
 use napi_derive::napi;
 use oxc_allocator::Allocator;
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    AssignmentTarget, BindingPattern, Declaration, Expression, FunctionBody, LogicalOperator,
+    ModuleExportName, ObjectExpression, ObjectPropertyKind, Program, Statement,
+};
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
@@ -73,13 +76,23 @@ pub fn rewrite_gcc_exports(code: String) -> std::result::Result<GccExportsRewrit
     let mut existing_export_names = HashSet::<String>::new();
     let mut declared_names = HashSet::<String>::new();
     let mut has_default_export = false;
+    let mut default_binding = false;
     let mut named_export_specifiers = Vec::<String>::new();
 
     for item in &program.body {
         collect_top_level_declared_names(item, &mut declared_names);
         match item {
+            Statement::ExportDeclaration(_) => {
+                collect_top_level_declared_names(item, &mut existing_export_names);
+            }
             Statement::ExportNamedDeclaration(named) => {
                 for specifier in &named.specifiers {
+                    existing_export_names
+                        .insert(export_name_from_module_export_name(&specifier.exported));
+                }
+            }
+            Statement::ExportFromDeclaration(export) => {
+                for specifier in &export.specifiers {
                     existing_export_names
                         .insert(export_name_from_module_export_name(&specifier.exported));
                 }
@@ -91,6 +104,10 @@ pub fn rewrite_gcc_exports(code: String) -> std::result::Result<GccExportsRewrit
         }
     }
 
+    let binding_protocol = program
+        .body
+        .iter()
+        .any(|item| gcc_bootstrap_object(item).is_some_and(is_binding_protocol_object));
     let mut edits = Vec::<SourceEdit>::new();
     let mut matched_bootstrap_count = 0u32;
     let mut matched_export_assignment_count = 0u32;
@@ -110,6 +127,22 @@ pub fn rewrite_gcc_exports(code: String) -> std::result::Result<GccExportsRewrit
 
         let Some((export_name, right)) = get_gcc_export_assignment(item) else {
             continue;
+        };
+        // The shim publishes a getter so Closure cannot fold a mutable public
+        // binding into its initial value. Remove that transport only after
+        // optimization, when the getter's identifier is the final ESM binding.
+        let (export_name, right) = if let Some(name) = export_name
+            .strip_prefix("__gccBinding_")
+            .filter(|_| binding_protocol)
+        {
+            let value = binding_getter_value(right, &program)
+                .ok_or_else(|| format!("Unable to recover public binding getter for {name:?}"))?;
+            if name == "__DEFAULT_EXPORT__" {
+                default_binding = true;
+            }
+            (name.to_string(), value)
+        } else {
+            (export_name, right)
         };
         matched_export_assignment_count += 1;
         if !processed_exports.insert(export_name.clone()) {
@@ -155,7 +188,11 @@ pub fn rewrite_gcc_exports(code: String) -> std::result::Result<GccExportsRewrit
     for (export_name, rewrite) in exports_map {
         if export_name == "__DEFAULT_EXPORT__" {
             if !has_default_export {
-                appended.push_str(&format!("export default {};", rewrite.local_name()));
+                appended.push_str(&if default_binding {
+                    format!("export{{{} as default}};", rewrite.local_name())
+                } else {
+                    format!("export default {};", rewrite.local_name())
+                });
             }
         } else if !existing_export_names.contains(&export_name) {
             named_export_specifiers.push(format_named_export_specifier(
@@ -309,26 +346,103 @@ fn get_gcc_export_assignment<'a>(item: &'a Statement<'a>) -> Option<(String, &'a
     Some((export_name, &assignment.right))
 }
 
-fn is_gcc_bootstrap_statement(item: &Statement<'_>) -> bool {
+fn binding_getter_value<'a>(
+    expression: &'a Expression<'a>,
+    program: &'a Program<'a>,
+) -> Option<&'a Expression<'a>> {
+    let mut expression = expression;
+    let mut visited = HashSet::new();
+    loop {
+        match expression {
+            Expression::ArrowFunctionExpression(function) => {
+                return function
+                    .get_expression()
+                    .or_else(|| getter_body_value(function.get_function_body()?));
+            }
+            Expression::FunctionExpression(function) => {
+                return getter_body_value(function.body.as_ref()?);
+            }
+            Expression::Identifier(identifier) if visited.insert(identifier.name.as_str()) => {
+                // Closure may share equivalent getter functions among aliases.
+                let mut initializer = None;
+                for statement in &program.body {
+                    match statement {
+                        Statement::FunctionDeclaration(function)
+                            if function
+                                .id
+                                .as_ref()
+                                .is_some_and(|id| id.name == identifier.name) =>
+                        {
+                            return getter_body_value(function.body.as_ref()?);
+                        }
+                        Statement::VariableDeclaration(declaration) => {
+                            for declaration in &declaration.declarations {
+                                if matches!(&declaration.id, BindingPattern::BindingIdentifier(binding) if binding.name == identifier.name)
+                                {
+                                    initializer = declaration.init.as_ref();
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                expression = initializer?;
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn getter_body_value<'a>(body: &'a FunctionBody<'a>) -> Option<&'a Expression<'a>> {
+    if body.statements.len() != 1 {
+        return None;
+    }
+    let Statement::ReturnStatement(statement) = &body.statements[0] else {
+        return None;
+    };
+    statement.argument.as_ref()
+}
+
+fn gcc_bootstrap_object<'a>(item: &'a Statement<'a>) -> Option<&'a ObjectExpression<'a>> {
     let Statement::ExpressionStatement(statement) = item else {
-        return false;
+        return None;
     };
     let Expression::AssignmentExpression(assignment) = &statement.expression else {
-        return false;
+        return None;
     };
-    let Some((object, property)) = assignment_target_member_parts(&assignment.left) else {
-        return false;
-    };
+    let (object, property) = assignment_target_member_parts(&assignment.left)?;
     let Expression::LogicalExpression(right) = &assignment.right else {
-        return false;
+        return None;
     };
-    if right.operator != LogicalOperator::Or {
+    if right.operator != LogicalOperator::Or
+        || !is_global_gcc_member(object, &property)
+        || !matches!(member_parts(&right.left), Some((object, property)) if is_global_gcc_member(object, &property))
+    {
+        return None;
+    }
+    let Expression::ObjectExpression(object) = &right.right else {
+        return None;
+    };
+    Some(object)
+}
+
+fn is_binding_protocol_object(object: &ObjectExpression<'_>) -> bool {
+    if object.properties.len() != 1 {
         return false;
     }
+    let ObjectPropertyKind::ObjectProperty(property) = &object.properties[0] else {
+        return false;
+    };
+    property
+        .key
+        .static_name()
+        .is_some_and(|name| name == "__gccBindingProtocol__")
+        && matches!(&property.value, Expression::NumericLiteral(value) if value.value.to_bits() == 1.0_f64.to_bits())
+}
 
-    is_global_gcc_member(object, &property)
-        && matches!(member_parts(&right.left), Some((object, property)) if is_global_gcc_member(object, &property))
-        && matches!(&right.right, Expression::ObjectExpression(object) if object.properties.is_empty())
+fn is_gcc_bootstrap_statement(item: &Statement<'_>) -> bool {
+    gcc_bootstrap_object(item)
+        .is_some_and(|object| object.properties.is_empty() || is_binding_protocol_object(object))
 }
 
 fn is_global_gcc_member(object: &Expression<'_>, property: &str) -> bool {
@@ -392,23 +506,29 @@ fn collect_top_level_declared_names(item: &Statement<'_>, names: &mut HashSet<St
                 names.insert(id.name.to_string());
             }
         }
-        Statement::ExportNamedDeclaration(export_decl) => match &export_decl.declaration {
-            Some(Declaration::VariableDeclaration(variable)) => {
+        Statement::ExportDeclaration(export_decl) => match &export_decl.declaration {
+            Declaration::VariableDeclaration(variable) => {
                 for declarator in &variable.declarations {
                     collect_pattern_names(&declarator.id, names);
                 }
             }
-            Some(Declaration::FunctionDeclaration(function)) => {
+            Declaration::FunctionDeclaration(function) => {
                 if let Some(id) = &function.id {
                     names.insert(id.name.to_string());
                 }
             }
-            Some(Declaration::ClassDeclaration(class)) => {
+            Declaration::ClassDeclaration(class) => {
                 if let Some(id) = &class.id {
                     names.insert(id.name.to_string());
                 }
             }
-            _ => {}
+            Declaration::TSTypeAliasDeclaration(_)
+            | Declaration::TSInterfaceDeclaration(_)
+            | Declaration::TSEnumDeclaration(_)
+            | Declaration::TSExternalModuleDeclaration(_)
+            | Declaration::TSNamespaceDeclaration(_)
+            | Declaration::TSGlobalDeclaration(_)
+            | Declaration::TSImportEqualsDeclaration(_) => {}
         },
         _ => {}
     }
@@ -494,39 +614,38 @@ mod tests {
     use super::{apply_source_edits, rewrite_gcc_exports, SourceEdit};
 
     #[test]
-    fn rewrites_named_identifier_exports_without_gcc_wrapper() {
+    fn rewrites_named_identifier_exports_without_gcc_wrapper() -> Result<(), String> {
         let output = rewrite_gcc_exports(
             "const Mc=1;globalThis.GCC=globalThis.GCC||{};globalThis.GCC.MotionHero=Mc;"
                 .to_string(),
-        )
-        .unwrap()
+        )?
         .code;
 
         assert!(output.contains("export{Mc as MotionHero};"), "{output}");
         assert!(!output.contains("globalThis.GCC"), "{output}");
         assert!(!output.contains("__gcc_export_"), "{output}");
+        Ok(())
     }
 
     #[test]
-    fn rewrites_default_identifier_exports_without_gcc_wrapper() {
+    fn rewrites_default_identifier_exports_without_gcc_wrapper() -> Result<(), String> {
         let output = rewrite_gcc_exports(
             "const Mc=1;globalThis.GCC=globalThis.GCC||{};globalThis.GCC.__DEFAULT_EXPORT__=Mc;"
                 .to_string(),
-        )
-        .unwrap()
+        )?
         .code;
 
         assert!(output.contains("export default Mc;"), "{output}");
         assert!(!output.contains("globalThis.GCC"), "{output}");
         assert!(!output.contains("__gcc_default_export__"), "{output}");
+        Ok(())
     }
 
     #[test]
-    fn keeps_temp_fallback_for_non_identifier_exports() {
+    fn keeps_temp_fallback_for_non_identifier_exports() -> Result<(), String> {
         let output = rewrite_gcc_exports(
             "globalThis.GCC=globalThis.GCC||{};globalThis.GCC.MotionHero=foo();".to_string(),
-        )
-        .unwrap()
+        )?
         .code;
 
         assert!(
@@ -535,23 +654,24 @@ mod tests {
         );
         assert!(!output.contains("globalThis.GCC"), "{output}");
         assert!(!output.contains("__gcc_export_MotionHero"), "{output}");
+        Ok(())
     }
 
     #[test]
-    fn skips_duplicate_exports_already_present() {
+    fn skips_duplicate_exports_already_present() -> Result<(), String> {
         let output = rewrite_gcc_exports(
             "const Mc=1;export{Mc as MotionHero};globalThis.GCC=globalThis.GCC||{};globalThis.GCC.MotionHero=Mc;"
                 .to_string(),
-        )
-        .unwrap()
+        )?
         .code;
 
         assert_eq!(output.matches("MotionHero").count(), 1, "{output}");
         assert!(!output.contains("globalThis.GCC"), "{output}");
+        Ok(())
     }
 
     #[test]
-    fn preserves_every_byte_outside_the_rewritten_spans() {
+    fn preserves_every_byte_outside_the_rewritten_spans() -> Result<(), String> {
         // Closure picked these bytes: the octal-ish numeric literal, the single
         // quotes, the deliberate line break and the trailing spacing. Reprinting
         // the module re-canonicalizes all of them, which is what cost +629 gzip
@@ -562,7 +682,7 @@ mod tests {
             "var re=/a[\"{;]/g;\n"
         );
         let input = format!("{untouched}globalThis.GCC=globalThis.GCC||{{}};globalThis.GCC.f=f;");
-        let output = rewrite_gcc_exports(input).unwrap();
+        let output = rewrite_gcc_exports(input)?;
 
         assert_eq!(output.rewritten_export_count, 1, "{}", output.code);
         assert_eq!(
@@ -570,14 +690,14 @@ mod tests {
             format!("{untouched}export{{f}};"),
             "bytes outside the edited spans must survive verbatim"
         );
+        Ok(())
     }
 
     #[test]
-    fn splices_the_right_hand_side_from_the_original_text() {
+    fn splices_the_right_hand_side_from_the_original_text() -> Result<(), String> {
         let output = rewrite_gcc_exports(
             "globalThis.GCC=globalThis.GCC||{};globalThis.GCC.v={ 'a-b':0x10, c:'d' };".to_string(),
-        )
-        .unwrap()
+        )?
         .code;
 
         // The object literal keeps its authored quoting, hex literal and spacing.
@@ -586,50 +706,53 @@ mod tests {
             "{output}"
         );
         assert!(output.contains("export{v};"), "{output}");
+        Ok(())
     }
 
     #[test]
-    fn leaves_a_marker_string_with_no_export_statements_untouched() {
+    fn leaves_a_marker_string_with_no_export_statements_untouched() -> Result<(), String> {
         // The marker appears only inside a literal, so there is nothing to
         // rewrite and the file must come back byte-identical.
         let input = "var help=\"set globalThis.GCC to debug\";console.log(help);".to_string();
-        let output = rewrite_gcc_exports(input.clone()).unwrap();
+        let output = rewrite_gcc_exports(input.clone())?;
 
         assert_eq!(output.code, input);
         assert_eq!(output.gcc_reference_count, 0);
         assert_eq!(output.matched_bootstrap_count, 0);
         assert_eq!(output.matched_export_assignment_count, 0);
         assert_eq!(output.rewritten_export_count, 0);
+        Ok(())
     }
 
     #[test]
-    fn reports_structural_gcc_references_separately_from_rewrites() {
+    fn reports_structural_gcc_references_separately_from_rewrites() -> Result<(), String> {
         let output = rewrite_gcc_exports(
             "const a=1,b=2;globalThis.GCC=globalThis.GCC||{};globalThis.GCC.one=a;globalThis.GCC.two=b;"
                 .to_string(),
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(output.gcc_reference_count, 3, "{}", output.code);
         assert_eq!(output.matched_bootstrap_count, 1, "{}", output.code);
         assert_eq!(output.matched_export_assignment_count, 2, "{}", output.code);
         assert_eq!(output.rewritten_export_count, 2, "{}", output.code);
+        Ok(())
     }
 
     #[test]
-    fn reports_unsupported_structural_gcc_references() {
+    fn reports_unsupported_structural_gcc_references() -> Result<(), String> {
         let input = "console.log(globalThis.GCC);".to_string();
-        let output = rewrite_gcc_exports(input.clone()).unwrap();
+        let output = rewrite_gcc_exports(input.clone())?;
 
         assert_eq!(output.code, input);
         assert_eq!(output.gcc_reference_count, 1);
         assert_eq!(output.matched_bootstrap_count, 0);
         assert_eq!(output.matched_export_assignment_count, 0);
         assert_eq!(output.rewritten_export_count, 0);
+        Ok(())
     }
 
     #[test]
-    fn rejects_overlapping_edits_instead_of_reprinting() {
+    fn rejects_overlapping_edits_instead_of_reprinting() -> Result<(), String> {
         let error = apply_source_edits(
             "abcdef",
             vec![
@@ -646,37 +769,40 @@ mod tests {
             ],
             "",
         )
-        .expect_err("overlapping edits must fail closed");
+        .err()
+        .ok_or("overlapping edits must fail closed")?;
         assert!(error.contains("overlapping"), "{error}");
+        Ok(())
     }
 
     #[test]
-    fn reports_how_many_export_slots_were_rewritten() {
+    fn reports_how_many_export_slots_were_rewritten() -> Result<(), String> {
         let output = rewrite_gcc_exports(
             "const a=1,b=2;globalThis.GCC=globalThis.GCC||{};globalThis.GCC.one=a;globalThis.GCC.two=b;"
                 .to_string(),
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(output.rewritten_export_count, 2, "{}", output.code);
+        Ok(())
     }
 
     #[test]
-    fn leaves_non_gcc_modules_unchanged() {
+    fn leaves_non_gcc_modules_unchanged() -> Result<(), String> {
         let input = "export const value = 1;".to_string();
-        let output = rewrite_gcc_exports(input.clone()).unwrap();
+        let output = rewrite_gcc_exports(input.clone())?;
 
         assert_eq!(output.code, input);
         assert_eq!(output.rewritten_export_count, 0);
+        Ok(())
     }
 
     #[test]
-    fn rewrites_member_expression_exports_to_named_binding_without_gcc_temp() {
+    fn rewrites_member_expression_exports_to_named_binding_without_gcc_temp() -> Result<(), String>
+    {
         let output = rewrite_gcc_exports(
             "const Y={tb:1};globalThis.GCC=globalThis.GCC||{};globalThis.GCC.MotionHero=Y.tb;"
                 .to_string(),
-        )
-        .unwrap()
+        )?
         .code;
 
         assert!(
@@ -685,15 +811,15 @@ mod tests {
         );
         assert!(!output.contains("__gcc_export_"), "{output}");
         assert!(!output.contains("globalThis.GCC"), "{output}");
+        Ok(())
     }
 
     #[test]
-    fn merges_named_exports_into_one_statement() {
+    fn merges_named_exports_into_one_statement() -> Result<(), String> {
         let output = rewrite_gcc_exports(
             "const A=1;const B=2;globalThis.GCC=globalThis.GCC||{};globalThis.GCC.First=A;globalThis.GCC.Second=B;"
                 .to_string(),
-        )
-        .unwrap()
+        )?
         .code;
 
         assert!(
@@ -701,5 +827,6 @@ mod tests {
             "{output}"
         );
         assert_eq!(output.matches("export{").count(), 1, "{output}");
+        Ok(())
     }
 }

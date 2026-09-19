@@ -50,7 +50,12 @@ export function collectTypeMetadataFiles({
     features,
     sourceFile,
   }));
+  const ambientBindings = collectAmbientGlobalBindings(program);
+  const ambientGlobals = [
+    ...new Set(ambientBindings.map((name) => name.text)),
+  ].sort();
   const needsChecker =
+    ambientBindings.length > 0 ||
     boundaryModuleFileNames.length > 0 ||
     externalSpecifiers.length > 0 ||
     files.some(
@@ -60,7 +65,6 @@ export function collectTypeMetadataFiles({
         features.hasTypeDeclarations,
     );
   const hasDecorators = files.some(({ features }) => features.hasDecorators);
-  const ambientGlobals = collectAmbientGlobalNames(program);
   if (!needsChecker && !hasDecorators) {
     const collectedFiles = effectiveTargets.map((target) => ({
       ...createEmptyMetadataFile(target),
@@ -76,6 +80,10 @@ export function collectTypeMetadataFiles({
     ? collectClassOnlyInterfaceSymbolIds(program, checker)
     : new Set<string>();
   const externalOrigins = collectExternalDeclarationOrigins({
+    ambientValueSymbols: ambientBindings.flatMap((name) => {
+      const symbol = checker.getSymbolAtLocation(name);
+      return symbol ? [symbol] : [];
+    }),
     boundaryModuleFileNames,
     externalSpecifiers: new Set(externalSpecifiers),
     program,
@@ -97,30 +105,26 @@ export function collectTypeMetadataFiles({
       origins: externalOrigins,
       sourceFile,
     });
-    if (!features.shouldAnalyze) {
-      collectedBySourcePath.set(sourceFile.fileName, {
-        ...createEmptyMetadataFile({
-          emitFilePath: sourceFile.fileName,
-          sourceFilePath: sourceFile.fileName,
-        }),
-        externalOwnedMemberAccesses,
+    let file: ClosureTypeMetadataFile;
+    if (features.shouldAnalyze) {
+      const result = collectClosureIrFileMetadata({
+        classOnlyInterfaceSymbolIds,
+        compilerOptions,
+        checker,
+        features,
+        sourceFile,
+        unsafeEnumSymbols,
       });
-      continue;
+      diagnostics.push(...result.diagnostics);
+      file = result.file;
+    } else {
+      file = createEmptyMetadataFile({
+        emitFilePath: sourceFile.fileName,
+        sourceFilePath: sourceFile.fileName,
+      });
     }
-
-    const result = collectClosureIrFileMetadata({
-      classOnlyInterfaceSymbolIds,
-      compilerOptions,
-      checker,
-      features,
-      sourceFile,
-      unsafeEnumSymbols,
-    });
-    diagnostics.push(...result.diagnostics);
-    collectedBySourcePath.set(sourceFile.fileName, {
-      ...result.file,
-      externalOwnedMemberAccesses,
-    });
+    file.externalOwnedMemberAccesses = externalOwnedMemberAccesses;
+    collectedBySourcePath.set(sourceFile.fileName, file);
   }
 
   const collectedFiles = effectiveTargets.map((target) => {
@@ -200,8 +204,8 @@ function filterScanToSources(
  * no name list. Files with imports/exports are modules, whose declarations are
  * module-scoped rather than global.
  */
-function collectAmbientGlobalNames(program: ts.Program): string[] {
-  const names = new Set<string>();
+function collectAmbientGlobalBindings(program: ts.Program): ts.Identifier[] {
+  const names = new Set<ts.Identifier>();
   for (const sourceFile of program.getSourceFiles()) {
     if (sourceFile.fileName.includes("/node_modules/")) {
       continue;
@@ -216,16 +220,10 @@ function collectAmbientGlobalNames(program: ts.Program): string[] {
     // runtime binding, so a reference to it can only resolve from the
     // environment. Those are externs whether or not the file is a module.
     const moduleScoped =
-      sourceFile.isDeclarationFile &&
-      sourceFile.statements.some(
-        (statement) =>
-          ts.isImportDeclaration(statement) ||
-          ts.isExportDeclaration(statement) ||
-          ts.isExportAssignment(statement),
-      );
+      sourceFile.isDeclarationFile && ts.isExternalModule(sourceFile);
     collectAmbientStatements(sourceFile.statements, names, moduleScoped, false);
   }
-  return [...names].sort();
+  return [...names];
 }
 
 /**
@@ -270,14 +268,18 @@ function moduleDeclarationHasValues(statement: ts.ModuleDeclaration): boolean {
 
 function collectAmbientStatements(
   statements: ts.NodeArray<ts.Statement> | ts.Statement[],
-  names: Set<string>,
+  names: Set<ts.Identifier>,
   moduleScoped: boolean,
   /** Inside `declare global` the `declare` modifier is implicit. */
   implicitlyDeclared: boolean,
 ) {
   for (const statement of statements) {
     if (ts.isModuleDeclaration(statement)) {
-      collectAmbientModuleDeclaration(statement, names, implicitlyDeclared);
+      if (statement.flags & ts.NodeFlags.GlobalAugmentation) {
+        collectAmbientGlobalAugmentation(statement, names);
+      } else if (!moduleScoped) {
+        collectAmbientModuleDeclaration(statement, names, implicitlyDeclared);
+      }
       continue;
     }
     if (moduleScoped) {
@@ -289,16 +291,12 @@ function collectAmbientStatements(
 
 function collectAmbientModuleDeclaration(
   statement: ts.ModuleDeclaration,
-  names: Set<string>,
+  names: Set<ts.Identifier>,
   implicitlyDeclared: boolean,
 ) {
   if (statement.name.kind === ts.SyntaxKind.StringLiteral) {
     // `declare module "x"`: an import target, reached by importing it.
     // Its members are never global.
-    return;
-  }
-  if (statement.name.text === "global") {
-    collectAmbientGlobalAugmentation(statement, names);
     return;
   }
   // `declare namespace X { … }` emits no runtime object, so any value read
@@ -309,13 +307,13 @@ function collectAmbientModuleDeclaration(
     (implicitlyDeclared || statementHasDeclareKeyword(statement)) &&
     moduleDeclarationHasValues(statement)
   ) {
-    names.add(statement.name.text);
+    names.add(statement.name);
   }
 }
 
 function collectAmbientGlobalAugmentation(
   statement: ts.ModuleDeclaration,
-  names: Set<string>,
+  names: Set<ts.Identifier>,
 ) {
   if (statement.body && ts.isModuleBlock(statement.body)) {
     // Inside `declare global` everything is global, module or not.
@@ -325,7 +323,7 @@ function collectAmbientGlobalAugmentation(
 
 function collectAmbientValueStatement(
   statement: ts.Statement,
-  names: Set<string>,
+  names: Set<ts.Identifier>,
   implicitlyDeclared: boolean,
 ) {
   if (!(implicitlyDeclared || statementHasDeclareKeyword(statement))) {
@@ -339,7 +337,7 @@ function collectAmbientValueStatement(
     (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) &&
     statement.name
   ) {
-    names.add(statement.name.text);
+    names.add(statement.name);
   }
 }
 
@@ -354,11 +352,11 @@ function statementHasDeclareKeyword(statement: ts.Statement): boolean {
 
 function addDeclaredVariableNames(
   statement: ts.VariableStatement,
-  names: Set<string>,
+  names: Set<ts.Identifier>,
 ) {
   for (const declaration of statement.declarationList.declarations) {
     if (ts.isIdentifier(declaration.name)) {
-      names.add(declaration.name.text);
+      names.add(declaration.name);
     }
   }
 }

@@ -1,3 +1,5 @@
+import path from "path";
+
 import { prepareClosureJobs } from "../../../native/load";
 import { logInternalDetail } from "../../../shared/timing";
 import { resolveChunkOutputType } from "../../resolve/options";
@@ -23,7 +25,29 @@ export function prepareClosureStageJobs(input: ClosureStageInput) {
     explicitExternPaths: input.explicitExternPaths,
     explicitJsInputs: input.options.js,
     finalCacheDir: input.finalCacheDir,
-    generatedExternPaths: input.generatedExternPaths,
+    generatedExterns: input.generatedExterns.map((extern) => ({
+      path: extern.path,
+      entryFiles: extern.entryFiles.map((filePath) => {
+        const index = input.options.entries.findIndex(
+          (entry) => entry.file === filePath,
+        );
+        const sourcePath = input.entryFiles[index]?.sourcePath;
+        if (!sourcePath) {
+          throw new TypeError(
+            `Missing resolved entry ownership for typed extern ${extern.path}: ${filePath}`,
+          );
+        }
+        const relativePath = path.relative(
+          path.join(input.projectCacheDir, "workspace"),
+          sourcePath,
+        );
+        return relativePath === ".." ||
+          relativePath.startsWith(`..${path.sep}`) ||
+          path.isAbsolute(relativePath)
+          ? sourcePath
+          : relativePath;
+      }),
+    })),
     languageOut: input.options.languageOut,
     manifestFile: input.options.chunks.manifestFile,
     hasPreservedModules: input.preservedModules.length > 0,

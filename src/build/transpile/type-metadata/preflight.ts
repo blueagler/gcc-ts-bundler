@@ -1,13 +1,9 @@
-import fs from "fs";
 import ts from "@typescript/typescript6";
 
 import type { DiagnosticsPreflight } from "../../../api/types";
 import { logInternalDetail } from "../../../shared/timing";
-import { isUnknownArray } from "../../../shared/validation";
 import { shouldIgnorePreflightDiagnostic } from "./diagnostics";
 import type { ClosureIrScanResult } from "./metadata/scan";
-
-const authoredFileSetCache = new Map<string, Set<string>>();
 
 export function collectNativePreflightDiagnostics({
   authoredFiles,
@@ -86,30 +82,4 @@ function collectSemanticDiagnostics({
   }
 
   return diagnostics;
-}
-
-export function loadViteAuthoredFiles(filePath?: string) {
-  if (!filePath) {
-    return null;
-  }
-
-  const cached = authoredFileSetCache.get(filePath);
-  if (cached) {
-    return cached;
-  }
-
-  try {
-    const raw = fs.readFileSync(filePath, "utf8");
-    const parsed: unknown = JSON.parse(raw);
-    if (!isUnknownArray(parsed)) {
-      return null;
-    }
-    const authoredFiles = new Set(
-      parsed.filter((value): value is string => typeof value === "string"),
-    );
-    authoredFileSetCache.set(filePath, authoredFiles);
-    return authoredFiles;
-  } catch {
-    return null;
-  }
 }

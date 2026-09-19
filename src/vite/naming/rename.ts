@@ -1,17 +1,13 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import { readJsonIfExists } from "../../shared/cache-store";
 import type {
   GccRuntimeManifest,
-  MaterializedGraph,
   NormalizedOutputOptions,
   OutputChunk,
   ViteChunkOutputType,
 } from "../internal-types";
-import { buildChunkModuleIdLookup } from "../chunk-modules";
 import { joinPublicPath, stripPublicPathPrefix } from "../output";
-import { parseGccRuntimeManifest } from "../../build/closure/runtime-manifest/parse";
 import type { BaseOutputSeed, DeferredChunkSeed } from "./helpers";
 import {
   applyFileRenames,
@@ -20,7 +16,6 @@ import {
   ensureUniqueJsFileName,
   findPreferredRollupChunkSeed,
   hashText,
-  isRuntimeModuleSourceMap,
   mapOutputFiles,
   patchRuntimeChunkUrls,
   renderPatternFileName,
@@ -39,37 +34,24 @@ interface RenamedNonBaseOutputs {
 export async function renameCompiledNonBaseJsOutputs(input: {
   baseChunkName: string;
   chunkOutputType: ViteChunkOutputType;
+  chunkModuleIds: Map<string, Set<string>>;
   dynamicRootModuleIds: string[];
   jsChunks: OutputChunk[];
+  manifest: GccRuntimeManifest;
   manifestFilePath: string;
-  materialized: MaterializedGraph;
   outDir: string;
   outputFiles: string[];
   outputOptions: NormalizedOutputOptions;
   publicPath: string;
-  runtimeModuleSourceMapFilePath: string;
 }) {
   const deferNaming = input.chunkOutputType === "esm";
-  const manifest = parseGccRuntimeManifest(
-    await fs.readFile(input.manifestFilePath, "utf8"),
-    input.manifestFilePath,
-  );
+  const { chunkModuleIds, manifest } = input;
   const baseChunkId = manifest.baseChunk;
   const baseChunk = manifest.chunks[baseChunkId];
   if (!baseChunk) {
     throw new Error("gccTsBundler() could not find the base runtime chunk.");
   }
 
-  const runtimeModuleSourceMap = await readJsonIfExists(
-    input.runtimeModuleSourceMapFilePath,
-    isRuntimeModuleSourceMap,
-  );
-  const chunkModuleIds = buildChunkModuleIdLookup({
-    jsChunks: input.jsChunks,
-    manifest,
-    materialized: input.materialized,
-    runtimeModuleSourceMap: runtimeModuleSourceMap ?? {},
-  });
   const dynamicRootModuleIds = new Set(input.dynamicRootModuleIds);
   const deferredChunkSeeds: DeferredChunkSeed[] = [];
   const renameMap = new Map<string, string>();

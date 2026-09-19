@@ -6,6 +6,7 @@ import {
   type ImportedBinding,
 } from "../../shared/typescript";
 import { getCapturedSourceFile } from "../capture-analysis";
+import type { CapturedModule, ViteBuildMetrics } from "../internal-types";
 
 export interface ModuleExportTable {
   local: Set<string>;
@@ -14,10 +15,10 @@ export interface ModuleExportTable {
 }
 
 export function collectModuleExportTable(
-  moduleId: string,
-  code: string,
+  record: CapturedModule,
+  metrics?: ViteBuildMetrics,
 ): ModuleExportTable {
-  const sourceFile = getCapturedSourceFile(moduleId, code);
+  const sourceFile = getCapturedSourceFile(record, record.code, metrics);
   const table: ModuleExportTable = {
     local: new Set<string>(),
     named: new Map<string, ImportedBinding>(),

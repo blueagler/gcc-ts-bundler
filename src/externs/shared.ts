@@ -46,22 +46,14 @@ const BUILTIN_RUNTIME_MEMBER_NAMES = new Set([
 export interface InterfaceContract {
   extends: Set<ts.Symbol>;
   members: Set<string>;
-  name: string;
-  symbol: ts.Symbol;
 }
 
 export interface ClassContract {
   constructorParamContracts: Array<Set<ts.Symbol>>;
-  instanceMembers: Set<string>;
-  name: string;
-  staticMembers: Set<string>;
-  symbol: ts.Symbol;
 }
 
 export interface TypeAliasContract {
   members: Set<string>;
-  name: string;
-  symbol: ts.Symbol;
 }
 
 export interface ContractRegistry {
@@ -69,13 +61,6 @@ export interface ContractRegistry {
   interfaceContracts: Map<ts.Symbol, InterfaceContract>;
   scannedFiles: Set<string>;
   typeAliasContracts: Map<ts.Symbol, TypeAliasContract>;
-}
-
-export interface UsageAnalysis {
-  nominalInstanceMembers: Map<ts.Symbol, Set<string>>;
-  nominalStaticMembers: Map<ts.Symbol, Set<string>>;
-  structuralContracts: Set<ts.Symbol>;
-  structuralMembers: Set<string>;
 }
 
 export function createEmptyContractRegistry(): ContractRegistry {
@@ -151,19 +136,6 @@ export function resolveAliasedSymbol(
   return symbol.flags & ts.SymbolFlags.Alias
     ? checker.getAliasedSymbol(symbol)
     : symbol;
-}
-
-export function addMapSetValue<K>(
-  map: Map<K, Set<string>>,
-  key: K,
-  value: string,
-) {
-  const current = map.get(key);
-  if (current) {
-    current.add(value);
-    return;
-  }
-  map.set(key, new Set([value]));
 }
 
 export function isProjectAppSourceFile(filePath: string, projectRoot: string) {

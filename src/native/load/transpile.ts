@@ -6,6 +6,7 @@ import type {
   NativeTranspileChunkInput,
   NativeTranspilePackageAlias,
   NativeTranspilePreservedModule,
+  NativeTranspileSourcesInput,
 } from "../abi";
 import { loadBinding } from "./binding";
 
@@ -34,52 +35,52 @@ export function transpileSources(input: {
   // Spelled out rather than rest-spread: these keys reach the native addon,
   // and only a literal written against the boundary type keeps its property
   // names through the self-build's renaming.
-  return loadBinding().transpileSources(
-    input.fileNames,
-    input.explicitExternPaths,
-    input.outDir,
-    input.externsPath,
-    input.metadataPath,
-    input.chunkMode,
-    input.target,
-    input.runtimeModuleSourceMapFile ?? null,
-    input.workspaceDir,
-    input.packageAliases.map((alias) => ({
+  const nativeInput: NativeTranspileSourcesInput = {
+    fileNames: input.fileNames,
+    explicitExternPaths: input.explicitExternPaths,
+    outDir: input.outDir,
+    externsPath: input.externsPath,
+    metadataPath: input.metadataPath,
+    chunkMode: input.chunkMode,
+    target: input.target,
+    runtimeModuleSourceMapFile: input.runtimeModuleSourceMapFile,
+    workspaceDir: input.workspaceDir,
+    packageAliases: input.packageAliases.map((alias) => ({
       packageName: alias.packageName,
       subpath: alias.subpath,
       targetPath: alias.targetPath,
     })),
-    input.resolvedImports.map((entry) => ({
+    resolvedImports: input.resolvedImports.map((entry) => ({
       importerFilePath: entry.importerFilePath,
       moduleId: entry.moduleId,
       specifier: entry.specifier,
       targetPath: entry.targetPath,
     })),
-    input.externalBoundaries.map((entry) => ({
+    externalBoundaries: input.externalBoundaries.map((entry) => ({
       importerFilePath: entry.importerFilePath,
       specifier: entry.specifier,
     })),
-    input.opaqueExternalSpecifiers,
-    input.packageJsonFiles,
-    input.preservedModules.map((module) => ({
+    opaqueExternalSpecifiers: input.opaqueExternalSpecifiers,
+    packageJsonFiles: input.packageJsonFiles,
+    preservedModules: input.preservedModules.map((module) => ({
       exportNames: module.exportNames,
       filePath: module.filePath,
       hasDefaultExport: module.hasDefaultExport,
       moduleId: module.moduleId,
       outputRelativePath: module.outputRelativePath,
     })),
-    input.lazyImports.map((entry) => ({
+    lazyImports: input.lazyImports.map((entry) => ({
       importerFilePath: entry.importerFilePath,
       moduleId: entry.moduleId,
       specifier: entry.specifier,
       targetPath: entry.targetPath,
     })),
-    input.chunkGraph.map((chunk) => ({
+    chunkGraph: input.chunkGraph.map((chunk) => ({
       dependencies: chunk.dependencies,
       files: chunk.files,
       name: chunk.name,
     })),
-    input.classMapCalls.map((call) => ({
+    classMapCalls: input.classMapCalls.map((call) => ({
       argIndex: call.argIndex,
       callee: call.callee,
       calleeModulePattern: call.calleeModulePattern,
@@ -88,7 +89,8 @@ export function transpileSources(input: {
       keyPattern: call.keyPattern,
       stringLiteralArgIndex: call.stringLiteralArgIndex,
     })),
-    input.pureCallees,
-    input.typeInferenceDisabled,
-  );
+    pureCallees: input.pureCallees,
+    typeInferenceDisabled: input.typeInferenceDisabled,
+  };
+  return loadBinding().transpileSources(nativeInput);
 }

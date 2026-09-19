@@ -2,6 +2,7 @@ import path from "path";
 
 import ts from "@typescript/typescript6";
 
+import { isValueIdentifier } from "../../../../../shared/typescript";
 import {
   getStaticPropertyName,
   toUtf8Offset,
@@ -70,26 +71,38 @@ export function collectExternalGlobalProtocolEvidence({
     return false;
   };
 
+  const variableInitializers: Array<{
+    name: ts.Identifier;
+    initializer: ts.Expression;
+  }> = [];
+  const collectVariableInitializers = (node: ts.Node) => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer
+    ) {
+      variableInitializers.push({
+        name: node.name,
+        initializer: node.initializer,
+      });
+    }
+    ts.forEachChild(node, collectVariableInitializers);
+  };
+  for (const sourceFile of sourceFiles) {
+    collectVariableInitializers(sourceFile);
+  }
+
   let changed = true;
   while (changed) {
     changed = false;
-    for (const sourceFile of sourceFiles) {
-      const visitAlias = (node: ts.Node) => {
-        if (
-          ts.isVariableDeclaration(node) &&
-          ts.isIdentifier(node.name) &&
-          node.initializer &&
-          isGlobalAliasValue(node.initializer)
-        ) {
-          const symbol = symbolAt(node.name);
-          if (symbol && !aliases.has(symbol)) {
-            aliases.add(symbol);
-            changed = true;
-          }
+    for (const { name, initializer } of variableInitializers) {
+      if (isGlobalAliasValue(initializer)) {
+        const symbol = symbolAt(name);
+        if (symbol && !aliases.has(symbol)) {
+          aliases.add(symbol);
+          changed = true;
         }
-        ts.forEachChild(node, visitAlias);
-      };
-      visitAlias(sourceFile);
+      }
     }
   }
 
@@ -236,18 +249,8 @@ export function collectExternalGlobalProtocolEvidence({
   const isBareRead = (identifier: ts.Identifier) => {
     const parent = identifier.parent;
     if (
-      (ts.isPropertyAccessExpression(parent) && parent.name === identifier) ||
-      (ts.isPropertyAssignment(parent) && parent.name === identifier) ||
-      (ts.isMethodDeclaration(parent) && parent.name === identifier) ||
-      (ts.isPropertyDeclaration(parent) && parent.name === identifier) ||
-      (ts.isVariableDeclaration(parent) && parent.name === identifier) ||
-      (ts.isParameter(parent) && parent.name === identifier) ||
-      ((ts.isFunctionDeclaration(parent) || ts.isClassDeclaration(parent)) &&
-        parent.name === identifier) ||
-      ts.isImportSpecifier(parent) ||
-      ts.isImportClause(parent) ||
+      !isValueIdentifier(identifier) ||
       ts.isExportSpecifier(parent) ||
-      ts.isLabeledStatement(parent) ||
       (ts.isBinaryExpression(parent) &&
         parent.left === identifier &&
         parent.operatorToken.kind === ts.SyntaxKind.EqualsToken)
@@ -370,25 +373,6 @@ export function collectExternalGlobalProtocolEvidence({
       memberAccessesByFile.set(fileName, starts);
     }
   }
-  for (const sourceFile of sourceFiles) {
-    const visitExternalNameAccess = (node: ts.Node) => {
-      const nameNode = ts.isPropertyAccessExpression(node)
-        ? node.name
-        : ts.isElementAccessExpression(node) &&
-            node.argumentExpression &&
-            ts.isStringLiteralLike(node.argumentExpression)
-          ? node.argumentExpression
-          : null;
-      if (nameNode && externalGlobals.has(nameNode.text)) {
-        const fileName = path.normalize(sourceFile.fileName);
-        const starts = memberAccessesByFile.get(fileName) ?? [];
-        starts.push(toUtf8Offset(sourceFile, nameNode.getStart(sourceFile)));
-        memberAccessesByFile.set(fileName, starts);
-      }
-      ts.forEachChild(node, visitExternalNameAccess);
-    };
-    visitExternalNameAccess(sourceFile);
-  }
   for (const [fileName, starts] of memberAccessesByFile) {
     memberAccessesByFile.set(
       fileName,
@@ -439,23 +423,14 @@ export function collectExternalGlobalProtocolEvidence({
   changed = true;
   while (changed) {
     changed = false;
-    for (const sourceFile of sourceFiles) {
-      const visitCandidate = (node: ts.Node) => {
-        if (
-          ts.isVariableDeclaration(node) &&
-          ts.isIdentifier(node.name) &&
-          node.initializer &&
-          isExternalValue(node.initializer)
-        ) {
-          const symbol = symbolAt(node.name);
-          if (symbol && !candidates.has(symbol)) {
-            candidates.add(symbol);
-            changed = true;
-          }
+    for (const { name, initializer } of variableInitializers) {
+      if (isExternalValue(initializer)) {
+        const symbol = symbolAt(name);
+        if (symbol && !candidates.has(symbol)) {
+          candidates.add(symbol);
+          changed = true;
         }
-        ts.forEachChild(node, visitCandidate);
-      };
-      visitCandidate(sourceFile);
+      }
     }
   }
   const memberProperties = new Set<string>();

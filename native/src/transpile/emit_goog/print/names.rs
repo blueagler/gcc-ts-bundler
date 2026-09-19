@@ -1,10 +1,9 @@
 //! Statement/expression print and export declaration names.
 
-use oxc_ast::ast::*;
+use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind};
 use oxc_codegen::{Codegen, Gen};
 
 use super::super::super::emit_runtime::binding_names_with_ids;
-use super::super::super::identity::ModuleIdentity;
 use super::super::super::lowering::closure_input_codegen_options;
 
 pub(crate) fn print_node(node: &impl Gen) -> String {
@@ -27,17 +26,19 @@ pub(crate) fn default_declaration_name<'a>(
     }
 }
 
-pub(crate) fn exported_decl_names(
-    declaration: &Declaration<'_>,
-    identity: &ModuleIdentity,
-) -> Vec<String> {
-    match declaration {
-        Declaration::VariableDeclaration(declaration) => declaration
-            .declarations
-            .iter()
-            .flat_map(|declarator| binding_names_with_ids(&declarator.id, identity))
-            .map(|(_, name)| name)
-            .collect(),
+pub(crate) fn exported_decl_names(declaration: &Declaration<'_>) -> Result<Vec<String>, String> {
+    Ok(match declaration {
+        Declaration::VariableDeclaration(declaration) => {
+            let mut names = Vec::new();
+            for declarator in &declaration.declarations {
+                names.extend(
+                    binding_names_with_ids(&declarator.id)?
+                        .into_iter()
+                        .map(|(_, name)| name),
+                );
+            }
+            names
+        }
         Declaration::FunctionDeclaration(function) => {
             function.id.iter().map(|id| id.name.to_string()).collect()
         }
@@ -45,5 +46,5 @@ pub(crate) fn exported_decl_names(
             class.id.iter().map(|id| id.name.to_string()).collect()
         }
         _ => Vec::new(),
-    }
+    })
 }

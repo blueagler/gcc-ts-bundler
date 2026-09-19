@@ -1,3 +1,4 @@
+import type ts from "@typescript/typescript6";
 import type { Rollup } from "vite";
 
 import type { ResolvedChunkOutputType } from "../api/types";
@@ -39,11 +40,21 @@ export interface CapturedModule {
   renderedLength?: number;
   normalizedCode?: string;
   normalizedAnalysis?: CapturedModuleAnalysis;
+  /** Memoized TypeScript parse of one `code` revision. */
+  parsedSource?: {
+    code: string;
+    sourceFile: ts.SourceFile;
+  };
   rawAnalysis?: CapturedModuleAnalysis;
 }
 export interface ViteAssetPlaceholder {
   canonical: string;
   current: string;
+  fileReference?: {
+    moduleId: string;
+    referenceId: string;
+    urlId: string | undefined;
+  };
 }
 
 export interface CapturedRuntimeModule {
@@ -62,7 +73,7 @@ export interface MaterializedGraph {
   authoredFiles: string[];
   /** Physical source files used to resolve bare CJS imports while prebundling. */
   dependencySourceFileByMaterializedFile?: Record<string, string>;
-  entries: string[];
+  entries: Array<{ file: string; sourceModuleId: string }>;
   modules: CapturedRuntimeModule[];
   prunedEmptyModuleIds: string[];
   retainedEmptyModuleIds: string[];

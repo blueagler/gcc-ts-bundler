@@ -12,7 +12,7 @@ import type { PreparedCompileJob } from "./types";
 export async function invokePreparedClosureJob(
   job: PreparedCompileJob,
   compilerEnvironment: ClosureCompilerEnvironment,
-): Promise<{ exitCode: number; capturedStdErr: string }> {
+) {
   const strictCheckTypes = hasStrictCheckTypes(compilerEnvironment.options);
   const closureOptions: ClosureCompilerOptions = {
     assumeFunctionWrapper: job.assumeFunctionWrapper,
@@ -65,9 +65,5 @@ export async function invokePreparedClosureJob(
   }
   configureClosureCompilerOptions(closureOptions, compilerEnvironment.options);
   omitEmptyHideWarningsFor(closureOptions);
-  let capturedStdErr = "";
-  const exitCode = await runClosureCompiler(closureOptions, (stdErr) => {
-    capturedStdErr += stdErr;
-  });
-  return { exitCode, capturedStdErr };
+  return runClosureCompiler(closureOptions);
 }

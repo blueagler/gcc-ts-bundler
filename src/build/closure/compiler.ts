@@ -7,7 +7,6 @@ export {
   resolveClosureCompilerEnvironment,
 } from "./compiler/environment-resolve";
 export {
-  TYPE_INFERENCE_OPTIONS,
   applyTypeInferenceOptions,
   hasStrictCheckTypes,
   omitEmptyHideWarningsFor,

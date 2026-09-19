@@ -12,27 +12,27 @@ pub(crate) fn render_generated_externs(
     // they are externs, not program code. Typed as `?`: the ambient's TS type
     // is the author's claim about a global we do not control, and asserting it
     // to Closure would be a guess.
-    let mut ambient_names = ambient_global_names.iter().cloned().collect::<Vec<_>>();
+    let mut ambient_names = ambient_global_names.iter().collect::<Vec<_>>();
     ambient_names.sort();
     for name in ambient_names {
-        if is_valid_js_identifier(&name) {
+        if is_valid_js_identifier(name) {
             lines.push("/** @type {?} */".to_string());
             lines.push(format!("var {name};"));
         }
     }
-    let mut preserved_names = preserved_property_names.iter().cloned().collect::<Vec<_>>();
+    let mut preserved_names = preserved_property_names.iter().collect::<Vec<_>>();
     preserved_names.sort();
     for name in preserved_names {
-        if is_valid_js_identifier(&name) {
+        if is_valid_js_identifier(name) {
             lines.push(format!("Object.prototype.{name};"));
         } else {
             lines.push(format!("Object.prototype[{name:?}];"));
         }
     }
-    let mut static_names = static_property_names.iter().cloned().collect::<Vec<_>>();
+    let mut static_names = static_property_names.iter().collect::<Vec<_>>();
     static_names.sort();
     for name in static_names {
-        if is_valid_js_identifier(&name) {
+        if is_valid_js_identifier(name) {
             lines.push(format!("Function.prototype.{name};"));
         } else {
             lines.push(format!("Function.prototype[{name:?}];"));

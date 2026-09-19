@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    BindingIdentifier, ImportDeclaration, ImportDeclarationSpecifier, ImportOrExportKind,
+};
 
 use super::super::super::fresh::FreshNameAllocator;
 use super::super::super::hoist::HoistPlan;
@@ -18,7 +20,6 @@ pub(crate) struct HoistedImportPlanner<'a> {
     pub(crate) consumer_ordinal: usize,
     context: &'a TranspileContext,
     pub(crate) fresh_names: FreshNameAllocator,
-    pub(crate) identity: &'a ModuleIdentity,
     lexical_binding_names: &'a HashSet<String>,
     plan: &'a HoistPlan,
     pub(crate) preserved_import_count: usize,
@@ -26,11 +27,9 @@ pub(crate) struct HoistedImportPlanner<'a> {
 }
 
 impl<'a> HoistedImportPlanner<'a> {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         context: &'a TranspileContext,
         plan: &'a HoistPlan,
-        identity: &'a ModuleIdentity,
         consumer_module_id: &'a str,
         consumer_ordinal: usize,
         lexical_binding_names: &'a HashSet<String>,
@@ -41,7 +40,6 @@ impl<'a> HoistedImportPlanner<'a> {
             consumer_ordinal,
             context,
             fresh_names,
-            identity,
             lexical_binding_names,
             plan,
             preserved_import_count: 0,
@@ -105,15 +103,16 @@ impl<'a> HoistedImportPlanner<'a> {
                     if import.import_kind == ImportOrExportKind::Type
                         || named.import_kind == ImportOrExportKind::Type => {}
                 ImportDeclarationSpecifier::ImportSpecifier(named)
-                    if !used_binding_ids.contains(&self.identity.key_of_binding(&named.local)) => {}
+                    if !used_binding_ids
+                        .contains(&ModuleIdentity::key_of_binding(&named.local)?) => {}
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(default)
                     if import.import_kind == ImportOrExportKind::Type
                         || !used_binding_ids
-                            .contains(&self.identity.key_of_binding(&default.local)) => {}
+                            .contains(&ModuleIdentity::key_of_binding(&default.local)?) => {}
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace)
                     if import.import_kind == ImportOrExportKind::Type
                         || !used_binding_ids
-                            .contains(&self.identity.key_of_binding(&namespace.local)) => {}
+                            .contains(&ModuleIdentity::key_of_binding(&namespace.local)?) => {}
                 ImportDeclarationSpecifier::ImportSpecifier(named) => {
                     let imported_name = module_export_name(&named.imported);
                     self.plan_named_binding(
@@ -135,15 +134,21 @@ impl<'a> HoistedImportPlanner<'a> {
                 }
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) => {
                     if direct_namespace_ids
-                        .contains(&self.identity.key_of_binding(&namespace.local))
+                        .contains(&ModuleIdentity::key_of_binding(&namespace.local)?)
                     {
                         continue;
                     }
-                    let object_name = self.require_binding(&target_module_id, &mut lines);
+                    let object_name = self.fresh_names.fresh(&format!(
+                        "__gcc_ns_{}_{}",
+                        self.consumer_ordinal, namespace.local.name
+                    ));
+                    let runtime_module_id = to_bundler_runtime_module_id(&target_module_id);
+                    lines.push(format!(
+                        "const {object_name} = __require({runtime_module_id:?},true);"
+                    ));
                     rewrites.push(ImportBindingRewrite {
-                        binding_id: self.identity.key_of_binding(&namespace.local),
-                        replacement: ImportReplacement::Name(object_name.clone()),
-                        replacement_code: object_name,
+                        binding_id: ModuleIdentity::key_of_binding(&namespace.local)?,
+                        replacement: ImportReplacement::Name(object_name),
                     });
                 }
             }
@@ -164,7 +169,7 @@ impl<'a> HoistedImportPlanner<'a> {
         lines: &mut Vec<String>,
         rewrites: &mut Vec<ImportBindingRewrite>,
     ) -> std::result::Result<(), String> {
-        let binding_id = self.identity.key_of_binding(local);
+        let binding_id = ModuleIdentity::key_of_binding(local)?;
         if let Some(binding) = self.plan.resolve_export(target_module_id, imported_name) {
             let direct_name = self.plan.direct_binding_name(binding);
             if self
@@ -174,13 +179,11 @@ impl<'a> HoistedImportPlanner<'a> {
                     .as_ref()
                     .is_some_and(|name| !self.lexical_binding_names.contains(name))
             {
-                let direct_name = direct_name.ok_or_else(|| {
-                    format!("Missing hoist ordinal for {}", binding.owner_module_id)
-                })?;
+                let direct_name = direct_name
+                    .ok_or_else(|| format!("Missing hoist ordinal for {}", binding.module_id))?;
                 rewrites.push(ImportBindingRewrite {
                     binding_id,
-                    replacement: ImportReplacement::Name(direct_name.clone()),
-                    replacement_code: direct_name,
+                    replacement: ImportReplacement::Name(direct_name),
                 });
                 return Ok(());
             }
@@ -188,22 +191,20 @@ impl<'a> HoistedImportPlanner<'a> {
             let owner_slots = self
                 .context
                 .bundler_module_slots
-                .get(&binding.owner_module_id)
+                .get(&binding.module_id)
                 .ok_or_else(|| {
                     format!(
                         "Missing bundler-runtime export slots for {}",
-                        binding.owner_module_id
+                        binding.module_id
                     )
                 })?;
-            let owner_slot = owner_slots
-                .slot_for(&binding.owner_export_name)
-                .ok_or_else(|| {
-                    format!(
-                        "Missing bundler-runtime export slot for {} in {}",
-                        binding.owner_export_name, binding.owner_module_id
-                    )
-                })?;
-            let object_name = self.require_binding(&binding.owner_module_id, lines);
+            let owner_slot = owner_slots.slot_for(&binding.export_name).ok_or_else(|| {
+                format!(
+                    "Missing bundler-runtime export slot for {} in {}",
+                    binding.export_name, binding.module_id
+                )
+            })?;
+            let object_name = self.require_binding(&binding.module_id, lines);
             rewrites.push(slot_rewrite(binding_id, &object_name, owner_slot));
             return Ok(());
         }
@@ -232,6 +233,5 @@ fn slot_rewrite(binding_id: BindingKey, object_name: &str, slot: usize) -> Impor
     ImportBindingRewrite {
         binding_id,
         replacement: ImportReplacement::Slot(alias),
-        replacement_code: format!("{object_name}[{slot}]"),
     }
 }

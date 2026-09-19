@@ -1,7 +1,11 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use oxc_allocator::{Allocator, FromIn};
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    Argument, ArrayExpressionElement, BindingPattern, CallExpression, Declaration, Expression,
+    ImportDeclarationSpecifier, ModuleExportName, ObjectExpression, ObjectPropertyKind, Program,
+    PropertyKey, Statement, VariableDeclarationKind, VariableDeclarator,
+};
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_span::SPAN;
@@ -21,14 +25,14 @@ pub(crate) fn apply<'a>(
     program: &mut Program<'a>,
     identity: &ModuleIdentity,
     calls: &[ClassMapCallInput],
-) -> BTreeSet<String> {
+) -> Result<BTreeSet<String>, String> {
     if calls.is_empty() {
-        return BTreeSet::new();
+        return Ok(BTreeSet::new());
     }
-    let import_aliases = collect_import_aliases(program, identity);
-    let mut visitor = ClassMapVisitor::new(allocator, calls, import_aliases, program, identity);
+    let import_aliases = collect_import_aliases(program)?;
+    let mut visitor = ClassMapVisitor::new(allocator, calls, import_aliases, program, identity)?;
     visitor.visit_program(program);
-    visitor.quoted_property_names
+    visitor.error.map_or(Ok(visitor.quoted_property_names), Err)
 }
 
 pub(crate) fn collect_pair_array_class_map_property_names(
@@ -50,22 +54,22 @@ pub(crate) fn collect_pair_array_class_map_property_names(
     };
     let mut rules = Vec::new();
     for call in calls {
-        if call.keySource.as_deref() != Some("pairArray") {
+        if call.key_source.as_deref() != Some("pairArray") {
             continue;
         }
         rules.push(PairRule {
-            arg_index: call.argIndex as usize,
+            arg_index: call.arg_index as usize,
             callee: call.callee.clone(),
             module_pattern: compile(
                 &call.callee,
                 "calleeModulePattern",
-                call.calleeModulePattern.as_deref(),
+                call.callee_module_pattern.as_deref(),
             )?,
-            key_pattern: compile(&call.callee, "keyPattern", call.keyPattern.as_deref())?,
+            key_pattern: compile(&call.callee, "keyPattern", call.key_pattern.as_deref())?,
             key_exclude_pattern: compile(
                 &call.callee,
                 "keyExcludePattern",
-                call.keyExcludePattern.as_deref(),
+                call.key_exclude_pattern.as_deref(),
             )?,
         });
     }
@@ -175,6 +179,7 @@ struct Rule {
 }
 
 struct ClassMapVisitor<'a, 'i> {
+    error: Option<String>,
     allocator: &'a Allocator,
     builder: AstBuilder<'a>,
     calls: HashMap<String, Vec<Rule>>,
@@ -192,26 +197,27 @@ impl<'a, 'i> ClassMapVisitor<'a, 'i> {
         import_aliases: BindingKeyMap<String>,
         program: &Program<'a>,
         identity: &'i ModuleIdentity,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let mut grouped = HashMap::<String, Vec<Rule>>::new();
         for call in calls {
-            if call.keySource.as_deref() == Some("pairArray") {
+            if call.key_source.as_deref() == Some("pairArray") {
                 continue;
             }
             grouped.entry(call.callee.clone()).or_default().push(Rule {
-                arg_index: call.argIndex as usize,
+                arg_index: call.arg_index as usize,
                 key_exclude_pattern: call
-                    .keyExcludePattern
+                    .key_exclude_pattern
                     .as_deref()
                     .and_then(|pattern| regex::Regex::new(pattern).ok()),
                 key_pattern: call
-                    .keyPattern
+                    .key_pattern
                     .as_deref()
                     .and_then(|pattern| regex::Regex::new(pattern).ok()),
-                string_literal_arg_index: call.stringLiteralArgIndex.map(|index| index as usize),
+                string_literal_arg_index: call.string_literal_arg_index.map(|index| index as usize),
             });
         }
         let mut visitor = Self {
+            error: None,
             allocator,
             builder: AstBuilder::new(allocator),
             calls: grouped,
@@ -221,17 +227,16 @@ impl<'a, 'i> ClassMapVisitor<'a, 'i> {
             object_binding_rules: HashMap::new(),
             quoted_property_names: BTreeSet::new(),
         };
-        visitor.literal_contract_bindings = visitor.collect_literal_contract_bindings(program);
-        visitor.object_binding_rules = visitor.collect_object_binding_rules(program);
-        visitor
+        visitor.literal_contract_bindings = visitor.collect_literal_contract_bindings(program)?;
+        visitor.object_binding_rules = visitor.collect_object_binding_rules(program)?;
+        Ok(visitor)
     }
 
     fn rules_for_call(&self, call: &CallExpression<'_>) -> Option<&Vec<Rule>> {
         let (local_name, local_binding) = callee_local_binding(&call.callee, self.identity)?;
         let callee = local_binding
             .and_then(|binding| self.import_aliases.get(&binding))
-            .map(String::as_str)
-            .unwrap_or(local_name.as_str());
+            .map_or(local_name.as_str(), String::as_str);
         self.calls.get(callee)
     }
 
@@ -284,8 +289,11 @@ impl<'a, 'i> ClassMapVisitor<'a, 'i> {
         })
     }
 
-    fn collect_literal_contract_bindings(&self, program: &Program<'a>) -> BindingKeySet {
-        let initializers = collect_const_initializers(program, self.identity);
+    fn collect_literal_contract_bindings(
+        &self,
+        program: &Program<'a>,
+    ) -> Result<BindingKeySet, String> {
+        let initializers = collect_const_initializers(program)?;
         let mut bindings = HashSet::new();
         loop {
             let mut changed = false;
@@ -298,13 +306,16 @@ impl<'a, 'i> ClassMapVisitor<'a, 'i> {
                 }
             }
             if !changed {
-                return bindings;
+                return Ok(bindings);
             }
         }
     }
 
-    fn collect_object_binding_rules(&self, program: &Program<'a>) -> BindingKeyMap<Vec<Rule>> {
-        let const_bindings = collect_const_initializers(program, self.identity)
+    fn collect_object_binding_rules(
+        &self,
+        program: &Program<'a>,
+    ) -> Result<BindingKeyMap<Vec<Rule>>, String> {
+        let const_bindings = collect_const_initializers(program)?
             .into_iter()
             .map(|(binding, _)| binding)
             .collect::<HashSet<_>>();
@@ -315,7 +326,7 @@ impl<'a, 'i> ClassMapVisitor<'a, 'i> {
             visitor: self,
         };
         collector.visit_program(program);
-        collector.rules
+        Ok(collector.rules)
     }
 
     fn quote_object(&mut self, object: &mut ObjectExpression<'a>, rule: &Rule) {
@@ -371,7 +382,13 @@ impl<'a> VisitMut<'a> for ClassMapVisitor<'a, '_> {
         let BindingPattern::BindingIdentifier(binding) = &declarator.id else {
             return;
         };
-        let key = self.identity.key_of_binding(binding);
+        let key = match ModuleIdentity::key_of_binding(binding) {
+            Ok(key) => key,
+            Err(error) => {
+                self.error.get_or_insert(error);
+                return;
+            }
+        };
         let Some(rules) = self.object_binding_rules.get(&key).cloned() else {
             return;
         };
@@ -444,10 +461,7 @@ impl<'a> Visit<'a> for ObjectBindingCollector<'_, '_> {
     }
 }
 
-fn collect_import_aliases(
-    program: &Program<'_>,
-    identity: &ModuleIdentity,
-) -> BindingKeyMap<String> {
+fn collect_import_aliases(program: &Program<'_>) -> Result<BindingKeyMap<String>, String> {
     let mut aliases = HashMap::new();
     for statement in &program.body {
         let Statement::ImportDeclaration(import) = statement else {
@@ -458,24 +472,23 @@ fn collect_import_aliases(
                 continue;
             };
             aliases.insert(
-                identity.key_of_binding(&named.local),
+                ModuleIdentity::key_of_binding(&named.local)?,
                 module_export_name(&named.imported),
             );
         }
     }
-    aliases
+    Ok(aliases)
 }
 
 fn collect_const_initializers<'a>(
     program: &'a Program<'a>,
-    identity: &ModuleIdentity,
-) -> Vec<(BindingKey, &'a Expression<'a>)> {
+) -> Result<Vec<(BindingKey, &'a Expression<'a>)>, String> {
     let mut values = Vec::new();
     for statement in &program.body {
         let declaration = match statement {
             Statement::VariableDeclaration(declaration) => Some(&**declaration),
-            Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
-                Some(Declaration::VariableDeclaration(declaration)) => Some(&**declaration),
+            Statement::ExportDeclaration(export) => match &export.declaration {
+                Declaration::VariableDeclaration(declaration) => Some(&**declaration),
                 _ => None,
             },
             _ => None,
@@ -492,10 +505,10 @@ fn collect_const_initializers<'a>(
             else {
                 continue;
             };
-            values.push((identity.key_of_binding(binding), initializer));
+            values.push((ModuleIdentity::key_of_binding(binding)?, initializer));
         }
     }
-    values
+    Ok(values)
 }
 
 fn callee_local_binding(

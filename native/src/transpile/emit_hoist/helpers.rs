@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    BindingPattern, Expression, ImportDeclarationSpecifier, ImportOrExportKind, Program, Statement,
+};
 use oxc_codegen::{Codegen, Gen};
 
 use super::super::hoist::{scan_namespace_usage, HoistPlan};
@@ -15,10 +17,10 @@ pub(super) fn collect_direct_safe_namespace_ids(
     file_path: &Path,
     context: &TranspileContext,
     plan: &HoistPlan,
-) -> BindingKeySet {
+) -> Result<BindingKeySet, String> {
     let consumer_module_id = to_goog_module_id(file_path, &context.workspace_dir);
     let consumer_chunk = plan.chunk_of(&consumer_module_id);
-    let usage = scan_namespace_usage(program, identity);
+    let usage = scan_namespace_usage(program, identity)?;
     let mut direct = HashSet::new();
     for statement in &program.body {
         let Statement::ImportDeclaration(import) = statement else {
@@ -40,7 +42,7 @@ pub(super) fn collect_direct_safe_namespace_ids(
         }
         for specifier in import.specifiers.iter().flatten() {
             if let ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) = specifier {
-                let binding = identity.key_of_binding(&namespace.local);
+                let binding = ModuleIdentity::key_of_binding(&namespace.local)?;
                 if usage.member_only_usage(binding).is_some_and(|members| {
                     members
                         .iter()
@@ -51,7 +53,7 @@ pub(super) fn collect_direct_safe_namespace_ids(
             }
         }
     }
-    direct
+    Ok(direct)
 }
 
 pub(super) fn is_pure_statement(

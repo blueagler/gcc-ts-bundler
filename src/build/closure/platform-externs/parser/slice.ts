@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import zlib from "node:zlib";
 import { promisify } from "node:util";
+import { runWithConcurrency } from "../../../../shared/concurrency";
 
 const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
@@ -93,14 +94,12 @@ export async function digestSliceInputs(
 }
 
 async function digestGroup(files: readonly string[]): Promise<string> {
-  const digests = await Promise.all(
-    files.map(async (filePath) => {
-      const content = createHash("sha256")
-        .update(await fs.readFile(filePath))
-        .digest("hex");
-      return `${path.extname(filePath).toLowerCase()}:${content}`;
-    }),
-  );
+  const digests = await runWithConcurrency(files, 16, async (filePath) => {
+    const content = createHash("sha256")
+      .update(await fs.readFile(filePath))
+      .digest("hex");
+    return `${path.extname(filePath).toLowerCase()}:${content}`;
+  });
   digests.sort();
   return createHash("sha256").update(digests.join("\u0000")).digest("hex");
 }
@@ -174,37 +173,32 @@ async function touch(target: string) {
  * entry from a live alternate, and reads refresh mtime so an entry stays alive
  * exactly as long as something uses it.
  *
- * Runs at most once per process and never blocks a build: failures are
- * swallowed, and the sweep is fire-and-forget from the caller's perspective.
+ * The caller owns and awaits each root's sweep; no process-global sentinel
+ * may suppress collection for a different project.
  */
-let collected = false;
 
 export async function collectExpiredEntries(
   cacheRoot: string,
   maxAgeMs = MAX_ENTRY_AGE_MS,
 ): Promise<number> {
-  if (collected) return 0;
-  collected = true;
   const directory = cacheDirectory(cacheRoot);
   let removed = 0;
   try {
     const cutoff = Date.now() - maxAgeMs;
     const entries = await fs.readdir(directory);
-    await Promise.all(
-      entries.map(async (entry) => {
-        if (!entry.startsWith("slice.") && !entry.startsWith("units.")) return;
-        const filePath = path.join(directory, entry);
-        try {
-          const stats = await fs.stat(filePath);
-          if (stats.mtimeMs < cutoff) {
-            await fs.rm(filePath, { force: true });
-            removed += 1;
-          }
-        } catch {
-          /* raced with another build; leave it */
+    await runWithConcurrency(entries, 16, async (entry) => {
+      if (!entry.startsWith("slice.") && !entry.startsWith("units.")) return;
+      const filePath = path.join(directory, entry);
+      try {
+        const stats = await fs.stat(filePath);
+        if (stats.mtimeMs < cutoff) {
+          await fs.rm(filePath, { force: true });
+          removed += 1;
         }
-      }),
-    );
+      } catch {
+        /* raced with another build; leave it */
+      }
+    });
   } catch {
     /* no cache directory yet, or unreadable — nothing to collect */
   }

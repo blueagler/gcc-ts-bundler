@@ -1,8 +1,8 @@
 # anti-slop
 
-An Oxlint plugin of fifteen generic rules that reject low-evidence code: patterns that compile and run while telling the reader, the compiler, and the next caller nothing about what a value actually is or who owns it.
+An Oxlint plugin of twelve generic rules that reject low-evidence code: patterns that compile and run while telling the reader, the compiler, and the next caller nothing about what a value actually is or who owns it.
 
-The thesis is that most of these patterns are the same mistake wearing different syntax. A value arrives without a contract, and instead of establishing one at the boundary where it enters the program, the code carries the uncertainty inward and papers over it locally with an assertion, a `typeof` branch, an `unknown` annotation, or an open dictionary. Each of those is cheap to write and expensive to own, because the knowledge of what the value is now lives in the author's head rather than in a type. Every rule here points at one such pattern, and in every case the intended fix has the same shape: parse or validate once at the I/O boundary, name the resulting type after the domain role it plays, and let inference carry that type through the rest of the program.
+The thesis is that most of these patterns are the same mistake wearing different syntax. A value arrives without a contract, and instead of establishing one at the boundary where it enters the program, the code carries the uncertainty inward and papers over it locally with an assertion, a `typeof` branch, or an `unknown` annotation. Each of those is cheap to write and expensive to own, because the knowledge of what the value is now lives in the author's head rather than in a type. Every rule here points at one such pattern, and in every case the intended fix has the same shape: parse or validate once at the I/O boundary, name the resulting type after the domain role it plays, and let inference carry that type through the rest of the program.
 
 The rules are deliberately generic, so they belong in any TypeScript or JavaScript repository. Project-specific rules belong in a separate plugin.
 
@@ -21,7 +21,9 @@ const config = readFileSync("config.json", "utf8") as unknown as ServerConfig;
 Right:
 
 ```ts
-const config = parseServerConfig(JSON.parse(readFileSync("config.json", "utf8")));
+const config = parseServerConfig(
+  JSON.parse(readFileSync("config.json", "utf8")),
+);
 ```
 
 Options: none. A chain composed only of `as const` assertions is allowed, because const assertions narrow rather than widen, though TypeScript rejects a repeated const assertion on its own, so the allowance mostly documents intent.
@@ -49,24 +51,6 @@ if (timeout !== undefined) request.timeout = timeout;
 Options: none. The rule reads object spreads and JSX attribute spreads, and it strips the wrappers that leave the spread value unchanged, so parentheses, `as T`, `satisfies T`, and a non-null assertion do not hide the pattern. A logical expression is read the same way as a ternary: `...(hasTimeout && { timeout })` omits the key through the operator's falsy result rather than through a written `{}`, and it reports for the same reason. Two object operands are a choice between shapes rather than an omission, so `...(a ? { x } : { x: y })` stays silent.
 
 `??` is deliberately outside the rule. `...(options.compiler ?? {})` defaults a whole optional value instead of deciding whether one named key appears, so there is no omission for a reader to reconstruct and the rewrite above does not describe the code at all. Cloning an optional object this way is the idiomatic form, and reporting it would be a false positive on correct code.
-
-### no-known-value-widening
-
-Rationale: when a value's type is already established syntactically, annotating it with a broad or anonymous target throws that knowledge away at the one moment it was free to keep. A literal object annotated as `Record<string, unknown>` loses its keys; a known value annotated as `object` or `unknown` loses everything. The annotation looks like documentation but is a downgrade, and every downstream caller pays for it with an assertion.
-
-Wrong:
-
-```ts
-const routes: Record<string, unknown> = { home: "/", search: "/search" };
-```
-
-Right:
-
-```ts
-const routes = { home: "/", search: "/search" } as const satisfies Record<string, string>;
-```
-
-Options: none. Seeding an empty object literal into a dictionary or generic container that is filled later is allowed, since there is no evidence to discard. A homomorphic mapped type such as `{ [Key in keyof Settings]: string[] }` is not a widening target either, because its keys are pinned to a named type rather than left open.
 
 ### no-module-mocking
 
@@ -164,24 +148,6 @@ function renderLabel(amount: Money): string {
 
 Options: `allowInTypeGuards` is enabled by default and permits `typeof` inside a function whose return type is a type predicate, which is where a representation check legitimately lives. `allowUndefinedChecks` is also enabled by default and permits an equality comparison against the string `"undefined"`, because testing whether a binding is defined has no domain-level substitute. Set either option to `false` to withdraw that allowance.
 
-### no-shape-in-symbol-names
-
-Rationale: naming something for its structure rather than its role tells the reader nothing they could not already see. A `UserShape` or a `configShape` is a declaration whose meaning nobody has decided yet, and the name will still be there long after the ambiguity has hardened into a contract. Name the declaration for what owns it or what it is used for.
-
-Wrong:
-
-```ts
-type PayloadShape = { id: string; total: number };
-```
-
-Right:
-
-```ts
-type CheckoutTotal = { id: string; total: number };
-```
-
-Options: `terms` takes the list of banned words and defaults to `["shape"]`. Matching is on word segments at declarations, so `shape` and `userShape` are reported while `reshape` and `shapefile` are not, and a banned name imported from a third-party package does not produce a finding at every use site.
-
 ### no-unknown-parameters
 
 Rationale: an `unknown` parameter moves the parsing obligation from the one boundary that knows the payload's provenance into every function that touches it. The function cannot proceed without narrowing, so the narrowing is duplicated inward, and the call sites lose any statement of what they are allowed to pass. Accept the parsed domain type and run the schema or parser once, at the boundary.
@@ -200,7 +166,7 @@ function handleMessage(payload: InboundMessage): void {}
 
 A rest parameter is read through the array that collects the arguments, so `...values: unknown[]` is reported too: it accepts an `unknown` at every position, which is the same missing contract spelled once for all of them. `readonly unknown[]`, `Array<unknown>`, and a tuple with an `unknown` member are read the same way.
 
-Options: `allowedNames` lists parameter names that may be `unknown`. It replaces the previously hardcoded exemption for `cause`, so a project that enriches errors with an arbitrary cause lists that name explicitly with `allowedNames: ["cause"]`. There is no boundary opt-out, because a parser's own input is a `string`, a `Uint8Array`, or a `Response`, not `unknown`. An unconstrained single-use type parameter is rejected as a fake generic for the same reason: `parse<T>(input: string): T` is `unknown` with the burden shifted onto the caller.
+Options: `allowedNames` lists parameter names that may be `unknown`; its default includes `cause`. Actual validators need to admit untrusted values before narrowing them. This repository's [lint configuration](../../../.oxlintrc.json) therefore disables this rule and `no-unknown-returns` only in the shared validation/cache/hash modules and native/esbuild admission modules. Use conventional predicates such as `isString(value: unknown): value is string` there, not an unconstrained generic that disguises the same input. Required schemas, assertion restrictions, and TypeScript unsafe-use checks remain enabled.
 
 ### no-unknown-returns
 
@@ -222,7 +188,7 @@ function loadSettings(path: string): EditorSettings {
 }
 ```
 
-Options: none. Local aliases that resolve to `unknown` count as `unknown`, and an unconstrained type parameter that appears only in the return position is rejected as a fake generic, since the caller picks `T` with no evidence that the value matches it. There is no boundary opt-out; a parsing function is exactly the place that is supposed to name its output.
+Options: none. Local aliases that resolve to `unknown` count as `unknown`. The scoped admission modules described above may return an untrusted value to its validating caller; ordinary domain functions should return their established result type. A generic return chosen by the caller is not evidence that an unchecked value has that type.
 
 ### no-unknown-type-aliases
 
@@ -248,24 +214,6 @@ type JsonValue =
 ```
 
 Options: none. Aliases are followed transitively, so an alias to an alias that resolves to `unknown` is reported. There is no boundary opt-out for naming `unknown`.
-
-### no-unsafe-dictionary-type
-
-Rationale: an open dictionary whose value type is `unknown`, `any`, `object`, `{}`, or a union containing one of those promises callers a lookup table and then delivers nothing about what a lookup produces. Two obligations are lost at once: which keys exist, and what a value is. The shape is common as a temporary stand-in, and once it reaches a signature it forces an assertion at every read.
-
-Wrong:
-
-```ts
-type FeatureFlags = Record<string, unknown>;
-```
-
-Right:
-
-```ts
-type FeatureFlags = Record<FeatureName, boolean>;
-```
-
-Options: none. Intersections follow TypeScript's own absorption rules rather than the union rule: `any & T` is `any` and reports, while `unknown & T` is just `T` and stays silent. A closed-key record is not an open dictionary: `Record<"draft" | "published", unknown>` has a finite key set and is treated as an ordinary object type, so the rule does not fire on it. A `keyof` key set is closed for the same reason: `{ [Key in keyof Settings]: unknown }` states that the keys are exactly `Settings`'s own, and that holds whether or not `Settings` is declared in the same file, so a projection over an imported type is not an open dictionary. Only a provably open source reopens it, as in `keyof Record<string, string>`. The rule targets dictionaries keyed by `string`, `number`, `symbol`, `PropertyKey`, or a template literal type, whether they are written as `Record<...>`, an index signature, or a mapped type.
 
 ### no-widen-then-assert
 
@@ -323,7 +271,7 @@ if (parsed.lockId === lockId) release();
 Right:
 
 ```ts
-const record = { "lockId": lockId, "releasedAt": releasedAt };
+const record = { lockId: lockId, releasedAt: releasedAt };
 if (parsed["lockId"] === lockId) release();
 ```
 

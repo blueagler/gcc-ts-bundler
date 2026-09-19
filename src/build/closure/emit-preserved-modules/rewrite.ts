@@ -1,5 +1,6 @@
 import fs from "fs/promises";
 import path from "path";
+import { runWithConcurrency } from "../../../shared/concurrency";
 
 import type {
   ChunkPlanChunk,
@@ -26,14 +27,14 @@ export async function rewritePreservedModulePaths(input: {
     input.modules.map((module) => [module.moduleId, module]),
   );
   const sourceByOutput = new Map(
-    await Promise.all(
-      input.postprocessActions.map(
-        async (action) =>
-          [
-            action.outputPath,
-            await fs.readFile(action.outputPath, "utf8"),
-          ] as const,
-      ),
+    await runWithConcurrency(
+      input.postprocessActions,
+      16,
+      async (action) =>
+        [
+          action.outputPath,
+          await fs.readFile(action.outputPath, "utf8"),
+        ] as const,
     ),
   );
   const importStateByOutput = new Map<string, OutputImportState>();
@@ -103,8 +104,10 @@ export async function rewritePreservedModulePaths(input: {
     }
   }
 
-  await Promise.all(
-    [...importStateByOutput].map(async ([outputPath, state]) => {
+  await runWithConcurrency(
+    [...importStateByOutput],
+    16,
+    async ([outputPath, state]) => {
       const source = await fs.readFile(outputPath, "utf8");
       const importLines: string[] = [];
       const aliasLines: string[] = [];
@@ -120,7 +123,7 @@ export async function rewritePreservedModulePaths(input: {
         `${[...importLines, ...aliasLines].join("\n")}\n${source}`,
         "utf8",
       );
-    }),
+    },
   );
 }
 

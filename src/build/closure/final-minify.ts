@@ -1,6 +1,7 @@
 import fs from "fs/promises";
 
 import { minifyJavaScript } from "../../native/load";
+import { runWithConcurrency } from "../../shared/concurrency";
 
 export const JAVASCRIPT_OUTPUT_FILE = /\.[cm]?js$/u;
 
@@ -26,19 +27,19 @@ export async function finalizeJavaScriptOutputs(input: {
   outputFiles: readonly string[];
 }) {
   const excluded = new Set(input.excludedOutputFiles);
-  await Promise.all(
-    input.outputFiles
-      .filter(
-        (filePath) =>
-          JAVASCRIPT_OUTPUT_FILE.test(filePath) && !excluded.has(filePath),
-      )
-      .map(async (filePath) => {
-        const source = await fs.readFile(filePath, "utf8");
-        await fs.writeFile(
-          filePath,
-          minifyFinalJavaScriptText(filePath, source),
-          "utf8",
-        );
-      }),
+  await runWithConcurrency(
+    input.outputFiles.filter(
+      (filePath) =>
+        JAVASCRIPT_OUTPUT_FILE.test(filePath) && !excluded.has(filePath),
+    ),
+    16,
+    async (filePath) => {
+      const source = await fs.readFile(filePath, "utf8");
+      await fs.writeFile(
+        filePath,
+        minifyFinalJavaScriptText(filePath, source),
+        "utf8",
+      );
+    },
   );
 }

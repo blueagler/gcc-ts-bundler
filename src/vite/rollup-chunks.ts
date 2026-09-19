@@ -39,9 +39,6 @@ export function serializeRollupChunkGraph(input: {
   const sorted = (values: Iterable<string>) =>
     [...new Set(values)].sort((left, right) => left.localeCompare(right));
   return input.jsChunks.map((chunk) => ({
-    dynamicImportedChunkFileNames: sorted(
-      chunk.dynamicImports.filter((fileName) => chunkFileNames.has(fileName)),
-    ),
     fileName: chunk.fileName,
     importedChunkFileNames: sorted(
       chunk.imports.filter((fileName) => chunkFileNames.has(fileName)),

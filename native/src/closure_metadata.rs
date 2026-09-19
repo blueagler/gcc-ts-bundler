@@ -1,5 +1,3 @@
-#![allow(non_snake_case)]
-
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -109,47 +107,56 @@ pub struct ClosureEnumMember {
     pub value: serde_json::Value,
 }
 
-#[allow(non_snake_case)]
 #[napi(object)]
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypeMetadataCounts {
-    pub annotationCount: u32,
-    pub enumDeclarationCount: u32,
-    pub memberAnnotationCount: u32,
-    pub typeDeclarationCount: u32,
-    pub unresolvedTypeReferenceCount: u32,
+    #[napi(js_name = "annotationCount")]
+    #[serde(rename = "annotationCount")]
+    pub annotations: u32,
+    #[napi(js_name = "enumDeclarationCount")]
+    #[serde(rename = "enumDeclarationCount")]
+    pub enum_declarations: u32,
+    #[napi(js_name = "memberAnnotationCount")]
+    #[serde(rename = "memberAnnotationCount")]
+    pub member_annotations: u32,
+    #[napi(js_name = "typeDeclarationCount")]
+    #[serde(rename = "typeDeclarationCount")]
+    pub type_declarations: u32,
+    #[napi(js_name = "unresolvedTypeReferenceCount")]
+    #[serde(rename = "unresolvedTypeReferenceCount")]
+    pub unresolved_type_references: u32,
 }
 
 impl TypeMetadataCounts {
     pub(crate) fn add_assign(&mut self, other: &Self) {
-        self.annotationCount += other.annotationCount;
-        self.enumDeclarationCount += other.enumDeclarationCount;
-        self.memberAnnotationCount += other.memberAnnotationCount;
-        self.typeDeclarationCount += other.typeDeclarationCount;
-        self.unresolvedTypeReferenceCount += other.unresolvedTypeReferenceCount;
+        self.annotations += other.annotations;
+        self.enum_declarations += other.enum_declarations;
+        self.member_annotations += other.member_annotations;
+        self.type_declarations += other.type_declarations;
+        self.unresolved_type_references += other.unresolved_type_references;
     }
 
     pub(crate) fn has_type_metadata(&self) -> bool {
-        self.annotationCount
-            + self.enumDeclarationCount
-            + self.memberAnnotationCount
-            + self.typeDeclarationCount
+        self.annotations + self.enum_declarations + self.member_annotations + self.type_declarations
             > 0
     }
 }
 
-#[allow(non_snake_case)]
 #[napi(object)]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypeMetadataDiagnostic {
-    pub declarationFilePath: Option<String>,
+    #[napi(js_name = "declarationFilePath")]
+    pub declaration_file_path: Option<String>,
     pub phase: String,
     pub reason: String,
-    pub sourceFilePath: String,
-    pub symbolId: Option<String>,
-    pub symbolName: Option<String>,
+    #[napi(js_name = "sourceFilePath")]
+    pub source_file_path: String,
+    #[napi(js_name = "symbolId")]
+    pub symbol_id: Option<String>,
+    #[napi(js_name = "symbolName")]
+    pub symbol_name: Option<String>,
     pub target: Option<String>,
 }
 
@@ -161,12 +168,12 @@ impl TypeMetadataDiagnostic {
         target: Option<String>,
     ) -> Self {
         Self {
-            declarationFilePath: symbol.and_then(|value| value.declaration_file_path.clone()),
+            declaration_file_path: symbol.and_then(|value| value.declaration_file_path.clone()),
             phase: "delivery".to_string(),
             reason: reason.into(),
-            sourceFilePath: metadata.source_file_path.clone(),
-            symbolId: symbol.map(|value| value.id.clone()),
-            symbolName: symbol.map(|value| value.diagnostic_name.clone()),
+            source_file_path: metadata.source_file_path.clone(),
+            symbol_id: symbol.map(|value| value.id.clone()),
+            symbol_name: symbol.map(|value| value.diagnostic_name.clone()),
             target,
         }
     }
@@ -175,14 +182,13 @@ impl TypeMetadataDiagnostic {
         (
             self.phase.as_str(),
             self.reason.as_str(),
-            self.symbolId.as_deref().unwrap_or_default(),
+            self.symbol_id.as_deref().unwrap_or_default(),
             self.target.as_deref().unwrap_or_default(),
-            self.sourceFilePath.as_str(),
+            self.source_file_path.as_str(),
         )
     }
 }
 
-#[allow(non_snake_case)]
 #[napi(object)]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -190,7 +196,6 @@ pub struct EmittedTypeDeclaration {
     pub template: String,
 }
 
-#[allow(non_snake_case)]
 #[napi(object)]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -198,7 +203,8 @@ pub struct EmittedTypeMetadata {
     pub counts: TypeMetadataCounts,
     pub declarations: Vec<EmittedTypeDeclaration>,
     pub diagnostics: Vec<TypeMetadataDiagnostic>,
-    pub emittedFile: String,
+    #[napi(js_name = "emittedFile")]
+    pub emitted_file: String,
 }
 
 impl EmittedTypeMetadata {
@@ -217,7 +223,7 @@ impl EmittedTypeMetadata {
                 .map(|template| EmittedTypeDeclaration { template })
                 .collect(),
             diagnostics,
-            emittedFile: emitted_file,
+            emitted_file,
         }
     }
 }
@@ -243,10 +249,10 @@ pub fn load_closure_metadata(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::ClosureFileMetadata;
 
     #[test]
-    fn deserializes_symbol_aware_metadata_v1() {
+    fn deserializes_symbol_aware_metadata_v1() -> Result<(), serde_json::Error> {
         let files = serde_json::from_str::<Vec<ClosureFileMetadata>>(
             r#"[
               {
@@ -279,12 +285,12 @@ mod tests {
                 ]
               }
             ]"#,
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].annotations.len(), 1);
         assert_eq!(files[0].declarations.len(), 1);
         assert_eq!(files[0].enums[0].binding_name, "Kind");
+        Ok(())
     }
 }

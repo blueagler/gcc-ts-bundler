@@ -11,7 +11,7 @@ pub(crate) fn collect_preserved_module_ids(
 ) -> HashSet<String> {
     preserved_modules
         .iter()
-        .map(|module| module.moduleId.clone())
+        .map(|module| module.module_id.clone())
         .collect()
 }
 
@@ -28,11 +28,11 @@ pub(crate) fn allocate_run_boundary_identity_tokens(
             .chain(
                 resolved_imports
                     .iter()
-                    .filter(|resolved| preserved_module_ids.contains(&resolved.moduleId))
+                    .filter(|resolved| preserved_module_ids.contains(&resolved.module_id))
                     .map(|resolved| {
                         emit_goog::boundary_identity(
                             &to_goog_module_id(
-                                Path::new(&resolved.importerFilePath),
+                                Path::new(&resolved.importer_file_path),
                                 workspace_dir,
                             ),
                             &resolved.specifier,
@@ -47,7 +47,7 @@ pub(crate) fn index_preserved_modules(
 ) -> HashMap<String, PreservedModuleInput> {
     preserved_modules
         .into_iter()
-        .map(|module| (module.moduleId.clone(), module))
+        .map(|module| (module.module_id.clone(), module))
         .collect()
 }
 
@@ -58,7 +58,7 @@ pub(crate) fn filter_compiled_file_names(
     let preserved_file_paths = preserved_modules
         .values()
         .map(|module| {
-            normalize_path(Path::new(&module.filePath))
+            normalize_path(Path::new(&module.file_path))
                 .to_string_lossy()
                 .to_string()
         })

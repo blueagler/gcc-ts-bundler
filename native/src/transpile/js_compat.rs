@@ -1,7 +1,4 @@
-use std::collections::HashSet;
 use std::path::Path;
-
-use super::compat::collect_class_static_assignments;
 
 mod program;
 mod text;

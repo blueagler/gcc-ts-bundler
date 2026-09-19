@@ -1,5 +1,7 @@
 import ts from "@typescript/typescript6";
 
+import { getClosureIrSyntaxIndex } from "../scan";
+
 export function objectLiteralBindingName(literal: ts.ObjectLiteralExpression) {
   const declaration = objectLiteralVariableDeclaration(literal);
   if (
@@ -213,19 +215,15 @@ export function collectDynamicallyKeyedSymbols(
   checker: ts.TypeChecker,
 ) {
   const symbols = new Set<ts.Symbol>();
-  const visit = (node: ts.Node) => {
-    if (ts.isElementAccessExpression(node)) {
-      const root = unwrapExpression(node.expression);
-      if (ts.isIdentifier(root)) {
-        const symbol = resolveSymbol(checker, root);
-        if (symbol) {
-          symbols.add(symbol);
-        }
+  for (const node of getClosureIrSyntaxIndex(sourceFile).dynamicAccesses) {
+    const root = unwrapExpression(node.expression);
+    if (ts.isIdentifier(root)) {
+      const symbol = resolveSymbol(checker, root);
+      if (symbol) {
+        symbols.add(symbol);
       }
     }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
+  }
   return symbols;
 }
 

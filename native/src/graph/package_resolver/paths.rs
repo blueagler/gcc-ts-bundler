@@ -4,9 +4,11 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use super::super::path_utils::module_candidates;
 use super::super::ResolveContext;
 use crate::commonjs::CommonJsAnalysis;
 use crate::pathing::normalize_path;
+use crate::utils::append_hex;
 
 pub(super) fn resolve_package_target(
     target: &str,
@@ -61,7 +63,7 @@ pub(super) fn resolve_module_base(
     description: &str,
     importer: &Path,
 ) -> std::result::Result<Option<PathBuf>, String> {
-    for candidate in super::super::module_candidates(base) {
+    for candidate in module_candidates(base) {
         if !candidate.exists() {
             continue;
         }
@@ -164,10 +166,10 @@ pub(super) fn is_package_source_file(file_path: &Path, context: &ResolveContext)
 }
 
 fn sha256_hex(contents: &[u8]) -> String {
-    Sha256::digest(contents)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    let digest = Sha256::digest(contents);
+    let mut hash = String::with_capacity(digest.len() * 2);
+    append_hex(&mut hash, &digest);
+    hash
 }
 
 fn is_materialized_dependency_bundle_file(file_path: &Path, context: &ResolveContext) -> bool {
@@ -208,11 +210,10 @@ fn is_materialized_dependency_bundle_file(file_path: &Path, context: &ResolveCon
         && marker
             .get("files")
             .and_then(Value::as_array)
-            .map(|files| {
+            .is_some_and(|files| {
                 files.iter().any(|file| {
                     file.get("path").and_then(Value::as_str) == Some(&relative_path)
                         && file.get("sha256").and_then(Value::as_str) == Some(actual_hash.as_str())
                 })
             })
-            .unwrap_or(false)
 }

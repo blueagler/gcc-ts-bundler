@@ -38,7 +38,7 @@ pub(crate) fn closure_input_codegen_options() -> oxc_codegen::CodegenOptions {
 
 #[cfg(test)]
 mod comments_policy {
-    use super::*;
+    use super::{closure_input_codegen_options, Codegen, SourceType};
 
     fn emit(source: &str) -> String {
         let allocator = oxc_allocator::Allocator::default();

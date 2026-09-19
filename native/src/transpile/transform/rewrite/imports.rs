@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -11,7 +12,7 @@ use oxc_span::SourceType;
 use oxc_span::SPAN;
 use oxc_str::Str;
 
-use super::super::super::lowering::EnumValue;
+use super::super::super::lowering::EnumValues;
 use super::super::super::{
     resolve_relative_module, to_bundler_runtime_module_id, ChunkMode, LazyImportInput,
     TranspileContext,
@@ -76,7 +77,7 @@ impl<'a> VisitMut<'a> for DynamicImportRewriter<'a, '_> {
         let module_id = Expression::new_string_literal(
             SPAN,
             Str::from_in(
-                &to_bundler_runtime_module_id(&lazy_import.moduleId),
+                &to_bundler_runtime_module_id(&lazy_import.module_id),
                 self.allocator,
             ),
             None,
@@ -96,12 +97,24 @@ impl<'a> VisitMut<'a> for DynamicImportRewriter<'a, '_> {
 pub(crate) fn collect_imported_enum_values(
     file_path: &Path,
     program: &oxc_ast::ast::Program<'_>,
-) -> HashMap<String, HashMap<String, EnumValue>> {
+    context: &TranspileContext,
+) -> EnumValues {
     let mut imported = HashMap::new();
     for statement in &program.body {
         let oxc_ast::ast::Statement::ImportDeclaration(import) = statement else {
             continue;
         };
+        let Some(specifiers) = &import.specifiers else {
+            continue;
+        };
+        if !specifiers.iter().any(|specifier| {
+            matches!(
+                specifier,
+                oxc_ast::ast::ImportDeclarationSpecifier::ImportSpecifier(_)
+            )
+        }) {
+            continue;
+        }
         let specifier = import.source.value.as_str();
         if !specifier.starts_with('.') {
             continue;
@@ -109,18 +122,15 @@ pub(crate) fn collect_imported_enum_values(
         let Some(resolved_path) = resolve_relative_module(file_path, specifier) else {
             continue;
         };
-        let mut target_values = enum_values_from_file(&resolved_path);
+        let mut target_values = enum_values_from_file(&resolved_path, context);
         if target_values.is_empty() {
             for candidate in enum_metadata_candidate_paths(&resolved_path) {
-                target_values = enum_values_from_file(&candidate);
+                target_values = enum_values_from_file(&candidate, context);
                 if !target_values.is_empty() {
                     break;
                 }
             }
         }
-        let Some(specifiers) = &import.specifiers else {
-            continue;
-        };
         for specifier in specifiers {
             let oxc_ast::ast::ImportDeclarationSpecifier::ImportSpecifier(named) = specifier else {
                 continue;
@@ -142,19 +152,24 @@ pub(crate) fn collect_imported_enum_values(
     imported
 }
 
-fn enum_values_from_file(path: &Path) -> HashMap<String, HashMap<String, EnumValue>> {
+fn enum_values_from_file<'a>(path: &Path, context: &'a TranspileContext) -> Cow<'a, EnumValues> {
+    if let Some(values) = context.authored_enum_values.get(path) {
+        return Cow::Borrowed(values);
+    }
     let Ok(source) = std::fs::read_to_string(path) else {
-        return HashMap::new();
+        return Cow::Owned(HashMap::new());
     };
     let Ok(source_type) = SourceType::from_path(path) else {
-        return HashMap::new();
+        return Cow::Owned(HashMap::new());
     };
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, &source, source_type.with_module(true)).parse();
     if !parsed.diagnostics.is_empty() {
-        return HashMap::new();
+        return Cow::Owned(HashMap::new());
     }
-    super::super::super::lowering::collect_enum_values(&parsed.program)
+    Cow::Owned(super::super::super::lowering::collect_enum_values(
+        &parsed.program,
+    ))
 }
 
 fn enum_metadata_candidate_paths(resolved_path: &Path) -> Vec<PathBuf> {

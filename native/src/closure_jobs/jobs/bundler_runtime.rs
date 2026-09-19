@@ -1,4 +1,28 @@
-use super::super::*;
+use std::collections::{BTreeMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use crate::pathing::{
+    bundler_runtime_ids_are_readable, to_bundler_runtime_chunk_id, to_bundler_runtime_module_id,
+    to_goog_module_id,
+};
+
+use super::super::chunk_plan::ResolvedClosureChunk;
+use super::super::externs::{
+    collect_effective_extern_paths, select_bundler_runtime_closure_lib_files,
+    select_effective_extern_paths, unique_paths, ClosureLibScanner,
+};
+use super::super::runtime::{
+    bundler_runtime_output_file_name, needs_custom_elements_es5_adapter,
+    render_bundler_runtime_base_chunk, render_bundler_runtime_lazy_chunk_with_alias_suffix,
+    render_bundler_runtime_preamble_part, runtime_alias_suffix, BundlerRuntimeBaseChunkInput,
+    BundlerRuntimeInitChunk, BundlerRuntimeInitManifest, BundlerRuntimeManifest,
+    BundlerRuntimeManifestChunk, RuntimeCapabilities, RuntimePreamblePart,
+};
+use super::super::{
+    ChunkOutputType, ClosureCompileJob, GeneratedAsset, PostprocessAction, PrepareClosureJobsInput,
+    PrepareClosureJobsOutput, BUNDLER_RUNTIME_PREFIX_NAMESPACE,
+};
 use super::shared::{aggregate_type_metadata, property_renaming_report_path};
 use crate::transpile::assigners::collect_annotated_assigner_names;
 use oxc_allocator::Allocator;
@@ -6,7 +30,6 @@ use oxc_ast::ast::{Argument, BindingPattern, Expression, IdentifierReference, Pr
 use oxc_ast::AstKind;
 use oxc_semantic::{Semantic, SemanticBuilder, SymbolId};
 use oxc_span::SourceType;
-use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, serde::Serialize)]
 struct DebugBundlerRuntimeInitManifest(
@@ -71,7 +94,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         for file_path in &chunk.files {
             let source_text = fs::read_to_string(file_path).map_err(|error| error.to_string())?;
             let module_id =
-                to_goog_module_id(Path::new(file_path), Path::new(&input.emittedOutDir));
+                to_goog_module_id(Path::new(file_path), Path::new(&input.emitted_out_dir));
             let runtime_module_id = to_bundler_runtime_module_id(&module_id);
             if source_text.contains("__register(") {
                 registered_runtime_ids.insert(runtime_module_id.clone());
@@ -94,7 +117,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
                 modules: manifest_modules,
                 url: format!(
                     "{}{}",
-                    input.publicPath,
+                    input.public_path,
                     bundler_runtime_output_file_name(
                         &chunk.name,
                         &runtime_chunk_id,
@@ -115,14 +138,14 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         .collect::<BTreeMap<_, _>>();
 
     let manifest = BundlerRuntimeManifest {
-        baseChunk: runtime_chunk_id_by_name
+        base_chunk: runtime_chunk_id_by_name
             .get(&base_chunk.name)
             .cloned()
             .ok_or_else(|| format!("Missing runtime chunk id for {}", base_chunk.name))?,
         chunks: manifest_chunks,
-        loader: input.chunkLoader.clone(),
+        loader: input.chunk_loader.clone(),
         modules: module_map,
-        publicPath: input.publicPath.clone(),
+        public_path: input.public_path.clone(),
     };
     let runtime_chunks = resolved_chunks
         .iter()
@@ -168,10 +191,10 @@ pub(crate) fn prepare_bundler_runtime_jobs(
     let base_chunk_index = *chunk_index_by_name
         .get(&base_chunk.name)
         .ok_or_else(|| format!("Missing base chunk index for {}", base_chunk.name))?;
-    let public_path = if input.publicPath == "./" {
+    let public_path = if input.public_path == "./" {
         String::new()
     } else {
-        input.publicPath.clone()
+        input.public_path.clone()
     };
     let runtime_manifest_json = if runtime_debug {
         serde_json::to_string(&DebugBundlerRuntimeInitManifest(
@@ -198,20 +221,20 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         .map_err(|error| error.to_string())?
     };
 
-    let mut effective_externs = collect_effective_extern_paths(
-        &input.packageRoot,
-        &input.explicitExternPaths,
-        &input.generatedExternPaths,
-        Some(&input.nativeExternPath),
+    let effective_externs = collect_effective_extern_paths(
+        &input.package_root,
+        &input.explicit_extern_paths,
+        &input.generated_externs,
+        Some(&input.native_extern_path),
         None,
     )?;
-    effective_externs = unique_paths(effective_externs);
+    let effective_externs = select_effective_extern_paths(&effective_externs, None);
     let property_renaming_report_path =
-        property_renaming_report_path(raw_dir, &input.compilationLevel, &base_chunk.name);
-    let leading_js_inputs = unique_paths(input.explicitJsInputs.clone());
+        property_renaming_report_path(raw_dir, &input.compilation_level, &base_chunk.name);
+    let leading_js_inputs = unique_paths(input.explicit_js_inputs.clone());
 
-    if !input.manifestFile.is_empty() {
-        let manifest_path = PathBuf::from(&input.outDir).join(&input.manifestFile);
+    if !input.manifest_file.is_empty() {
+        let manifest_path = PathBuf::from(&input.out_dir).join(&input.manifest_file);
         generated_assets.push(GeneratedAsset {
             path: manifest_path.to_string_lossy().to_string(),
             text: format!(
@@ -252,7 +275,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         .collect::<Vec<_>>()
         .join("\n");
     let include_custom_elements_es5_adapter =
-        needs_custom_elements_es5_adapter(&input.languageOut, &all_module_contents);
+        needs_custom_elements_es5_adapter(&input.language_out, &all_module_contents);
 
     // Every optional runtime block hangs off the global `__g` object, so
     // Closure can never prove one dead. Deciding here is the only place the
@@ -265,7 +288,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
     // *after* the compile, so it passes its pre-compile CSS-ownership answer
     // in through `needsCssRuntime`.
     let capabilities = RuntimeCapabilities {
-        css: input.needsCssRuntime || manifest.chunks.values().any(|chunk| !chunk.css.is_empty()),
+        css: input.needs_css_runtime || manifest.chunks.values().any(|chunk| !chunk.css.is_empty()),
         entry_runner: base_entry_points_json != "[]",
         live_exports: calls_runtime_helper(&all_module_contents, "__live"),
         preload: calls_runtime_helper(&all_module_contents, "__preloadDynamicImport"),
@@ -280,7 +303,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
     let elide_runtime = chunk_output_type.is_esm()
         && resolved_chunks.len() == 1
         && base_chunk.dependencies.is_empty()
-        && !input.hasPreservedModules
+        && !input.has_preserved_modules
         && !all_module_contents.contains("__VITE_WORKER_ASSET__")
         && !capabilities.css
         && !capabilities.entry_runner
@@ -302,19 +325,15 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         .first()
         .filter(|chunk| chunk.name != base_chunk.name)
         .map(|chunk| chunk.name.clone());
-    let runtime_core = runtime_core_chunk_name
-        .as_ref()
-        .map(|_| {
-            render_bundler_runtime_preamble_part(
-                &runtime_manifest_json,
-                !runtime_debug,
-                runtime_debug,
-                chunk_output_type,
-                RuntimePreamblePart::Core,
-                capabilities,
-            )
-        })
-        .transpose()?;
+    let runtime_core = runtime_core_chunk_name.as_ref().map(|_| {
+        render_bundler_runtime_preamble_part(
+            &runtime_manifest_json,
+            runtime_debug,
+            chunk_output_type,
+            RuntimePreamblePart::Core,
+            capabilities,
+        )
+    });
 
     let mut linked_chunk_paths = Vec::new();
     for chunk in resolved_chunks {
@@ -324,15 +343,14 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         let chunk_index = *chunk_index_by_name
             .get(&chunk.name)
             .ok_or_else(|| format!("Missing chunk index for {}", chunk.name))?;
-        let rewritten_module_text = (!runtime_debug)
-            .then(|| rewrite_runtime_module_ids(module_text, &runtime_module_index_by_id))
-            .transpose()?;
-        let module_text = rewritten_module_text.as_deref().unwrap_or(module_text);
-        // Module-id replacement runs first because it keys generated calls by
-        // resolver identity before their per-chunk aliases are renamed.
         let requested_alias_suffix = runtime_alias_suffix(chunk_index, chunk_output_type);
-        let alias_rewrite = rename_runtime_aliases(module_text, &requested_alias_suffix)?;
-        let module_text = alias_rewrite.text.as_deref().unwrap_or(module_text);
+        let rewrite = rewrite_runtime_source(
+            module_text,
+            &runtime_module_index_by_id,
+            runtime_debug,
+            &requested_alias_suffix,
+        )?;
+        let module_text = rewrite.text.as_deref().unwrap_or(module_text);
         // The transpiler annotated these; reading the marker back out of the
         // assembled text is what carries the list across the per-module file
         // boundary, and keeps the pin exactly in step with what was annotated.
@@ -346,24 +364,22 @@ pub(crate) fn prepare_bundler_runtime_jobs(
             Vec::new()
         };
         let source_text = if chunk.name == base_chunk.name {
-            render_bundler_runtime_base_chunk_with_alias_suffix(
-                base_chunk_index,
-                &base_entry_points_json,
-                &input.chunkLoader,
-                &runtime_manifest_json,
-                !runtime_debug,
+            render_bundler_runtime_base_chunk(&BundlerRuntimeBaseChunkInput {
+                chunk_id: base_chunk_index,
+                entry_points_json: &base_entry_points_json,
+                manifest_json: &runtime_manifest_json,
                 module_text,
                 include_custom_elements_es5_adapter,
                 runtime_debug,
                 chunk_output_type,
-                if runtime_core.is_some() {
+                preamble_part: if runtime_core.is_some() {
                     RuntimePreamblePart::ManifestOnly
                 } else {
                     RuntimePreamblePart::All
                 },
-                &alias_rewrite.suffix,
+                suffix: &rewrite.suffix,
                 capabilities,
-            )?
+            })
         } else {
             render_bundler_runtime_lazy_chunk_with_alias_suffix(
                 chunk_index,
@@ -373,7 +389,7 @@ pub(crate) fn prepare_bundler_runtime_jobs(
                     .filter(|name| *name == chunk.name)
                     .and(runtime_core.as_deref()),
                 &assigner_names,
-                &alias_rewrite.suffix,
+                &rewrite.suffix,
                 capabilities,
             )
         };
@@ -385,28 +401,15 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         linked_chunk_paths.push((chunk.name.clone(), source_path));
     }
 
-    let mut closure_lib_files =
-        select_bundler_runtime_closure_lib_files(&input.packageRoot, &leading_js_inputs)?;
+    let mut helper_requirements =
+        ClosureLibScanner::default().scan(input.explicit_js_inputs.iter())?;
     // Linked chunks are generated in memory and are not written until the job
-    // executes, so file-based selection cannot inspect them here. Include the
-    // reflect runtime when native emission introduced a goog.reflect call.
-    if generated_assets
-        .iter()
-        .any(|asset| asset.text.contains("goog.reflect."))
-    {
-        let closure_lib_dir = Path::new(&input.packageRoot).join("closure-lib");
-        closure_lib_files.extend([
-            closure_lib_dir
-                .join("base.js")
-                .to_string_lossy()
-                .to_string(),
-            closure_lib_dir
-                .join("reflect.js")
-                .to_string_lossy()
-                .to_string(),
-        ]);
-        closure_lib_files = unique_paths(closure_lib_files);
+    // executes. Observe them directly instead of reading their output paths.
+    for asset in &generated_assets {
+        helper_requirements.observe(&asset.text);
     }
+    let closure_lib_files =
+        select_bundler_runtime_closure_lib_files(&input.package_root, helper_requirements);
     let chunk_specs = resolved_chunks
         .iter()
         .enumerate()
@@ -455,17 +458,17 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         // ES_MODULES already implies `setAssumeGlobalScopeIsIsolated(true)`
         // inside the compiler; passing the flag as well is a no-op there and
         // keeps script mode unchanged, so there is one value for both modes.
-        assumeFunctionWrapper: true,
+        assume_function_wrapper: true,
         chunk: Some(chunk_specs),
-        chunkOutputType: chunk_output_type.is_esm().then(|| "ES_MODULES".to_string()),
-        chunkOutputPathPrefix: Some(format!(
+        chunk_output_type: chunk_output_type.is_esm().then(|| "ES_MODULES".to_string()),
+        chunk_output_path_prefix: Some(format!(
             "{}{}",
             raw_dir.to_string_lossy(),
             std::path::MAIN_SEPARATOR
         )),
-        compilationLevel: input.compilationLevel.clone(),
-        dependencyMode: None,
-        entryPoint: None,
+        compilation_level: input.compilation_level.clone(),
+        dependency_mode: None,
+        entry_point: None,
         externs: effective_externs,
         js: unique_paths(
             leading_js_inputs
@@ -475,22 +478,22 @@ pub(crate) fn prepare_bundler_runtime_jobs(
                 .chain(chunk_sources)
                 .collect(),
         ),
-        jsOutputFile: None,
-        languageIn: "UNSTABLE".to_string(),
-        languageOut: input.languageOut.clone(),
-        propertyRenamingReportPath: property_renaming_report_path.clone(),
+        js_output_file: None,
+        language_in: "UNSTABLE".to_string(),
+        language_out: input.language_out.clone(),
+        property_renaming_report_path: property_renaming_report_path.clone(),
         // Hoisted module code is top level, so Closure prefixes every
         // cross-chunk survivor onto $gcc. Postprocess wraps each output chunk
         // in an IIFE that redeclares $gcc from globalThis, so direct
         // cross-chunk identifier references resolve through one shared object.
         // ES_MODULES gets real `import`/`export` edges instead, and Closure
         // rejects the flag outright in that mode.
-        renamePrefixNamespace: (!chunk_output_type.is_esm())
+        rename_prefix_namespace: (!chunk_output_type.is_esm())
             .then(|| BUNDLER_RUNTIME_PREFIX_NAMESPACE.to_string()),
-        rewritePolyfills: false,
-        warningLevel: warning_level.to_string(),
-        hasTypeMetadata: has_type_metadata,
-        typeMetadataCounts: type_metadata_counts,
+        rewrite_polyfills: false,
+        warning_level: warning_level.to_string(),
+        has_type_metadata,
+        type_metadata_counts,
     });
 
     for chunk in resolved_chunks {
@@ -501,9 +504,9 @@ pub(crate) fn prepare_bundler_runtime_jobs(
         let final_chunk_file_name =
             bundler_runtime_output_file_name(&chunk.name, &internal_chunk_name, &base_chunk.name);
         let output_path = raw_dir.join(format!("{}.js", internal_chunk_name));
-        let final_output_path = PathBuf::from(&input.outDir).join(final_chunk_file_name);
+        let final_output_path = PathBuf::from(&input.out_dir).join(final_chunk_file_name);
         postprocess_actions.push(PostprocessAction {
-            inputPath: output_path.to_string_lossy().to_string(),
+            input_path: output_path.to_string_lossy().to_string(),
             // Compile the ordinary runtime-shaped input so removing an unused
             // eager-only envelope cannot perturb Closure's optimization of the
             // application body. The postprocess action strips only the two
@@ -514,20 +517,20 @@ pub(crate) fn prepare_bundler_runtime_jobs(
             } else {
                 "copy".to_string()
             },
-            outputPath: final_output_path.to_string_lossy().to_string(),
+            output_path: final_output_path.to_string_lossy().to_string(),
         });
         published_outputs.push(final_output_path.to_string_lossy().to_string());
     }
 
     Ok(PrepareClosureJobsOutput {
-        bundlerRuntimeBaseInputPath: runtime_chunk_id_by_name
+        bundler_runtime_base_input_path: runtime_chunk_id_by_name
             .get(&base_chunk.name)
             .map(|internal_chunk_name| raw_dir.join(format!("{internal_chunk_name}.js")))
             .map(|path| path.to_string_lossy().to_string()),
-        compileJobs: compile_jobs,
-        generatedAssets: generated_assets,
-        postprocessActions: postprocess_actions,
-        publishedOutputs: published_outputs,
+        compile_jobs,
+        generated_assets,
+        postprocess_actions,
+        published_outputs,
     })
 }
 
@@ -570,17 +573,19 @@ const RUNTIME_ALIAS_NAMES: [&str; 4] = [
     "__preloadDynamicImport",
 ];
 
-struct RuntimeAliasRewrite {
+struct RuntimeSourceRewrite {
     text: Option<String>,
     suffix: String,
 }
 
-fn rename_runtime_aliases(
+fn rewrite_runtime_source(
     source_text: &str,
+    runtime_module_index_by_id: &BTreeMap<String, usize>,
+    runtime_debug: bool,
     requested_suffix: &str,
-) -> std::result::Result<RuntimeAliasRewrite, String> {
-    if requested_suffix.is_empty() {
-        return Ok(RuntimeAliasRewrite {
+) -> Result<RuntimeSourceRewrite, String> {
+    if runtime_debug && requested_suffix.is_empty() {
+        return Ok(RuntimeSourceRewrite {
             text: None,
             suffix: String::new(),
         });
@@ -589,179 +594,151 @@ fn rename_runtime_aliases(
     let program = parse_runtime_program(&allocator, source_text)?;
     let semantic = build_runtime_semantic(&program);
 
-    let mut targets = Vec::<(usize, usize, &'static str)>::new();
-    let mut used_names = HashSet::<String>::new();
+    let mut used_names = HashSet::<&str>::new();
+    let mut param_call_ids = HashSet::<SymbolId>::new();
     for node in semantic.nodes().iter() {
         match node.kind() {
-            AstKind::IdentifierReference(ident) => {
-                // Only a free reference to the generated helper is a rename
-                // target. A reference that resolves to any declaration in the
-                // file is an authored binding and must keep its spelling.
-                match RUNTIME_ALIAS_NAMES
-                    .into_iter()
-                    .find(|name| *name == ident.name.as_str())
-                    .filter(|_| is_unresolved(&semantic, ident))
+            AstKind::IdentifierReference(ident) if !requested_suffix.is_empty() => {
+                used_names.insert(ident.name.as_str());
+            }
+            AstKind::BindingIdentifier(ident) if !requested_suffix.is_empty() => {
+                used_names.insert(ident.name.as_str());
+            }
+            AstKind::LabelIdentifier(ident) if !requested_suffix.is_empty() => {
+                used_names.insert(ident.name.as_str());
+            }
+            AstKind::CallExpression(call) if !runtime_debug => {
+                let Expression::Identifier(callee) = &call.callee else {
+                    continue;
+                };
+                if callee.name != "__register"
+                    || runtime_reference_symbol(&semantic, callee)?.is_some()
                 {
-                    Some(name) => {
-                        targets.push((ident.span.start as usize, ident.span.end as usize, name))
-                    }
-                    None => {
-                        used_names.insert(ident.name.to_string());
-                    }
+                    continue;
                 }
-            }
-            // Binding and label names occupy the same namespace the suffix
-            // search has to dodge. Member and property names (oxc
-            // `IdentifierName`) deliberately do not, matching what swc's
-            // `Ident`-only visitor saw.
-            AstKind::BindingIdentifier(ident) => {
-                used_names.insert(ident.name.to_string());
-            }
-            AstKind::LabelIdentifier(ident) => {
-                used_names.insert(ident.name.to_string());
+                let Some(callback) = call.arguments.get(1).and_then(Argument::as_expression) else {
+                    continue;
+                };
+                let params = match callback {
+                    Expression::FunctionExpression(function) => &function.params,
+                    Expression::ArrowFunctionExpression(arrow) => &arrow.params,
+                    _ => continue,
+                };
+                // Registry factories receive require, exports, import, preload,
+                // live. Only positions 0, 2, and 3 take a module ID.
+                for index in [0, 2, 3] {
+                    let Some(parameter) = params.items.get(index) else {
+                        continue;
+                    };
+                    let BindingPattern::BindingIdentifier(binding) = &parameter.pattern else {
+                        continue;
+                    };
+                    param_call_ids.insert(binding.symbol_id.get().ok_or_else(|| {
+                        format!(
+                            "Missing semantic binding for runtime parameter {}",
+                            binding.name
+                        )
+                    })?);
+                }
             }
             _ => {}
         }
     }
 
     let mut suffix = requested_suffix.to_string();
-    let mut counter = 1usize;
-    while RUNTIME_ALIAS_DECL_NAMES
-        .iter()
-        .any(|name| used_names.contains(&format!("{name}{suffix}")))
-    {
-        suffix = format!("{requested_suffix}_{counter}");
-        counter += 1;
-    }
-    let edits = targets
-        .into_iter()
-        .map(|(start, end, name)| (start, end, format!("{name}{suffix}")))
-        .collect();
-    Ok(RuntimeAliasRewrite {
-        text: Some(apply_runtime_source_edits(source_text, edits)?),
-        suffix,
-    })
-}
-
-#[derive(Clone, Copy)]
-enum RuntimeCallKind {
-    Register,
-    Require,
-    DynamicImport,
-    PreloadDynamicImport,
-}
-
-fn rewrite_runtime_module_ids(
-    source_text: &str,
-    runtime_module_index_by_id: &BTreeMap<String, usize>,
-) -> std::result::Result<String, String> {
-    let allocator = Allocator::default();
-    let program = parse_runtime_program(&allocator, source_text)?;
-    let semantic = build_runtime_semantic(&program);
-
-    // Every registry facade rebinds the helpers as callback parameters, so the
-    // parameter symbols are as much a call site as the free global is. Position
-    // in the facade signature is what names them.
-    let mut param_call_ids = HashMap::<SymbolId, RuntimeCallKind>::new();
-    for node in semantic.nodes().iter() {
-        let AstKind::CallExpression(call) = node.kind() else {
-            continue;
-        };
-        let Expression::Identifier(callee) = &call.callee else {
-            continue;
-        };
-        if callee.name != "__register" || !is_unresolved(&semantic, callee) {
-            continue;
-        }
-        let Some(callback) = call.arguments.get(1).and_then(Argument::as_expression) else {
-            continue;
-        };
-        let params = match callback {
-            Expression::FunctionExpression(function) => &function.params,
-            Expression::ArrowFunctionExpression(arrow) => &arrow.params,
-            _ => continue,
-        };
-        for (index, parameter) in params.items.iter().enumerate() {
-            let BindingPattern::BindingIdentifier(binding) = &parameter.pattern else {
-                continue;
-            };
-            let kind = match index {
-                0 => RuntimeCallKind::Require,
-                2 => RuntimeCallKind::DynamicImport,
-                3 => RuntimeCallKind::PreloadDynamicImport,
-                _ => continue,
-            };
-            param_call_ids.insert(binding.symbol_id(), kind);
+    if !requested_suffix.is_empty() {
+        let mut counter = 1usize;
+        while RUNTIME_ALIAS_DECL_NAMES
+            .iter()
+            .any(|name| used_names.contains(format!("{name}{suffix}").as_str()))
+        {
+            suffix = format!("{requested_suffix}_{counter}");
+            counter += 1;
         }
     }
 
-    let mut edits = Vec::<(usize, usize, String)>::new();
-    let mut errors = Vec::<String>::new();
+    // Both replacements use the original semantic identities and byte spans:
+    // alias identifiers and module-ID literals are disjoint, even in one call.
+    let mut edits = Vec::new();
+    let mut errors = Vec::new();
     for node in semantic.nodes().iter() {
-        let AstKind::CallExpression(call) = node.kind() else {
-            continue;
-        };
-        let Expression::Identifier(callee) = &call.callee else {
-            continue;
-        };
-        if runtime_call_kind(&semantic, callee, &param_call_ids).is_none() {
-            continue;
+        match node.kind() {
+            AstKind::IdentifierReference(ident)
+                if !suffix.is_empty() && RUNTIME_ALIAS_NAMES.contains(&ident.name.as_str()) =>
+            {
+                // Facade parameters and authored bindings keep their spelling.
+                if runtime_reference_symbol(&semantic, ident)?.is_none() {
+                    edits.push((
+                        ident.span.start as usize,
+                        ident.span.end as usize,
+                        format!("{}{suffix}", ident.name),
+                    ));
+                }
+            }
+            AstKind::CallExpression(call) if !runtime_debug => {
+                let Expression::Identifier(callee) = &call.callee else {
+                    continue;
+                };
+                if !is_runtime_call(&semantic, callee, &param_call_ids)? {
+                    continue;
+                }
+                let Some(Expression::StringLiteral(module_id)) =
+                    call.arguments.first().and_then(Argument::as_expression)
+                else {
+                    continue;
+                };
+                let Some(module_index) = runtime_module_index_by_id.get(module_id.value.as_str())
+                else {
+                    errors.push(format!("Missing module index for {}", module_id.value));
+                    continue;
+                };
+                edits.push((
+                    module_id.span.start as usize,
+                    module_id.span.end as usize,
+                    module_index.to_string(),
+                ));
+            }
+            _ => {}
         }
-        let Some(argument) = call.arguments.first().and_then(Argument::as_expression) else {
-            continue;
-        };
-        let Expression::StringLiteral(module_id) = argument else {
-            continue;
-        };
-        let Some(module_index) = runtime_module_index_by_id.get(module_id.value.as_str()) else {
-            errors.push(format!("Missing module index for {}", module_id.value));
-            continue;
-        };
-        // oxc spans are plain byte offsets into `source_text`, so the literal's
-        // span - quotes included - is already the replacement range.
-        edits.push((
-            module_id.span.start as usize,
-            module_id.span.end as usize,
-            module_index.to_string(),
-        ));
     }
     if !errors.is_empty() {
         return Err(errors.join("\n"));
     }
-    apply_runtime_source_edits(source_text, edits)
+    Ok(RuntimeSourceRewrite {
+        text: if edits.is_empty() {
+            None
+        } else {
+            Some(apply_runtime_source_edits(source_text, edits)?)
+        },
+        suffix,
+    })
 }
 
-/// Which generated helper a callee names, if any: either a free reference to
-/// the global spelling or a reference to a facade parameter that rebound it.
-fn runtime_call_kind(
+/// A runtime call is either a free helper or a facade parameter reference.
+fn is_runtime_call(
     semantic: &Semantic<'_>,
     callee: &IdentifierReference<'_>,
-    param_call_ids: &HashMap<SymbolId, RuntimeCallKind>,
-) -> Option<RuntimeCallKind> {
-    match semantic
-        .scoping()
-        .get_reference(callee.reference_id())
-        .symbol_id()
-    {
-        Some(symbol_id) => param_call_ids.get(&symbol_id).copied(),
-        None => match callee.name.as_str() {
-            "__register" => Some(RuntimeCallKind::Register),
-            "__require" => Some(RuntimeCallKind::Require),
-            "__dynamicImport" => Some(RuntimeCallKind::DynamicImport),
-            "__preloadDynamicImport" => Some(RuntimeCallKind::PreloadDynamicImport),
-            _ => None,
-        },
-    }
+    param_call_ids: &HashSet<SymbolId>,
+) -> Result<bool, String> {
+    Ok(match runtime_reference_symbol(semantic, callee)? {
+        Some(symbol_id) => param_call_ids.contains(&symbol_id),
+        None => RUNTIME_ALIAS_NAMES.contains(&callee.name.as_str()),
+    })
 }
 
-/// True when the reference resolves to no declaration in this file, which is
-/// oxc's equivalent of swc's "carries the unresolved mark".
-fn is_unresolved(semantic: &Semantic<'_>, ident: &IdentifierReference<'_>) -> bool {
-    semantic
-        .scoping()
-        .get_reference(ident.reference_id())
-        .symbol_id()
-        .is_none()
+/// A valid semantic reference can be unresolved; a missing reference is instead
+/// an error because it cannot prove whether a runtime helper is authored.
+fn runtime_reference_symbol(
+    semantic: &Semantic<'_>,
+    ident: &IdentifierReference<'_>,
+) -> Result<Option<SymbolId>, String> {
+    let reference_id = ident.reference_id.get().ok_or_else(|| {
+        format!(
+            "Missing semantic reference for runtime identifier {}",
+            ident.name
+        )
+    })?;
+    Ok(semantic.scoping().get_reference(reference_id).symbol_id())
 }
 
 fn parse_runtime_program<'a>(
@@ -780,7 +757,7 @@ fn parse_runtime_program<'a>(
 /// an authored binding that happens to share the name.
 ///
 /// `with_build_nodes` is off by default and leaves `Semantic::nodes` empty, so
-/// both passes below would silently find nothing to rewrite.
+/// the rewrite would silently find nothing.
 fn build_runtime_semantic<'a>(program: &'a Program<'a>) -> Semantic<'a> {
     SemanticBuilder::new()
         .with_build_nodes(true)
@@ -794,67 +771,102 @@ fn apply_runtime_source_edits(
 ) -> std::result::Result<String, String> {
     edits.sort_by_key(|(start, _, _)| *start);
     let mut output = source_text.to_string();
+    let mut previous_start = source_text.len();
     for (start, end, replacement) in edits.into_iter().rev() {
         if start > end
-            || end > output.len()
-            || !output.is_char_boundary(start)
-            || !output.is_char_boundary(end)
+            || end > previous_start
+            || !source_text.is_char_boundary(start)
+            || !source_text.is_char_boundary(end)
         {
             return Err("Invalid bundler-runtime source edit span".to_string());
         }
         output.replace_range(start..end, &replacement);
+        previous_start = start;
     }
     Ok(output)
 }
 
 #[cfg(test)]
 mod identity_regressions {
-    use super::*;
+    use std::collections::BTreeMap;
+
+    use super::rewrite_runtime_source;
 
     #[test]
-    fn runtime_text_rewrites_skip_literals_and_authored_bindings() {
+    fn runtime_text_rewrites_skip_literals_and_authored_bindings(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let source = concat!(
             "function __require(id){return id;}\n",
             "globalThis.label='__require';\n",
             "globalThis.local=__require(\"user-value\");\n",
-            "__register(\"m0\",function(__require,__exports,__dynamicImport,__preloadDynamicImport,__live){",
-            "return __require(\"m1\");});\n",
-);
-        let rewritten = rewrite_runtime_module_ids(
+            "__register(\"m0\",function(read,exports,load,preload,live){",
+            "exports(\"authored\");live(\"authored\");",
+            "function nested(read){return read(\"authored\");}",
+            "load(\"m1\");preload(\"m1\");return read(\"m1\");});\n",
+            "__register(\"m1\",(read,exports,load)=>load(\"m0\"));\n",
+            "__dynamicImport(\"m1\");",
+        );
+        let rewritten = rewrite_runtime_source(
             source,
             &BTreeMap::from([("m0".to_string(), 0), ("m1".to_string(), 1)]),
-        )
-        .expect("runtime ids");
+            false,
+            "_0",
+        )?
+        .text
+        .ok_or("rewritten text")?;
         assert!(rewritten.contains("label='__require'"), "{rewritten}");
         assert!(
             rewritten.contains("__require(\"user-value\")"),
             "{rewritten}"
         );
-        assert!(rewritten.contains("__register(0"), "{rewritten}");
-        assert!(rewritten.contains("return __require(1)"), "{rewritten}");
+        assert!(rewritten.contains("__register_0(0"), "{rewritten}");
+        assert!(rewritten.contains("return read(1)"), "{rewritten}");
+        assert!(rewritten.contains("load(1);preload(1)"), "{rewritten}");
+        assert!(
+            rewritten.contains("exports(\"authored\");live(\"authored\")"),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains("nested(read){return read(\"authored\");}"),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains("__register_0(1,(read,exports,load)=>load(0))"),
+            "{rewritten}"
+        );
+        assert!(rewritten.contains("__dynamicImport_0(1)"), "{rewritten}");
+        Ok(())
     }
 
     #[test]
     fn missing_generated_runtime_module_id_is_an_error() {
-        let error = rewrite_runtime_module_ids("__dynamicImport(\"missing\");", &BTreeMap::new())
-            .expect_err("missing id");
-        assert_eq!(error, "Missing module index for missing");
+        assert!(rewrite_runtime_source(
+            "__dynamicImport(\"missing\");",
+            &BTreeMap::new(),
+            false,
+            "_0",
+        )
+        .is_err());
     }
 
     #[test]
-    fn runtime_alias_plan_avoids_descendant_bindings() {
+    fn runtime_alias_plan_avoids_descendant_bindings() -> Result<(), Box<dyn std::error::Error>> {
         let source = concat!(
             "globalThis.label='__require';",
             "function use(__require_0){return __require_0;}",
             "const __runtime_0=1;",
-            "__require(0);",
+            "__require(\"readable-module\");",
         );
-        let rewritten = rename_runtime_aliases(source, "_0").expect("aliases");
+        let rewritten = rewrite_runtime_source(source, &BTreeMap::new(), true, "_0")?;
         assert_eq!(rewritten.suffix, "_0_1");
-        let code = rewritten.text.expect("rewritten text");
+        let code = rewritten.text.ok_or("rewritten text")?;
         assert!(code.contains("label='__require'"), "{code}");
         assert!(code.contains("function use(__require_0)"), "{code}");
         assert!(code.contains("const __runtime_0=1"), "{code}");
-        assert!(code.contains("__require_0_1(0)"), "{code}");
+        assert!(
+            code.contains("__require_0_1(\"readable-module\")"),
+            "{code}"
+        );
+        Ok(())
     }
 }

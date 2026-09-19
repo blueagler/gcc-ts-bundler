@@ -1,5 +1,5 @@
 export { collectViteTypeMetadata } from "./collect";
-export { resolveDeclarationOverlay } from "./declaration-overlay";
+export { resolveDeclarationOverlays } from "./declaration-overlay";
 export {
   joinDeclarationAndRuntimeExports,
   resolveRuntimeExportGraph,

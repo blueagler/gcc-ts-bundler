@@ -1,133 +1,113 @@
-import fs from "fs";
 import path from "path";
 import ts from "@typescript/typescript6";
 
-import { hashJson } from "../../shared/hash";
-import {
-  isRecord,
-  isRecordOf,
-  isString,
-  isStringArray,
-} from "../../shared/validation";
+import { isRecord } from "../../shared/validation";
 
-const compilerOptionsCache = new Map<string, ts.CompilerOptions>();
-const declarationFileCache = new Map<string, string[]>();
+export interface ParsedTsConfig {
+  configInputs: Record<string, string>;
+  parsed: ts.ParsedCommandLine;
+}
 
-/**
- * The `.d.ts` files this tsconfig puts in the program via `files`/`include`.
- *
- * Ambient declarations are global by design and imported by nobody, so they
- * never appear in the module graph. `tsc` still type-checks against them
- * because it seeds the program from the config, not from the import graph.
- * Reading them from the same parsed config the build already loads is how the
- * checker reaches parity with `tsc` — no heuristics, no name lists.
- *
- * Only declaration files are taken: implementation sources are reached through
- * the graph, and adding them would widen the analysis set rather than the
- * type-checking context.
- */
-export async function loadTsConfigDeclarationFiles(configPath: string) {
-  const configStat = await fs.promises.stat(configPath);
-  const cacheKey = hashJson({
-    configPath,
-    kind: "declaration-files",
-    mtimeMs: configStat.mtimeMs,
-    size: configStat.size,
-  });
-  const cached = declarationFileCache.get(cacheKey);
-  if (cached) {
-    return cached;
+/** Parse afresh: inherited configs and newly included declarations are inputs too. */
+export function parseTsConfig(
+  configPath: string,
+  explicitRootNames?: readonly string[],
+): ParsedTsConfig {
+  const configInputs: Record<string, string> = {};
+  const readFile = (filePath: string) => {
+    const resolvedPath = path.resolve(filePath);
+    if (Object.hasOwn(configInputs, resolvedPath)) {
+      return configInputs[resolvedPath];
+    }
+    const content = ts.sys.readFile(filePath);
+    if (content !== undefined) configInputs[resolvedPath] = content;
+    return content;
+  };
+  const config = ts.readConfigFile(configPath, readFile);
+  if (config.error) {
+    throw new Error(
+      ts.flattenDiagnosticMessageText(config.error.messageText, "\n"),
+    );
   }
-
-  const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
-  if (configFile.error) {
-    // A malformed tsconfig is reported by `loadCompilerOptions`; parity is a
-    // best-effort widening and must never be the thing that fails a build.
-    declarationFileCache.set(cacheKey, []);
-    return [];
-  }
-  const parsed = ts.parseJsonConfigFileContent(
-    isRecord(configFile.config) ? configFile.config : {},
-    ts.sys,
+  const rawConfig = isRecord(config.config) ? config.config : {};
+  const directoryInputs = new Map<string, string[]>();
+  const host: ts.ParseConfigHost = {
+    ...ts.sys,
+    readFile,
+    readDirectory(...args) {
+      const key = JSON.stringify(args);
+      const existing = directoryInputs.get(key);
+      if (existing) return existing;
+      const files = ts.sys.readDirectory(...args);
+      directoryInputs.set(key, files);
+      return files;
+    },
+  };
+  // Resolve the config's own membership before adding graph roots. Supplying
+  // files up front would replace inherited files and disable the default
+  // include, losing unimported ambient declarations. TypeScript mutates raw.
+  let parsed = ts.parseJsonConfigFileContent(
+    { ...rawConfig },
+    host,
     path.dirname(configPath),
     undefined,
     configPath,
   );
-  const declarationFiles = parsed.fileNames
+  if (explicitRootNames?.length) {
+    const files = rawConfig.files;
+    // The bundler owns runtime roots, not tsconfig discovery. Validate that
+    // actual combined input set rather than requiring a separate TS project.
+    // Keep malformed files values intact so their diagnostics still survive.
+    parsed = ts.parseJsonConfigFileContent(
+      {
+        ...rawConfig,
+        ...(files === undefined ||
+        (Array.isArray(files) &&
+          files.every((file) => typeof file === "string"))
+          ? { files: [...parsed.fileNames, ...explicitRootNames] }
+          : {}),
+      },
+      host,
+      path.dirname(configPath),
+      undefined,
+      configPath,
+    );
+  }
+  if (parsed.errors.length) {
+    throw new Error(
+      ts.formatDiagnosticsWithColorAndContext(
+        parsed.errors,
+        ts.createCompilerHost({}),
+      ),
+    );
+  }
+  return { configInputs, parsed };
+}
+
+/** Ambient declarations belong to the program even when no module imports them. */
+export async function loadTsConfigDeclarationFiles(
+  configPath: string,
+  tsConfig = parseTsConfig(configPath),
+) {
+  return tsConfig.parsed.fileNames
     .filter((fileName) => fileName.endsWith(".d.ts"))
     .map((fileName) => path.resolve(fileName))
     .sort();
-  declarationFileCache.set(cacheKey, declarationFiles);
-  return declarationFiles;
 }
 
 export async function loadCompilerOptions(
   configPath: string,
   extraOptions: ts.CompilerOptions = {},
+  tsConfig = parseTsConfig(configPath),
 ) {
-  const configStat = await fs.promises.stat(configPath);
-  const cacheKey = hashJson({
-    configPath,
-    extraOptions,
-    mtimeMs: configStat.mtimeMs,
-    size: configStat.size,
-  });
-  const cached = compilerOptionsCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
-  const configDir = path.dirname(configPath);
-  const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
-  if (configFile.error) {
-    throw new Error(
-      ts.flattenDiagnosticMessageText(configFile.error.messageText, "\n"),
-    );
-  }
-
-  const rawConfig: unknown = configFile.config;
-  const config = isRecord(rawConfig) ? rawConfig : {};
-  const compilerConfig = isRecord(config.compilerOptions)
-    ? config.compilerOptions
-    : {};
-  const configuredBaseUrl = isString(compilerConfig.baseUrl)
-    ? compilerConfig.baseUrl
-    : undefined;
-  const configuredIgnoreDeprecations = isString(
-    compilerConfig.ignoreDeprecations,
-  )
-    ? compilerConfig.ignoreDeprecations
-    : undefined;
-  const configuredPaths = isRecordOf(compilerConfig.paths, isStringArray)
-    ? compilerConfig.paths
-    : {};
-  const parsedConfig = ts.parseJsonConfigFileContent(
-    config,
-    ts.sys,
-    configDir,
-    {
-      ...extraOptions,
-      baseUrl: extraOptions.baseUrl ?? configuredBaseUrl ?? configDir,
-      ignoreDeprecations:
-        extraOptions.ignoreDeprecations ??
-        configuredIgnoreDeprecations ??
-        "6.0",
-      paths: {
-        ...configuredPaths,
-        ...(extraOptions.paths ?? {}),
-      },
-    },
-    configPath,
-  );
-  if (parsedConfig.errors.length > 0) {
-    throw new Error(
-      ts.formatDiagnosticsWithColorAndContext(
-        parsedConfig.errors,
-        ts.createCompilerHost({}),
-      ),
-    );
-  }
-
-  compilerOptionsCache.set(cacheKey, parsedConfig.options);
-  return parsedConfig.options;
+  const { options } = tsConfig.parsed;
+  return {
+    ...options,
+    ...extraOptions,
+    baseUrl:
+      extraOptions.baseUrl ?? options.baseUrl ?? path.dirname(configPath),
+    ignoreDeprecations:
+      extraOptions.ignoreDeprecations ?? options.ignoreDeprecations ?? "6.0",
+    paths: { ...options.paths, ...extraOptions.paths },
+  };
 }

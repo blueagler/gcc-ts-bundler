@@ -2,7 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    ArrayExpression, ArrowFunctionExpression, CallExpression, Expression, Function,
+    ObjectExpression, ObjectPropertyKind, PropertyKey, PropertyKind, Statement,
+};
 
 use super::super::wrappers_types::{DynamicImportObjectWrapper, DynamicImportWrappers};
 use super::resolve_dynamic_import_object_wrapper;
@@ -51,7 +54,9 @@ fn extract_dynamic_import_module_ids_from_arrow(
     if let Some(expression) = arrow.get_expression() {
         return extract_dynamic_import_module_ids_from_expr(expression, identity);
     }
-    let [Statement::ReturnStatement(return_statement)] = arrow.body.statements.as_slice() else {
+    let [Statement::ReturnStatement(return_statement)] =
+        arrow.get_function_body()?.statements.as_slice()
+    else {
         return None;
     };
     extract_dynamic_import_module_ids_from_expr(return_statement.argument.as_ref()?, identity)
@@ -121,7 +126,7 @@ fn extract_dynamic_import_object_wrapper_from_arrow(
             identity,
         );
     }
-    let argument = extract_wrapper_return_argument(&arrow.body.statements)?;
+    let argument = extract_wrapper_return_argument(&arrow.get_function_body()?.statements)?;
     resolve_dynamic_import_object_wrapper(argument, &HashMap::new(), wrappers, identity)
 }
 

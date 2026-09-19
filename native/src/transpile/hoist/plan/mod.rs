@@ -4,9 +4,21 @@ mod exports;
 mod scan;
 mod slots;
 
-use super::super::*;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
+
+use super::super::context::ExportTopology;
+#[cfg(test)]
+use super::super::{closure_metadata_key, PackageAliasInput};
+use super::super::{
+    should_normalize_commonjs, to_goog_module_id, ClosureFileMetadata, LazyImportInput,
+    TranspileChunkInput, TranspileContext,
+};
 use super::HoistPlan;
-use exports::{resolve_all_export_bindings, resolve_all_namespace_reexports};
+use crate::commonjs::CommonJsAnalysis;
+use exports::resolve_all_export_linkers;
 #[cfg(test)]
 use oxc_allocator::Allocator;
 use oxc_semantic::SemanticBuilder;
@@ -24,12 +36,21 @@ pub(crate) fn scan_hoist_module(
     workspace_dir: &Path,
     metadata: Option<&ClosureFileMetadata>,
     resolution_context: &TranspileContext,
+    commonjs_analysis: &CommonJsAnalysis,
+    topology: Option<ExportTopology>,
 ) -> std::result::Result<(String, ModuleScan), String> {
     let module_id = to_goog_module_id(file_path, workspace_dir);
-    let commonjs_analysis = crate::commonjs::analyze_commonjs_program(program);
-    let mut scan = if should_normalize_commonjs(file_path, &commonjs_analysis) {
-        scan_commonjs_module(file_path, &commonjs_analysis, resolution_context)
+    let mut scan = if should_normalize_commonjs(file_path, commonjs_analysis) {
+        scan_commonjs_module(file_path, commonjs_analysis, resolution_context)
     } else {
+        let topology = match topology {
+            Some(topology) => topology,
+            None => super::super::context::collect_export_topology(
+                program,
+                file_path,
+                resolution_context,
+            )?,
+        };
         let semantic = SemanticBuilder::new()
             .with_build_nodes(true)
             .with_enum_eval(true)
@@ -45,9 +66,10 @@ pub(crate) fn scan_hoist_module(
         let live_assigners = collect_state_writing_declarations(&semantic.semantic);
         let identity =
             super::super::identity::ModuleIdentity::new(semantic.semantic.into_scoping());
-        let mut scan = scan_esm_program(program, &identity, file_path, resolution_context);
+        let mut scan =
+            scan_esm_program(program, &identity, file_path, resolution_context, topology)?;
         scan.local_export_modes =
-            super::super::emit_runtime::collect_local_export_modes(program, &identity);
+            super::super::emit_runtime::collect_local_export_modes(program, &identity)?;
         scan.live_assigners = live_assigners;
         scan
     };
@@ -99,8 +121,10 @@ pub(crate) fn assemble_hoist_plan(
         .map(|(ordinal, module_id)| (module_id.clone(), ordinal))
         .collect::<HashMap<_, _>>();
 
-    let export_bindings = resolve_all_export_bindings(&scans);
-    let namespace_reexports = resolve_all_namespace_reexports(&scans);
+    let exports::ExportLinkers {
+        export_bindings,
+        namespace_reexports,
+    } = resolve_all_export_linkers(&scans);
     let reified_namespace_modules = scans
         .values()
         .flat_map(|scan| {
@@ -174,12 +198,15 @@ pub(crate) fn build_hoist_plan(
             };
         let allocator = Allocator::default();
         let program = super::super::parse_oxc_program(&allocator, &effective_path, source)?;
+        let commonjs_analysis = crate::commonjs::analyze_commonjs_program(&program);
         let (module_id, scan) = scan_hoist_module(
             &program,
             &file_path,
             workspace_dir,
             metadata,
             &resolution_context,
+            &commonjs_analysis,
+            None,
         )?;
         scans.insert(module_id, scan);
     }

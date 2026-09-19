@@ -1,4 +1,5 @@
 import type { ResolvedConfig } from "vite";
+import type { TransformOptions } from "rolldown/utils";
 
 import type { CapturedModuleResolutionCache } from "../capture";
 import type {
@@ -24,6 +25,7 @@ export async function materializeCapturedGraph(
     entryModuleIds: string[];
     metrics?: ViteBuildMetrics | undefined;
     moduleIds: string[];
+    nativeDefines: TransformOptions["define"];
     resolutionCache: CapturedModuleResolutionCache;
     srcDir: string;
   },
@@ -52,6 +54,7 @@ export async function materializeCapturedGraph(
     filePathByModuleId: records.filePathByModuleId,
     materializedModuleIds: classified.materializedModuleIds,
     metrics: input.metrics,
+    nativeDefines: input.nativeDefines,
     resolutionCache: input.resolutionCache,
     srcDir: input.srcDir,
   });

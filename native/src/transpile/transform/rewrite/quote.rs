@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use oxc_allocator::FromIn;
-use oxc_allocator::{Allocator, TakeIn};
+use oxc_allocator::{Allocator, FromIn, ReplaceWith};
 use oxc_ast::ast::{BindingPattern, Expression, Statement};
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk_mut, VisitMut};
@@ -9,22 +8,20 @@ use oxc_span::SPAN;
 use oxc_str::Str;
 
 use super::super::super::identity::{BindingKey, BindingKeySet, ModuleIdentity};
-use super::super::super::lowering::EnumValue;
+use super::super::super::lowering::EnumValues;
 
 pub(crate) fn quote_runtime_enum_members<'a>(
     allocator: &'a Allocator,
     program: &mut oxc_ast::ast::Program<'a>,
     identity: &ModuleIdentity,
-    enum_values: &HashMap<String, HashMap<String, EnumValue>>,
-) {
+    enum_values: &EnumValues,
+) -> Result<(), String> {
     let mut bindings = HashMap::<BindingKey, HashSet<String>>::new();
     for statement in &program.body {
         let declaration = match statement {
             Statement::VariableDeclaration(declaration) => Some(&**declaration),
-            Statement::ExportNamedDeclaration(export) => match export.declaration.as_ref() {
-                Some(oxc_ast::ast::Declaration::VariableDeclaration(declaration)) => {
-                    Some(&**declaration)
-                }
+            Statement::ExportDeclaration(export) => match &export.declaration {
+                oxc_ast::ast::Declaration::VariableDeclaration(declaration) => Some(&**declaration),
                 _ => None,
             },
             _ => None,
@@ -40,13 +37,13 @@ pub(crate) fn quote_runtime_enum_members<'a>(
                 continue;
             };
             bindings.insert(
-                identity.key_of_binding(binding),
+                ModuleIdentity::key_of_binding(binding)?,
                 members.keys().cloned().collect(),
             );
         }
     }
     if bindings.is_empty() {
-        return;
+        return Ok(());
     }
     struct EnumMemberQuoter<'a, 'i> {
         allocator: &'a Allocator,
@@ -66,23 +63,32 @@ pub(crate) fn quote_runtime_enum_members<'a>(
             let Some(binding) = self.identity.key_of_reference(object) else {
                 return;
             };
-            let property = member.property.name.to_string();
             if !self
                 .bindings
                 .get(&binding)
-                .is_some_and(|members| members.contains(&property))
+                .is_some_and(|members| members.contains(member.property.name.as_str()))
             {
                 return;
             }
-            let object = member.object.take_in(&self.builder);
-            let key = Expression::new_string_literal(
-                SPAN,
-                Str::from_in(&property, self.allocator),
-                None,
-                &self.builder,
-            );
-            *expression =
-                Expression::new_computed_member_expression(SPAN, object, key, false, &self.builder);
+            expression.replace_with(|expression| match expression {
+                Expression::StaticMemberExpression(member) => {
+                    let member = member.unbox();
+                    let key = Expression::new_string_literal(
+                        SPAN,
+                        Str::from_in(member.property.name.as_str(), self.allocator),
+                        None,
+                        &self.builder,
+                    );
+                    Expression::new_computed_member_expression(
+                        SPAN,
+                        member.object,
+                        key,
+                        member.optional,
+                        &self.builder,
+                    )
+                }
+                expression => expression,
+            });
         }
     }
     EnumMemberQuoter {
@@ -92,6 +98,7 @@ pub(crate) fn quote_runtime_enum_members<'a>(
         bindings,
     }
     .visit_program(program);
+    Ok(())
 }
 
 pub(crate) fn quote_opaque_commonjs_members<'a>(
@@ -99,9 +106,9 @@ pub(crate) fn quote_opaque_commonjs_members<'a>(
     program: &mut oxc_ast::ast::Program<'a>,
     identity: &ModuleIdentity,
     names: &HashSet<String>,
-) {
+) -> Result<(), String> {
     if names.is_empty() {
-        return;
+        return Ok(());
     }
     let mut bindings = BindingKeySet::new();
     for statement in &program.body {
@@ -110,7 +117,7 @@ pub(crate) fn quote_opaque_commonjs_members<'a>(
                 for specifier in import.specifiers.iter().flatten() {
                     let local = specifier.local();
                     if names.contains(local.name.as_str()) {
-                        bindings.insert(identity.key_of_binding(local));
+                        bindings.insert(ModuleIdentity::key_of_binding(local)?);
                     }
                 }
             }
@@ -118,7 +125,7 @@ pub(crate) fn quote_opaque_commonjs_members<'a>(
                 for declarator in &declaration.declarations {
                     if let BindingPattern::BindingIdentifier(binding) = &declarator.id {
                         if names.contains(binding.name.as_str()) {
-                            bindings.insert(identity.key_of_binding(binding));
+                            bindings.insert(ModuleIdentity::key_of_binding(binding)?);
                         }
                     }
                 }
@@ -133,6 +140,7 @@ pub(crate) fn quote_opaque_commonjs_members<'a>(
         identity,
     }
     .visit_program(program);
+    Ok(())
 }
 
 struct OpaqueCommonJsMemberQuoter<'a, 'i> {
@@ -158,23 +166,23 @@ impl<'a> VisitMut<'a> for OpaqueCommonJsMemberQuoter<'a, '_> {
         {
             return;
         }
-        let property = member.property.name.to_string();
-        let optional = member.optional;
-        let object = std::mem::replace(
-            &mut member.object,
-            Expression::new_null_literal(SPAN, &self.builder),
-        );
-        *expression = Expression::new_computed_member_expression(
-            SPAN,
-            object,
-            Expression::new_string_literal(
-                SPAN,
-                Str::from_in(&property, self.allocator),
-                None,
-                &self.builder,
-            ),
-            optional,
-            &self.builder,
-        );
+        expression.replace_with(|expression| match expression {
+            Expression::StaticMemberExpression(member) => {
+                let member = member.unbox();
+                Expression::new_computed_member_expression(
+                    SPAN,
+                    member.object,
+                    Expression::new_string_literal(
+                        SPAN,
+                        Str::from_in(member.property.name.as_str(), self.allocator),
+                        None,
+                        &self.builder,
+                    ),
+                    member.optional,
+                    &self.builder,
+                )
+            }
+            expression => expression,
+        });
     }
 }

@@ -1,4 +1,8 @@
-import { withInternalTiming } from "../../../shared/timing";
+import {
+  countInternalWork,
+  withInternalTiming,
+  withInternalTimingSync,
+} from "../../../shared/timing";
 import { withExplicitHideWarningsFor } from "../compiler";
 import { compilePreparedClosureJobs } from "../compile-jobs";
 import {
@@ -14,13 +18,24 @@ export type { ClosureStageResult } from "./types";
 export async function runClosureStage(
   input: ClosureStageInput,
 ): Promise<ClosureStageResult> {
-  const { cacheOutputDir } = await prepareClosureStageDirectories({
-    finalCacheDir: input.finalCacheDir,
-    outDir: input.outDir,
-  });
-  const { chunkOutputType, prepared } = prepareClosureStageJobs(input);
-  await writeGeneratedAssets(prepared.generatedAssets);
-  const exitCodes = await withInternalTiming("closure:compile", () =>
+  const { cacheOutputDir } = await withInternalTiming(
+    "closure:directories",
+    () =>
+      prepareClosureStageDirectories({
+        finalCacheDir: input.finalCacheDir,
+        outDir: input.outDir,
+      }),
+  );
+  const { chunkOutputType, prepared } = withInternalTimingSync(
+    "closure:assemble-jobs",
+    () => prepareClosureStageJobs(input),
+  );
+  countInternalWork("compileJobs", prepared.compileJobs.length);
+  countInternalWork("generatedAssets", prepared.generatedAssets.length);
+  await withInternalTiming("closure:write-assets", () =>
+    writeGeneratedAssets(prepared.generatedAssets),
+  );
+  const results = await withInternalTiming("closure:compile", () =>
     compilePreparedClosureJobs({
       closureCompilerEnvironment: withExplicitHideWarningsFor(
         input.closureCompilerEnvironment,
@@ -36,9 +51,14 @@ export async function runClosureStage(
       usesPersistentCache: input.options.cache.mode !== "off",
     }),
   );
-  const failedExitCode = exitCodes.find((exitCode) => exitCode !== 0);
-  if (failedExitCode !== undefined) {
-    return { cacheOutputFiles: [], exitCode: failedExitCode, outputFiles: [] };
+  const failed = results.find((result) => result.exitCode !== 0);
+  if (failed) {
+    return {
+      cacheOutputFiles: [],
+      diagnostics: results.flatMap((result) => result.diagnostics),
+      exitCode: failed.exitCode,
+      outputFiles: [],
+    };
   }
   return finalizeClosureStageOutputs({
     cacheOutputDir,

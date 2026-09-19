@@ -106,7 +106,7 @@ export async function assembleGraph(
 
   const runtimeEntrySpecifiers = materialized.entries.map((entry) => {
     const targetFilePath = normalizePath(
-      path.resolve(materialized.srcDir, entry),
+      path.resolve(materialized.srcDir, entry.file),
     );
     const requestKey = entryRequestKeyByTargetFilePath.get(targetFilePath);
     let outputFilePath = requestKey
@@ -119,9 +119,12 @@ export async function assembleGraph(
         bundles.collapsedEntryOutputByPath.get(outputFilePath)
           ?.directTargetFilePath ?? outputFilePath;
     }
-    return outputFilePath
-      ? `./${path.relative(runtimeSrcDir, outputFilePath).replace(/\\/g, "/")}`
-      : entry;
+    return {
+      ...entry,
+      file: outputFilePath
+        ? `./${path.relative(runtimeSrcDir, outputFilePath).replace(/\\/g, "/")}`
+        : entry.file,
+    };
   });
 
   return {
@@ -153,7 +156,7 @@ export async function assembleGraph(
     runtimeEntries: [
       ...new Set(
         [
-          ...runtimeEntrySpecifiers,
+          ...runtimeEntrySpecifiers.map((entry) => entry.file),
           ...authoredEntries.map((entry) => `./${entry.relativePath}`),
           ...directDependencyEntries.map((entry) => `./${entry.relativePath}`),
           ...bundledModules.map((module) => `./${module.relativePath}`),

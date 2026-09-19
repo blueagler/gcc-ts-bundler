@@ -1,14 +1,16 @@
 import path from "path";
 import ts from "@typescript/typescript6";
 
+import type { NativeFileHashEntry } from "../../native/abi";
 import { resolveGraph } from "../../native/load";
-import { loadCompilerOptions } from "./compiler-options";
+import { loadCompilerOptions, type ParsedTsConfig } from "./compiler-options";
 import type { PackageAlias, ResolvedImport } from "../types";
 import { createBundleRequire } from "../../shared/bundle-location";
 
 const require = createBundleRequire();
 
 export interface TsxRuntimeSupport {
+  fileHashes: NativeFileHashEntry[];
   packageAliases: PackageAlias[];
   packageJsonFiles: string[];
   sourceFiles: string[];
@@ -19,17 +21,19 @@ export interface TsxRuntimeSupport {
 export async function collectTsxRuntimeSupport({
   fileNames,
   tsConfigPath,
+  tsConfig,
   workspaceDir,
 }: {
   fileNames: string[];
   tsConfigPath: string;
+  tsConfig: ParsedTsConfig;
   workspaceDir: string;
 }): Promise<TsxRuntimeSupport> {
   if (!fileNames.some((fileName) => fileName.endsWith(".tsx"))) {
     return emptyTsxRuntimeSupport();
   }
 
-  const compilerOptions = await loadCompilerOptions(tsConfigPath);
+  const compilerOptions = await loadCompilerOptions(tsConfigPath, {}, tsConfig);
   const runtimeSpecifier = getJsxRuntimeSpecifier(compilerOptions);
   if (!runtimeSpecifier) {
     return emptyTsxRuntimeSupport();
@@ -51,6 +55,7 @@ export async function collectTsxRuntimeSupport({
   });
 
   return {
+    fileHashes: graph.fileHashes,
     packageAliases: mergePackageAliases([
       runtimeAlias,
       ...graph.packageAliases,
@@ -89,6 +94,7 @@ export function mergeResolvedImports(imports: ResolvedImport[]) {
 
 function emptyTsxRuntimeSupport(): TsxRuntimeSupport {
   return {
+    fileHashes: [],
     packageAliases: [],
     packageJsonFiles: [],
     sourceFiles: [],

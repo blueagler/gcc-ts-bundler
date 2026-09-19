@@ -11,6 +11,7 @@ import type { ClosureCompilerEnvironment } from "../compiler";
 
 export interface ClosureStageResult {
   cacheOutputFiles: string[];
+  diagnostics: string[];
   exitCode: number;
   outputFiles: string[];
 }
@@ -23,7 +24,7 @@ export type ClosureStageInput = {
   entryShebangs: Array<{ shebang: string; sourcePath: string }>;
   explicitExternPaths: string[];
   finalCacheDir: string;
-  generatedExternPaths: string[];
+  generatedExterns: ResolvedBuildOptions["typedExterns"];
   nativeExternPath: string;
   options: ResolvedBuildOptions;
   outDir: string;

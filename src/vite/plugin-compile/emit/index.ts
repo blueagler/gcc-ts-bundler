@@ -29,5 +29,10 @@ export async function emitViteGraph(
     input,
     renamedNonBaseOutputs,
   );
-  return await finalizeCompiledEmit(this, input, finalizedBaseOutput);
+  return await finalizeCompiledEmit(
+    this,
+    input,
+    finalizedBaseOutput,
+    renamedNonBaseOutputs,
+  );
 }

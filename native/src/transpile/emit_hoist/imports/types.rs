@@ -1,4 +1,4 @@
-use oxc_ast::ast::*;
+use oxc_ast::ast::ModuleExportName;
 
 use super::super::super::emit::PreservedImportPlan;
 use super::super::import_plan::ImportBindingRewrite;

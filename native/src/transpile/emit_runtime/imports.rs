@@ -1,7 +1,10 @@
 use std::path::Path;
 
 use oxc_allocator::{Allocator, FromIn};
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    BindingIdentifier, Expression, ImportDeclaration, ImportDeclarationSpecifier,
+    ImportOrExportKind, ObjectProperty, Program,
+};
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk_mut, VisitMut};
 use oxc_span::SPAN;
@@ -10,19 +13,18 @@ use oxc_syntax::number::NumberBase;
 
 use super::super::fresh::FreshNameAllocator;
 use super::super::identity::{BindingKey, BindingKeyMap, ModuleIdentity};
-use super::super::imports_exports::{stable_slot_access, ImportBindingSlotAlias};
+use super::super::imports_exports::ImportBindingSlotAlias;
 use super::super::{
     resolve_module_id_for_specifier, to_bundler_runtime_module_id, BundlerModuleSlots,
     TranspileContext,
 };
 use super::exports::module_export_name;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct ImportBindingRewrite {
     pub(crate) binding_id: BindingKey,
     pub(crate) local_name: String,
-    pub(crate) replacement_code: String,
-    pub(crate) slot_alias: Option<ImportBindingSlotAlias>,
+    pub(crate) slot_alias: ImportBindingSlotAlias,
 }
 
 pub(crate) struct BundlerImportPlan {
@@ -33,7 +35,6 @@ pub(crate) struct BundlerImportPlan {
 pub(crate) fn convert_bundler_import_decl(
     file_path: &Path,
     import: &ImportDeclaration<'_>,
-    identity: &ModuleIdentity,
     context: &TranspileContext,
     import_counter: &mut usize,
     fresh_names: &mut FreshNameAllocator,
@@ -86,7 +87,6 @@ pub(crate) fn convert_bundler_import_decl(
                     &local_name,
                     "default",
                     &default.local,
-                    identity,
                     target_slots,
                 )?);
             }
@@ -95,12 +95,14 @@ pub(crate) fn convert_bundler_import_decl(
                     &local_name,
                     &module_export_name(&named.imported),
                     &named.local,
-                    identity,
                     target_slots,
                 )?);
             }
             ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) => {
-                lines.push(format!("const {} = {local_name};", namespace.local.name));
+                lines.push(format!(
+                    "const {} = {require_name}({runtime_module_id:?},true);",
+                    namespace.local.name
+                ));
             }
         }
     }
@@ -114,20 +116,18 @@ fn import_rewrite(
     source_object_name: &str,
     imported_name: &str,
     local: &BindingIdentifier<'_>,
-    identity: &ModuleIdentity,
     target_slots: &BundlerModuleSlots,
 ) -> std::result::Result<ImportBindingRewrite, String> {
     let slot = target_slots.slot_for(imported_name).ok_or_else(|| {
         format!("Missing bundler-runtime export slot for imported name {imported_name}")
     })?;
     Ok(ImportBindingRewrite {
-        binding_id: identity.key_of_binding(local),
+        binding_id: ModuleIdentity::key_of_binding(local)?,
         local_name: local.name.to_string(),
-        replacement_code: stable_slot_access(source_object_name, slot),
-        slot_alias: Some(ImportBindingSlotAlias {
+        slot_alias: ImportBindingSlotAlias {
             source_object_name: source_object_name.to_string(),
             source_slot: slot,
-        }),
+        },
     })
 }
 
@@ -146,7 +146,7 @@ pub(crate) fn apply_import_binding_rewrites<'a>(
         identity,
         rewrites: rewrites
             .iter()
-            .map(|rewrite| (rewrite.binding_id, rewrite.slot_alias.clone().unwrap()))
+            .map(|rewrite| (rewrite.binding_id, &rewrite.slot_alias))
             .collect(),
     }
     .visit_program(program);
@@ -156,7 +156,7 @@ struct ImportBindingRewriteVisitor<'a, 'i> {
     allocator: &'a Allocator,
     builder: AstBuilder<'a>,
     identity: &'i ModuleIdentity,
-    rewrites: BindingKeyMap<ImportBindingSlotAlias>,
+    rewrites: BindingKeyMap<&'i ImportBindingSlotAlias>,
 }
 
 impl<'a> ImportBindingRewriteVisitor<'a, '_> {

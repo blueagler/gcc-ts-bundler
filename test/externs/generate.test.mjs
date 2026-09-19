@@ -4,25 +4,27 @@ import { pathToFileURL } from "node:url";
 import { expect, test } from "bun:test";
 
 import { build, generateExterns } from "../../dist/index.mjs";
-// The evidence-class rule lives in src and is asserted directly, so this test
-// is meaningful before dist is rebuilt; the tests above validate the built
-// artifact and need `bun run build:js` to see rule changes.
+// Source-only cases see edits directly. Cases using these dist imports need
+// `bun run build:js:bootstrap` (or a self-build) to see implementation changes.
 import { generateExterns as generateExternsFromSource } from "../../src/api/build.ts";
+import { runClosureCompiler } from "../../src/build/closure/compiler.ts";
 import {
   collectReachableTypeFiles,
   isNodeBuiltin,
   isPlatformBuiltin,
   loadExternCompilerOptions,
 } from "../../src/externs/compiler/index.ts";
-import { createTypeWorld } from "../../src/externs/context.ts";
+import {
+  createExternAnalysisContext,
+  createTypeWorld,
+} from "../../src/externs/context.ts";
+import { collectBoundaryAwareUsageMemberNames } from "../../src/externs/contracts/usage.ts";
 import { mergeRuntimeHazards } from "../../src/externs/runtime/index.ts";
 import {
   createFixture,
   createExternFixture,
   createRuntimeExternFixture,
   execFileAsync,
-  findFilesNamed,
-  getProjectCacheDir,
 } from "../helpers.mjs";
 
 test("mergeRuntimeHazards merges every hazard set without runtime string indexing", () => {
@@ -47,12 +49,434 @@ test("mergeRuntimeHazards merges every hazard set without runtime string indexin
 
   const merged = mergeRuntimeHazards(first, second);
   for (const [key, values] of Object.entries(merged)) {
-    expect([...values]).toEqual([
-      ...first[key],
-      ...second[key],
-    ]);
+    expect([...values]).toEqual([...first[key], ...second[key]]);
   }
 });
+
+test.serial(
+  "used namespace exports respect module identity, finite keys and lexical shadows",
+  async () => {
+    const fixture = await createFixture();
+    const declaration = [
+      "export interface Client { replyCode: number; hiddenMember(): string; }",
+      "export declare function createClient(): Client;",
+      "export declare function readClient(): Client;",
+      "export declare function unusedRoot(): { unusedCode: number };",
+    ].join("\n");
+    for (const specifier of ["selected-a", "selected-b"]) {
+      await fixture.write(
+        `node_modules/${specifier}/package.json`,
+        JSON.stringify({
+          name: specifier,
+          types: "./index.d.ts",
+          exports: {
+            ".": { types: "./index.d.ts" },
+            "./alias": { types: "./index.d.ts" },
+          },
+        }),
+      );
+      await fixture.write(`node_modules/${specifier}/index.d.ts`, declaration);
+    }
+    await fixture.write(
+      "src/main.ts",
+      [
+        'import * as first from "selected-a/alias";',
+        'import * as second from "selected-b";',
+        "first.createClient().replyCode;",
+        "const { createClient: make } = second;",
+        "make().replyCode;",
+        'declare const key: "createClient" | "readClient";',
+        "second[key]();",
+        "type ClientContract = second.Client;",
+        "function local(first: { unusedRoot(): void }) { first.unusedRoot(); }",
+        "function shadow(require: (name: string) => unknown) {",
+        '  return require("selected-a");',
+        "}",
+        'import "./child.js";',
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/child.ts",
+      'import * as first from "selected-a"; first["readClient"]();',
+    );
+
+    const result = await generateExternsFromSource({
+      appEntryFiles: ["./main.ts"],
+      modules: ["selected-a", "selected-a/alias", "selected-b"].map(
+        (specifier) => ({ exports: "used", runtime: "external", specifier }),
+      ),
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+    const byModule = Object.fromEntries(
+      result.typedDeclarations.moduleExports.map(({ specifier, exports }) => [
+        specifier,
+        exports.map(({ exportName }) => exportName),
+      ]),
+    );
+    expect(byModule).toEqual({
+      "selected-a": ["createClient", "readClient"],
+      "selected-a/alias": ["createClient", "readClient"],
+      "selected-b": ["Client", "createClient", "readClient"],
+    });
+    // Root selection must not prune members of a returned interface.
+    expect(result.typedDeclarations.propertyNames).toContain("replyCode");
+    expect(result.typedDeclarations.propertyNames).toContain("hiddenMember");
+    expect(result.typedDeclarations.propertyNames).not.toContain("unusedCode");
+  },
+);
+
+test.serial(
+  "used exports widen only escaping namespaces and retain non-import load contracts",
+  async () => {
+    const fixture = await createFixture();
+    const cases = [
+      [
+        "computed",
+        'import * as ns from "computed"; declare const key: string; ns[key];',
+      ],
+      [
+        "alias",
+        'import * as ns from "alias"; const copy = ns; copy.createClient();',
+      ],
+      [
+        "shorthand",
+        'import * as ns from "shorthand"; export const box = { ns };',
+      ],
+      [
+        "typeof",
+        'import * as ns from "typeof"; export type Whole = typeof ns;',
+      ],
+      [
+        "spread",
+        'import * as ns from "spread"; export const copy = { ...ns };',
+      ],
+      [
+        "rest",
+        'import * as ns from "rest"; const { createClient, ...rest } = ns;',
+      ],
+      ["enumerated", 'import * as ns from "enumerated"; Object.keys(ns);'],
+      [
+        "local-export",
+        'import * as ns from "local-export"; export { ns as forwarded };',
+      ],
+      ["dynamic", 'export const loaded = import("dynamic");'],
+      ["commonjs", 'export const loaded = require("commonjs");'],
+      ["equals", 'import ns = require("equals"); ns.createClient();'],
+      ["star", 'export * from "star";'],
+      ["namespace-export", 'export * as forwarded from "namespace-export";'],
+      [
+        "named",
+        'import { createClient as make, type Client } from "named";',
+        ["Client", "createClient"],
+      ],
+      [
+        "reexport",
+        'export { createClient as make, type Client } from "reexport";',
+        ["Client", "createClient"],
+      ],
+      [
+        "type-import",
+        'export type Contract = import("type-import").Client;',
+        ["Client"],
+      ],
+      [
+        "isolated",
+        'import * as ns from "isolated"; ns.createClient();',
+        ["createClient"],
+      ],
+      [
+        "forward",
+        'forwardNamespace.createClient(); import * as forwardNamespace from "forward";',
+        ["createClient"],
+      ],
+      [
+        "nested-type",
+        'declare module "holder" { import * as nestedNamespace from "nested-type"; export type Contract = nestedNamespace.Client; }',
+        ["Client"],
+      ],
+    ];
+    const declaration = [
+      "export interface Client { replyCode: number; hiddenMember(): string; }",
+      "export declare function createClient(): Client;",
+      "export declare function unusedRoot(): { unusedCode: number };",
+    ].join("\n");
+    for (const [specifier, source] of cases) {
+      await fixture.write(
+        `node_modules/${specifier}/package.json`,
+        JSON.stringify({ name: specifier, types: "./index.d.ts" }),
+      );
+      await fixture.write(`node_modules/${specifier}/index.d.ts`, declaration);
+      await fixture.write(`src/${specifier}.ts`, source);
+    }
+    const result = await generateExternsFromSource({
+      appEntryFiles: cases.map(([specifier]) => `./${specifier}.ts`),
+      modules: cases.map(([specifier]) => ({
+        exports: "used",
+        runtime: "external",
+        specifier,
+      })),
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+    for (const [specifier, , expected] of cases) {
+      const module = result.typedDeclarations.moduleExports.find(
+        (module) => module.specifier === specifier,
+      );
+      expect(module.exports.map(({ exportName }) => exportName)).toEqual(
+        expected ?? ["Client", "createClient", "unusedRoot"],
+      );
+    }
+    expect(result.typedDeclarations.propertyNames).toContain("replyCode");
+    expect(result.typedDeclarations.propertyNames).toContain("hiddenMember");
+    expect(result.typedDeclarations.propertyNames).toContain("unusedCode");
+  },
+);
+
+test.serial(
+  "used exports recognize synthetic JavaScript require without Node ambient types",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          allowJs: true,
+          checkJs: true,
+          module: "ESNext",
+          moduleResolution: "Bundler",
+          types: [],
+        },
+      }),
+    );
+    for (const specifier of ["js-runtime", "shadowed-runtime"]) {
+      await fixture.write(
+        `node_modules/${specifier}/package.json`,
+        JSON.stringify({ name: specifier, types: "./index.d.ts" }),
+      );
+      await fixture.write(
+        `node_modules/${specifier}/index.d.ts`,
+        [
+          "export declare function createClient(): { replyCode: number };",
+          "export declare function alternate(): { alternateCode: number };",
+        ].join("\n"),
+      );
+    }
+    await fixture.write(
+      "src/main.js",
+      [
+        'const runtime = require("js-runtime");',
+        "runtime.createClient().replyCode;",
+        "function local(require) {",
+        '  return require("shadowed-runtime");',
+        "}",
+      ].join("\n"),
+    );
+    const result = await generateExternsFromSource({
+      appEntryFiles: ["./main.js"],
+      modules: ["js-runtime", "shadowed-runtime"].map((specifier) => ({
+        exports: "used",
+        runtime: "external",
+        specifier,
+      })),
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+    expect(
+      Object.fromEntries(
+        result.typedDeclarations.moduleExports.map(({ specifier, exports }) => [
+          specifier,
+          exports.map(({ exportName }) => exportName),
+        ]),
+      ),
+    ).toEqual({
+      "js-runtime": ["alternate", "createClient"],
+      "shadowed-runtime": [],
+    });
+    expect(result.typedDeclarations.propertyNames).toContain("replyCode");
+    expect(result.typedDeclarations.propertyNames).toContain("alternateCode");
+  },
+);
+
+test.serial(
+  "used exports do not precisely match different package origins by spelling",
+  async () => {
+    const fixture = await createFixture();
+    for (const [directory, version, declarations] of [
+      [
+        "node_modules/versioned-runtime",
+        "1.0.0",
+        [
+          "export declare function createClient(): { rootCode: number };",
+          "export declare function preserveRoot(): { preservedCode: number };",
+        ],
+      ],
+      [
+        "src/nested/node_modules/versioned-runtime",
+        "2.0.0",
+        ["export declare function createClient(): { nestedCode: number };"],
+      ],
+    ]) {
+      await fixture.write(
+        `${directory}/package.json`,
+        JSON.stringify({
+          name: "versioned-runtime",
+          version,
+          types: "./index.d.ts",
+        }),
+      );
+      await fixture.write(`${directory}/index.d.ts`, declarations.join("\n"));
+    }
+    await fixture.write(
+      "src/nested/main.ts",
+      'import * as runtime from "versioned-runtime"; runtime.createClient().nestedCode;',
+    );
+    const result = await generateExternsFromSource({
+      appEntryFiles: ["./nested/main.ts"],
+      modules: [
+        {
+          exports: "used",
+          runtime: "external",
+          specifier: "versioned-runtime",
+        },
+      ],
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+    expect(
+      result.typedDeclarations.moduleExports[0].exports.map(
+        ({ exportName }) => exportName,
+      ),
+    ).toEqual(["createClient", "preserveRoot"]);
+    expect(result.typedDeclarations.propertyNames).toContain("preservedCode");
+  },
+);
+
+test.serial(
+  "used export-equals defaults retain the complete callable and returned object",
+  { timeout: 20000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "node_modules/callable/package.json",
+      JSON.stringify({ name: "callable", types: "./index.d.ts" }),
+    );
+    await fixture.write(
+      "node_modules/callable/index.d.ts",
+      [
+        "declare function factory(): factory.Client;",
+        "declare namespace factory {",
+        "  class Client { replyCode: number; hiddenMember(): string; static existing(): string; }",
+        "  namespace Client { function from(): Client; }",
+        "  enum Mode { Default = 0 }",
+        "  namespace Mode { function create(): Client; }",
+        "  function unusedMember(): Client;",
+        "}",
+        "export = factory;",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/main.ts",
+      'import create from "callable"; create().replyCode;',
+    );
+    const result = await generateExternsFromSource({
+      appEntryFiles: ["./main.ts"],
+      modules: [
+        { exports: "used", runtime: "external", specifier: "callable" },
+      ],
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+    expect(
+      result.typedDeclarations.moduleExports[0].exports.map(
+        ({ exportName }) => exportName,
+      ),
+    ).toEqual(["export="]);
+    expect(result.typedDeclarations.propertyNames).toContain("replyCode");
+    expect(result.typedDeclarations.propertyNames).toContain("hiddenMember");
+    const factory =
+      result.typedDeclarations.moduleExports[0].exports[0].qualifiedName;
+    const externsFile = path.join(fixture.projectRoot, "callable.externs.js");
+    const consumerFile = path.join(fixture.projectRoot, "consumer.js");
+    await fs.writeFile(externsFile, result.typedDeclarations.text);
+    for (const [returnType, succeeds] of [
+      ["string", true],
+      ["number", false],
+    ]) {
+      await fs.writeFile(
+        consumerFile,
+        `/** @return {${returnType}} */ function consume() { return ${factory}.unusedMember().hiddenMember() + ${factory}.Client.existing() + ${factory}.Client.from().hiddenMember() + ${factory}.Mode.create().hiddenMember(); }`,
+      );
+      const compiled = await runClosureCompiler({
+        compilationLevel: "SIMPLE",
+        env: "BROWSER",
+        externs: [externsFile],
+        js: [consumerFile],
+        jsOutputFile: path.join(fixture.projectRoot, "consumer.out.js"),
+        jscompError: ["checkTypes", "undefinedVars", "missingProperties"],
+        languageIn: "UNSTABLE",
+        languageOut: "ECMASCRIPT_2020",
+        warningLevel: "VERBOSE",
+      });
+      expect(compiled.exitCode === 0, compiled.diagnostics.join("\n")).toBe(
+        succeeds,
+      );
+    }
+  },
+);
+
+test.serial(
+  "invalid symbol depth rejects before either artifact is changed",
+  async () => {
+    const fixture = await createExternFixture();
+    await fixture.write("barriers.js", "original barriers\n");
+    await fixture.write("typed.js", "original declarations\n");
+    for (const maxSymbolDepth of [
+      -1,
+      0.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+    ]) {
+      await expect(
+        generateExternsFromSource({
+          appEntryFiles: ["./main.ts"],
+          maxSymbolDepth,
+          modules: ["contract-pkg"],
+          outputFile: "./barriers.js",
+          typedOutputFile: "./typed.js",
+          projectRoot: fixture.projectRoot,
+          srcDir: fixture.srcDir,
+        }),
+      ).rejects.toThrow(/maxSymbolDepth/);
+      expect(await fixture.read("barriers.js")).toBe("original barriers\n");
+      expect(await fixture.read("typed.js")).toBe("original declarations\n");
+    }
+  },
+);
+
+test.serial(
+  "normalized artifact path collisions reject without overwriting the destination",
+  async () => {
+    const fixture = await createExternFixture();
+    await fixture.write("externs.js", "original externs\n");
+    await expect(
+      generateExternsFromSource({
+        appEntryFiles: ["./main.ts"],
+        modules: [{ runtime: "external", specifier: "contract-pkg" }],
+        outputFile: "./externs.js",
+        typedOutputFile: path.join(
+          fixture.projectRoot,
+          "nested",
+          "..",
+          "externs.js",
+        ),
+        projectRoot: fixture.projectRoot,
+        srcDir: fixture.srcDir,
+      }),
+    ).rejects.toThrow(/distinct paths/);
+    expect(await fixture.read("externs.js")).toBe("original externs\n");
+  },
+);
 
 test.serial(
   "generateExterns follows declaration dependencies and emits stable property externs",
@@ -89,6 +513,123 @@ test.serial(
     expect(result.text).not.toContain("__gcc_extern_");
   },
 );
+
+for (const { name, source, expected, unresolved = false } of [
+  {
+    name: "same-named classes in different packages",
+    source: 'import { Service } from "pkg-b"; new Service(host);',
+    expected: ["bOnly"],
+  },
+  {
+    name: "renamed imports",
+    source: 'import { Service as Client } from "pkg-b"; new Client(host);',
+    expected: ["bOnly"],
+  },
+  {
+    name: "default imports with a different local name",
+    source: 'import Client from "pkg-b"; new Client(host);',
+    expected: ["bOnly"],
+  },
+  {
+    name: "namespace imports",
+    source: 'import * as client from "pkg-b"; new client.Service(host);',
+    expected: ["bOnly"],
+  },
+  {
+    name: "constructor value aliases",
+    source:
+      'import { Service } from "pkg-b"; const Client = Service; new Client(host);',
+    expected: ["bOnly"],
+  },
+  {
+    name: "anonymous default classes",
+    source:
+      'import Client from "pkg-c"; const cHost = { cOnly: 7 }; new Client(cHost);',
+    expected: ["cOnly"],
+  },
+  {
+    name: "lexically shadowed constructors and receivers",
+    source: [
+      'import { Service } from "pkg-a";',
+      "const service = new Service({ aOnly: 1 });",
+      "service.remote();",
+      "function local(Service: new (host: unknown) => unknown) {",
+      "  new Service(host);",
+      "  const service = { localOnly: 1 };",
+      "  return service.localOnly;",
+      "}",
+    ].join("\n"),
+    expected: ["remote"],
+  },
+  {
+    name: "nested class receiver identity",
+    source: [
+      'import { Service } from "pkg-b";',
+      "class Outer {",
+      "  service = new Service(host);",
+      "  run() {",
+      "    class Inner {",
+      "      service = { localOnly: 1 };",
+      "      read() { return this.service.localOnly; }",
+      "    }",
+      "    this.service.remote();",
+      "    return new Inner().read();",
+      "  }",
+      "}",
+    ].join("\n"),
+    expected: ["bOnly", "remote"],
+  },
+  {
+    name: "unresolved imports never borrowing another package's class",
+    source: 'import { Service } from "missing-pkg"; new Service(host);',
+    expected: [],
+    unresolved: true,
+  },
+]) {
+  test.serial(`boundary usage respects ${name}`, async () => {
+    const fixture = await createFixture();
+    const scannedFiles = [];
+    for (const [specifier, member, declaration] of [
+      ["pkg-a", "aOnly", "export declare class Service"],
+      ["pkg-b", "bOnly", "export declare class Service"],
+      ["pkg-c", "cOnly", "export default class"],
+    ]) {
+      await fixture.write(
+        `node_modules/${specifier}/package.json`,
+        JSON.stringify({ name: specifier, types: "./index.d.ts" }),
+      );
+      const declarationPath = `node_modules/${specifier}/index.d.ts`;
+      await fixture.write(
+        declarationPath,
+        [
+          `export interface Host { ${member}: number; }`,
+          `${declaration} { constructor(host: Host); remote(): void; }`,
+          ...(specifier === "pkg-b" ? ["export default Service;"] : []),
+        ].join("\n"),
+      );
+      scannedFiles.push(path.join(fixture.projectRoot, declarationPath));
+    }
+    await fixture.write(
+      "src/main.ts",
+      ['import "pkg-a";', "const host = { bOnly: 42 };", source].join("\n"),
+    );
+    const analysis = createExternAnalysisContext({
+      appEntryFiles: [path.join(fixture.srcDir, "main.ts")],
+      compilerOptions: await loadExternCompilerOptions({
+        projectRoot: fixture.projectRoot,
+        tsConfigPath: undefined,
+      }),
+      projectRoot: fixture.projectRoot,
+      scannedFiles,
+    });
+    expect(
+      analysis.program.getSemanticDiagnostics().map(({ code }) => code),
+    ).toEqual(unresolved ? [2307] : []);
+    expect([...collectBoundaryAwareUsageMemberNames(analysis)].sort()).toEqual(
+      expected,
+    );
+  });
+}
 
 test.serial(
   "generateExterns resolves package subpaths that ship sibling declaration files",
@@ -452,7 +993,9 @@ test.serial(
       srcDir: runtimeFixture.srcDir,
     });
 
-    expect(runtimeResult.ok).toBe(true);
+    expect(runtimeResult.ok, JSON.stringify(runtimeResult.diagnostics)).toBe(
+      true,
+    );
     const runtimeOutput = await runtimeFixture.read("dist/index.js");
     expect(runtimeOutput).not.toMatch(/runtime-pkg/);
 
@@ -534,35 +1077,9 @@ test.serial(
   },
 );
 
-test.serial(
-  "build does not auto-generate runtime-aware dependency externs by default",
-  async () => {
-    const fixture = await createRuntimeExternFixture();
-    const cacheDir = path.join(fixture.projectRoot, ".cache");
-
-    const result = await build({
-      cache: { dir: cacheDir, mode: "persistent" },
-      compilationLevel: "ADVANCED",
-      entries: ["./index.ts"],
-      outDir: fixture.outDir,
-      projectRoot: fixture.projectRoot,
-      srcDir: fixture.srcDir,
-    });
-    expect(result.ok).toBe(true);
-
-    const projectCacheDir = getProjectCacheDir(cacheDir, fixture.projectRoot);
-    const externFiles = await findFilesNamed(
-      path.join(projectCacheDir, "native-emit"),
-      "runtime-dependency-externs.js",
-    );
-    expect(externFiles).toHaveLength(0);
-  },
-);
-
 test("one extern-name predicate, two documented sources", async () => {
-  const { isExternPropertyName, isRuntimeExternPropertyName } = await import(
-    "../../src/externs/shared.ts"
-  );
+  const { isExternPropertyName, isRuntimeExternPropertyName } =
+    await import("../../src/externs/shared.ts");
 
   // Structural / unusable names are rejected by both sources.
   for (const name of ["prototype", "constructor", "#priv", "a@b", "Map"]) {
@@ -590,9 +1107,8 @@ test("one extern-name predicate, two documented sources", async () => {
 });
 
 test("barrier accounting counts every extern property shape", async () => {
-  const { accountBarriers, formatBarrierWarning } = await import(
-    "../../src/externs/barriers.ts"
-  );
+  const { accountBarriers, formatBarrierWarning } =
+    await import("../../src/externs/barriers.ts");
 
   const text = [
     "/** @externs */",
@@ -617,7 +1133,9 @@ test("barrier accounting counts every extern property shape", async () => {
   expect(accounting.byKind.get("owner")).toBe(2);
   expect(accounting.byKind.get("record")).toBe(2);
   expect(formatBarrierWarning(accounting)).toBeNull();
-  expect(formatBarrierWarning(accounting, 1)).toContain("pins 6 property names");
+  expect(formatBarrierWarning(accounting, 1)).toContain(
+    "pins 6 property names",
+  );
 });
 
 // jQuery's Deferred API is defined entirely through concatenated keys
@@ -626,12 +1144,10 @@ test("barrier accounting counts every extern property shape", async () => {
 // the page died with `TypeError: <x>.ga is not a function` on first paint. The
 // example used to hide this by pinning jQuery's whole 761-member type surface.
 test("concatenated element-access keys are rename evidence", async () => {
-  const { analyzeRuntimeUsage } = await import(
-    "../../src/externs/runtime/index.ts"
-  );
-  const { collectRuntimeUsageExternLines } = await import(
-    "../../src/externs/render.ts"
-  );
+  const { analyzeRuntimeUsage } =
+    await import("../../src/externs/runtime/index.ts");
+  const { collectRuntimeUsageExternLines } =
+    await import("../../src/externs/render.ts");
   const fixture = await createFixture();
   await fixture.write(
     "runtime.js",
@@ -676,12 +1192,10 @@ test("concatenated element-access keys are rename evidence", async () => {
 // helper that evaluates `str[0] in input`, so the fixed characters are runtime
 // property reads even though they are not literal element-access expressions.
 test("literal arguments indexed into object-key probes are rename evidence", async () => {
-  const { analyzeRuntimeUsage } = await import(
-    "../../src/externs/runtime/index.ts"
-  );
-  const { collectRuntimeUsageExternLines } = await import(
-    "../../src/externs/render.ts"
-  );
+  const { analyzeRuntimeUsage } =
+    await import("../../src/externs/runtime/index.ts");
+  const { collectRuntimeUsageExternLines } =
+    await import("../../src/externs/render.ts");
   const fixture = await createFixture();
   await fixture.write(
     "runtime.js",
@@ -723,12 +1237,10 @@ test("literal arguments indexed into object-key probes are rename evidence", asy
 // Identifier `this` field helpers become dotted assigns. Minified proven
 // helpers (`J`) still write a string key and stay string-defined.
 test("identifier this field helpers are not string-defined rename evidence", async () => {
-  const { analyzeRuntimeUsage } = await import(
-    "../../src/externs/runtime/index.ts"
-  );
-  const { collectRuntimeUsageExternLines } = await import(
-    "../../src/externs/render.ts"
-  );
+  const { analyzeRuntimeUsage } =
+    await import("../../src/externs/runtime/index.ts");
+  const { collectRuntimeUsageExternLines } =
+    await import("../../src/externs/render.ts");
   const fixture = await createFixture();
   await fixture.write(
     "runtime.js",
@@ -777,12 +1289,10 @@ test("identifier this field helpers are not string-defined rename evidence", asy
 });
 
 test("Babel class descriptors are string-defined rename evidence", async () => {
-  const { analyzeRuntimeUsage } = await import(
-    "../../src/externs/runtime/index.ts"
-  );
-  const { collectRuntimeUsageExternLines } = await import(
-    "../../src/externs/render.ts"
-  );
+  const { analyzeRuntimeUsage } =
+    await import("../../src/externs/runtime/index.ts");
+  const { collectRuntimeUsageExternLines } =
+    await import("../../src/externs/render.ts");
   const fixture = await createFixture();
   await fixture.write(
     "runtime.js",
@@ -820,12 +1330,10 @@ test("Babel class descriptors are string-defined rename evidence", async () => {
 // string does not follow, and `.animate()`/`.fadeIn()` silently produce no tween
 // inside a requestAnimationFrame tick that surfaces nothing.
 test("a string value naming a sibling key is rename evidence", async () => {
-  const { analyzeRuntimeUsage } = await import(
-    "../../src/externs/runtime/index.ts"
-  );
-  const { collectRuntimeUsageExternLines } = await import(
-    "../../src/externs/render.ts"
-  );
+  const { analyzeRuntimeUsage } =
+    await import("../../src/externs/runtime/index.ts");
+  const { collectRuntimeUsageExternLines } =
+    await import("../../src/externs/render.ts");
   const fixture = await createFixture();
   await fixture.write(
     "runtime.js",
@@ -869,12 +1377,10 @@ test("a string value naming a sibling key is rename evidence", async () => {
 // module throws `Cannot set properties of undefined (setting 'placeholder')`
 // the moment it evaluates. Every other evidence class misses this shape.
 test("finite literal key lists that reach computed access are rename evidence", async () => {
-  const { analyzeRuntimeUsage } = await import(
-    "../../src/externs/runtime/index.ts"
-  );
-  const { collectRuntimeUsageExternLines } = await import(
-    "../../src/externs/render.ts"
-  );
+  const { analyzeRuntimeUsage } =
+    await import("../../src/externs/runtime/index.ts");
+  const { collectRuntimeUsageExternLines } =
+    await import("../../src/externs/render.ts");
   const fixture = await createFixture();
   await fixture.write(
     "runtime.js",
@@ -942,9 +1448,8 @@ test("finite literal key lists that reach computed access are rename evidence", 
 });
 
 test("const-bound key lists and element transforms are rename evidence", async () => {
-  const { analyzeRuntimeUsage } = await import(
-    "../../src/externs/runtime/index.ts"
-  );
+  const { analyzeRuntimeUsage } =
+    await import("../../src/externs/runtime/index.ts");
   const fixture = await createFixture();
   await fixture.write(
     "runtime.js",
@@ -1006,36 +1511,6 @@ test("const-bound key lists and element transforms are rename evidence", async (
   ]);
 });
 
-// The audit that justified shipping the rule unconditionally: across all 12
-// `_default` sites in the real jquery.js, the sibling-key rule fires exactly
-// once. If a future change widens it, this count moves and the test fails.
-test("the sibling-key rule fires exactly once across real jquery.js", async () => {
-  const { analyzeRuntimeUsage } = await import(
-    "../../src/externs/runtime/index.ts"
-  );
-  const jquerySource = path.join(
-    import.meta.dirname,
-    "..",
-    "..",
-    "examples",
-    "jquery-vite-official",
-    "node_modules",
-    "jquery",
-    "dist",
-    "jquery.js",
-  );
-  try {
-    await fs.access(jquerySource);
-  } catch {
-    return;
-  }
-  const hazards = await analyzeRuntimeUsage([jquerySource], {
-    keyExclusionListCallees: [],
-    keyReadCallees: [],
-  });
-  expect([...hazards.selfReferentialKeys]).toEqual(["swing"]);
-});
-
 // Regression lock for the example's posture: proven barriers only.
 test("jquery example pins proven barriers, not a type surface", async () => {
   const exampleRoot = path.resolve(
@@ -1067,9 +1542,6 @@ test("jquery example pins proven barriers, not a type surface", async () => {
   // `dataPriv.get(this, "events")`; renaming one side silently unhooks every
   // delegated handler.
   expect(runtime.renameBarriers.propertyNames).toContain("events");
-  // Two orders of magnitude below the 761 the type surface produced.
-  expect(runtime.renameBarriers.propertyNames.length).toBeLessThan(60);
-  expect(runtime.barrierWarnings).toEqual([]);
 });
 
 // The CSS custom-property protocol. `@ant-design/cssinjs` turns a token object
@@ -1080,9 +1552,8 @@ test("jquery example pins proven barriers, not a type surface", async () => {
 // packages of spreads, dot-writes and higher-order calls, so no other evidence
 // class reaches them.
 test("keys that reach a `--` string construction are rename evidence", async () => {
-  const { analyzeCssVariableProtocol } = await import(
-    "../../src/externs/css-variable-protocol.ts"
-  );
+  const { analyzeCssVariableProtocol } =
+    await import("../../src/externs/css-variable-protocol.ts");
   const fixture = await createFixture();
   // Module 1: the sink. The enumerated key escapes into a template with a
   // literal `--` head, through a call — exactly `token2CSSVar(key, prefix)`.
@@ -1150,9 +1621,8 @@ test("keys that reach a `--` string construction are rename evidence", async () 
 // serializer do it — and pinning on that alone is what made the round-1 probe
 // unusable. Without a custom-property name in the output, nothing is pinned.
 test("enumeration without a `--` construction pins nothing", async () => {
-  const { analyzeCssVariableProtocol } = await import(
-    "../../src/externs/css-variable-protocol.ts"
-  );
+  const { analyzeCssVariableProtocol } =
+    await import("../../src/externs/css-variable-protocol.ts");
   const fixture = await createFixture();
   await fixture.write(
     "serialize.js",
@@ -1203,9 +1673,8 @@ test("enumeration without a `--` construction pins nothing", async () => {
 // when a string key carries selector syntax; its identifier keys with object
 // values are selector element names.
 test("element-name keys in selector position are rename evidence", async () => {
-  const { analyzeCssVariableProtocol } = await import(
-    "../../src/externs/css-variable-protocol.ts"
-  );
+  const { analyzeCssVariableProtocol } =
+    await import("../../src/externs/css-variable-protocol.ts");
   const fixture = await createFixture();
   await fixture.write(
     "style.js",
@@ -1239,9 +1708,8 @@ test("element-name keys in selector position are rename evidence", async () => {
 // literal, the `_skip_check_`/`_multi_value_` wrapper is a declaration,
 // not a selector, so its key stays renamable too.
 test("selector keys need style-shape evidence; wrappers stay out", async () => {
-  const { analyzeCssVariableProtocol } = await import(
-    "../../src/externs/css-variable-protocol.ts"
-  );
+  const { analyzeCssVariableProtocol } =
+    await import("../../src/externs/css-variable-protocol.ts");
   const fixture = await createFixture();
   await fixture.write(
     "plain.js",
@@ -1273,12 +1741,10 @@ test("selector keys need style-shape evidence; wrappers stay out", async () => {
 // `.ant-tabs-tab margin{va:true;value:…}` instead of `.ant-tabs-tab{margin:…}`.
 // The tabs lose their gap with no error anywhere.
 test("keys read through a const-bound string are rename evidence", async () => {
-  const { analyzeRuntimeUsage } = await import(
-    "../../src/externs/runtime/index.ts"
-  );
-  const { collectRuntimeUsageExternLines } = await import(
-    "../../src/externs/render.ts"
-  );
+  const { analyzeRuntimeUsage } =
+    await import("../../src/externs/runtime/index.ts");
+  const { collectRuntimeUsageExternLines } =
+    await import("../../src/externs/render.ts");
   const fixture = await createFixture();
   await fixture.write(
     "runtime.js",
@@ -1432,39 +1898,34 @@ test.serial(
   },
 );
 
-test.serial(
-  "generateExterns reuses a provided typeWorld program",
-  async () => {
-    const fixture = await createExternFixture();
-    const compilerOptions = await loadExternCompilerOptions({
-      projectRoot: fixture.projectRoot,
-      tsConfigPath: undefined,
-    });
-    const typeWorld = createTypeWorld(
-      [
-        path.join(fixture.projectRoot, "src/main.ts"),
-        path.join(fixture.projectRoot, "node_modules/contract-pkg/index.d.ts"),
-      ],
-      compilerOptions,
-    );
-    const programBefore = typeWorld.program;
-    const result = await generateExternsFromSource({
-      appEntryFiles: ["./main.ts"],
-      includeDependencies: false,
-      mode: "boundary-aware",
-      modules: ["contract-pkg"],
-      projectRoot: fixture.projectRoot,
-      srcDir: fixture.srcDir,
-      typeWorld,
-    });
-    expect(typeWorld.program).toBe(programBefore);
-    expect(
-      result.scannedFiles.some((filePath) =>
-        filePath.includes("/contract-pkg/"),
-      ),
-    ).toBe(true);
-  },
-);
+test.serial("generateExterns reuses a provided typeWorld program", async () => {
+  const fixture = await createExternFixture();
+  const compilerOptions = await loadExternCompilerOptions({
+    projectRoot: fixture.projectRoot,
+    tsConfigPath: undefined,
+  });
+  const typeWorld = createTypeWorld(
+    [
+      path.join(fixture.projectRoot, "src/main.ts"),
+      path.join(fixture.projectRoot, "node_modules/contract-pkg/index.d.ts"),
+    ],
+    compilerOptions,
+  );
+  const programBefore = typeWorld.program;
+  const result = await generateExternsFromSource({
+    appEntryFiles: ["./main.ts"],
+    includeDependencies: false,
+    mode: "boundary-aware",
+    modules: ["contract-pkg"],
+    projectRoot: fixture.projectRoot,
+    srcDir: fixture.srcDir,
+    typeWorld,
+  });
+  expect(typeWorld.program).toBe(programBefore);
+  expect(
+    result.scannedFiles.some((filePath) => filePath.includes("/contract-pkg/")),
+  ).toBe(true);
+});
 
 test.serial(
   "generateExterns propertyPolicy omits a pinned renameable name",

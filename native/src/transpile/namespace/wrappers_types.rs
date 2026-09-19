@@ -6,9 +6,9 @@ use crate::transpile::identity::BindingKeyMap;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DynamicImportWrappers {
-    pub(crate) function_wrappers: BindingKeyMap<BTreeSet<String>>,
-    pub(crate) object_wrappers: BindingKeyMap<DynamicImportObjectWrapper>,
-    pub(crate) object_function_wrappers: BindingKeyMap<DynamicImportObjectWrapper>,
+    pub(crate) functions: BindingKeyMap<BTreeSet<String>>,
+    pub(crate) objects: BindingKeyMap<DynamicImportObjectWrapper>,
+    pub(crate) object_factories: BindingKeyMap<DynamicImportObjectWrapper>,
 }
 
 pub(crate) type DynamicImportObjectWrapper = BTreeMap<String, BTreeSet<String>>;

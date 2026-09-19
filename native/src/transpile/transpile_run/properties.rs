@@ -2,20 +2,15 @@ use std::collections::HashSet;
 
 use crate::closure_metadata::ClosureFileMetadata;
 
-use super::super::transpile_plan::collect_decorated_metadata_property_names;
-
 pub(crate) fn extend_preserved_property_names(
     preserved_property_names: &mut HashSet<String>,
     file_metadata: &std::collections::HashMap<String, ClosureFileMetadata>,
     preserves_node_import_meta: bool,
     type_inference_disabled: bool,
     prelude_property_names: impl IntoIterator<Item = String>,
-) -> std::result::Result<(), String> {
-    // Decorator metadata carries property keys as string literals; preserving
-    // those keys keeps the literals valid instead of rewriting Closure output.
-    preserved_property_names.extend(collect_decorated_metadata_property_names(file_metadata)?);
-    // Prelowered decorator keys and pair-array classMap keys come from the
-    // fused analysis prelude, which parsed each file once.
+) {
+    // Authored and lowered decorator keys (including metadata-only inputs),
+    // plus pair-array classMap keys, come from the analysis prelude.
     preserved_property_names.extend(prelude_property_names);
     if preserves_node_import_meta {
         // `import.meta` is a host-provided Node ESM object. Quote its standard
@@ -32,5 +27,4 @@ pub(crate) fn extend_preserved_property_names(
                 .map(|member| member.name.clone()),
         );
     }
-    Ok(())
 }

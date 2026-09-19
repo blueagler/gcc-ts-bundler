@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 
 import { ensureParentDirectory } from "../../../shared/files";
+import { runWithConcurrency } from "../../../shared/concurrency";
 import { rewriteGccExports } from "../../../native/load";
 import type { prepareClosureJobs } from "../../../native/load";
 import { readCachedText } from "./io";
@@ -128,8 +129,10 @@ export async function runClosurePostprocess({
   const report = new PostprocessRuleReport();
   const inputContents = new Map<string, Promise<string>>();
 
-  const exportRewriteReports = await Promise.all(
-    prepared.postprocessActions.map(async (action) => {
+  const exportRewriteReports = await runWithConcurrency(
+    prepared.postprocessActions,
+    16,
+    async (action) => {
       await ensureParentDirectory(action.outputPath);
       // ES_MODULES output has no $gcc namespace and cannot be wrapped:
       // `import`/`export` are top-level-only, and Closure ignores
@@ -214,7 +217,7 @@ export async function runClosurePostprocess({
       }
       await fs.writeFile(action.outputPath, contents);
       return exportRewriteReport;
-    }),
+    },
   );
 
   const structurallyTriggered = exportRewriteReports.filter(

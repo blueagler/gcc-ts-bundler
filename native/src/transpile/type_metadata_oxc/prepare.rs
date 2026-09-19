@@ -1,9 +1,10 @@
 //! Prepare bound type metadata for declaration and enum delivery.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::*;
+use oxc_ast::ast::{BindingIdentifier, IdentifierReference};
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
@@ -22,32 +23,32 @@ use crate::closure_metadata::{
     ClosureAnnotation, ClosureEnumDeclaration, ClosureFileMetadata, ClosureTypeSymbol,
 };
 
-pub(crate) struct PreparedTypeMetadata {
-    pub(super) binding_annotations: BindingKeyMap<Vec<ClosureAnnotation>>,
+pub(crate) struct PreparedTypeMetadata<'m> {
+    pub(super) binding_annotations: BindingKeyMap<Vec<&'m ClosureAnnotation>>,
     declaration_lines: Vec<String>,
     pub(super) delivery: TypeMetadataDelivery,
     enum_names: HashMap<String, String>,
-    pub(super) member_annotations: BindingKeyMap<Vec<ClosureAnnotation>>,
-    pub(super) metadata: ClosureFileMetadata,
+    pub(super) member_annotations: BindingKeyMap<Vec<&'m ClosureAnnotation>>,
+    pub(super) metadata: Cow<'m, ClosureFileMetadata>,
     shared_type_declarations: Vec<SharedHelperDeclaration>,
     pub(super) symbol_resolutions: HashMap<String, RuntimeTypeName>,
-    pub(super) symbols_by_id: HashMap<String, ClosureTypeSymbol>,
+    pub(super) symbols_by_id: HashMap<&'m str, &'m ClosureTypeSymbol>,
 }
 
-impl BoundTypeMetadata {
+impl<'m> BoundTypeMetadata<'m> {
     pub(crate) fn prepare(
         self,
         fresh_names: &mut FreshNameAllocator,
         runtime_names: &BindingKeyMap<RuntimeTypeName>,
         hoist_ordinal: Option<usize>,
-    ) -> PreparedTypeMetadata {
+    ) -> PreparedTypeMetadata<'m> {
         PreparedTypeMetadata::new(self, fresh_names, runtime_names, hoist_ordinal)
     }
 }
 
-impl PreparedTypeMetadata {
+impl<'m> PreparedTypeMetadata<'m> {
     fn new(
-        bound: BoundTypeMetadata,
+        bound: BoundTypeMetadata<'m>,
         fresh_names: &mut FreshNameAllocator,
         runtime_names: &BindingKeyMap<RuntimeTypeName>,
         hoist_ordinal: Option<usize>,
@@ -108,9 +109,10 @@ impl PreparedTypeMetadata {
 
         let mut enum_names = HashMap::new();
         for declaration in &bound.metadata.enums {
-            let preferred = hoist_ordinal
-                .map(|ordinal| suffixed_name(&declaration.binding_name, ordinal))
-                .unwrap_or_else(|| declaration.binding_name.clone());
+            let preferred = hoist_ordinal.map_or_else(
+                || declaration.binding_name.clone(),
+                |ordinal| suffixed_name(&declaration.binding_name, ordinal),
+            );
             let emitted_name = fresh_names.fresh(&preferred);
             enum_names.insert(declaration.symbol_id.clone(), emitted_name.clone());
             symbol_resolutions.insert(
@@ -133,14 +135,14 @@ impl PreparedTypeMetadata {
                 }
                 let authored_name = bound
                     .symbols_by_id
-                    .get(&declaration.declared_symbol_id)
-                    .map(|symbol| symbol.diagnostic_name.as_str())
-                    .unwrap_or("ClosureType");
-                let preferred = hoist_ordinal
-                    .map(|_| {
+                    .get(declaration.declared_symbol_id.as_str())
+                    .map_or("ClosureType", |symbol| symbol.diagnostic_name.as_str());
+                let preferred = hoist_ordinal.map_or_else(
+                    || authored_name.to_string(),
+                    |_| {
                         shared_type_declaration_name(authored_name, &declaration.declared_symbol_id)
-                    })
-                    .unwrap_or_else(|| authored_name.to_string());
+                    },
+                );
                 declaration_names.insert(
                     declaration.declared_symbol_id.clone(),
                     if hoist_ordinal.is_some() {
@@ -176,7 +178,6 @@ impl PreparedTypeMetadata {
                 .filter(|declaration| {
                     declaration_names.contains_key(&declaration.declared_symbol_id)
                 })
-                .cloned()
                 .collect::<Vec<_>>();
             let first_pass = render_declarations(
                 &bound.metadata,
@@ -264,8 +265,8 @@ impl PreparedTypeMetadata {
         &self.metadata.enums
     }
 
-    pub(crate) fn count_enum(&mut self) {
-        self.delivery.counts.enumDeclarationCount += 1;
+    pub(crate) fn count_enums(&mut self, count: usize) {
+        self.delivery.counts.enum_declarations += count as u32;
     }
 
     pub(crate) fn finish(mut self) -> TypeMetadataDelivery {
@@ -334,7 +335,7 @@ fn rename_declaration_template(
             .join("\n"));
     }
     let semantic = SemanticBuilder::new()
-        .with_build_nodes(true)
+        .with_build_nodes(false)
         .with_enum_eval(true)
         .build(&parsed.program);
     if !semantic.diagnostics.is_empty() {
@@ -346,16 +347,20 @@ fn rename_declaration_template(
             .join("\n"));
     }
     let identity = ModuleIdentity::new(semantic.semantic.into_scoping());
-    let bindings = collect_top_level_bindings(&parsed.program, &identity);
+    let bindings = collect_top_level_bindings(&parsed.program)?;
     let target = unique_binding(&bindings, authored_name)
         .ok_or_else(|| format!("Missing declaration binding {authored_name}"))?;
     let mut collector = IdentifierEditCollector {
         edits: Vec::new(),
+        binding_error: None,
         emitted_name,
         identity: &identity,
         target,
     };
     collector.visit_program(&parsed.program);
+    if let Some(error) = collector.binding_error {
+        return Err(error);
+    }
     collector
         .edits
         .sort_by_key(|(start, end, _)| (*start, *end));
@@ -367,6 +372,7 @@ fn rename_declaration_template(
 
 struct IdentifierEditCollector<'a> {
     edits: Vec<(usize, usize, String)>,
+    binding_error: Option<String>,
     emitted_name: &'a str,
     identity: &'a ModuleIdentity,
     target: BindingKey,
@@ -384,8 +390,12 @@ impl IdentifierEditCollector<'_> {
 
 impl<'a> Visit<'a> for IdentifierEditCollector<'_> {
     fn visit_binding_identifier(&mut self, binding: &BindingIdentifier<'a>) {
-        if self.identity.key_of_binding(binding) == self.target {
-            self.push(binding.span);
+        match ModuleIdentity::key_of_binding(binding) {
+            Ok(key) if key == self.target => self.push(binding.span),
+            Ok(_) => {}
+            Err(error) => {
+                self.binding_error.get_or_insert(error);
+            }
         }
     }
 

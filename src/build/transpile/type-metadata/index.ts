@@ -3,13 +3,9 @@ import ts from "@typescript/typescript6";
 
 import { logInternalDetail } from "../../../shared/timing";
 import {
-  collectFileStates,
-  matchFileStates,
-  type NativeFileStateEntry,
-} from "../../../native/load";
-import {
   loadCompilerOptions,
   loadTsConfigDeclarationFiles,
+  parseTsConfig,
 } from "../../resolve/compiler-options";
 import { collectTypeMetadataFiles } from "./metadata";
 import {
@@ -35,35 +31,6 @@ interface NativeTypeAnalysisContext {
   program: ts.Program;
 }
 
-interface AnalysisProgramMemo {
-  compilerOptions: ts.CompilerOptions;
-  program: ts.Program;
-  rootNamesKey: string;
-  sourceFileStates: NativeFileStateEntry[];
-  tsConfigPath: string;
-}
-
-/**
- * Process-wide reuse of the analysis program. Building it — parsing the root
- * set plus the whole default lib — dominates type metadata collection, and a
- * watch or multi-build process re-enters this function with byte-identical
- * inputs almost every time.
- *
- * The invalidation key is spelled out on purpose, and every part of it is
- * load-bearing:
- *  - `tsConfigPath` and the `compilerOptions` object identity. Identity is
- *    exact here rather than approximate: `loadCompilerOptions` memoizes on the
- *    config path, the extra options and the config's mtime, so a different
- *    object means a different configuration.
- *  - `rootNamesKey`, the sorted root name list. Consumers index the program by
- *    file name rather than by program file order, so sorting is safe.
- *  - `sourceFileStates`, the mtime/size of every non-default-lib file the
- *    previous program actually pulled in. That covers transitively resolved
- *    imports and ambient declarations, not just the roots, so a type-only edit
- *    to any file the checker read forces a fresh program.
- */
-let analysisProgramMemo: AnalysisProgramMemo | undefined;
-
 export async function createNativeTypeAnalysisContext({
   fileNames,
   tsConfigPath,
@@ -82,21 +49,30 @@ export async function createNativeTypeAnalysisContext({
       program: typeWorld.program,
     };
   }
-  const compilerOptions = await loadCompilerOptions(tsConfigPath, {
-    allowJs: true,
-    ignoreDeprecations: "6.0",
-    moduleResolution: ts.ModuleResolutionKind.Bundler,
-    noEmit: true,
-    rootDir: workspaceDir,
-    skipLibCheck: true,
-    target: ts.ScriptTarget.ESNext,
-  });
+  const tsConfig = parseTsConfig(tsConfigPath, fileNames);
+  const compilerOptions = await loadCompilerOptions(
+    tsConfigPath,
+    {
+      allowJs: true,
+      ignoreDeprecations: "6.0",
+      module: ts.ModuleKind.ESNext,
+      moduleResolution: ts.ModuleResolutionKind.Bundler,
+      noEmit: true,
+      rootDir: workspaceDir,
+      skipLibCheck: true,
+      target: ts.ScriptTarget.ESNext,
+    },
+    tsConfig,
+  );
   // Program parity with `tsc`: the checker must see the same files `tsc`
   // would. Graph roots cover everything reachable by import; ambient
   // declarations are reachable by nobody and come from the config instead.
   // `typeRoots`/`types` packages and triple-slash references are resolved by
   // `ts.createProgram` itself once the roots are right.
-  const declarationRoots = await loadTsConfigDeclarationFiles(tsConfigPath);
+  const declarationRoots = await loadTsConfigDeclarationFiles(
+    tsConfigPath,
+    tsConfig,
+  );
   const rootNames = [...fileNames];
   const seen = new Set(fileNames.map((fileName) => path.resolve(fileName)));
   for (const declarationFile of declarationRoots) {
@@ -106,23 +82,6 @@ export async function createNativeTypeAnalysisContext({
     seen.add(declarationFile);
     rootNames.push(declarationFile);
   }
-  const rootNamesKey = [...rootNames]
-    .sort((left, right) => left.localeCompare(right))
-    .join("\0");
-  const memo = analysisProgramMemo;
-  if (
-    memo !== undefined &&
-    memo.compilerOptions === compilerOptions &&
-    memo.tsConfigPath === tsConfigPath &&
-    memo.rootNamesKey === rootNamesKey &&
-    matchFileStates(memo.sourceFileStates)
-  ) {
-    return {
-      compilerOptions,
-      fileNames,
-      program: memo.program,
-    };
-  }
   if (rootNames.length !== fileNames.length) {
     logInternalDetail(
       "native-emit:program-parity",
@@ -131,18 +90,6 @@ export async function createNativeTypeAnalysisContext({
   }
 
   const program = ts.createProgram(rootNames, compilerOptions);
-  analysisProgramMemo = {
-    compilerOptions,
-    program,
-    rootNamesKey,
-    sourceFileStates: collectFileStates(
-      program
-        .getSourceFiles()
-        .filter((sourceFile) => !program.isSourceFileDefaultLibrary(sourceFile))
-        .map((sourceFile) => sourceFile.fileName),
-    ),
-    tsConfigPath,
-  };
   return {
     compilerOptions,
     // `fileNames` stays the analysis set: parity widens what the checker can

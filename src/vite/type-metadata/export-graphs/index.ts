@@ -126,15 +126,14 @@ export function parseRuntimeExportGraph(
   return dedupeBy(facts, (fact) => JSON.stringify(fact));
 }
 
-export function resolveRuntimeExportGraph(input: {
+export async function resolveRuntimeExportGraph(input: {
   entryModuleId: string;
-  modules: ReadonlyMap<string, string>;
+  factsFor: (moduleId: string) => Promise<RuntimeExportFact[]>;
   resolveModuleId?: (
     importerModuleId: string,
     specifier: string,
   ) => string | null;
 }) {
-  const parsed = new Map<string, RuntimeExportFact[]>();
   const diagnostics: TypeMetadataDiagnostic[] = [];
   const resolveModuleId =
     input.resolveModuleId ??
@@ -142,30 +141,21 @@ export function resolveRuntimeExportGraph(input: {
       specifier.startsWith(".")
         ? path.normalize(path.resolve(path.dirname(importer), specifier))
         : null);
-  const factsFor = (moduleId: string) => {
-    const cached = parsed.get(moduleId);
-    if (cached) {
-      return cached;
-    }
-    const sourceText = input.modules.get(moduleId);
-    const facts = sourceText
-      ? parseRuntimeExportGraph(moduleId, sourceText)
-      : [];
-    parsed.set(moduleId, facts);
-    return facts;
-  };
-
-  const namesFor = (moduleId: string, seen: Set<string>): Set<string> => {
+  const namesFor = async (
+    moduleId: string,
+    seen: Set<string>,
+  ): Promise<Set<string>> => {
     if (seen.has(moduleId)) {
       return new Set();
     }
     const nextSeen = new Set(seen).add(moduleId);
+    const facts = await input.factsFor(moduleId);
     const names = new Set(
-      factsFor(moduleId).flatMap((fact) =>
+      facts.flatMap((fact) =>
         fact.exportName === undefined ? [] : [fact.exportName],
       ),
     );
-    for (const fact of factsFor(moduleId)) {
+    for (const fact of facts) {
       if (fact.kind !== "star" || !fact.targetSpecifier) {
         continue;
       }
@@ -173,7 +163,7 @@ export function resolveRuntimeExportGraph(input: {
       if (!target) {
         continue;
       }
-      for (const name of namesFor(target, nextSeen)) {
+      for (const name of await namesFor(target, nextSeen)) {
         if (name !== "default") {
           names.add(name);
         }
@@ -182,40 +172,43 @@ export function resolveRuntimeExportGraph(input: {
     return names;
   };
 
-  const resolve = (
+  const resolve = async (
     moduleId: string,
     exportName: string,
     seen: Set<string>,
-  ): RuntimeExportTarget | null => {
+  ): Promise<RuntimeExportTarget | null> => {
     const visitKey = `${moduleId}\0${exportName}`;
     if (seen.has(visitKey)) {
       return null;
     }
     const nextSeen = new Set(seen).add(visitKey);
-    const direct = factsFor(moduleId).filter(
-      (fact) => fact.exportName === exportName && fact.kind !== "star",
-    );
-    const targets = direct.flatMap((fact): RuntimeExportTarget[] => {
+    const facts = await input.factsFor(moduleId);
+    const targets: RuntimeExportTarget[] = [];
+    for (const fact of facts) {
+      if (fact.exportName !== exportName || fact.kind === "star") {
+        continue;
+      }
       if (fact.kind === "local" || fact.kind === "cjs") {
-        return [
-          {
-            exportName,
-            kind: fact.kind,
-            localName: fact.localName,
-            moduleId,
-          },
-        ];
+        targets.push({
+          exportName,
+          kind: fact.kind,
+          localName: fact.localName,
+          moduleId,
+        });
+        continue;
       }
       if (!fact.targetSpecifier || !fact.importedName) {
-        return [];
+        continue;
       }
       const targetModuleId = resolveModuleId(moduleId, fact.targetSpecifier);
       if (!targetModuleId || fact.importedName === "*") {
-        return [];
+        continue;
       }
-      const target = resolve(targetModuleId, fact.importedName, nextSeen);
-      return target ? [{ ...target, exportName }] : [];
-    });
+      const target = await resolve(targetModuleId, fact.importedName, nextSeen);
+      if (target) {
+        targets.push({ ...target, exportName });
+      }
+    }
     if (targets.length === 1) {
       return targets[0] ?? null;
     }
@@ -231,20 +224,23 @@ export function resolveRuntimeExportGraph(input: {
       return targets[0];
     }
 
-    const starTargets = factsFor(moduleId).flatMap((fact) => {
+    const starTargets: RuntimeExportTarget[] = [];
+    for (const fact of facts) {
       if (
         fact.kind !== "star" ||
         !fact.targetSpecifier ||
         exportName === "default"
       ) {
-        return [];
+        continue;
       }
       const targetModuleId = resolveModuleId(moduleId, fact.targetSpecifier);
       const target = targetModuleId
-        ? resolve(targetModuleId, exportName, nextSeen)
+        ? await resolve(targetModuleId, exportName, nextSeen)
         : null;
-      return target ? [target] : [];
-    });
+      if (target) {
+        starTargets.push(target);
+      }
+    }
     if (starTargets.length === 1) {
       return starTargets[0] ?? null;
     }
@@ -261,9 +257,9 @@ export function resolveRuntimeExportGraph(input: {
 
   const exports = new Map<string, RuntimeExportTarget>();
   for (const exportName of [
-    ...namesFor(input.entryModuleId, new Set()),
+    ...(await namesFor(input.entryModuleId, new Set())),
   ].sort()) {
-    const target = resolve(input.entryModuleId, exportName, new Set());
+    const target = await resolve(input.entryModuleId, exportName, new Set());
     if (target) {
       exports.set(exportName, target);
     }

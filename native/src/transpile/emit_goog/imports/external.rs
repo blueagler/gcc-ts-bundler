@@ -1,6 +1,6 @@
 //! External and preserved-module import assembly for goog.module emit.
 
-use oxc_ast::ast::*;
+use oxc_ast::ast::{ImportDeclaration, ImportDeclarationSpecifier, ImportOrExportKind};
 
 use super::super::super::emit::PreservedImportPlan;
 use super::super::super::fresh::FreshNameAllocator;
@@ -61,7 +61,7 @@ pub(crate) fn convert_external_import_decl(
     import: &ImportDeclaration<'_>,
     external_specifier: &str,
     boundary_token: String,
-    namespace_externs: Option<(&ModuleIdentity, &NamespaceUsage)>,
+    namespace_externs: Option<&NamespaceUsage>,
     opaque_external: bool,
     fresh_names: &mut FreshNameAllocator,
 ) -> std::result::Result<ExternalImportPlan, String> {
@@ -122,9 +122,9 @@ pub(crate) fn convert_external_import_decl(
                 } else {
                     extern_lines.push(format!("/** @type {{?}} */ var {boundary};"));
                 }
-                if let Some((identity, namespace_usage)) = namespace_externs {
-                    if let Some(member_names) =
-                        namespace_usage.member_only_usage(identity.key_of_binding(&namespace.local))
+                if let Some(namespace_usage) = namespace_externs {
+                    if let Some(member_names) = namespace_usage
+                        .member_only_usage(ModuleIdentity::key_of_binding(&namespace.local)?)
                     {
                         extern_lines.extend(
                             member_names

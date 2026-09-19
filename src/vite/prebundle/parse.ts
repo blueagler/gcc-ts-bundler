@@ -314,9 +314,9 @@ function collectDefaultExportedDeclaration(
   statement: ts.Statement,
   exportedNames: Set<string>,
 ): boolean | undefined {
-  if (
-    !(ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement))
-  ) {
+  if (!(
+    ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)
+  )) {
     return undefined;
   }
   if (!hasModifier(statement, ts.SyntaxKind.DefaultKeyword)) {
@@ -375,16 +375,12 @@ function collectExportedDeclarationNames(
 function isExportedFunctionClassOrVariable(
   statement: ts.Statement,
 ): statement is
-  | ts.FunctionDeclaration
-  | ts.ClassDeclaration
-  | ts.VariableStatement {
-  if (
-    !(
-      ts.isFunctionDeclaration(statement) ||
-      ts.isClassDeclaration(statement) ||
-      ts.isVariableStatement(statement)
-    )
-  ) {
+  ts.FunctionDeclaration | ts.ClassDeclaration | ts.VariableStatement {
+  if (!(
+    ts.isFunctionDeclaration(statement) ||
+    ts.isClassDeclaration(statement) ||
+    ts.isVariableStatement(statement)
+  )) {
     return false;
   }
   return hasModifier(statement, ts.SyntaxKind.ExportKeyword);

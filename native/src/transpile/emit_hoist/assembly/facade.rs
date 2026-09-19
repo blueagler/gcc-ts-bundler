@@ -7,7 +7,6 @@ use super::super::super::imports_exports::{
 };
 use super::super::super::{to_bundler_runtime_module_id, TranspileContext};
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_facade(
     module_id: &str,
     ordinal: usize,
@@ -35,17 +34,17 @@ pub(crate) fn render_facade(
             let runtime_id = to_bundler_runtime_module_id(target);
             lines.push(render_static_export_slot(
                 slot,
-                &format!("__require({runtime_id:?})"),
+                &format!("__require({runtime_id:?},true)"),
             ));
             continue;
         }
         let binding = plan.resolve_export(module_id, export_name).ok_or_else(|| {
             format!("Missing hoisted export binding for {export_name} in {module_id}")
         })?;
-        if binding.owner_module_id == module_id {
-            let value = suffixed_name(&binding.owner_local_name, ordinal);
+        if binding.module_id == module_id {
+            let value = suffixed_name(&binding.local_name, ordinal);
             let mode = local_export_modes
-                .get(&binding.owner_local_name)
+                .get(&binding.local_name)
                 .copied()
                 .unwrap_or(BundlerExportSlotMode::Live);
             lines.push(match mode {
@@ -57,7 +56,7 @@ pub(crate) fn render_facade(
         if plan.is_direct_binding(module_id, binding) {
             let value = plan
                 .direct_binding_name(binding)
-                .ok_or_else(|| format!("Missing hoist ordinal for {}", binding.owner_module_id))?;
+                .ok_or_else(|| format!("Missing hoist ordinal for {}", binding.module_id))?;
             lines.push(match plan.direct_binding_slot_mode(module_id, binding) {
                 BundlerExportSlotMode::Static => render_static_export_slot(slot, &value),
                 BundlerExportSlotMode::Live => render_live_export_slot(slot, &value),
@@ -66,22 +65,20 @@ pub(crate) fn render_facade(
         }
         let owner_slots = context
             .bundler_module_slots
-            .get(&binding.owner_module_id)
+            .get(&binding.module_id)
             .ok_or_else(|| {
                 format!(
                     "Missing bundler-runtime export slots for {}",
-                    binding.owner_module_id
+                    binding.module_id
                 )
             })?;
-        let owner_slot = owner_slots
-            .slot_for(&binding.owner_export_name)
-            .ok_or_else(|| {
-                format!(
-                    "Missing bundler-runtime export slot for {} in {}",
-                    binding.owner_export_name, binding.owner_module_id
-                )
-            })?;
-        let owner_runtime_id = to_bundler_runtime_module_id(&binding.owner_module_id);
+        let owner_slot = owner_slots.slot_for(&binding.export_name).ok_or_else(|| {
+            format!(
+                "Missing bundler-runtime export slot for {} in {}",
+                binding.export_name, binding.module_id
+            )
+        })?;
+        let owner_runtime_id = to_bundler_runtime_module_id(&binding.module_id);
         lines.push(render_live_export_slot(
             slot,
             &format!("__require({owner_runtime_id:?})[{owner_slot}]"),

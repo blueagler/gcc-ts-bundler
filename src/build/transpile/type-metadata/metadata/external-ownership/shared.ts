@@ -10,23 +10,48 @@ export interface RuntimeBoundaryDeclarationOrigins {
   moduleFiles: ReadonlySet<string>;
   packageRoots: readonly string[];
   ownedProperties: ReadonlyMap<string, ReadonlySet<string>>;
+  // These facts belong to this collection's Program. File provenance inputs
+  // are complete before construction; boundaryTypeSymbols and ownedProperties
+  // still change afterward and must not participate in these caches.
+  readonly typeIdentities: WeakMap<ts.Type, readonly string[]>;
+  readonly normalizedFileNames: WeakMap<ts.SourceFile, string>;
+  readonly boundarySourceFiles: WeakMap<ts.SourceFile, boolean>;
 }
 
-export function typeIdentityKeys(type: ts.Type) {
+export function typeIdentityKeys(
+  type: ts.Type,
+  origins: RuntimeBoundaryDeclarationOrigins,
+): readonly string[] {
+  const cached = origins.typeIdentities.get(type);
+  if (cached !== undefined) return cached;
   const identities = new Set<string>();
   for (const symbol of typeOwnerSymbols(type)) {
     for (const declaration of symbol.declarations ?? []) {
-      identities.add(typeIdentityKey(symbol, declaration));
+      identities.add(typeIdentityKey(symbol, declaration, origins));
     }
   }
-  return [...identities];
+  const result = [...identities];
+  origins.typeIdentities.set(type, result);
+  return result;
 }
 
 export function typeIdentityKey(
   symbol: ts.Symbol,
   declaration: ts.Declaration,
+  origins: RuntimeBoundaryDeclarationOrigins,
 ) {
-  return `${path.normalize(declaration.getSourceFile().fileName)}:${declaration.pos}:${declaration.end}:${symbol.getName()}`;
+  return `${normalizedSourceFileName(declaration.getSourceFile(), origins)}:${declaration.pos}:${declaration.end}:${symbol.getName()}`;
+}
+
+export function normalizedSourceFileName(
+  sourceFile: ts.SourceFile,
+  origins: RuntimeBoundaryDeclarationOrigins,
+) {
+  const cached = origins.normalizedFileNames.get(sourceFile);
+  if (cached !== undefined) return cached;
+  const fileName = path.normalize(sourceFile.fileName);
+  origins.normalizedFileNames.set(sourceFile, fileName);
+  return fileName;
 }
 
 export function typeOwnerSymbols(type: ts.Type) {
@@ -56,7 +81,7 @@ export function typeOriginatesFromRuntimeBoundary(
   seen.add(type);
 
   if (
-    typeIdentityKeys(type).some((identity) =>
+    typeIdentityKeys(type, origins).some((identity) =>
       origins.boundaryTypeSymbols.has(identity),
     ) ||
     symbolOriginatesFromRuntimeBoundary(type.aliasSymbol, origins) ||
@@ -83,19 +108,9 @@ export function symbolOriginatesFromRuntimeBoundary(
   symbol: ts.Symbol | undefined,
   origins: RuntimeBoundaryDeclarationOrigins,
 ) {
-  return (symbol?.declarations ?? []).some((declaration) => {
-    const fileName = path.normalize(declaration.getSourceFile().fileName);
-    if (origins.defaultLibraryFiles.has(fileName)) return false;
-    return (
-      origins.files.has(fileName) ||
-      origins.moduleFiles.has(fileName) ||
-      origins.packageRoots.some(
-        (packageRoot) =>
-          fileName === packageRoot ||
-          fileName.startsWith(`${packageRoot}${path.sep}`),
-      )
-    );
-  });
+  return (symbol?.declarations ?? []).some((declaration) =>
+    declarationOriginatesFromRuntimeBoundary(declaration, origins),
+  );
 }
 
 export function expressionOriginatesFromExternalValue(
@@ -131,17 +146,21 @@ export function declarationOriginatesFromRuntimeBoundary(
   origins: RuntimeBoundaryDeclarationOrigins,
 ) {
   if (!declaration) return false;
-  const fileName = path.normalize(declaration.getSourceFile().fileName);
-  if (origins.defaultLibraryFiles.has(fileName)) return false;
-  return (
-    origins.moduleFiles.has(fileName) ||
-    origins.files.has(fileName) ||
-    origins.packageRoots.some(
-      (packageRoot) =>
-        fileName === packageRoot ||
-        fileName.startsWith(`${packageRoot}${path.sep}`),
-    )
-  );
+  const sourceFile = declaration.getSourceFile();
+  const cached = origins.boundarySourceFiles.get(sourceFile);
+  if (cached !== undefined) return cached;
+  const fileName = normalizedSourceFileName(sourceFile, origins);
+  const boundary =
+    !origins.defaultLibraryFiles.has(fileName) &&
+    (origins.moduleFiles.has(fileName) ||
+      origins.files.has(fileName) ||
+      origins.packageRoots.some(
+        (packageRoot) =>
+          fileName === packageRoot ||
+          fileName.startsWith(`${packageRoot}${path.sep}`),
+      ));
+  origins.boundarySourceFiles.set(sourceFile, boundary);
+  return boundary;
 }
 
 export function unwrapExpression(expression: ts.Expression): ts.Expression {

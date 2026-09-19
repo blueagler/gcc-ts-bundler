@@ -1,4 +1,3 @@
-import fs from "node:fs/promises";
 import path from "node:path";
 
 import type { ResolvedConfig } from "vite";
@@ -15,7 +14,6 @@ import type {
 } from "../../build/types";
 import {
   createCompilerOptions,
-  INTERNAL_VITE_AUTHORED_FILES_FILE,
   INTERNAL_VITE_RUNTIME_MODULE_SOURCES_FILE,
 } from "../config";
 import { ownershipNeedsCssRuntime } from "../css";
@@ -64,7 +62,7 @@ export async function compileViteGraph(
   const { prepared } = input;
   const compilerOptions = createCompilerOptions({
     config: input.config,
-    entries: prepared.materialized.entries,
+    entries: prepared.materialized.entries.map((entry) => entry.file),
     externs: prepared.externs.renameBarriers,
     manifestFile: prepared.manifestSettings.fileName,
     languageOut: input.languageOut,
@@ -80,15 +78,6 @@ export async function compileViteGraph(
     prepared.captureRoot,
     INTERNAL_VITE_RUNTIME_MODULE_SOURCES_FILE,
   );
-  const authoredFilesFilePath = path.join(
-    prepared.captureRoot,
-    INTERNAL_VITE_AUTHORED_FILES_FILE,
-  );
-  await fs.writeFile(
-    authoredFilesFilePath,
-    JSON.stringify(prepared.materialized.authoredFiles, null, 2),
-    "utf8",
-  );
   // The runtime preamble is Closure input, but CSS rows are attached after the
   // compile, so the compiler cannot see for itself whether it will ever need
   // the `<link>` loader. This is the only place the answer exists in time.
@@ -101,7 +90,7 @@ export async function compileViteGraph(
       jsChunks: prepared.jsChunks,
       materialized: prepared.materialized,
     }),
-    viteAuthoredFilesFile: authoredFilesFilePath,
+    authoredFiles: prepared.materialized.authoredFiles,
     viteRuntimeSourceMapFile: runtimeModuleSourceMapFilePath,
   };
   const buildOptions: InternalBuildOptions = {

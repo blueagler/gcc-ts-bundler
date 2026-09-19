@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::*;
+use oxc_ast::ast::Program;
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::VisitMut;
 
@@ -27,10 +27,10 @@ pub(crate) fn rewrite_namespace_usage<'a, 'i>(
     context: &'i TranspileContext,
     hoist: Option<HoistNamespaceInfo<'i>>,
 ) -> std::result::Result<Vec<NamespaceReification>, String> {
-    let wrappers = collect_dynamic_import_wrappers(program, identity);
-    let object_carriers = collect_dynamic_import_object_carriers(program, &wrappers, identity);
+    let wrappers = collect_dynamic_import_wrappers(program, identity)?;
+    let object_carriers = collect_dynamic_import_object_carriers(program, &wrappers, identity)?;
     let promise_carriers =
-        collect_dynamic_import_promise_carriers(program, &object_carriers, &wrappers, identity);
+        collect_dynamic_import_promise_carriers(program, &object_carriers, &wrappers, identity)?;
     let mut visitor = BundlerRuntimeNamespaceVisitor {
         allocator,
         builder: AstBuilder::new(allocator),
@@ -38,7 +38,7 @@ pub(crate) fn rewrite_namespace_usage<'a, 'i>(
         direct_namespace_targets: HashMap::new(),
         errors: Vec::new(),
         file_path: file_path.to_path_buf(),
-        finite_property_bindings: collect_finite_property_bindings(program, identity),
+        finite_property_bindings: collect_finite_property_bindings(program, identity)?,
         hoist,
         identity,
         namespace_bindings: HashMap::new(),

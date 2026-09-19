@@ -2,7 +2,11 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    Argument, ArrowFunctionExpression, AssignmentExpression, BindingPattern, CallExpression,
+    ComputedMemberExpression, Expression, ForInStatement, Function, ObjectPropertyKind, Program,
+    PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement,
+};
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
@@ -69,7 +73,9 @@ fn is_module_declaration(statement: &Statement<'_>) -> bool {
         Statement::ImportDeclaration(_)
             | Statement::ExportAllDeclaration(_)
             | Statement::ExportDefaultDeclaration(_)
+            | Statement::ExportDeclaration(_)
             | Statement::ExportNamedDeclaration(_)
+            | Statement::ExportFromDeclaration(_)
             | Statement::TSExportAssignment(_)
             | Statement::TSNamespaceExportDeclaration(_)
     )
@@ -220,10 +226,6 @@ impl NamespaceOpacityVisitor<'_> {
 }
 
 impl<'a> Visit<'a> for NamespaceOpacityVisitor<'_> {
-    fn visit_static_member_expression(&mut self, member: &StaticMemberExpression<'a>) {
-        walk::walk_static_member_expression(self, member);
-    }
-
     fn visit_computed_member_expression(&mut self, member: &ComputedMemberExpression<'a>) {
         if self.is_namespace(&member.object) && string_literal_expr(&member.expression).is_none() {
             self.opaque = true;
@@ -328,7 +330,7 @@ impl<'a> Visit<'a> for CommonJsCollector {
             .iter()
             .any(|parameter| binds_commonjs_wrapper_name(&parameter.pattern));
         self.visit_shadowing_scope(shadows, |visitor| {
-            walk::walk_function(visitor, function, flags)
+            walk::walk_function(visitor, function, flags);
         });
     }
 
@@ -339,7 +341,7 @@ impl<'a> Visit<'a> for CommonJsCollector {
             .iter()
             .any(|parameter| binds_commonjs_wrapper_name(&parameter.pattern));
         self.visit_shadowing_scope(shadows, |visitor| {
-            walk::walk_arrow_function_expression(visitor, arrow)
+            walk::walk_arrow_function_expression(visitor, arrow);
         });
     }
 
@@ -537,66 +539,71 @@ fn string_literal_expr(expression: &Expression<'_>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::path::Path;
 
-    fn analyze(source: &str) -> CommonJsAnalysis {
-        analyze_commonjs_source(Path::new("/tmp/cjs-test.js"), source).unwrap()
+    use super::{analyze_commonjs_source, CommonJsAnalysis};
+
+    fn analyze(source: &str) -> Result<CommonJsAnalysis, String> {
+        analyze_commonjs_source(Path::new("/tmp/cjs-test.js"), source)
     }
 
     #[test]
-    fn collects_static_requires() {
-        let analysis = analyze("const React = require('react'); exports.ok = React;");
+    fn collects_static_requires() -> Result<(), String> {
+        let analysis = analyze("const React = require('react'); exports.ok = React;")?;
         assert!(analysis.has_commonjs);
         assert_eq!(analysis.dependencies, vec!["react".to_string()]);
+        Ok(())
     }
 
     #[test]
-    fn collects_named_exports() {
-        let analysis = analyze("exports.foo = 1; module.exports.bar = 2;");
+    fn collects_named_exports() -> Result<(), String> {
+        let analysis = analyze("exports.foo = 1; module.exports.bar = 2;")?;
         assert_eq!(
             analysis.export_names,
             vec!["bar".to_string(), "foo".to_string()]
         );
         assert!(analysis.has_default_export);
+        Ok(())
     }
 
     #[test]
-    fn ignores_exports_shadowed_by_bundler_wrapper_parameters() {
-        let analysis = analyze(
-            "var require_a = __commonJS({ \"a.js\"(exports, module) { exports.jsx = 1; module.exports = null; } });\nexport { require_a };",
-        );
+    fn ignores_exports_shadowed_by_bundler_wrapper_parameters() -> Result<(), String> {
+        let analysis = analyze("var require_a = __commonJS({ \"a.js\"(exports, module) { exports.jsx = 1; module.exports = null; } });\nexport { require_a };")?;
         assert!(!analysis.has_commonjs);
         assert!(analysis.export_names.is_empty());
         assert!(analysis.unsupported.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn still_detects_commonjs_outside_shadowing_scopes() {
+    fn still_detects_commonjs_outside_shadowing_scopes() -> Result<(), String> {
         let analysis =
-            analyze("function wrap(exports) { exports.inner = 1; }\nmodule.exports.outer = 2;");
+            analyze("function wrap(exports) { exports.inner = 1; }\nmodule.exports.outer = 2;")?;
         assert!(analysis.has_commonjs);
         assert_eq!(analysis.export_names, vec!["outer".to_string()]);
+        Ok(())
     }
 
     #[test]
-    fn detects_proxy_exports_and_folds_production_branch() {
-        let analysis = analyze(
-            "if (process.env.NODE_ENV === 'production') { module.exports = require('./prod'); } else { module.exports = require('./dev'); }",
-        );
+    fn detects_proxy_exports_and_folds_production_branch() -> Result<(), String> {
+        let analysis = analyze("if (process.env.NODE_ENV === 'production') { module.exports = require('./prod'); } else { module.exports = require('./dev'); }")?;
         assert_eq!(analysis.dependencies, vec!["./prod".to_string()]);
         assert_eq!(analysis.proxy_export.as_deref(), Some("./prod"));
+        Ok(())
     }
 
     #[test]
-    fn rejects_dynamic_require_and_computed_export_names() {
-        assert!(!analyze("require(name);").unsupported.is_empty());
-        assert!(!analyze("exports[name] = 1;").unsupported.is_empty());
+    fn rejects_dynamic_require_and_computed_export_names() -> Result<(), String> {
+        assert!(!analyze("require(name);")?.unsupported.is_empty());
+        assert!(!analyze("exports[name] = 1;")?.unsupported.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn opacity_is_fail_closed() {
-        assert!(!analyze("exports.alpha = 1;").exports_are_opaque);
-        assert!(analyze("exports.alpha = 1; Object.keys(exports);").exports_are_opaque);
-        assert!(analyze("exports.alpha = 1; exports[key];").exports_are_opaque);
+    fn opacity_is_fail_closed() -> Result<(), String> {
+        assert!(!analyze("exports.alpha = 1;")?.exports_are_opaque);
+        assert!(analyze("exports.alpha = 1; Object.keys(exports);")?.exports_are_opaque);
+        assert!(analyze("exports.alpha = 1; exports[key];")?.exports_are_opaque);
+        Ok(())
     }
 }

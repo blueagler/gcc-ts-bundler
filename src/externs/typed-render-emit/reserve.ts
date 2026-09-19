@@ -9,6 +9,7 @@ export function reserveSeedSymbol(
   module: ModuleSeed,
   state: RenderState,
 ): string {
+  state.projection?.roots.get(module.specifier)?.add(symbol);
   return state.nameForSymbol.get(symbol) ?? reserveAt(symbol, module, state, 0);
 }
 
@@ -24,12 +25,17 @@ export function reserveSymbol(
   state: RenderState,
 ): string | undefined {
   const current = state.nameForSymbol.get(symbol);
-  if (current) return current;
+  if (current) {
+    state.projection?.currentDependencies?.push(symbol);
+    return current;
+  }
   const depth = state.currentDepth + 1;
   if (state.maxSymbolDepth !== undefined && depth > state.maxSymbolDepth) {
     return undefined;
   }
-  return reserveAt(symbol, module, state, depth);
+  const name = reserveAt(symbol, module, state, depth);
+  state.projection?.currentDependencies?.push(symbol);
+  return name;
 }
 
 function reserveAt(
@@ -54,5 +60,13 @@ function reserveAt(
   state.depthForSymbol.set(symbol, depth);
   state.moduleForSymbol.set(symbol, module);
   state.pending.push(symbol);
+  if (state.projection) {
+    state.projection.symbols.set(symbol, {
+      dependencies: [],
+      namespace,
+      lineStart: 0,
+      lineEnd: 0,
+    });
+  }
   return name;
 }

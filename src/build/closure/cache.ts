@@ -4,6 +4,7 @@ import path from "path";
 
 import { readJsonIfExists, writeJson } from "../../shared/cache-store";
 import { zipExact } from "../../shared/arrays";
+import { runWithConcurrency } from "../../shared/concurrency";
 import { ensureDirectory } from "../../shared/files";
 import {
   collectFileContentSnapshot,
@@ -15,7 +16,6 @@ import {
   isNumber,
   isObjectOf,
   isString,
-  isStringArray,
   recordOf,
 } from "../../shared/validation";
 import type { NativeTypeMetadataCounts } from "../../native/load";
@@ -23,11 +23,10 @@ import type { ClosureCompilerOptions } from "./compiler";
 
 interface ClosureJobCacheMetadata {
   artifacts: FileContentSnapshot;
-  artifactFiles: string[];
   version: number;
 }
 
-const CLOSURE_JOB_CACHE_VERSION = 6;
+const CLOSURE_JOB_CACHE_VERSION = 7;
 
 export interface ClosureCompileJobConfig {
   assumeFunctionWrapper: boolean;
@@ -91,123 +90,37 @@ export function getCompileJobArtifactFiles(job: {
   return artifacts;
 }
 
-export async function tryRestoreCachedClosureJob({
+export interface PreparedClosureJobCache {
+  artifactFiles: string[];
+  inputHashes: ClosureJobInputHashes;
+  job: ClosureCompileJobConfig;
+  jobCacheDir: string;
+}
+
+interface ClosureJobInputHashes {
+  externHash: string[];
+  jsHash: string[];
+  renamingMapHash: string[];
+}
+
+export async function prepareClosureJobCache({
   cacheDir,
   compilerVersion,
   job,
   artifactFiles,
 }: {
+  artifactFiles: string[];
   cacheDir: string;
   compilerVersion: string;
   job: ClosureCompileJobConfig;
-  artifactFiles: string[];
-}) {
-  const jobCacheDir = await getClosureJobCacheDir(
-    cacheDir,
-    job,
-    compilerVersion,
-  );
-  const metadata = await readJsonIfExists(
-    path.join(jobCacheDir, "meta.json"),
-    isClosureJobCacheMetadata,
-  );
-  if (
-    !metadata ||
-    metadata.version !== CLOSURE_JOB_CACHE_VERSION ||
-    metadata.artifactFiles.length !== artifactFiles.length
-  ) {
-    return false;
-  }
-
-  const cachedFiles = metadata.artifactFiles.map((fileName) =>
-    path.join(jobCacheDir, fileName),
-  );
-  if (!(await fileContentSnapshotMatches(metadata.artifacts, cachedFiles))) {
-    return false;
-  }
-
-  await Promise.all(
-    zipExact(
-      artifactFiles,
-      cachedFiles,
-      "Closure artifacts and cached files",
-    ).map(async ([artifactFile, cachedFile]) => {
-      await ensureDirectory(path.dirname(artifactFile));
-      await fs.copyFile(cachedFile, artifactFile);
-    }),
-  );
-  return true;
-}
-
-const isClosureJobCacheMetadata = isObjectOf<ClosureJobCacheMetadata>({
-  artifacts: recordOf(
-    isObjectOf<FileContentSnapshot[string]>({
-      digest: isString,
-      size: isNumber,
-    }),
-  ),
-  artifactFiles: isStringArray,
-  version: isNumber,
-});
-
-export async function persistCachedClosureJob({
-  cacheDir,
-  compilerVersion,
-  job,
-  artifactFiles,
-}: {
-  cacheDir: string;
-  job: ClosureCompileJobConfig;
-  artifactFiles: string[];
-  compilerVersion: string;
-}) {
-  const jobCacheDir = await getClosureJobCacheDir(
-    cacheDir,
-    job,
-    compilerVersion,
-  );
-  await fs.rm(jobCacheDir, { force: true, recursive: true });
-  await ensureDirectory(jobCacheDir);
-  const artifactNames = artifactFiles.map((artifactFile) =>
-    path.basename(artifactFile),
-  );
-  await Promise.all(
-    zipExact(
-      artifactFiles,
-      artifactNames,
-      "Closure artifacts and artifact names",
-    ).map(([artifactFile, artifactName]) =>
-      fs.copyFile(artifactFile, path.join(jobCacheDir, artifactName)),
-    ),
-  );
-  const artifacts = await collectFileContentSnapshot(
-    artifactNames.map((artifactName) => path.join(jobCacheDir, artifactName)),
-  );
-  await writeJson(path.join(jobCacheDir, "meta.json"), {
-    artifacts,
-    artifactFiles: artifactNames,
-    version: CLOSURE_JOB_CACHE_VERSION,
-  } satisfies ClosureJobCacheMetadata);
-}
-
-async function getClosureJobCacheDir(
-  cacheDir: string,
-  job: ClosureCompileJobConfig,
-  compilerVersion: string,
-) {
+}): Promise<PreparedClosureJobCache> {
+  const inputHashes = await hashClosureJobInputs(job);
   const outputFiles = getCompileJobOutputFiles(job);
-  const jsHash = await hashFilesInOrder(job.js);
-  const externHash = await hashFilesInOrder(job.externs);
-  const renamingMapHash = await hashFilesInOrder(
-    [job.propertyMapInputFile, job.variableMapInputFile].filter(
-      (filePath): filePath is string => typeof filePath === "string",
-    ),
-  );
   const cacheKey = hashJson({
     compilerEnvironment: job.compilerEnvironment ?? {},
     compilerVersion,
-    externHash,
-    renamingMapHash,
+    externHash: inputHashes.externHash,
+    renamingMapHash: inputHashes.renamingMapHash,
     job: {
       assumeFunctionWrapper: job.assumeFunctionWrapper,
       chunk: job.chunk ?? null,
@@ -230,19 +143,142 @@ async function getClosureJobCacheDir(
       typeMetadataCounts: job.typeMetadataCounts,
       warningLevel: job.warningLevel,
     },
-    jsHash,
+    jsHash: inputHashes.jsHash,
     version: CLOSURE_JOB_CACHE_VERSION,
   });
-  return path.join(cacheDir, cacheKey);
+  return {
+    artifactFiles,
+    inputHashes,
+    job,
+    jobCacheDir: path.join(cacheDir, cacheKey),
+  };
+}
+
+export async function tryRestoreCachedClosureJob(
+  prepared: PreparedClosureJobCache,
+) {
+  const { artifactFiles, jobCacheDir } = prepared;
+  const metadata = await readJsonIfExists(
+    path.join(jobCacheDir, "meta.json"),
+    isClosureJobCacheMetadata,
+  );
+  const cachedFiles = metadata === null ? [] : Object.keys(metadata.artifacts);
+  if (
+    !metadata ||
+    metadata.version !== CLOSURE_JOB_CACHE_VERSION ||
+    cachedFiles.length !== artifactFiles.length
+  ) {
+    return false;
+  }
+  if (!(await fileContentSnapshotMatches(metadata.artifacts, cachedFiles))) {
+    return false;
+  }
+
+  const cachedByName = new Map(
+    cachedFiles.map((cachedFile) => [path.basename(cachedFile), cachedFile]),
+  );
+  if (cachedByName.size !== cachedFiles.length) {
+    return false;
+  }
+  const copies: Array<readonly [string, string]> = [];
+  for (const artifactFile of artifactFiles) {
+    const cachedFile = cachedByName.get(path.basename(artifactFile));
+    if (cachedFile === undefined) {
+      return false;
+    }
+    copies.push([artifactFile, cachedFile]);
+  }
+
+  await runWithConcurrency(copies, 16, async ([artifactFile, cachedFile]) => {
+    await ensureDirectory(path.dirname(artifactFile));
+    await fs.copyFile(cachedFile, artifactFile);
+  });
+  return true;
+}
+
+const isClosureJobCacheMetadata = isObjectOf<ClosureJobCacheMetadata>({
+  artifacts: recordOf(
+    isObjectOf<FileContentSnapshot[string]>({
+      digest: isString,
+      size: isNumber,
+    }),
+  ),
+  version: isNumber,
+});
+
+export async function persistCachedClosureJob(
+  prepared: PreparedClosureJobCache,
+) {
+  if (!(await closureJobInputsMatch(prepared))) {
+    return;
+  }
+  const { artifactFiles, jobCacheDir } = prepared;
+  await fs.rm(jobCacheDir, { force: true, recursive: true });
+  await ensureDirectory(jobCacheDir);
+  const artifactNames = artifactFiles.map((artifactFile) =>
+    path.basename(artifactFile),
+  );
+  await runWithConcurrency(
+    zipExact(
+      artifactFiles,
+      artifactNames,
+      "Closure artifacts and artifact names",
+    ),
+    16,
+    ([artifactFile, artifactName]) =>
+      fs.copyFile(artifactFile, path.join(jobCacheDir, artifactName)),
+  );
+  const artifacts = await collectFileContentSnapshot(
+    artifactNames.map((artifactName) => path.join(jobCacheDir, artifactName)),
+  );
+  await writeJson(path.join(jobCacheDir, "meta.json"), {
+    artifacts,
+    version: CLOSURE_JOB_CACHE_VERSION,
+  } satisfies ClosureJobCacheMetadata);
+}
+
+async function hashClosureJobInputs(
+  job: ClosureCompileJobConfig,
+): Promise<ClosureJobInputHashes> {
+  return {
+    externHash: await hashFilesInOrder(job.externs),
+    jsHash: await hashFilesInOrder(job.js),
+    renamingMapHash: await hashFilesInOrder(
+      [job.propertyMapInputFile, job.variableMapInputFile].filter(
+        (filePath): filePath is string => typeof filePath === "string",
+      ),
+    ),
+  };
+}
+
+async function closureJobInputsMatch(prepared: PreparedClosureJobCache) {
+  try {
+    const current = await hashClosureJobInputs(prepared.job);
+    return (
+      current.externHash.length === prepared.inputHashes.externHash.length &&
+      current.externHash.every(
+        (hash, index) => hash === prepared.inputHashes.externHash[index],
+      ) &&
+      current.jsHash.length === prepared.inputHashes.jsHash.length &&
+      current.jsHash.every(
+        (hash, index) => hash === prepared.inputHashes.jsHash[index],
+      ) &&
+      current.renamingMapHash.length ===
+        prepared.inputHashes.renamingMapHash.length &&
+      current.renamingMapHash.every(
+        (hash, index) => hash === prepared.inputHashes.renamingMapHash[index],
+      )
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function hashFilesInOrder(filePaths: string[]) {
-  return Promise.all(
-    filePaths.map(async (filePath) =>
-      crypto
-        .createHash("sha256")
-        .update(await fs.readFile(filePath))
-        .digest("hex"),
-    ),
+  return runWithConcurrency(filePaths, 16, async (filePath) =>
+    crypto
+      .createHash("sha256")
+      .update(await fs.readFile(filePath))
+      .digest("hex"),
   );
 }

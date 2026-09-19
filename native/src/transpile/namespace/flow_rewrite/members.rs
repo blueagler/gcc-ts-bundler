@@ -2,8 +2,8 @@
 
 use std::collections::BTreeSet;
 
-use oxc_allocator::{FromIn, TakeIn};
-use oxc_ast::ast::*;
+use oxc_allocator::{FromIn, ReplaceWith};
+use oxc_ast::ast::{Argument, Expression, TSTypeParameterInstantiation};
 use oxc_span::SPAN;
 use oxc_str::Str;
 use oxc_syntax::number::NumberBase;
@@ -36,15 +36,19 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
         }
 
         if finite_computed_property(&member.expression) {
-            let object = member.object.take_in(&self.builder);
-            let property = member.expression.take_in(&self.builder);
-            *expression = lower_finite_namespace_member(
-                object,
-                property,
-                member.optional,
-                self.allocator,
-                &self.builder,
-            );
+            expression.replace_with(|expression| match expression {
+                Expression::ComputedMemberExpression(member) => {
+                    let member = member.unbox();
+                    lower_finite_namespace_member(
+                        member.object,
+                        member.expression,
+                        member.optional,
+                        self.allocator,
+                        &self.builder,
+                    )
+                }
+                expression => expression,
+            });
             return true;
         }
 
@@ -55,20 +59,27 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
             .identity
             .key_of_reference(property_identifier)
             .and_then(|key| self.finite_property_bindings.get(&key))
-            .cloned()
         else {
             return false;
         };
-        let object = member.object.take_in(&self.builder);
-        let property = member.expression.take_in(&self.builder);
-        *expression = lower_bound_finite_namespace_member(
-            object,
-            property,
-            &properties,
-            member.optional,
-            self.allocator,
-            &self.builder,
-        );
+        let Some((last, preceding)) = properties.split_last() else {
+            return false;
+        };
+        expression.replace_with(|expression| match expression {
+            Expression::ComputedMemberExpression(member) => {
+                let member = member.unbox();
+                lower_bound_finite_namespace_member(
+                    member.object,
+                    member.expression,
+                    last,
+                    preceding,
+                    member.optional,
+                    self.allocator,
+                    &self.builder,
+                )
+            }
+            expression => expression,
+        });
         true
     }
 
@@ -93,27 +104,30 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
             self.reify(&module_ids, expression);
             return true;
         };
-        let slot = match self.slot_for_module_ids(&module_ids, &property) {
-            Ok(slot) => slot,
-            Err(message) => {
-                self.push_error(message);
-                return true;
-            }
-        };
-        let object = match expression {
-            Expression::StaticMemberExpression(member) => member.object.take_in(&self.builder),
-            Expression::ComputedMemberExpression(member) => member.object.take_in(&self.builder),
-            _ => unreachable!(),
-        };
-        let slot = Expression::new_numeric_literal(
-            SPAN,
-            slot as f64,
-            None,
-            NumberBase::Decimal,
-            &self.builder,
-        );
-        *expression =
-            Expression::new_computed_member_expression(SPAN, object, slot, optional, &self.builder);
+        if let Err(message) = self.validate_namespace_export(&module_ids, &property) {
+            self.push_error(message);
+            return true;
+        }
+        expression.replace_with(|expression| {
+            let object = match expression {
+                Expression::StaticMemberExpression(member) => member.unbox().object,
+                Expression::ComputedMemberExpression(member) => member.unbox().object,
+                expression => return expression,
+            };
+            let property = Expression::new_string_literal(
+                SPAN,
+                Str::from_in(&property, self.allocator),
+                None,
+                &self.builder,
+            );
+            Expression::new_computed_member_expression(
+                SPAN,
+                object,
+                property,
+                optional,
+                &self.builder,
+            )
+        });
         true
     }
 
@@ -167,26 +181,22 @@ impl<'a> BundlerRuntimeNamespaceVisitor<'a, '_> {
                 }
             }
         }
-        let Some(owner_slots) = self
-            .context
-            .bundler_module_slots
-            .get(&resolved.owner_module_id)
-        else {
+        let Some(owner_slots) = self.context.bundler_module_slots.get(&resolved.module_id) else {
             self.push_error(format!(
                 "Missing bundler-runtime export slot metadata for {}",
-                resolved.owner_module_id
+                resolved.module_id
             ));
             return true;
         };
-        let Some(owner_slot) = owner_slots.slot_for(&resolved.owner_export_name) else {
+        let Some(owner_slot) = owner_slots.slot_for(&resolved.export_name) else {
             self.push_error(format!(
                 "bundler-runtime cannot rewrite namespace access for export {:?} from {}",
-                resolved.owner_export_name, resolved.owner_module_id
+                resolved.export_name, resolved.module_id
             ));
             return true;
         };
         let callee = Expression::new_identifier(SPAN, "__require", &self.builder);
-        let runtime_module_id = to_bundler_runtime_module_id(&resolved.owner_module_id);
+        let runtime_module_id = to_bundler_runtime_module_id(&resolved.module_id);
         let module_id = Expression::new_string_literal(
             SPAN,
             Str::from_in(&runtime_module_id, self.allocator),

@@ -1,6 +1,6 @@
-import { defineValues, isFunction } from "../../shared/validation";
+import { defineValues, isFunction, isRecord } from "../../shared/validation";
 import type { NativeBinding } from "../abi";
-import { loadNativeBinding, type NativeAddonCandidate } from "../index";
+import { loadNativeBinding } from "../index";
 
 let cachedBinding: NativeBinding | null = null;
 
@@ -32,10 +32,9 @@ export function loadBinding(): NativeBinding {
   return cachedBinding;
 }
 
-function isNativeBinding<Value extends NativeAddonCandidate>(
-  value: Value,
-): value is Value & NativeBinding {
-  return NATIVE_BINDING_METHODS.every((methodName) =>
-    isFunction(value[methodName]),
+function isNativeBinding(value: unknown): value is NativeBinding {
+  return (
+    isRecord(value) &&
+    NATIVE_BINDING_METHODS.every((methodName) => isFunction(value[methodName]))
   );
 }

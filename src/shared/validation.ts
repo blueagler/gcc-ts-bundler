@@ -1,72 +1,9 @@
-export type RuntimePrimitive =
-  | string
-  | number
-  | boolean
-  | bigint
-  | symbol
-  | null
-  | undefined;
+export type Validator<T> = (value: unknown) => value is T;
 
-export type RuntimeValue =
-  | RuntimePrimitive
-  | RuntimeRecord
-  | RuntimeArray
-  | RuntimeCallable;
-
-export interface RuntimeArray {
-  readonly [index: number]: RuntimeValue;
-  readonly length: number;
-}
-
-export interface RuntimeRecord {
-  [key: string]: RuntimeValue;
-}
-
-export interface RuntimeCallable {
-  (...arguments_: never[]): RuntimeValue;
-}
-
-export type Validator<T> = <Value>(value: Value | T) => value is T;
-
-type PrimitiveKind = "string" | "number" | "boolean" | "other";
-
-function getPrimitiveKind<Value>(value: Value): PrimitiveKind {
-  if (Object(value) === value) {
-    return "other";
-  }
-
-  const tag = Object.prototype.toString.call(value);
-  if (tag === "[object String]") {
-    return "string";
-  }
-  if (tag === "[object Number]") {
-    return "number";
-  }
-  if (tag === "[object Boolean]") {
-    return "boolean";
-  }
-  return "other";
-}
-
-export function isFunction<Value>(
-  value: Value,
-): value is Value & RuntimeCallable {
-  const tag = Object.prototype.toString.call(value);
-  if (
-    tag !== "[object Function]" &&
-    tag !== "[object AsyncFunction]" &&
-    tag !== "[object GeneratorFunction]" &&
-    tag !== "[object AsyncGeneratorFunction]"
-  ) {
-    return false;
-  }
-
-  try {
-    Function.prototype.toString.call(value);
-    return true;
-  } catch {
-    return false;
-  }
+export function isFunction(
+  value: unknown,
+): value is (...arguments_: never[]) => unknown {
+  return typeof value === "function";
 }
 
 export function defineValues<const Values extends readonly string[]>(
@@ -78,62 +15,51 @@ export function assertNever(value: never): never {
   throw new TypeError(`Unexpected value: ${JSON.stringify(value)}.`);
 }
 
-export function isRecord<Value>(value: Value): value is Value & RuntimeRecord {
-  return Object(value) === value && !isFunction(value) && !Array.isArray(value);
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function isString<Value>(value: Value): value is Value & string {
-  return getPrimitiveKind(value) === "string";
+export function isString(value: unknown): value is string {
+  return typeof value === "string";
 }
 
-export function isNumber<Value>(value: Value): value is Value & number {
-  return getPrimitiveKind(value) === "number" && Number.isFinite(value);
+export function isNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
 }
 
-export function isBoolean<Value>(value: Value): value is Value & boolean {
-  return getPrimitiveKind(value) === "boolean";
+export function isBoolean(value: unknown): value is boolean {
+  return typeof value === "boolean";
 }
 
-export function isUnknownArray<Value>(
-  value: Value,
-): value is Value & RuntimeValue[] {
+export function isUnknownArray(value: unknown): value is unknown[] {
   return Array.isArray(value);
 }
 
-function isArrayOf<Value, Item>(
-  value: Value,
+function isArrayOf<Item>(
+  value: unknown,
   validate: Validator<Item>,
-): value is Value & Item[] {
+): value is Item[] {
   return isUnknownArray(value) && value.every(validate);
 }
 
-export function isStringArray<Value>(value: Value): value is Value & string[] {
+export function isStringArray(value: unknown): value is string[] {
   return isArrayOf(value, isString);
 }
 
-export function isRecordOf<Value, Item>(
-  value: Value | Record<string, NoInfer<Item>>,
-  validate: Validator<Item>,
-): value is Record<string, Item> {
-  return isRecord(value) && Object.values(value).every(validate);
-}
-
 export function optional<T>(validate: Validator<T>): Validator<T | undefined> {
-  return <Value>(value: Value): value is Value & (T | undefined) =>
+  return (value: unknown): value is T | undefined =>
     value === undefined || validate(value);
 }
 
 export function arrayOf<T>(validate: Validator<T>): Validator<T[]> {
-  return <Value>(value: Value): value is Value & T[] =>
-    isArrayOf(value, validate);
+  return (value: unknown): value is T[] => isArrayOf(value, validate);
 }
 
 export function recordOf<T>(
   validate: Validator<T>,
 ): Validator<Record<string, T>> {
-  return <Value>(
-    value: Value | Record<string, T>,
-  ): value is Record<string, T> => isRecordOf(value, validate);
+  return (value: unknown): value is Record<string, T> =>
+    isRecord(value) && Object.values(value).every(validate);
 }
 
 /**
@@ -146,7 +72,7 @@ export function recordOf<T>(
 export type ObjectSchema<T> = { [Key in keyof T]-?: Validator<T[Key]> };
 
 export function isObjectOf<T>(schema: ObjectSchema<T>): Validator<T> {
-  return <Value>(value: Value): value is Value & T => {
+  return (value: unknown): value is T => {
     if (!isRecord(value)) {
       return false;
     }
@@ -160,22 +86,17 @@ export function isObjectOf<T>(schema: ObjectSchema<T>): Validator<T> {
   };
 }
 
-function isOneOf<Input, const Choice extends string>(
-  value: Input,
+function isOneOf<const Choice extends string>(
+  value: unknown,
   choices: readonly Choice[],
-): value is Input & Choice {
-  if (!isString(value)) {
-    return false;
-  }
-  const stringValue: string = value;
-  return choices.some((choice) => choice === stringValue);
+): value is Choice {
+  return isString(value) && choices.some((choice) => choice === value);
 }
 
 export function oneOf<const Value extends string>(
   choices: readonly Value[],
 ): Validator<Value> {
-  return <Input>(value: Input): value is Input & Value =>
-    isOneOf(value, choices);
+  return (value: unknown): value is Value => isOneOf(value, choices);
 }
 
 export function parseChoice<const Value extends string>(
@@ -196,8 +117,8 @@ export function parseChoice<const Value extends string>(
   return choice;
 }
 
-export function requireChoice<Input, const Value extends string>(
-  value: Input,
+export function requireChoice<const Value extends string>(
+  value: unknown,
   choices: readonly Value[],
   optionName: string,
 ): Value {
@@ -221,17 +142,10 @@ export function parseJson<T>(
   throw new TypeError(`Invalid JSON structure in ${source}.`);
 }
 
-export function hasErrorCode<ErrorValue>(
-  error: ErrorValue,
-  code: string,
-): boolean {
-  if (!isRecord(error)) {
-    return false;
-  }
-  const record: RuntimeRecord = error;
-  return record.code === code;
+export function hasErrorCode(error: unknown, code: string): boolean {
+  return isRecord(error) && error["code"] === code;
 }
 
-export function getErrorMessage<ErrorValue>(error: ErrorValue): string {
+export function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

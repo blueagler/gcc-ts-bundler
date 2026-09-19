@@ -16,8 +16,9 @@ export function restoreCapturedModuleCode(
     }
     record.code = record.capturedCode;
     delete record.capturedCode;
-    delete record.rawAnalysis;
     delete record.normalizedAnalysis;
     delete record.normalizedCode;
+    delete record.parsedSource;
+    delete record.rawAnalysis;
   }
 }

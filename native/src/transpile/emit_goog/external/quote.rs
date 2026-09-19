@@ -4,7 +4,10 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::*;
+use oxc_ast::ast::{
+    ChainElement, Expression, ImportDeclarationSpecifier, ImportOrExportKind, Program, Statement,
+    VariableDeclarator,
+};
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk, Visit, VisitMut};
 use oxc_span::GetSpan;
@@ -22,7 +25,7 @@ pub(crate) fn quote_external_boundary_accesses<'a>(
     context: &TranspileContext,
     file_metadata: Option<&ClosureFileMetadata>,
     evidence: ExternalBoundaryEvidence,
-) {
+) -> Result<(), String> {
     let external_root_starts = file_metadata
         .map(|metadata| {
             metadata
@@ -68,15 +71,15 @@ pub(crate) fn quote_external_boundary_accesses<'a>(
             for specifier in import.specifiers.iter().flatten() {
                 match specifier {
                     ImportDeclarationSpecifier::ImportDefaultSpecifier(default) => {
-                        candidates.insert(identity.key_of_binding(&default.local));
+                        candidates.insert(ModuleIdentity::key_of_binding(&default.local)?);
                     }
                     ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) => {
-                        candidates.insert(identity.key_of_binding(&namespace.local));
+                        candidates.insert(ModuleIdentity::key_of_binding(&namespace.local)?);
                     }
                     ImportDeclarationSpecifier::ImportSpecifier(named)
                         if named.import_kind != ImportOrExportKind::Type =>
                     {
-                        candidates.insert(identity.key_of_binding(&named.local));
+                        candidates.insert(ModuleIdentity::key_of_binding(&named.local)?);
                     }
                     ImportDeclarationSpecifier::ImportSpecifier(_) => {}
                 }
@@ -84,16 +87,20 @@ pub(crate) fn quote_external_boundary_accesses<'a>(
         }
     }
     if candidates.is_empty() && external_member_starts.is_empty() {
-        return;
+        return Ok(());
     }
     loop {
         let mut collector = ExternalDerivedBindingCollector {
             candidates: &mut candidates,
             changed: false,
+            error: None,
             external_root_starts: &external_root_starts,
             identity,
         };
         collector.visit_program(program);
+        if let Some(error) = collector.error {
+            return Err(error);
+        }
         if !collector.changed {
             break;
         }
@@ -107,6 +114,7 @@ pub(crate) fn quote_external_boundary_accesses<'a>(
         identity,
     }
     .visit_program(program);
+    Ok(())
 }
 
 pub(crate) struct ExternalBoundaryAccessQuoter<'a, 'b> {
@@ -132,12 +140,16 @@ impl ExternalBoundaryAccessQuoter<'_, '_> {
 struct ExternalDerivedBindingCollector<'b> {
     candidates: &'b mut BindingKeySet,
     changed: bool,
+    error: Option<String>,
     external_root_starts: &'b HashSet<u32>,
     identity: &'b ModuleIdentity,
 }
 
 impl<'a> Visit<'a> for ExternalDerivedBindingCollector<'_> {
     fn visit_variable_declarator(&mut self, declarator: &VariableDeclarator<'a>) {
+        if self.error.is_some() {
+            return;
+        }
         if declarator.init.as_ref().is_some_and(|initializer| {
             is_external_boundary_value(
                 initializer,
@@ -147,9 +159,13 @@ impl<'a> Visit<'a> for ExternalDerivedBindingCollector<'_> {
             )
         }) {
             if let Some(binding) = declarator.id.get_binding_identifier() {
-                self.changed |= self
-                    .candidates
-                    .insert(self.identity.key_of_binding(binding));
+                match ModuleIdentity::key_of_binding(binding) {
+                    Ok(binding) => self.changed |= self.candidates.insert(binding),
+                    Err(error) => {
+                        self.error = Some(error);
+                        return;
+                    }
+                }
             }
         }
         walk::walk_variable_declarator(self, declarator);
@@ -211,7 +227,7 @@ fn is_external_boundary_value(
             }
             ChainElement::CallExpression(call) => recurse(&call.callee),
             ChainElement::TSNonNullExpression(expression) => recurse(&expression.expression),
-            _ => false,
+            ChainElement::PrivateFieldExpression(_) => false,
         },
         _ => false,
     }

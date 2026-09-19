@@ -3,8 +3,7 @@ use std::path::Path;
 use oxc_allocator::Allocator;
 use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
 use oxc_minifier::{
-    CompressOptions, CompressOptionsUnused, MangleOptions, MangleOptionsKeepNames, Minifier,
-    MinifierOptions,
+    CompressOptions, MangleOptions, MangleOptionsKeepNames, Minifier, MinifierOptions,
 };
 use oxc_parser::Parser;
 use oxc_span::SourceType;
@@ -29,13 +28,9 @@ pub fn minify_javascript(file_path: String, source: String) -> Result<String, St
     }
 
     let mut program = parsed.program;
-    let mut compress = CompressOptions::smallest();
-    compress.drop_debugger = false;
-    compress.join_vars = true;
-    compress.sequences = true;
-    compress.unused = CompressOptionsUnused::Keep;
     let result = Minifier::new(MinifierOptions {
-        compress: Some(compress),
+        compress: Some(CompressOptions::safest()),
+        mangle_properties: None,
         mangle: Some(MangleOptions {
             top_level: Some(false),
             keep_names: MangleOptionsKeepNames::all_true(),
@@ -57,10 +52,10 @@ pub fn minify_javascript(file_path: String, source: String) -> Result<String, St
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::minify_javascript;
 
     #[test]
-    fn keeps_mutation_visible_no_dce_safe_mangle_contracts() {
+    fn keeps_mutation_visible_no_dce_safe_mangle_contracts() -> Result<(), String> {
         let output = minify_javascript(
             "fixture.mjs".to_string(),
             [
@@ -72,13 +67,13 @@ mod tests {
                 "export { unusedBinding, namedFunction, object };",
             ]
             .join("\n"),
-        )
-        .unwrap();
+        )?;
         assert!(output.contains("unusedBinding"), "{output}");
         assert!(output.contains("namedFunction"), "{output}");
         assert!(output.contains("preservedProperty"), "{output}");
         assert!(!output.contains("localBinding"), "{output}");
         assert!(output.contains("console.log"), "{output}");
         assert!(output.contains("debugger"), "{output}");
+        Ok(())
     }
 }

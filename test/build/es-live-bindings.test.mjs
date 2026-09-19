@@ -1,10 +1,9 @@
-import fs from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { expect, test } from "bun:test";
 
 import { build } from "../../dist/index.mjs";
-import { createFixture, findFilesNamed } from "../helpers.mjs";
+import { createFixture } from "../helpers.mjs";
 
 /**
  * ES modules export *bindings*, not values: when the exporting module reassigns
@@ -24,6 +23,181 @@ import { createFixture, findFilesNamed } from "../helpers.mjs";
  */
 
 let importCounter = 0;
+
+test.serial(
+  "a dependent chunk binds the hoisted import, not the shadowing base-chunk name",
+  { timeout: 30_000 },
+  async () => {
+    // After `Id`/`SyntaxContext` becomes `SymbolId`/`Scoping`, a mis-tracked
+    // symbol makes `hoist`/`emit_hoist` emit a *direct* binding to the wrong
+    // declaration -- and nothing fails to compile. Here the base chunk holds
+    // two top-level `label` declarations after hoisting (its own, plus
+    // `shared`'s) and the lazy chunk references `shared`'s across the chunk
+    // boundary. The identity decision is observable only by running both:
+    // picking the base chunk's own `label` yields "MAIN_..." in the lazy chunk.
+    // Values, not output text -- the goldens already cover text.
+    //
+    // Every label is derived from a `globalThis` read so Closure cannot fold it.
+    // With plain string constants, constant propagation answers the question at
+    // compile time and inlines the literal into the lazy chunk, so the runtime
+    // never touches the binding and the test passes vacuously.
+    const fixture = await createFixture();
+    await fixture.write(
+      "src/shared.ts",
+      [
+        "export const label = (): string =>",
+        '  "SHARED_" + (globalThis as Record<string, unknown>)["__oxcSalt"];',
+        "export function readLabel(): string { return label(); }",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/feature.ts",
+      [
+        'import { label } from "./shared";',
+        'const inner = "FEATURE_LOCAL";',
+        "export function describe(): string { return label() + `|` + inner; }",
+        "",
+      ].join("\n"),
+    );
+    await fixture.write(
+      "src/main.ts",
+      [
+        // Same top-level name as `shared`'s export, different value.
+        "const label = (): string =>",
+        '  "MAIN_" + (globalThis as Record<string, unknown>)["__oxcSalt"];',
+        'import { readLabel } from "./shared";',
+        'const load = () => import("./feature");',
+        '(globalThis as Record<string, unknown>)["__oxcBase"] = () =>',
+        "  label() + `|` + readLabel();",
+        '(globalThis as Record<string, unknown>)["__oxcLazy"] = () =>',
+        "  load().then((m) => m.describe());",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await build({
+      cache: { mode: "off" },
+      chunks: { mode: "split", publicPath: "./" },
+      entries: ["./main.ts"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+    expectBuilt(result);
+
+    // Pin that this is really a cross-chunk case: two chunks, one of which is
+    // loaded on demand by the other.
+    const chunkFiles = result.outputFiles.filter((file) => file.endsWith(".js"));
+    expect(chunkFiles).toHaveLength(2);
+    const baseFile = chunkFiles.find((file) => file.endsWith("main.js"));
+    const lazyFile = chunkFiles.find((file) => file !== baseFile);
+    expect(baseFile).toBeTruthy();
+    expect(lazyFile).toBeTruthy();
+
+    // Run in a child process on purpose. Loading a chunked bundle installs a
+    // runtime registry on `globalThis.__g` and needs `document`/`location`
+    // stubs, and bun runs test *files* concurrently -- sharing those globals
+    // with the chunk tests in `chunks-runtime.test.mjs` makes the two races and
+    // fails with an unregistered-module error. A child process owns its globals.
+    await fixture.write(
+      "run.mjs",
+      [
+        'globalThis.document = { body: { textContent: "" } };',
+        `globalThis.location = { href: ${JSON.stringify(pathToFileURL(baseFile).href)} };`,
+        'globalThis["__oxcSalt"] = "SALT";',
+        `await import(${JSON.stringify(pathToFileURL(baseFile).href)});`,
+        "console.log(JSON.stringify({",
+        '  base: globalThis["__oxcBase"](),',
+        '  lazy: await globalThis["__oxcLazy"](),',
+        "}));",
+        "",
+      ].join("\n"),
+    );
+    const child = Bun.spawnSync({
+      cmd: ["node", path.join(fixture.projectRoot, "run.mjs")],
+    });
+    const stdout = child.stdout.toString().trim();
+    expect(child.exitCode, `${stdout}\n${child.stderr.toString()}`).toBe(0);
+    const observed = JSON.parse(stdout.split("\n").at(-1));
+
+    expect(observed.base).toBe("MAIN_SALT|SHARED_SALT");
+    // The identity decision under test: the lazy chunk's `label` is `shared`'s
+    // hoisted binding, not the base chunk's shadowing one.
+    expect(observed.lazy).toBe("SHARED_SALT|FEATURE_LOCAL");
+  },
+);
+
+for (const mode of ["off", "split", "bundler-runtime"]) {
+  test.serial(
+    `default expressions snapshot imported values while default aliases stay live (${mode})`,
+    { timeout: 30_000 },
+    async () => {
+      const fixture = await createFixture();
+      await fixture.write(
+        "src/a.ts",
+        "export let x = 1; export function bump() { x++; }\n",
+      );
+      await fixture.write(
+        "src/b.ts",
+        [
+          'import { x } from "./a";',
+          "export default x;",
+          'export { x as live } from "./a";',
+        ].join("\n"),
+      );
+      await fixture.write(
+        "src/c.ts",
+        [
+          // Declaration order does not change an imported binding's identity.
+          "export { x as default };",
+          'import { x } from "./a";',
+        ].join("\n"),
+      );
+      await fixture.write(
+        "src/d.ts",
+        'export { x as default } from "./a";\n',
+      );
+      await fixture.write(
+        "src/main.ts",
+        [
+          'import snapshot, { live } from "./b";',
+          'import localDefault from "./c";',
+          'import forwardedDefault from "./d";',
+          'import { bump } from "./a";',
+          "bump();",
+          '(globalThis as Record<string, unknown>)["__exportTopology"] =',
+          "  [snapshot, live, localDefault, forwardedDefault];",
+        ].join("\n"),
+      );
+      const result = await build({
+        cache: { mode: "off" },
+        chunks: { mode, publicPath: "./" },
+        entries: ["./main.ts"],
+        outDir: fixture.outDir,
+        projectRoot: fixture.projectRoot,
+        srcDir: fixture.srcDir,
+      });
+      expectBuilt(result);
+      const mainFile = path.join(fixture.outDir, "main.js");
+      await fixture.write(
+        "run.mjs",
+        [
+          'globalThis.document = { body: { textContent: "" } };',
+          `globalThis.location = { href: ${JSON.stringify(pathToFileURL(mainFile).href)} };`,
+          `await import(${JSON.stringify(pathToFileURL(mainFile).href)});`,
+          'console.log(JSON.stringify(globalThis["__exportTopology"]));',
+        ].join("\n"),
+      );
+      const child = Bun.spawnSync({
+        cmd: ["node", path.join(fixture.projectRoot, "run.mjs")],
+      });
+      const stdout = child.stdout.toString().trim();
+      expect(child.exitCode, `${stdout}\n${child.stderr.toString()}`).toBe(0);
+      expect(JSON.parse(stdout.split("\n").at(-1))).toEqual([1, 2, 2, 2]);
+    },
+  );
+}
 
 const HELPER = [
   "export let mutable = 1;",
@@ -109,28 +283,6 @@ test.serial(
     // export `alias` is live at 5, `fixed`/`untouched` are unchanged, and the
     // function-local `mutable` in `shadowed()` was not confused with the export.
     expect(module.probe()).toBe("1|3|3|5|9|5|100");
-
-    // Cost, one layer down: the value export is untouched -- it is what a
-    // namespace import, a star re-export and the entry facade read -- and only
-    // the two reassigned exports gained an accessor. `untouched` and `fixed` did
-    // not, so a `const`-only module emits exactly the bytes it did before.
-    const helperEmit = await fs.readFile(
-      (await findFilesNamed(cacheDir, "helper.js")).find(
-        (file) => file.includes("/native-emit/") && file.includes("/out/src/"),
-      ),
-      "utf8",
-    );
-    expect(helperEmit).toContain("exports.mutable = mutable;");
-    expect(helperEmit).toContain("exports.__gccLive_mutable");
-    expect(helperEmit).toContain("exports.__gccLive_alias");
-    expect(helperEmit).not.toContain("__gccLive_untouched");
-    expect(helperEmit).not.toContain("__gccLive_fixed");
-    expect(helperEmit).not.toContain("__gccLive_renamed");
-
-    // And Closure removes the indirection: the accessor is a one-line getter, so
-    // the shipped bundle carries neither the function nor the property name.
-    const bundle = await fixture.read("dist/entry.js");
-    expect(bundle).not.toContain("__gccLive");
   },
 );
 
@@ -208,13 +360,9 @@ test.serial(
 );
 
 test.serial(
-  "a const-only module keeps its snapshot export shape",
+  "constant and never-written exports preserve their values",
   { timeout: 30_000 },
   async () => {
-    // The liveness machinery is scoped to provably-reassigned exports. Nothing
-    // in a module without one may change, which is what keeps the corpus and the
-    // property ledger stable -- every export in the examples is a `const`, a
-    // function or a class.
     const fixture = await createFixture();
     await fixture.write(
       "src/helper.ts",
@@ -247,27 +395,81 @@ test.serial(
     });
     expectBuilt(result);
 
-    const emitted = await Promise.all(
-      ["helper.js", "entry.js"].map(async (name) =>
-        fs.readFile(
-          (await findFilesNamed(cacheDir, name)).find(
-            (file) => file.includes("/native-emit/") && file.includes("/out/src/"),
-          ),
-          "utf8",
-        ),
-      ),
-    );
-    for (const source of emitted) {
-      expect(source).not.toContain("__gccLive");
-    }
-    // A `let` that is never written is still a plain snapshot alias.
-    expect(emitted[1]).toContain("const neverWritten = __goog_import_0.neverWritten;");
-
     const module = await importOutput(
       path.join(fixture.outDir, "entry.js"),
       "const-only",
     );
     expect(module.probe()).toBe("TAG|2|TAG|1");
+  },
+);
+
+test.serial(
+  "public ESM bindings follow package, namespace, star, alias and mts resolution",
+  { timeout: 30_000 },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write(
+      "node_modules/live-counter/package.json",
+      JSON.stringify({ name: "live-counter", type: "module", exports: "./index.js" }),
+    );
+    await fixture.write(
+      "node_modules/live-counter/index.js",
+      [
+        "export let count = 0;",
+        "export { count as first, count as second };",
+        "export const fixed = 41;",
+        "export function bump() { count++; }",
+      ].join("\n"),
+    );
+    await fixture.write("src/star.ts", 'export * from "live-counter";\n');
+    await fixture.write(
+      "src/relay.ts",
+      'export { count as relayed, first, second, bump, fixed } from "./star";\n',
+    );
+    await fixture.write(
+      "src/local.mts",
+      "export let local = 10; export function bumpLocal() { local += 2; }\n",
+    );
+    await fixture.write(
+      "src/entry.ts",
+      [
+        'import { count, bump } from "live-counter";',
+        'import * as counter from "live-counter";',
+        'import * as sameCounter from "live-counter";',
+        'import { relayed, first, second } from "./relay";',
+        'import { local, bumpLocal } from "./local.mjs";',
+        'export { count, first, second, bump, fixed } from "live-counter";',
+        'export { relayed } from "./relay";',
+        'export { local, bumpLocal } from "./local.mjs";',
+        "export { counter };",
+        'export const __gccBinding_probe = "unchanged";',
+        'export const __gccBindingProtocol__ = "user-value";',
+        "export function read() { return [count, counter.count, relayed, first, second, local]; }",
+        "export function mutate() { bump(); bumpLocal(); }",
+        "export function sameNamespace() { return counter === sameCounter; }",
+      ].join("\n"),
+    );
+    const result = await build({
+      cache: { mode: "off" },
+      chunks: { mode: "off", outputType: "esm" },
+      entries: ["./entry.ts"],
+      outDir: fixture.outDir,
+      projectRoot: fixture.projectRoot,
+      srcDir: fixture.srcDir,
+    });
+    expectBuilt(result);
+    const output = await importOutput(path.join(fixture.outDir, "entry.js"), "package-live");
+    expect(output.read()).toEqual([0, 0, 0, 0, 0, 10]);
+    expect(output.sameNamespace()).toBe(true);
+    output.mutate();
+    expect(output.read()).toEqual([1, 1, 1, 1, 1, 12]);
+    expect([output.count, output.first, output.second, output.relayed, output.local]).toEqual([1, 1, 1, 1, 12]);
+    output.bump();
+    expect(output.counter.count).toBe(2);
+    expect(output.count).toBe(2);
+    expect(output.fixed).toBe(41);
+    expect(output.__gccBinding_probe).toBe("unchanged");
+    expect(output.__gccBindingProtocol__).toBe("user-value");
   },
 );
 

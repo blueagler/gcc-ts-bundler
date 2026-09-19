@@ -1,6 +1,8 @@
 //! Facade-slot construction for hoist-plan construction.
 
-use super::super::super::*;
+use std::collections::{BTreeSet, HashMap};
+
+use super::super::super::LazyImportInput;
 use super::super::{FacadeSlots, HoistPlan, ResolvedExportBinding};
 use super::scan::ModuleScan;
 
@@ -64,7 +66,7 @@ pub(super) fn compute_facade_slots(
     // Dynamic imports expose namespace values across user and framework
     // boundaries, so keep the complete slot table and the named facade.
     for lazy_import in lazy_imports {
-        needs.need_all(&lazy_import.moduleId);
+        needs.need_all(&lazy_import.module_id);
     }
 
     for (module_id, scan) in scans {
@@ -74,43 +76,29 @@ pub(super) fn compute_facade_slots(
         let consumer_hoisted = plan.is_hoisted(module_id);
         for edge in &scan.import_edges {
             if edge.namespace {
-                match (&edge.namespace_members, consumer_hoisted) {
-                    (Some(members), true) => {
-                        let direct_namespace = plan.is_hoisted(&edge.target_module_id)
-                            && plan.chunk_of(&edge.target_module_id).is_some();
-                        if direct_namespace {
-                            // Members rewrite to direct bindings, except when
-                            // they resolve to a non-hoisted owner, where the
-                            // emitter falls back to `__require(owner)[slot]`.
-                            for member in members {
-                                match plan.resolve_export(&edge.target_module_id, member) {
-                                    Some(binding) if plan.is_direct_binding(module_id, binding) => {
-                                    }
-                                    Some(binding) => {
-                                        let (owner, owner_export_name) = (
-                                            binding.owner_module_id.clone(),
-                                            binding.owner_export_name.clone(),
-                                        );
-                                        needs.need(&owner, &owner_export_name);
-                                    }
-                                    None => needs.need(&edge.target_module_id, member),
+                if let (Some(members), true) = (&edge.namespace_members, consumer_hoisted) {
+                    let direct_namespace = plan.is_hoisted(&edge.target_module_id)
+                        && plan.chunk_of(&edge.target_module_id).is_some();
+                    if direct_namespace {
+                        // Members rewrite to direct bindings, except when
+                        // they resolve to a non-hoisted owner, where the
+                        // emitter falls back to `__require(owner)[slot]`.
+                        for member in members {
+                            match plan.resolve_export(&edge.target_module_id, member) {
+                                Some(binding) if plan.is_direct_binding(module_id, binding) => {}
+                                Some(binding) => {
+                                    needs.need(&binding.module_id, &binding.export_name);
                                 }
-                            }
-                        } else {
-                            for member in members {
-                                needs.need(&edge.target_module_id, member);
+                                None => needs.need(&edge.target_module_id, member),
                             }
                         }
-                    }
-                    _ => {
-                        if std::env::var("GCC_HOIST_DEBUG").is_ok() {
-                            eprintln!(
-                                "[hoist] need_all target={} consumer={} consumer_hoisted={} members={:?}",
-                                edge.target_module_id, module_id, consumer_hoisted, edge.namespace_members
-                            );
+                    } else {
+                        for member in members {
+                            needs.need(&edge.target_module_id, member);
                         }
-                        needs.need_all(&edge.target_module_id);
                     }
+                } else {
+                    needs.need_all(&edge.target_module_id);
                 }
             }
             if !consumer_hoisted {
@@ -126,11 +114,7 @@ pub(super) fn compute_facade_slots(
                 match plan.resolve_export(&edge.target_module_id, imported_name) {
                     Some(binding) if plan.is_direct_binding(module_id, binding) => {}
                     Some(binding) => {
-                        let (owner, owner_export_name) = (
-                            binding.owner_module_id.clone(),
-                            binding.owner_export_name.clone(),
-                        );
-                        needs.need(&owner, &owner_export_name);
+                        needs.need(&binding.module_id, &binding.export_name);
                     }
                     None => needs.need(&edge.target_module_id, imported_name),
                 }
@@ -170,18 +154,14 @@ pub(super) fn compute_facade_slots(
                 let Some(binding) = plan.resolve_export(&edge.target_module_id, name) else {
                     continue;
                 };
-                if plan.chunk_of(&binding.owner_module_id) == consumer_chunk {
+                if plan.chunk_of(&binding.module_id) == consumer_chunk {
                     continue;
                 }
                 let assigns_live = scans
-                    .get(&binding.owner_module_id)
-                    .is_some_and(|owner| owner.live_assigners.contains(&binding.owner_local_name));
+                    .get(&binding.module_id)
+                    .is_some_and(|owner| owner.live_assigners.contains(&binding.local_name));
                 if assigns_live {
-                    let (owner, owner_export_name) = (
-                        binding.owner_module_id.clone(),
-                        binding.owner_export_name.clone(),
-                    );
-                    needs.need(&owner, &owner_export_name);
+                    needs.need(&binding.module_id, &binding.export_name);
                 }
             }
         }
@@ -212,25 +192,15 @@ pub(super) fn compute_facade_slots(
                 .collect(),
         };
         for (_, binding) in names {
-            if binding.owner_module_id == module_id {
+            if binding.module_id == module_id {
                 continue;
             }
             if plan.is_direct_binding(&module_id, &binding) {
                 continue;
             }
-            needs.need(&binding.owner_module_id, &binding.owner_export_name);
+            needs.need(&binding.module_id, &binding.export_name);
         }
     }
 
-    if std::env::var("GCC_HOIST_DEBUG").is_ok() {
-        for (module_id, slots) in &needs.slots {
-            match slots {
-                FacadeSlots::All => eprintln!("[hoist] facade {} = ALL", module_id),
-                FacadeSlots::Named(names) => {
-                    eprintln!("[hoist] facade {} = {} names", module_id, names.len())
-                }
-            }
-        }
-    }
     needs.slots
 }

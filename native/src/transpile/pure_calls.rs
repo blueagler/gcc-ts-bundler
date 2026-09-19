@@ -20,8 +20,7 @@ fn pure_annotated_binding_before(source: &str, pure_index: usize) -> Option<Stri
     let before_equals = &before_comment[..equals_index];
     let name_start = before_equals
         .rfind(|character: char| !is_identifier_char(character))
-        .map(|index| index + 1)
-        .unwrap_or(0);
+        .map_or(0, |index| index + 1);
     let name = &before_equals[name_start..];
     if name.is_empty() || name.starts_with(|character: char| character.is_ascii_digit()) {
         return None;
@@ -29,7 +28,7 @@ fn pure_annotated_binding_before(source: &str, pure_index: usize) -> Option<Stri
     let keyword = before_equals[..name_start].trim_end();
     matches!(
         keyword.rsplit(char::is_whitespace).next(),
-        Some("var") | Some("let") | Some("const")
+        Some("var" | "let" | "const")
     )
     .then(|| name.to_string())
 }
@@ -40,7 +39,8 @@ fn is_identifier_char(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::collect_pure_annotated_binding_names;
+    use std::collections::HashSet;
 
     #[test]
     fn pure_initializer_comments_map_back_to_the_declared_binding() {

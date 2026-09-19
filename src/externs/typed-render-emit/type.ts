@@ -307,7 +307,7 @@ function renderSymbolReferenceType(
   if (!symbol || symbol.getName() === "__type") return undefined;
   const builtin = builtinTypeName(symbol.getName());
   const args = isTypeReference(type)
-    ? state.checker.getTypeArguments(type)
+    ? getTypeArguments(type, state.checker)
     : (type.aliasTypeArguments ?? []);
   if (builtin) return namedReference(builtin, args, state, module, seen);
   if (
@@ -582,7 +582,12 @@ export function isNonPublic(node: ts.Node) {
 }
 
 function getTypeArguments(type: ts.Type, checker: ts.TypeChecker) {
-  return isTypeReference(type) ? checker.getTypeArguments(type) : [];
+  if (!isTypeReference(type)) return [];
+  const args = checker.getTypeArguments(type);
+  // Heritage references can append TypeScript's synthetic `this` argument;
+  // it is not a declared template parameter and has no Closure spelling.
+  const parameterCount = type.target.typeParameters?.length ?? 0;
+  return args.length > parameterCount ? args.slice(0, parameterCount) : args;
 }
 
 function isTypeReference(type: ts.Type): type is ts.TypeReference {

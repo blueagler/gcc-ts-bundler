@@ -3,7 +3,7 @@ mod quote;
 
 use std::collections::HashSet;
 
-use oxc_allocator::{Allocator, TakeIn};
+use oxc_allocator::{Allocator, ReplaceWith};
 use oxc_ast::ast::Statement;
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::Visit;
@@ -19,16 +19,19 @@ pub(crate) fn rewrite_ts_export_assignments<'a>(
 ) {
     let builder = AstBuilder::new(allocator);
     for statement in &mut program.body {
-        let Statement::TSExportAssignment(assignment) = statement else {
-            continue;
-        };
-        let span = assignment.span;
-        let expression = assignment.expression.take_in(&builder);
-        *statement = Statement::new_export_default_declaration(
-            span,
-            oxc_ast::ast::ExportDefaultDeclarationKind::from(expression),
-            &builder,
-        );
+        if matches!(statement, Statement::TSExportAssignment(_)) {
+            statement.replace_with(|statement| match statement {
+                Statement::TSExportAssignment(assignment) => {
+                    let assignment = assignment.unbox();
+                    Statement::new_export_default_declaration(
+                        assignment.span,
+                        oxc_ast::ast::ExportDefaultDeclarationKind::from(assignment.expression),
+                        &builder,
+                    )
+                }
+                statement => statement,
+            });
+        }
     }
 }
 
@@ -36,9 +39,9 @@ pub(crate) fn remove_unused_imported_enums(
     program: &mut oxc_ast::ast::Program<'_>,
     identity: &ModuleIdentity,
     imported_enum_names: &HashSet<String>,
-) {
+) -> Result<(), String> {
     if imported_enum_names.is_empty() {
-        return;
+        return Ok(());
     }
     let mut references = BindingKeySet::default();
     struct ReferenceCollector<'a> {
@@ -60,6 +63,7 @@ pub(crate) fn remove_unused_imported_enums(
         references: &mut references,
     }
     .visit_program(program);
+    let mut error = None;
     program.body.retain_mut(|statement| {
         let Statement::ImportDeclaration(import) = statement else {
             return true;
@@ -69,9 +73,18 @@ pub(crate) fn remove_unused_imported_enums(
         };
         specifiers.retain(|specifier| {
             let local = specifier.local();
-            !imported_enum_names.contains(local.name.as_str())
-                || references.contains(&identity.key_of_binding(local))
+            if !imported_enum_names.contains(local.name.as_str()) {
+                return true;
+            }
+            match ModuleIdentity::key_of_binding(local) {
+                Ok(binding) => references.contains(&binding),
+                Err(message) => {
+                    error.get_or_insert(message);
+                    true
+                }
+            }
         });
         !specifiers.is_empty()
     });
+    error.map_or(Ok(()), Err)
 }

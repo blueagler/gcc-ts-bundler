@@ -16,7 +16,7 @@ import {
   referencesForTemplate,
 } from "../type-render/index";
 import type { ClosureAnnotation } from "../../types";
-import type { ClosureIrFileFeatures } from "../scan";
+import { getClosureIrSyntaxIndex, type ClosureIrFileFeatures } from "../scan";
 
 export function collectClosureDocsForSourceFile(
   sourceFile: ts.SourceFile,
@@ -157,39 +157,24 @@ export function collectClosureDocsForSourceFile(
     }
   };
 
-  const visit = (node: ts.Node) => {
+  for (const node of getClosureIrSyntaxIndex(sourceFile).annotationNodes) {
     if (ts.isFunctionDeclaration(node) && node.name) {
       annotateFunctionDeclaration(node, node.name);
     } else if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
       annotateVariableDeclaration(node, node.name);
     } else if (ts.isClassDeclaration(node) && node.name) {
       annotateClassDeclaration(node, node.name);
-    } else if (isStandaloneMethodOrAccessor(node) && shouldAnnotateTypeScript) {
+    } else if (
+      (ts.isMethodDeclaration(node) ||
+        ts.isGetAccessorDeclaration(node) ||
+        ts.isSetAccessorDeclaration(node)) &&
+      shouldAnnotateTypeScript
+    ) {
       annotateStandaloneMethodOrAccessor(node);
     }
-    ts.forEachChild(node, visit);
-  };
-
-  visit(sourceFile);
+  }
 
   return annotations;
-}
-
-/** Method or accessor whose owner is not a class body or object literal. */
-function isStandaloneMethodOrAccessor(
-  node: ts.Node,
-): node is
-  | ts.MethodDeclaration
-  | ts.GetAccessorDeclaration
-  | ts.SetAccessorDeclaration {
-  return (
-    (ts.isMethodDeclaration(node) ||
-      ts.isGetAccessorDeclaration(node) ||
-      ts.isSetAccessorDeclaration(node)) &&
-    !ts.isClassDeclaration(node.parent) &&
-    !ts.isClassExpression(node.parent) &&
-    !ts.isObjectLiteralExpression(node.parent)
-  );
 }
 
 function objectMemberKind(

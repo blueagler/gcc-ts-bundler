@@ -4,7 +4,6 @@ import ts from "@typescript/typescript6";
 import { getPropertyNameText, hasModifier } from "../../shared/typescript";
 import {
   createEmptyContractRegistry,
-  hasNonPublicModifier,
   isExternPropertyName,
   isScannedDeclarationSymbol,
   resolveAliasedSymbol,
@@ -78,9 +77,7 @@ function drainDependencyContracts(context: ContractCollectionContext) {
 function isCollectableContractDeclaration(
   declaration: ts.Declaration,
 ): declaration is
-  | ts.InterfaceDeclaration
-  | ts.TypeAliasDeclaration
-  | ts.ClassDeclaration {
+  ts.InterfaceDeclaration | ts.TypeAliasDeclaration | ts.ClassDeclaration {
   return (
     ts.isInterfaceDeclaration(declaration) ||
     ts.isTypeAliasDeclaration(declaration) ||
@@ -148,7 +145,7 @@ function collectContract(
     collectInterfaceContract(statement, context);
   } else if (ts.isTypeAliasDeclaration(statement)) {
     collectTypeAliasContract(statement, context);
-  } else if (ts.isClassDeclaration(statement) && statement.name) {
+  } else if (ts.isClassDeclaration(statement)) {
     collectClassContract(statement, context);
   }
 }
@@ -167,8 +164,6 @@ function collectInterfaceContract(
       context,
     ),
     members: collectTypeElementMembers(statement.members),
-    name: statement.name.text,
-    symbol,
   });
 }
 
@@ -181,54 +176,23 @@ function collectTypeAliasContract(
   if (!symbol || members.size === 0) {
     return;
   }
-  context.registry.typeAliasContracts.set(symbol, {
-    members,
-    name: statement.name.text,
-    symbol,
-  });
+  context.registry.typeAliasContracts.set(symbol, { members });
 }
 
 function collectClassContract(
   statement: ts.ClassDeclaration,
   context: ContractCollectionContext,
 ) {
-  if (!statement.name) {
-    return;
-  }
-  const symbol = context.checker.getSymbolAtLocation(statement.name);
+  const symbol = context.checker.getTypeAtLocation(statement).getSymbol();
   if (!symbol) {
     return;
   }
-  const { instanceMembers, staticMembers } = collectClassMembers(statement);
   context.registry.classContracts.set(symbol, {
     constructorParamContracts: collectConstructorParamContracts(
       statement,
       context,
     ),
-    instanceMembers,
-    name: statement.name.text,
-    staticMembers,
-    symbol,
   });
-}
-
-function collectClassMembers(statement: ts.ClassDeclaration) {
-  const instanceMembers = new Set<string>();
-  const staticMembers = new Set<string>();
-  for (const member of statement.members) {
-    if (ts.isConstructorDeclaration(member) || hasNonPublicModifier(member)) {
-      continue;
-    }
-    const memberName = getPropertyNameText(member.name);
-    if (!memberName || !isExternPropertyName(memberName)) {
-      continue;
-    }
-    (hasModifier(member, ts.SyntaxKind.StaticKeyword)
-      ? staticMembers
-      : instanceMembers
-    ).add(memberName);
-  }
-  return { instanceMembers, staticMembers };
 }
 
 function collectTypeElementMembers(members: ts.NodeArray<ts.TypeElement>) {

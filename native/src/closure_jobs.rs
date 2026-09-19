@@ -1,24 +1,13 @@
-#![allow(non_snake_case)]
-
 mod chunk_plan;
 mod externs;
 mod jobs;
 mod napi_types;
 mod runtime;
 
-use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use crate::pathing::{
-    bundler_runtime_ids_are_readable, to_bundler_runtime_chunk_id, to_bundler_runtime_module_id,
-    to_goog_module_id,
-};
-
-use self::chunk_plan::*;
-use self::externs::*;
-use self::jobs::*;
-use self::runtime::*;
+use self::chunk_plan::resolve_chunk_plan;
+use self::jobs::{prepare_bundler_runtime_jobs, prepare_off_mode_jobs};
 
 pub use napi_types::*;
 
@@ -54,18 +43,23 @@ impl ChunkOutputType {
 pub fn prepare_closure_jobs(
     input: PrepareClosureJobsInput,
 ) -> std::result::Result<PrepareClosureJobsOutput, String> {
-    let chunk_mode = parse_chunk_mode(&input.chunkMode)?;
-    let chunk_output_type = parse_chunk_output_type(&input.chunkOutputType)?;
-    let emitted_out_dir = PathBuf::from(&input.emittedOutDir);
-    let final_cache_dir = PathBuf::from(&input.finalCacheDir);
+    let chunk_mode = parse_chunk_mode(&input.chunk_mode)?;
+    self::externs::validate_generated_extern_scopes(&input)?;
+    let chunk_output_type = parse_chunk_output_type(&input.chunk_output_type)?;
+    let emitted_out_dir = PathBuf::from(&input.emitted_out_dir);
+    let final_cache_dir = PathBuf::from(&input.final_cache_dir);
     let raw_dir = final_cache_dir.join("raw");
     let runtime_asset_dir = final_cache_dir.join("bundler-runtime");
-    let warning_level = if input.diagnosticsVerbose {
+    let warning_level = if input.diagnostics_verbose {
         "VERBOSE".to_string()
     } else {
         "QUIET".to_string()
     };
-    let resolved_chunks = resolve_chunk_plan(&input.chunkPlan, &emitted_out_dir);
+    let resolved_chunks = resolve_chunk_plan(
+        &input.chunk_plan,
+        &emitted_out_dir,
+        chunk_mode == ChunkMode::Off,
+    );
 
     match chunk_mode {
         ChunkMode::BundlerRuntime => prepare_bundler_runtime_jobs(

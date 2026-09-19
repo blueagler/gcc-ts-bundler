@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use oxc_allocator::{Allocator, FromIn};
-use oxc_ast::ast::*;
+use oxc_ast::ast::{IdentifierReference, Program};
 use oxc_ast_visit::VisitMut;
 use oxc_str::Ident;
 
@@ -52,7 +52,6 @@ impl RuntimeBindingNames {
         ]);
         GeneratedRuntimeBindingRenameVisitor {
             allocator,
-            identity,
             replacements,
         }
         .visit_program(program);
@@ -60,15 +59,14 @@ impl RuntimeBindingNames {
     }
 }
 
-struct GeneratedRuntimeBindingRenameVisitor<'a, 'i> {
+struct GeneratedRuntimeBindingRenameVisitor<'a> {
     allocator: &'a Allocator,
-    identity: &'i ModuleIdentity,
     replacements: HashMap<String, String>,
 }
 
-impl<'a> VisitMut<'a> for GeneratedRuntimeBindingRenameVisitor<'a, '_> {
+impl<'a> VisitMut<'a> for GeneratedRuntimeBindingRenameVisitor<'a> {
     fn visit_identifier_reference(&mut self, identifier: &mut IdentifierReference<'a>) {
-        if !self.identity.is_synthesized_reference(identifier) {
+        if !ModuleIdentity::is_synthesized_reference(identifier) {
             return;
         }
         let Some(replacement) = self.replacements.get(identifier.name.as_str()) else {

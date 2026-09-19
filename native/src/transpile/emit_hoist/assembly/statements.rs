@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use oxc_allocator::{Allocator, Vec as ArenaVec};
-use oxc_ast::ast::*;
+use oxc_ast::ast::{ExportDefaultDeclarationKind, ImportOrExportKind, Program, Statement};
 
 use super::super::super::emit::render_closure_enum;
 use super::super::super::fresh::FreshNameAllocator;
@@ -14,34 +14,57 @@ use super::super::super::type_metadata_oxc::PreparedTypeMetadata;
 use super::super::super::TranspileContext;
 use super::super::helpers::print_node;
 use super::facade::render_facade;
-use super::render::{render_execution_require, render_hoisted_statement};
+use super::render::{render_execution_require, render_hoisted_statement, StatementRenderOptions};
 
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct HoistedAssemblyOptions<'a> {
+    pub(crate) file_path: &'a Path,
+    pub(crate) context: &'a TranspileContext,
+    pub(crate) plan: &'a HoistPlan,
+    pub(crate) module_id: &'a str,
+    pub(crate) ordinal: usize,
+    pub(crate) import_lines: &'a [String],
+    pub(crate) pure_names: &'a HashSet<String>,
+    pub(crate) module_bindings: &'a HashSet<String>,
+    pub(crate) nocollapse_assignments: &'a NocollapseAssignments,
+    pub(crate) local_export_modes: &'a HashMap<String, BundlerExportSlotMode>,
+    pub(crate) commonjs_export_name: Option<&'a str>,
+}
+
 pub(crate) fn assemble_hoisted_module_text<'a>(
     allocator: &'a Allocator,
     program: &mut Program<'a>,
     identity: &ModuleIdentity,
-    file_path: &Path,
-    context: &TranspileContext,
-    plan: &HoistPlan,
-    module_id: &str,
-    ordinal: usize,
-    type_metadata: &mut PreparedTypeMetadata,
-    import_lines: &[String],
+    type_metadata: &mut PreparedTypeMetadata<'_>,
     fresh_names: &mut FreshNameAllocator,
-    pure_names: &HashSet<String>,
-    module_bindings: &HashSet<String>,
-    nocollapse_assignments: &NocollapseAssignments,
-    local_export_modes: &HashMap<String, BundlerExportSlotMode>,
-    commonjs_export_name: Option<&str>,
+    options: HoistedAssemblyOptions<'_>,
 ) -> std::result::Result<String, String> {
+    let HoistedAssemblyOptions {
+        file_path,
+        context,
+        plan,
+        module_id,
+        ordinal,
+        import_lines,
+        pure_names,
+        module_bindings,
+        nocollapse_assignments,
+        local_export_modes,
+        commonjs_export_name,
+    } = options;
+    let render_options = StatementRenderOptions {
+        pure_names,
+        module_bindings,
+        context,
+        ordinal,
+        nocollapse_assignments,
+    };
     let mut output = type_metadata.take_declaration_lines();
-    let enum_declarations = type_metadata.enum_declarations().to_vec();
+    let enum_declarations = type_metadata.enum_declarations();
     for declaration in enum_declarations {
-        let emitted_name = type_metadata.enum_name(&declaration);
-        output.push(render_closure_enum(&declaration, &emitted_name));
-        type_metadata.count_enum();
+        let emitted_name = type_metadata.enum_name(declaration);
+        output.push(render_closure_enum(declaration, &emitted_name));
     }
+    type_metadata.count_enums(enum_declarations.len());
 
     // ESM imports are instantiated before every module statement, regardless
     // of their textual position. Keep generated registry requires equivalent.
@@ -50,26 +73,24 @@ pub(crate) fn assemble_hoisted_module_text<'a>(
     for statement in body {
         match statement {
             Statement::ImportDeclaration(_) => {}
-            Statement::ExportNamedDeclaration(export) => {
+            Statement::ExportDeclaration(export) => {
                 let export = export.unbox();
-                if export.export_kind == ImportOrExportKind::Type {
+                if export.export_kind() == ImportOrExportKind::Type {
                     continue;
                 }
-                if let Some(declaration) = export.declaration {
-                    output.push(render_hoisted_statement(
-                        type_metadata,
-                        identity,
-                        declaration.into(),
-                        pure_names,
-                        module_bindings,
-                        context,
-                        ordinal,
-                        nocollapse_assignments,
-                    )?);
-                } else if let Some(source) = export.source {
+                output.push(render_hoisted_statement(
+                    type_metadata,
+                    identity,
+                    export.declaration.into(),
+                    &render_options,
+                )?);
+            }
+            Statement::ExportNamedDeclaration(_) => {}
+            Statement::ExportFromDeclaration(export) => {
+                if export.export_kind != ImportOrExportKind::Type {
                     output.extend(render_execution_require(
                         file_path,
-                        source.value.as_str(),
+                        export.source.value.as_str(),
                         context,
                         plan,
                     )?);
@@ -94,11 +115,7 @@ pub(crate) fn assemble_hoisted_module_text<'a>(
                                 type_metadata,
                                 identity,
                                 Statement::FunctionDeclaration(function),
-                                pure_names,
-                                module_bindings,
-                                context,
-                                ordinal,
-                                nocollapse_assignments,
+                                &render_options,
                             )?);
                         } else {
                             let local_name =
@@ -119,11 +136,7 @@ pub(crate) fn assemble_hoisted_module_text<'a>(
                                 type_metadata,
                                 identity,
                                 Statement::ClassDeclaration(class),
-                                pure_names,
-                                module_bindings,
-                                context,
-                                ordinal,
-                                nocollapse_assignments,
+                                &render_options,
                             )?);
                         } else {
                             let local_name =
@@ -151,11 +164,7 @@ pub(crate) fn assemble_hoisted_module_text<'a>(
                 type_metadata,
                 identity,
                 statement,
-                pure_names,
-                module_bindings,
-                context,
-                ordinal,
-                nocollapse_assignments,
+                &render_options,
             )?),
         }
     }

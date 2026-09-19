@@ -49,13 +49,10 @@ function isDocRelevantTopLevelDeclaration(
     isTypeScriptLike: boolean;
   },
 ): statement is ts.FunctionDeclaration | ts.ClassDeclaration {
-  if (
-    !(
-      (ts.isFunctionDeclaration(statement) ||
-        ts.isClassDeclaration(statement)) &&
-      statement.name
-    )
-  ) {
+  if (!(
+    (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) &&
+    statement.name
+  )) {
     return false;
   }
 

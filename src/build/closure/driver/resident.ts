@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
 
+import { determineClosureConcurrency } from "../concurrency";
 import { probeClosureDriver, type ClosureDriverProbe } from "./probe";
 
 export interface ResidentJobResult {
@@ -10,6 +11,7 @@ export interface ResidentJobResult {
 }
 
 const READY_TIMEOUT_MS = 30_000;
+const SHUTDOWN_TIMEOUT_MS = 30_000;
 const JOB_TIMEOUT_MS = 10 * 60_000;
 // A typed self-build can emit >100k Closure warnings (~10–20 MiB of
 // stdout/stderr). 64 MiB leaves several times that headroom while bounding
@@ -23,52 +25,79 @@ function unrefStream(stream: unknown) {
   (stream as { unref?: () => void } | null | undefined)?.unref?.();
 }
 
-let queue: Promise<unknown> = Promise.resolve();
-let session: ResidentSession | undefined;
+// One JVM is the memory-conscious default. An explicit concurrency override can
+// enable a second lazy worker for independent jobs; this pool remains capped at
+// two regardless of the outer prepared-job concurrency.
+const workers: ResidentWorker[] = [];
+const sessions = new Set<ResidentSession>();
 
 process.on("exit", () => {
-  session?.kill();
+  for (const session of sessions) {
+    session.kill("SIGKILL");
+  }
 });
 
 export function runResidentClosureJob(
   args: readonly string[],
 ): Promise<ResidentJobResult | undefined> {
-  const job = queue.then(
-    () => runResidentClosureJobUnqueued(args),
-    () => runResidentClosureJobUnqueued(args),
-  );
-  queue = job.then(
-    () => undefined,
-    () => undefined,
-  );
-  return job;
+  const limit = determineClosureConcurrency(2, 1);
+  let worker = workers[0];
+  for (let index = 1; index < Math.min(limit, workers.length); index += 1) {
+    const candidate = workers[index];
+    if (candidate && worker && candidate.pending < worker.pending) {
+      worker = candidate;
+    }
+  }
+  if (!worker || (worker.pending > 0 && workers.length < limit)) {
+    worker = new ResidentWorker();
+    workers.push(worker);
+  }
+  return worker.run(args);
 }
 
-async function runResidentClosureJobUnqueued(
-  args: readonly string[],
-): Promise<ResidentJobResult | undefined> {
-  const probe = await probeClosureDriver();
-  if (!probe.ok) {
-    return undefined;
+class ResidentWorker {
+  private queue: Promise<void> = Promise.resolve();
+  private session: ResidentSession | undefined;
+  pending = 0;
+
+  run(args: readonly string[]): Promise<ResidentJobResult | undefined> {
+    this.pending += 1;
+    const job = this.queue.then(() => this.runUnqueued(args));
+    // The queue never rejects, including when the driver probe itself fails.
+    // A worker remains occupied through close/drain, not merely until exit.
+    this.queue = job.then(
+      () => {
+        this.pending -= 1;
+      },
+      () => {
+        this.pending -= 1;
+      },
+    );
+    return job;
   }
 
-  try {
-    const child = await ensureSession(probe);
-    return await child.run(args);
-  } catch {
-    session?.kill();
-    session = undefined;
-    return undefined;
-  }
-}
+  private async runUnqueued(
+    args: readonly string[],
+  ): Promise<ResidentJobResult | undefined> {
+    const probe = await probeClosureDriver();
+    if (!probe.ok) {
+      return undefined;
+    }
 
-async function ensureSession(probe: Extract<ClosureDriverProbe, { ok: true }>) {
-  if (session?.alive) {
-    return session;
+    try {
+      if (!this.session?.alive) {
+        await this.session?.close();
+        this.session = await ResidentSession.start(probe);
+      }
+      return await this.session.run(args);
+    } catch {
+      // Only this worker is reset. Its process and streams must be closed
+      // before the caller may spawn fallback against the same output paths.
+      await this.session?.close();
+      this.session = undefined;
+      return undefined;
+    }
   }
-  session?.kill();
-  session = await ResidentSession.start(probe);
-  return session;
 }
 
 class ResidentSession {
@@ -82,8 +111,16 @@ class ResidentSession {
   private bufferedBytes = 0;
   private waiter: ((frame: Buffer | undefined) => void) | undefined;
   alive = true;
+  private readonly closed = Promise.withResolvers<void>();
 
   private constructor(private readonly child: ChildProcess) {
+    // Register before the ready handshake too: process exit can happen while
+    // a JVM is still starting or while another worker is being drained.
+    sessions.add(this);
+    child.once("close", () => {
+      sessions.delete(this);
+      this.closed.resolve();
+    });
     child.stdout?.on("data", (chunk: Buffer) => {
       if (!this.waiter) {
         return;
@@ -135,23 +172,20 @@ class ResidentSession {
     unrefStream(child.stdout);
     unrefStream(child.stderr);
     const session = new ResidentSession(child);
-    const ready = await session.readFrame(READY_TIMEOUT_MS);
-    if (!ready) {
-      session.kill();
-      throw new Error("resident worker did not become ready");
-    }
-    let parsed: { ready?: boolean };
     try {
-      parsed = JSON.parse(ready.toString("utf8")) as { ready?: boolean };
+      const ready = await session.readFrame(READY_TIMEOUT_MS);
+      if (!ready) {
+        throw new Error("resident worker did not become ready");
+      }
+      const parsed = JSON.parse(ready.toString("utf8")) as { ready?: boolean };
+      if (parsed.ready !== true) {
+        throw new Error("resident worker handshake failed");
+      }
+      return session;
     } catch (error) {
-      session.kill();
+      await session.close();
       throw error;
     }
-    if (parsed.ready !== true) {
-      session.kill();
-      throw new Error("resident worker handshake failed");
-    }
-    return session;
   }
 
   async run(args: readonly string[]): Promise<ResidentJobResult> {
@@ -163,7 +197,7 @@ class ResidentSession {
     // stdout handler while `waiter` is still undefined and get dropped.
     const framePromise = this.readFrame(JOB_TIMEOUT_MS);
     try {
-      stdin.write(`${JSON.stringify({ args })}`);
+      stdin.write(`${JSON.stringify({ ["args"]: args })}`);
       stdin.write(Buffer.from([0]), (error) => {
         if (error) {
           this.kill();
@@ -191,14 +225,30 @@ class ResidentSession {
     };
   }
 
-  kill() {
+  async close() {
+    // A failed protocol exchange must not leave a writer alive when fallback
+    // compilation starts against the same output paths.
+    this.child.ref();
+    this.kill();
+    const escalation = setTimeout(
+      () => this.child.kill("SIGKILL"),
+      SHUTDOWN_TIMEOUT_MS,
+    );
+    try {
+      await this.closed.promise;
+    } finally {
+      clearTimeout(escalation);
+    }
+  }
+
+  kill(signal: NodeJS.Signals = "SIGTERM") {
     this.alive = false;
     this.chunks = [];
     this.scanChunk = 0;
     this.bufferedBytes = 0;
     const waiter = this.waiter;
     this.waiter = undefined;
-    this.child.kill();
+    this.child.kill(signal);
     waiter?.(undefined);
   }
 

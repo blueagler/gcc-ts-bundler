@@ -32,8 +32,8 @@ pub(super) fn aggregate_type_metadata(
         .map(|path| closure_metadata_key(Path::new(&path)))
         .collect::<HashSet<_>>();
     let mut metadata_by_file = HashMap::new();
-    for metadata in &input.typeMetadata {
-        let key = closure_metadata_key(Path::new(&metadata.emittedFile));
+    for metadata in &input.type_metadata {
+        let key = closure_metadata_key(Path::new(&metadata.emitted_file));
         if metadata_by_file.insert(key.clone(), metadata).is_some() {
             return Err(format!("Duplicate emitted type metadata for {key}"));
         }

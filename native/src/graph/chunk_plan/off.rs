@@ -1,27 +1,34 @@
-use super::super::*;
+use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
+
+use super::super::{assign_chunk_names, ChunkPlanChunkOutput, ChunkPlanEntryInput};
 use super::{to_relative_files, topological_sort, walk_reachable_files};
 
 pub(crate) fn build_off_chunk_plan(
     entry_files: &[ChunkPlanEntryInput],
     graph: &HashMap<String, Vec<String>>,
-    shim_files: &[String],
     workspace_dir: &Path,
 ) -> Result<Vec<ChunkPlanChunkOutput>, String> {
     let mut reachability = HashMap::<String, BTreeSet<String>>::new();
-    for shim_file in shim_files {
-        reachability.insert(shim_file.clone(), walk_reachable_files(shim_file, graph));
+    for entry in entry_files {
+        reachability.insert(
+            entry.shim_path.clone(),
+            walk_reachable_files(&entry.shim_path, graph),
+        );
     }
 
     if entry_files.len() == 1 {
         let only_entry = &entry_files[0];
-        let only_shim = &shim_files[0];
         return Ok(vec![ChunkPlanChunkOutput {
             dependencies: Vec::new(),
-            entryFiles: None,
+            entry_files: Some(to_relative_files(
+                std::slice::from_ref(&only_entry.source_path),
+                workspace_dir,
+            )),
             files: to_relative_files(
                 &topological_sort(
                     reachability
-                        .get(only_shim)
+                        .get(&only_entry.shim_path)
                         .cloned()
                         .unwrap_or_default()
                         .into_iter()
@@ -31,32 +38,32 @@ pub(crate) fn build_off_chunk_plan(
                 workspace_dir,
             ),
             kind: None,
-            lazyModuleIds: None,
-            name: strip_extension(&only_entry.outputName),
-            outputName: Some(only_entry.outputName.clone()),
+            lazy_module_ids: None,
+            name: strip_extension(&only_entry.output_name),
+            output_name: Some(only_entry.output_name.clone()),
         }]);
     }
 
     let entry_chunk_names = assign_chunk_names(
         entry_files
             .iter()
-            .map(|entry| strip_extension(&entry.outputName))
+            .map(|entry| strip_extension(&entry.output_name))
             .collect(),
         entry_files
             .iter()
-            .map(|entry| entry.outputName.clone())
+            .map(|entry| entry.output_name.clone())
             .collect(),
     )?;
-    let pair_count = entry_files.len().min(shim_files.len());
-    let mut parent = (0..pair_count).collect::<Vec<_>>();
-    for left in 0..pair_count {
-        for right in (left + 1)..pair_count {
+    let entry_count = entry_files.len();
+    let mut parent = (0..entry_count).collect::<Vec<_>>();
+    for left in 0..entry_count {
+        for right in (left + 1)..entry_count {
             let left_reachable = reachability
-                .get(&shim_files[left])
+                .get(&entry_files[left].shim_path)
                 .cloned()
                 .unwrap_or_default();
             let right_reachable = reachability
-                .get(&shim_files[right])
+                .get(&entry_files[right].shim_path)
                 .cloned()
                 .unwrap_or_default();
             if reachable_sets_intersect(&left_reachable, &right_reachable) {
@@ -67,7 +74,7 @@ pub(crate) fn build_off_chunk_plan(
 
     let mut component_order = Vec::new();
     let mut members = HashMap::<usize, Vec<usize>>::new();
-    for index in 0..pair_count {
+    for index in 0..entry_count {
         let root = find_component_root(&mut parent, index);
         if !members.contains_key(&root) {
             component_order.push(root);
@@ -79,21 +86,21 @@ pub(crate) fn build_off_chunk_plan(
     let mut chunks = Vec::new();
     for root in component_order {
         let indices = members.get(&root).cloned().unwrap_or_default();
-        let shared_files = shared_files_for_component(&indices, shim_files, &reachability);
+        let shared_files = shared_files_for_component(&indices, entry_files, &reachability);
         let shared_name = if indices.len() > 1 && !shared_files.is_empty() {
             let name = next_shared_chunk_name(&used_names);
             used_names.insert(name.clone());
             chunks.push(ChunkPlanChunkOutput {
                 dependencies: Vec::new(),
-                entryFiles: None,
+                entry_files: None,
                 files: to_relative_files(
                     &topological_sort(shared_files.iter().cloned().collect(), graph),
                     workspace_dir,
                 ),
                 kind: None,
-                lazyModuleIds: None,
+                lazy_module_ids: None,
                 name: name.clone(),
-                outputName: None,
+                output_name: None,
             });
             Some(name)
         } else {
@@ -102,7 +109,7 @@ pub(crate) fn build_off_chunk_plan(
 
         for index in indices {
             let unique_files = reachability
-                .get(&shim_files[index])
+                .get(&entry_files[index].shim_path)
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
@@ -113,12 +120,15 @@ pub(crate) fn build_off_chunk_plan(
                     .clone()
                     .map(|name| vec![name])
                     .unwrap_or_default(),
-                entryFiles: None,
+                entry_files: Some(to_relative_files(
+                    &[entry_files[index].source_path.clone()],
+                    workspace_dir,
+                )),
                 files: to_relative_files(&topological_sort(unique_files, graph), workspace_dir),
                 kind: None,
-                lazyModuleIds: None,
+                lazy_module_ids: None,
                 name: entry_chunk_names[index].clone(),
-                outputName: Some(entry_files[index].outputName.clone()),
+                output_name: Some(entry_files[index].output_name.clone()),
             });
         }
     }
@@ -167,12 +177,12 @@ fn next_shared_chunk_name(used_names: &BTreeSet<String>) -> String {
 
 fn shared_files_for_component(
     indices: &[usize],
-    shim_files: &[String],
+    entry_files: &[ChunkPlanEntryInput],
     reachability: &HashMap<String, BTreeSet<String>>,
 ) -> BTreeSet<String> {
     let mut counts = HashMap::<String, usize>::new();
     for &index in indices {
-        if let Some(reachable) = reachability.get(&shim_files[index]) {
+        if let Some(reachable) = reachability.get(&entry_files[index].shim_path) {
             for file_path in reachable {
                 *counts.entry(file_path.clone()).or_insert(0) += 1;
             }

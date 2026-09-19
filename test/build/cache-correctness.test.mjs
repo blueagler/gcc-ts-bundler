@@ -1,8 +1,13 @@
+import nodeFs from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import * as closureCompilerPackage from "google-closure-compiler";
 
-import { resolveClosureCompilerEnvironment } from "../../src/build/closure/compiler.ts";
+import {
+  configureClosureCompilerOptions,
+  resolveClosureCompilerEnvironment,
+} from "../../src/build/closure/compiler.ts";
 import { normalizeBuildOptions } from "../../src/build/resolve/options.ts";
 import {
   getOptionsSignature,
@@ -25,42 +30,201 @@ function setEnv(name, value) {
 }
 
 test.serial(
-  "every published entry participates in the package signature",
+  "inherited compiler options refresh without touching the root config",
   async () => {
-    // A Vite-plugin or preset change alters emitted bytes without touching
-    // dist/index.mjs. Hashing only that entry let a warm persistent cache
-    // replay output produced by the previous build of the plugin.
+    const { loadCompilerOptions } =
+      await import("../../src/build/resolve/compiler-options.ts");
+    const fixture = await createFixture();
+    await fixture.write("src/index.ts", "export const value = 1;\n");
+    await fixture.write(
+      "tsconfig.json",
+      '{"extends":"./base.json","include":["src"]}',
+    );
+    await fixture.write(
+      "base.json",
+      '{"compilerOptions":{"strictNullChecks":false}}',
+    );
+    const configPath = path.join(fixture.projectRoot, "tsconfig.json");
+    expect((await loadCompilerOptions(configPath)).strictNullChecks).toBe(
+      false,
+    );
+    await fixture.write(
+      "base.json",
+      '{"compilerOptions":{"strictNullChecks":true}}',
+    );
+    expect((await loadCompilerOptions(configPath)).strictNullChecks).toBe(true);
+  },
+);
+
+test.serial(
+  "explicit JS roots retain fresh inherited ambient inputs and config errors",
+  async () => {
+    const { loadTsConfigDeclarationFiles, parseTsConfig } =
+      await import("../../src/build/resolve/compiler-options.ts");
+    const fixture = await createFixture();
+    await fixture.write("captured/main.js", "export const value = 1;\n");
+    await fixture.write("tsconfig.json", '{"extends":"./config/base.json"}');
+    await fixture.write(
+      "config/base.json",
+      '{"compilerOptions":{"strictNullChecks":true},"include":["../types/**/*.d.ts"]}',
+    );
+    const configPath = path.join(fixture.projectRoot, "tsconfig.json");
+    const entry = path.join(fixture.projectRoot, "captured/main.js");
+    const initial = parseTsConfig(configPath, [entry]);
+    expect(initial.parsed.fileNames).toContain(entry);
+    expect(await loadTsConfigDeclarationFiles(configPath, initial)).toEqual([]);
+
+    await fixture.write(
+      "types/ambient.d.ts",
+      "declare const ambientValue: number;\n",
+    );
+    const refreshed = parseTsConfig(configPath, [entry]);
+    expect(await loadTsConfigDeclarationFiles(configPath, refreshed)).toEqual([
+      path.join(fixture.projectRoot, "types/ambient.d.ts"),
+    ]);
+
+    await fixture.write(
+      "config/base.json",
+      '{"compilerOptions":{"target":"invalid"},"include":["../types/**/*.d.ts"]}',
+    );
+    expect(() => parseTsConfig(configPath, [entry])).toThrow(/target/);
+  },
+);
+
+test.serial(
+  "failed lock owner initialization unwinds only its own acquisition",
+  async () => {
+    const { acquireProjectCacheLock } =
+      await import("../../src/shared/cache-store.ts");
+    const fixture = await createFixture();
+    const projectCacheDir = path.join(fixture.projectRoot, "cache");
+    const lockPath = `${projectCacheDir}.lock`;
+    const original = nodeFs.promises.writeFile;
+    const spy = spyOn(nodeFs.promises, "writeFile").mockImplementation(
+      async (file, ...args) => {
+        if (file === path.join(lockPath, "owner.json"))
+          throw new Error("owner write failed");
+        return original(file, ...args);
+      },
+    );
+    try {
+      await expect(acquireProjectCacheLock(projectCacheDir)).rejects.toThrow(
+        "owner write failed",
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    await expect(fs.access(lockPath)).rejects.toThrow();
+    const release = await acquireProjectCacheLock(projectCacheDir);
+    await release();
+  },
+);
+
+test.serial(
+  "a failed lock mkdir never removes another invocation's lock",
+  async () => {
+    const { acquireProjectCacheLock } =
+      await import("../../src/shared/cache-store.ts");
+    const fixture = await createFixture();
+    const projectCacheDir = path.join(fixture.projectRoot, "cache");
+    const release = await acquireProjectCacheLock(projectCacheDir);
+    const lockPath = `${projectCacheDir}.lock`;
+    const before = await fs.readFile(path.join(lockPath, "owner.json"), "utf8");
+    const original = nodeFs.promises.mkdir;
+    const spy = spyOn(nodeFs.promises, "mkdir").mockImplementation(
+      async (dir, ...args) => {
+        if (dir === lockPath)
+          throw Object.assign(new Error("mkdir denied"), { code: "EACCES" });
+        return original(dir, ...args);
+      },
+    );
+    try {
+      await expect(acquireProjectCacheLock(projectCacheDir)).rejects.toThrow(
+        "mkdir denied",
+      );
+      expect(await fs.readFile(path.join(lockPath, "owner.json"), "utf8")).toBe(
+        before,
+      );
+    } finally {
+      spy.mockRestore();
+      await release();
+    }
+    await expect(fs.access(lockPath)).rejects.toThrow();
+  },
+);
+
+test.serial(
+  "stale unidentified locks fail closed and preserve their contents",
+  async () => {
+    const { acquireProjectCacheLock } =
+      await import("../../src/shared/cache-store.ts");
+    const fixture = await createFixture();
+    const projectCacheDir = path.join(fixture.projectRoot, "cache");
+    const lockPath = `${projectCacheDir}.lock`;
+    await fs.mkdir(lockPath);
+    await fs.writeFile(path.join(lockPath, "owner.json"), "broken");
+    const stale = new Date("2020-01-01T00:00:00Z");
+    await fs.utimes(lockPath, stale, stale);
+    const failure = await acquireProjectCacheLock(projectCacheDir).catch(
+      (error) => error,
+    );
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure.message).toContain(lockPath);
+    expect(failure.message).toMatch(/no build is active/);
+    expect(await fs.readFile(path.join(lockPath, "owner.json"), "utf8")).toBe(
+      "broken",
+    );
+  },
+);
+
+test.serial(
+  "package identity tracks implementation bytes and JavaScript membership behind unchanged facades",
+  async () => {
     const fixture = await createFixture();
     const packageRoot = path.join(fixture.projectRoot, "package-root");
-    const entries = [
-      "dist/index.mjs",
-      "dist/vite/index.mjs",
-      "dist/presets/react.mjs",
-      "dist/presets/svelte.mjs",
-      "dist/presets/vue.mjs",
-    ];
-    await fs.mkdir(packageRoot, { recursive: true });
-    await fs.writeFile(
-      path.join(packageRoot, "package.json"),
+    await fixture.write(
+      "package-root/package.json",
       '{"name":"signature-probe"}\n',
-      "utf8",
     );
-    for (const entry of entries) {
-      const entryPath = path.join(packageRoot, entry);
-      await fs.mkdir(path.dirname(entryPath), { recursive: true });
-      await fs.writeFile(entryPath, "export const value = 0;\n", "utf8");
-    }
+    const bootstrap = await getPackageSignature(packageRoot);
 
-    const signatures = new Set([await getPackageSignature(packageRoot)]);
-    for (const entry of entries) {
-      await fs.writeFile(
-        path.join(packageRoot, entry),
-        `export const value = ${JSON.stringify(entry)};\n`,
-        "utf8",
-      );
-      signatures.add(await getPackageSignature(packageRoot));
-    }
-    expect(signatures.size).toBe(entries.length + 1);
+    const facade = 'export { value } from "./chunks/implementation.js";\n';
+    const implementation = "export const value = 1;\n";
+    await fixture.write("package-root/dist/index.mjs", facade);
+    await fixture.write(
+      "package-root/dist/chunks/implementation.js",
+      implementation,
+    );
+    const original = await getPackageSignature(packageRoot);
+    expect(original).not.toBe(bootstrap);
+
+    await fixture.write(
+      "package-root/dist/chunks/implementation.js",
+      "export const value = 2;\n",
+    );
+    expect(await getPackageSignature(packageRoot)).not.toBe(original);
+    expect(await fixture.read("package-root/dist/index.mjs")).toBe(facade);
+    await fixture.write(
+      "package-root/dist/chunks/implementation.js",
+      implementation,
+    );
+    expect(await getPackageSignature(packageRoot)).toBe(original);
+
+    await fixture.write(
+      "package-root/dist/runtime/helper.cjs",
+      "module.exports = 1;\n",
+    );
+    const added = await getPackageSignature(packageRoot);
+    expect(added).not.toBe(original);
+    await fs.rename(
+      path.join(packageRoot, "dist/runtime/helper.cjs"),
+      path.join(packageRoot, "dist/runtime/renamed.cjs"),
+    );
+    const renamed = await getPackageSignature(packageRoot);
+    expect(renamed).not.toBe(added);
+    await fs.unlink(path.join(packageRoot, "dist/runtime/renamed.cjs"));
+    expect(await getPackageSignature(packageRoot)).toBe(original);
+    expect(await fixture.read("package-root/dist/index.mjs")).toBe(facade);
   },
 );
 
@@ -131,6 +295,35 @@ test.serial("output behavior participates in the options signature", () => {
   }
 });
 test.serial(
+  "threading overrides emit one scalar flag regardless of spelling",
+  () => {
+    const restoreDebug = setEnv("GCC_CLOSURE_DEBUG", undefined);
+    const restoreFlags = setEnv("GCC_CLOSURE_EXTRA_FLAGS", undefined);
+    try {
+      for (const name of [
+        "num_parallel_threads",
+        "numParallelThreads",
+        "num-parallel-threads",
+      ]) {
+        process.env.GCC_CLOSURE_EXTRA_FLAGS =
+          "--num_parallel_threads=1 --numParallelThreads=2 " +
+          `--num-parallel-threads=3 --${name}=7 --${name}=8`;
+        const options = { compilationLevel: "ADVANCED" };
+        configureClosureCompilerOptions(options);
+        const compiler = new closureCompilerPackage.compiler(options);
+        expect(compiler.commandArguments).toEqual([
+          "--compilation_level=ADVANCED",
+          "--num_parallel_threads=8",
+        ]);
+      }
+    } finally {
+      restoreFlags();
+      restoreDebug();
+    }
+  },
+);
+
+test.serial(
   "options signature is independent of the absolute project root",
   () => {
     const layout = (projectRoot, overrides = {}) => ({
@@ -145,7 +338,9 @@ test.serial(
       ...overrides,
     });
     const signature = (projectRoot, overrides = {}) =>
-      getOptionsSignature(normalizeBuildOptions(layout(projectRoot, overrides)));
+      getOptionsSignature(
+        normalizeBuildOptions(layout(projectRoot, overrides)),
+      );
     const rootA = "/tmp/signature-root-a";
     const rootB = "/tmp/signature-root-b";
     const relocated = signature(rootB);
@@ -160,6 +355,46 @@ test.serial(
       signature(rootA, { externs: [path.join(rootA, "other-externs.js")] }),
     ]);
     expect(signatures.size).toBe(4);
+  },
+);
+
+test.serial(
+  "typed extern scopes participate in cache keys without path spelling noise",
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write("typed.js", "/** @externs */\nvar callerContract;\n");
+    const options = (typedExterns) =>
+      normalizeBuildOptions({
+        entries: ["a.ts", "b.ts"],
+        projectRoot: fixture.projectRoot,
+        srcDir: "./src",
+        typedExterns,
+      });
+    const scoped = (entries) => options([{ path: "./typed.js", entries }]);
+    const a = scoped(["./src/a.ts"]);
+    const b = scoped(["./src/b.ts"]);
+    const both = scoped(["./src/a.ts", "./src/b.ts"]);
+    const signature = (resolved) => getOptionsSignature(resolved);
+    expect(
+      new Set([a, b, both, options(["./typed.js"])].map(signature)).size,
+    ).toBe(4);
+    expect(signature(scoped(["src/./b.ts", "src/a.ts", "src/b.ts"]))).toBe(
+      signature(both),
+    );
+    expect(
+      signature(scoped([path.join(fixture.projectRoot, "src/a.ts")])),
+    ).toBe(signature(a));
+    const before = await hashExternalInputs(
+      a.typedExterns.map((extern) => extern.path),
+    );
+    await fixture.write("typed.js", "/** @externs */\nvar changedContract;\n");
+    expect(
+      await hashExternalInputs(a.typedExterns.map((extern) => extern.path)),
+    ).not.toBe(before);
+    expect(() => scoped([])).toThrow(/nonempty entries/);
+    expect(() => scoped(["./src/not-configured.ts"])).toThrow(
+      /not a configured build entry/,
+    );
   },
 );
 
@@ -203,9 +438,8 @@ test.serial(
   "variable renaming reports are paired to the job's property report",
   async () => {
     const fixture = await createFixture();
-    const { applyStableRenamingMaps } = await import(
-      "../../src/build/closure/compile-jobs/cache.ts"
-    );
+    const { applyStableRenamingMaps } =
+      await import("../../src/build/closure/compile-jobs/cache.ts");
     const cacheDir = path.join(fixture.projectRoot, "closure-jobs");
     const rawDir = path.join(fixture.projectRoot, "raw");
     const react = await applyStableRenamingMaps(
@@ -247,8 +481,11 @@ test.serial(
     const cacheDir = path.join(fixture.projectRoot, "closure-cache");
     const outputFile = path.join(fixture.projectRoot, "out.js");
     await fs.writeFile(outputFile, "var a = 1;\n");
-    const { persistCachedClosureJob, tryRestoreCachedClosureJob } =
-      await import("../../src/build/closure/cache.ts");
+    const {
+      persistCachedClosureJob,
+      prepareClosureJobCache,
+      tryRestoreCachedClosureJob,
+    } = await import("../../src/build/closure/cache.ts");
     const baseJob = {
       assumeFunctionWrapper: true,
       compilationLevel: "ADVANCED",
@@ -272,41 +509,29 @@ test.serial(
       ...baseJob,
       compilerEnvironment: { formatting: "PRETTY_PRINT" },
     };
-    await persistCachedClosureJob({
-      artifactFiles: [outputFile],
-      cacheDir,
-      compilerVersion: "test",
-      job: prettyJob,
-    });
-    expect(
-      await tryRestoreCachedClosureJob({
+    const prepare = (job) =>
+      prepareClosureJobCache({
         artifactFiles: [outputFile],
         cacheDir,
         compilerVersion: "test",
-        job: baseJob,
-      }),
-    ).toBe(false);
+        job,
+      });
+    const pretty = await prepare(prettyJob);
+    await persistCachedClosureJob(pretty);
+    expect(await tryRestoreCachedClosureJob(await prepare(baseJob))).toBe(
+      false,
+    );
+    expect(await tryRestoreCachedClosureJob(pretty)).toBe(true);
     expect(
-      await tryRestoreCachedClosureJob({
-        artifactFiles: [outputFile],
-        cacheDir,
-        compilerVersion: "test",
-        job: prettyJob,
-      }),
-    ).toBe(true);
-    expect(
-      await tryRestoreCachedClosureJob({
-        artifactFiles: [outputFile],
-        cacheDir,
-        compilerVersion: "test",
-        job: {
+      await tryRestoreCachedClosureJob(
+        await prepare({
           ...prettyJob,
           typeMetadataCounts: {
             ...prettyJob.typeMetadataCounts,
             annotationCount: 2,
           },
-        },
-      }),
+        }),
+      ),
     ).toBe(false);
 
     const [metadataPath] = await findFilesNamed(cacheDir, "meta.json");
@@ -317,32 +542,51 @@ test.serial(
       cachedArtifact,
       "X".repeat(Buffer.byteLength(cachedText)),
     );
-    expect(
-      await tryRestoreCachedClosureJob({
-        artifactFiles: [outputFile],
-        cacheDir,
-        compilerVersion: "test",
-        job: prettyJob,
-      }),
-    ).toBe(false);
+    expect(await tryRestoreCachedClosureJob(pretty)).toBe(false);
   },
 );
+
 test.serial(
-  "tracked file identity ignores mtime when content is unchanged",
+  "Closure job cache does not persist when inputs change after the key is prepared",
   async () => {
     const fixture = await createFixture();
-    const filePath = path.join(fixture.projectRoot, "src", "index.ts");
-    const contents = "export const value = 1;\n";
-    await fixture.write("src/index.ts", contents);
-    const { collectTrackedFiles, trackedFilesMatch } = await import(
-      "../../src/shared/file-state.ts"
-    );
-    const snapshot = await collectTrackedFiles([filePath]);
-    expect(await trackedFilesMatch(snapshot)).toBe(true);
-    await fixture.write("src/index.ts", contents);
-    expect(await trackedFilesMatch(snapshot)).toBe(true);
-    await fixture.write("src/index.ts", "export const value = 2;\n");
-    expect(await trackedFilesMatch(snapshot)).toBe(false);
+    const cacheDir = path.join(fixture.projectRoot, "closure-cache");
+    const outputFile = path.join(fixture.projectRoot, "out.js");
+    const jsFile = path.join(fixture.projectRoot, "input.js");
+    await fs.writeFile(outputFile, "var a = 1;\n");
+    await fs.writeFile(jsFile, "var x = 1;\n");
+    const {
+      persistCachedClosureJob,
+      prepareClosureJobCache,
+      tryRestoreCachedClosureJob,
+    } = await import("../../src/build/closure/cache.ts");
+    const prepared = await prepareClosureJobCache({
+      artifactFiles: [outputFile],
+      cacheDir,
+      compilerVersion: "test",
+      job: {
+        assumeFunctionWrapper: true,
+        compilationLevel: "ADVANCED",
+        externs: [],
+        hasTypeMetadata: true,
+        js: [jsFile],
+        jsOutputFile: outputFile,
+        languageIn: "UNSTABLE",
+        languageOut: "ECMASCRIPT_NEXT",
+        rewritePolyfills: false,
+        typeMetadataCounts: {
+          annotationCount: 1,
+          enumDeclarationCount: 0,
+          memberAnnotationCount: 0,
+          typeDeclarationCount: 0,
+          unresolvedTypeReferenceCount: 0,
+        },
+        warningLevel: "QUIET",
+      },
+    });
+    await fs.writeFile(jsFile, "var x = 2;\n");
+    await persistCachedClosureJob(prepared);
+    expect(await tryRestoreCachedClosureJob(prepared)).toBe(false);
   },
 );
 
@@ -365,28 +609,25 @@ test.serial("external input hashes ignore absolute file paths", async () => {
   expect(hashA).not.toBe(hashC);
 });
 
-test.serial(
-  "options signature ignores out-of-tree staging directories",
-  () => {
-    const layout = (outDir, externs = []) =>
-      getOptionsSignature(
-        normalizeBuildOptions({
-          cache: { mode: "persistent" },
-          entries: ["./index.ts"],
-          externs,
-          outDir,
-          projectRoot: "/tmp/signature-project",
-          srcDir: "./src",
-        }),
-      );
-    expect(
-      layout("/tmp/stage-aaa/dist", ["/tmp/stage-aaa/externs.js"]),
-    ).toBe(layout("/tmp/stage-bbb/dist", ["/tmp/stage-bbb/externs.js"]));
-    expect(layout("/tmp/signature-project/dist")).not.toBe(
-      layout("/tmp/signature-project/build"),
+test.serial("options signature ignores out-of-tree staging directories", () => {
+  const layout = (outDir, externs = []) =>
+    getOptionsSignature(
+      normalizeBuildOptions({
+        cache: { mode: "persistent" },
+        entries: ["./index.ts"],
+        externs,
+        outDir,
+        projectRoot: "/tmp/signature-project",
+        srcDir: "./src",
+      }),
     );
-  },
-);
+  expect(layout("/tmp/stage-aaa/dist", ["/tmp/stage-aaa/externs.js"])).toBe(
+    layout("/tmp/stage-bbb/dist", ["/tmp/stage-bbb/externs.js"]),
+  );
+  expect(layout("/tmp/signature-project/dist")).not.toBe(
+    layout("/tmp/signature-project/build"),
+  );
+});
 test.serial(
   "persistent cache hits after identical rewrite and a fresh out-of-tree outDir",
   { timeout: 120_000 },

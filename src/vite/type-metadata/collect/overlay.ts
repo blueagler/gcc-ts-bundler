@@ -5,33 +5,65 @@ import type {
   CapturedRuntimeModule,
   MaterializedGraph,
 } from "../../internal-types";
-import { resolveDeclarationOverlay } from "../declaration-overlay";
+import { resolveDeclarationOverlays } from "../declaration-overlay";
 import {
   joinDeclarationAndRuntimeExports,
+  parseRuntimeExportGraph,
   resolveRuntimeExportGraph,
 } from "../export-graphs";
 import {
   materializeJoinedExports,
   type OverlayAttachmentPlan,
 } from "../fusion";
-import type {
-  DeclarationOverlayResult,
-  ViteTypeMetadataDiagnostic,
-} from "../types";
+import type { RuntimeExportFact, ViteTypeMetadataDiagnostic } from "../types";
 
 export async function collectOverlayAttachments(input: {
+  dependencies: Set<string>;
   diagnostics: ViteTypeMetadataDiagnostic[];
   input: {
     materialized: MaterializedGraph;
     projectRoot: string;
   };
   sourceGraph: MaterializedGraph;
-  sourceTextByModuleId: Map<string, string>;
 }) {
-  const results: DeclarationOverlayResult[] = [];
+  const overlayInputs: Parameters<
+    typeof resolveDeclarationOverlays
+  >[0][number][] = [];
   const plans: OverlayAttachmentPlan[] = [];
   const seen = new Set<string>();
-  const runtimeGraph = createRuntimeGraphResolver(input.sourceGraph);
+  const moduleById = new Map(
+    input.sourceGraph.modules.map((module) => [module.id, module]),
+  );
+  const runtimeGraph = createRuntimeGraphResolver(moduleById);
+  // Share facts across package entries only for this collection. Provenance
+  // copies become dependencies when export resolution actually consumes them.
+  const parsedByFilePath = new Map<string, Promise<RuntimeExportFact[]>>();
+  const factsFor = (moduleId: string): Promise<RuntimeExportFact[]> => {
+    const module = moduleById.get(moduleId);
+    if (!module) {
+      return Promise.resolve([]);
+    }
+    const filePath = path.normalize(module.filePath);
+    const cached = parsedByFilePath.get(filePath);
+    if (cached) {
+      return cached;
+    }
+    input.dependencies.add(filePath);
+    const pending = fs.readFile(filePath, "utf8").then(
+      (sourceText) => parseRuntimeExportGraph(moduleId, sourceText),
+      () => {
+        input.diagnostics.push({
+          phase: "selection",
+          reason: "source-file-unreadable",
+          runtimeModuleId: moduleId,
+          sourceFilePath: filePath,
+        });
+        return [];
+      },
+    );
+    parsedByFilePath.set(filePath, pending);
+    return pending;
+  };
 
   for (const resolution of input.sourceGraph.runtimeResolutions ?? []) {
     const cleanRuntimePath = resolution.runtimePath.replace(/[?#].*$/u, "");
@@ -48,7 +80,7 @@ export async function collectOverlayAttachments(input: {
     }
     seen.add(overlayKey);
 
-    const overlayInput: Parameters<typeof resolveDeclarationOverlay>[0] = {
+    const overlayInput: (typeof overlayInputs)[number] = {
       resolution,
       resolutionMode: resolution.resolutionMode,
     };
@@ -58,16 +90,24 @@ export async function collectOverlayAttachments(input: {
     if (containingFilePath !== undefined) {
       overlayInput.containingFilePath = containingFilePath;
     }
-    const overlay = await resolveDeclarationOverlay(overlayInput);
-    results.push(overlay);
+    overlayInputs.push(overlayInput);
+  }
+
+  const results = await resolveDeclarationOverlays(overlayInputs);
+  for (const [index, overlay] of results.entries()) {
+    const overlayInput = overlayInputs[index];
+    if (!overlayInput) {
+      throw new Error("Declaration overlay result has no corresponding input.");
+    }
+    const { resolution } = overlayInput;
     input.diagnostics.push(...overlay.diagnostics);
     if (!overlay.identity || overlay.exports.length === 0) {
       continue;
     }
 
-    const runtime = resolveRuntimeExportGraph({
+    const runtime = await resolveRuntimeExportGraph({
       entryModuleId: resolution.runtimeModuleId,
-      modules: input.sourceTextByModuleId,
+      factsFor,
       resolveModuleId: runtimeGraph,
     });
     input.diagnostics.push(...runtime.diagnostics);
@@ -90,37 +130,13 @@ export async function collectOverlayAttachments(input: {
   return { plans, results };
 }
 
-export async function readRuntimeModuleSources(
-  modules: CapturedRuntimeModule[],
-  dependencies: Set<string>,
-  diagnostics: ViteTypeMetadataDiagnostic[],
+function createRuntimeGraphResolver(
+  moduleById: ReadonlyMap<string, CapturedRuntimeModule>,
 ) {
-  const sources = new Map<string, string>();
-  await Promise.all(
-    modules.map(async (module) => {
-      dependencies.add(path.normalize(module.filePath));
-      try {
-        sources.set(module.id, await fs.readFile(module.filePath, "utf8"));
-      } catch {
-        diagnostics.push({
-          phase: "selection",
-          reason: "source-file-unreadable",
-          runtimeModuleId: module.id,
-          sourceFilePath: module.filePath,
-        });
-      }
-    }),
-  );
-  return sources;
-}
-
-function createRuntimeGraphResolver(graph: MaterializedGraph) {
-  const moduleById = new Map(
-    graph.modules.map((module) => [module.id, module]),
-  );
-  const moduleIdByFilePath = new Map(
-    graph.modules.map((module) => [path.normalize(module.filePath), module.id]),
-  );
+  const moduleIdByFilePath = new Map<string, string>();
+  for (const module of moduleById.values()) {
+    moduleIdByFilePath.set(path.normalize(module.filePath), module.id);
+  }
   return (importerModuleId: string, specifier: string) => {
     const importer = moduleById.get(importerModuleId);
     if (!importer || !specifier.startsWith(".")) {

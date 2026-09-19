@@ -63,34 +63,6 @@ const CONFLICTING_GENERATED_TAGS = new Set([
   "typedef",
 ]);
 
-export function buildInterfaceDeclarationSnippet(
-  statement: ts.InterfaceDeclaration,
-  checker: ts.TypeChecker,
-  context: ClosureDocRenderContext,
-): ClosureTypeDeclaration {
-  const name = statement.name.text;
-  const symbol = checker.getSymbolAtLocation(statement.name);
-  const declaredSymbolId = registerDeclaredTypeSymbol(
-    symbol,
-    statement,
-    name,
-    context,
-  );
-  const lines: string[] = ["/**"];
-  lines.push(" * @record");
-  appendTemplateTags(lines, statement.typeParameters);
-  lines.push(" */");
-  lines.push(`function ${name}() {}`);
-  appendInterfaceMembers(lines, name, statement.members, checker, context);
-  const template = `${lines.join("\n")}\n`;
-  return {
-    declaredSymbolId,
-    id: `${declaredSymbolId}:declaration`,
-    references: referencesForTemplate(template, context),
-    template,
-  };
-}
-
 export function buildObjectLiteralBrandDeclaration({
   brandName,
   checker,
@@ -145,10 +117,11 @@ export function buildObjectLiteralBrandDeclaration({
   };
 }
 
-export function buildTypeAliasDeclarationSnippet(
-  statement: ts.TypeAliasDeclaration,
+export function buildTypeDeclarationSnippet(
+  statement: ts.InterfaceDeclaration | ts.TypeAliasDeclaration,
   checker: ts.TypeChecker,
   context: ClosureDocRenderContext,
+  classOnlyInterfaceSymbolIds: ReadonlySet<string>,
 ): ClosureTypeDeclaration {
   const name = statement.name.text;
   const symbol = checker.getSymbolAtLocation(statement.name);
@@ -159,18 +132,24 @@ export function buildTypeAliasDeclarationSnippet(
     context,
   );
   const lines: string[] = ["/**"];
-  if (ts.isTypeLiteralNode(statement.type)) {
-    lines.push(" * @record");
+  const declaration = ts.isInterfaceDeclaration(statement)
+    ? statement
+    : statement.type;
+  if (
+    ts.isInterfaceDeclaration(declaration) ||
+    ts.isTypeLiteralNode(declaration)
+  ) {
+    lines.push(
+      ts.isInterfaceDeclaration(statement) &&
+        symbol &&
+        classOnlyInterfaceSymbolIds.has(declaredSymbolId)
+        ? " * @interface"
+        : " * @record",
+    );
     appendTemplateTags(lines, statement.typeParameters);
     lines.push(" */");
     lines.push(`function ${name}() {}`);
-    appendInterfaceMembers(
-      lines,
-      name,
-      statement.type.members,
-      checker,
-      context,
-    );
+    appendInterfaceMembers(lines, name, declaration.members, checker, context);
   } else {
     const aliasType = checker.getTypeAtLocation(statement);
     const closureType = toClosureType(
@@ -178,7 +157,7 @@ export function buildTypeAliasDeclarationSnippet(
       checker,
       context,
       new Set(),
-      statement.type,
+      declaration,
     );
     appendTemplateTags(lines, statement.typeParameters);
     lines.push(` * @typedef {${closureType}}`);
@@ -645,7 +624,7 @@ function buildTypeJsDoc(closureType: string) {
 }
 
 /**
- * Near-twin of `appendSynthesizedDtsMembers` in `type-render/named.ts`, and
+ * Near-twin of `appendSynthesizedDtsMembers` in `type-render/to-closure.ts`, and
  * deliberately not merged with it. This one emits members for a real authored
  * interface: it accepts only `TypeElement` signatures, emits every member with
  * no cap, renders each member type verbatim, and does not thread a `seen` set

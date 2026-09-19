@@ -2,14 +2,16 @@ import ts from "@typescript/typescript6";
 
 import { applyTextEdits, type TextEdit } from "../../shared/text-edits";
 import { getCapturedSourceFile } from "../capture-analysis";
+import type { CapturedModule, ViteBuildMetrics } from "../internal-types";
 
 export function shakeModuleOnce(
-  moduleId: string,
+  record: CapturedModule,
   code: string,
   demandedNames: ReadonlySet<string>,
   stranded: Set<string>,
+  metrics?: ViteBuildMetrics,
 ) {
-  const sourceFile = getCapturedSourceFile(moduleId, code);
+  const sourceFile = getCapturedSourceFile(record, code, metrics);
   const edits: TextEdit[] = [];
   const forwarded = collectForwardedBindings(sourceFile);
   const droppedBindings = new Set<ts.ImportSpecifier | ts.Identifier>();

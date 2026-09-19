@@ -1,9 +1,14 @@
+import nodeFs from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 
 import { build, cleanCache } from "../../dist/index.mjs";
-import { createFixture, getProjectCacheDir } from "../helpers.mjs";
+import {
+  createFixture,
+  findFilesNamed,
+  getProjectCacheDir,
+} from "../helpers.mjs";
 
 const BUILD_TIMEOUT = 120_000;
 
@@ -28,6 +33,382 @@ function setEnv(name, value) {
     else process.env[name] = previous;
   };
 }
+
+test.serial(
+  "metadata preparation failures preserve previously published output",
+  { timeout: BUILD_TIMEOUT },
+  async () => {
+    const fixture = await createFixture();
+    const cacheDir = path.join(fixture.projectRoot, ".cache");
+    await fixture.write("src/index.ts", 'export const value = "PREVIOUS";\n');
+    const options = buildOptions(fixture, cacheDir);
+    expect((await build(options)).ok).toBe(true);
+    const previous = await fixture.read("dist/index.js");
+    await fixture.write("src/index.ts", 'export const value = "NEXT";\n');
+    const original = nodeFs.promises.writeFile;
+    const spy = spyOn(nodeFs.promises, "writeFile").mockImplementation(
+      async (file, ...args) => {
+        if (
+          String(file).includes(".staging-") &&
+          path.basename(String(file)).startsWith(".meta.json.")
+        ) {
+          throw new Error("final metadata write failed");
+        }
+        return original(file, ...args);
+      },
+    );
+    let result;
+    try {
+      result = await build(options);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(result.ok).toBe(false);
+    expect(
+      result.diagnostics.map(({ message }) => message).join("\n"),
+    ).toContain("final metadata write failed");
+    expect(await fixture.read("dist/index.js")).toBe(previous);
+  },
+);
+
+test.serial(
+  "fresh resolution notices a newly added higher-priority source",
+  { timeout: BUILD_TIMEOUT },
+  async () => {
+    const fixture = await createFixture();
+    const cacheDir = path.join(fixture.projectRoot, ".cache");
+    await fixture.write("src/index.ts", 'export { value } from "./value";\n');
+    await fixture.write("src/value.js", 'export const value = "JAVASCRIPT";\n');
+    const options = buildOptions(fixture, cacheDir);
+    expect((await build(options)).ok).toBe(true);
+    expect(await fixture.read("dist/index.js")).toContain("JAVASCRIPT");
+    await fixture.write("src/value.ts", 'export const value = "TYPESCRIPT";\n');
+    const changed = await build(options);
+    expect(changed.ok).toBe(true);
+    expect(changed.cacheHit).toBe(false);
+    expect(await fixture.read("dist/index.js")).toContain("TYPESCRIPT");
+  },
+);
+
+test.serial(
+  "new and nearer explicit-external declarations invalidate opaque final hits",
+  { timeout: BUILD_TIMEOUT },
+  async () => {
+    for (const scenario of ["appearing", "nearer"]) {
+      const fixture = await createFixture();
+      const cacheDir = path.join(fixture.projectRoot, ".cache");
+      const manifest = JSON.stringify({
+        name: "cache-edge-dep",
+        type: "module",
+        exports: "./index.js",
+      });
+      const goodDeclaration = "export declare const value: number;\n";
+      const badDeclaration = "export declare const value: string;\n";
+      await fixture.write("package.json", '{"type":"module"}\n');
+      await fixture.write(
+        "tsconfig.json",
+        JSON.stringify({
+          compilerOptions: {
+            module: "ESNext",
+            moduleResolution: "Bundler",
+            target: "ESNext",
+            types: [],
+          },
+          include: ["src"],
+        }),
+      );
+      await fixture.write(
+        "src/index.ts",
+        'import { value } from "cache-edge-dep";\nexport const result: number = value;\n',
+      );
+      await fixture.write("node_modules/cache-edge-dep/package.json", manifest);
+      await fixture.write(
+        "node_modules/cache-edge-dep/index.js",
+        "export const value = 41;\n",
+      );
+      if (scenario === "nearer") {
+        await fixture.write(
+          "node_modules/cache-edge-dep/index.d.ts",
+          goodDeclaration,
+        );
+      }
+      const options = buildOptions(fixture, cacheDir, {
+        chunks: { mode: "off", outputType: "esm" },
+        diagnostics: { preflight: "errors-only" },
+        externals: ["cache-edge-dep"],
+        packages: "esm-only",
+      });
+      expect((await build(options)).ok).toBe(true);
+      expect((await build(options)).cacheHit).toBe(true);
+      await fixture.write("node_modules/cache-edge-dep/package.json", manifest);
+      expect((await build(options)).cacheHit).toBe(true);
+
+      const packageDir =
+        scenario === "nearer"
+          ? "src/node_modules/cache-edge-dep"
+          : "node_modules/cache-edge-dep";
+      if (scenario === "nearer") {
+        await fixture.write(`${packageDir}/package.json`, manifest);
+      }
+      await fixture.write(`${packageDir}/index.d.ts`, badDeclaration);
+      const previousOutput = await fixture.read("dist/index.js");
+      const invalidated = await build(options);
+      expect(invalidated.ok).toBe(false);
+      expect(
+        invalidated.diagnostics.some(
+          ({ file, line }) =>
+            file === path.join(fixture.srcDir, "index.ts") && line === 2,
+        ),
+      ).toBe(true);
+      expect(await fixture.read("dist/index.js")).toBe(previousOutput);
+
+      await fixture.write(`${packageDir}/index.d.ts`, goodDeclaration);
+      const repaired = await build(options);
+      expect(repaired.ok).toBe(true);
+      expect(repaired.cacheHit).toBe(false);
+      expect((await build(options)).cacheHit).toBe(true);
+      await fixture.write(`${packageDir}/index.d.ts`, goodDeclaration);
+      expect((await build(options)).cacheHit).toBe(true);
+
+      await fixture.write(`${packageDir}/index.d.ts`, badDeclaration);
+      expect((await build(options)).ok).toBe(false);
+      await fixture.write(`${packageDir}/index.d.ts`, goodDeclaration);
+      await fixture.write(`${packageDir}/alternate.d.ts`, badDeclaration);
+      await fixture.write(
+        `${packageDir}/package.json`,
+        JSON.stringify({
+          name: "cache-edge-dep",
+          type: "module",
+          exports: {
+            ".": { types: "./alternate.d.ts", default: "./index.js" },
+          },
+        }),
+      );
+      const changedPackage = await build(options);
+      expect(changedPackage.ok).toBe(false);
+      expect(
+        changedPackage.diagnostics.some(
+          ({ file, line }) =>
+            file === path.join(fixture.srcDir, "index.ts") && line === 2,
+        ),
+      ).toBe(true);
+    }
+  },
+);
+
+test.serial(
+  "inherited compiler config changes invalidate final artifacts",
+  { timeout: BUILD_TIMEOUT },
+  async () => {
+    const fixture = await createFixture();
+    const cacheDir = path.join(fixture.projectRoot, ".cache");
+    await fixture.write("src/index.ts", 'export const value = "CONFIG";\n');
+    await fixture.write(
+      "tsconfig.json",
+      '{"extends":"./base.json","include":["src"]}',
+    );
+    await fixture.write(
+      "base.json",
+      '{"compilerOptions":{"module":"ESNext","moduleResolution":"Bundler","target":"ESNext","strictNullChecks":false}}',
+    );
+    const options = buildOptions(fixture, cacheDir);
+    expect((await build(options)).ok).toBe(true);
+    expect((await build(options)).cacheHit).toBe(true);
+    await fixture.write(
+      "base.json",
+      '{"compilerOptions":{"module":"ESNext","moduleResolution":"Bundler","target":"ESNext","strictNullChecks":true}}',
+    );
+    const changed = await build(options);
+    expect(changed.ok).toBe(true);
+    expect(changed.cacheHit).toBe(false);
+    expect(await fixture.read("dist/index.js")).toContain("CONFIG");
+  },
+);
+
+test.serial(
+  "restoration leaves canonical cached artifacts immutable and replaces stale output",
+  { timeout: BUILD_TIMEOUT },
+  async () => {
+    const fixture = await createFixture();
+    const cacheDir = path.join(fixture.projectRoot, ".cache");
+    await fixture.write("src/index.ts", 'export const value = "IMMUTABLE";\n');
+    const options = buildOptions(fixture, cacheDir);
+    expect((await build(options)).ok).toBe(true);
+    const projectCacheDir = getProjectCacheDir(cacheDir, fixture.projectRoot);
+    const [metadataPath] = await findFilesNamed(
+      path.join(projectCacheDir, "final"),
+      "meta.json",
+    );
+    const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
+    const files = metadata.artifacts.map(({ name }) =>
+      path.join(path.dirname(metadataPath), "outputs", name),
+    );
+    const before = await Promise.all(
+      files.map((file) => fs.readFile(file, "utf8")),
+    );
+    const expected = await fixture.read("dist/index.js");
+    await fixture.write("dist/index.js", "TAMPERED");
+    await fixture.write("dist/unrelated-stale.js", "STALE");
+    const original = nodeFs.promises.mkdtemp;
+    const spy = spyOn(nodeFs.promises, "mkdtemp").mockImplementation(
+      async (prefix, ...args) => {
+        if (
+          path
+            .resolve(String(prefix))
+            .startsWith(`${projectCacheDir}${path.sep}`)
+        ) {
+          throw Object.assign(
+            new Error("Cache staging writes are disallowed"),
+            { code: "EACCES" },
+          );
+        }
+        return original(prefix, ...args);
+      },
+    );
+    let restored;
+    try {
+      restored = await build(options);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(restored.ok).toBe(true);
+    expect(restored.cacheHit).toBe(true);
+    expect(await fixture.read("dist/index.js")).toBe(expected);
+    await expect(
+      fs.access(path.join(fixture.outDir, "unrelated-stale.js")),
+    ).rejects.toThrow();
+    expect(
+      await Promise.all(files.map((file) => fs.readFile(file, "utf8"))),
+    ).toEqual(before);
+  },
+);
+
+test.serial(
+  "failed restoration cleans leftover output staging and external temps",
+  { timeout: BUILD_TIMEOUT },
+  async () => {
+    const fixture = await createFixture();
+    const cacheDir = path.join(fixture.projectRoot, ".cache");
+    await fixture.write("src/helper.ts", "export const helper = 1;\n");
+    await fixture.write(
+      "src/index.ts",
+      'import { helper } from "./helper";\nexport const value = helper;\n',
+    );
+    const destPath = path.join(fixture.projectRoot, "bin", "cli.mjs");
+    const options = buildOptions(fixture, cacheDir, {
+      chunks: { mode: "off", outputType: "esm" },
+      compilationLevel: "SIMPLE",
+      entries: [
+        { file: "./index.ts", name: "index.js", outFile: "bin/cli.mjs" },
+      ],
+    });
+    expect((await build(options)).ok).toBe(true);
+    await fixture.write("dist/index.js", "TAMPERED");
+    await fs.writeFile(destPath, "STALE-RELOCATED");
+    const leftover = [];
+    let leftoverOutputStaging;
+    const originalRename = nodeFs.promises.rename;
+    const originalRm = nodeFs.promises.rm;
+    const renameSpy = spyOn(nodeFs.promises, "rename").mockImplementation(
+      async (from, to) => {
+        if (
+          leftoverOutputStaging === undefined &&
+          path.resolve(String(to)) === path.resolve(fixture.outDir)
+        ) {
+          leftoverOutputStaging = String(from);
+          throw new Error("output tree commit failed");
+        }
+        return originalRename(from, to);
+      },
+    );
+    const rmSpy = spyOn(nodeFs.promises, "rm").mockImplementation(
+      async (target, ...args) => {
+        leftover.push(String(target));
+        return originalRm(target, ...args);
+      },
+    );
+    let result;
+    try {
+      result = await build(options);
+    } finally {
+      renameSpy.mockRestore();
+      rmSpy.mockRestore();
+    }
+    expect(result.ok).toBe(false);
+    const messages = result.diagnostics
+      .map(({ message }) => message)
+      .join("\n");
+    expect(messages).toContain("output tree commit failed");
+    expect(await fixture.read("dist/index.js")).toBe("TAMPERED");
+    expect(await fs.readFile(destPath, "utf8")).toBe("STALE-RELOCATED");
+    const leftoverTemps = leftover.filter(
+      (file) =>
+        path.basename(file).includes(".cli.mjs.") && file.endsWith(".tmp"),
+    );
+    expect(leftoverTemps.length).toBeGreaterThan(0);
+    for (const file of leftoverTemps)
+      await expect(fs.access(file)).rejects.toThrow();
+    expect(leftoverOutputStaging).toBeDefined();
+    await expect(fs.access(leftoverOutputStaging)).rejects.toThrow();
+  },
+);
+
+test.serial(
+  "unsafe outFile destinations leave source and config bytes untouched",
+  { timeout: BUILD_TIMEOUT },
+  async () => {
+    const fixture = await createFixture();
+    await fixture.write("src/index.ts", "export const value = 42;\n");
+    await fixture.write("extra.js", "/** @externs */\nvar extra;\n");
+    await fixture.write(
+      "base.json",
+      '{"compilerOptions":{"target":"ESNext","module":"ESNext","moduleResolution":"Bundler"}}',
+    );
+    await fixture.write(
+      "tsconfig.json",
+      '{"extends":"./base.json","include":["src"]}',
+    );
+    const protectedPaths = [
+      "src/index.ts",
+      "tsconfig.json",
+      "base.json",
+      "extra.js",
+    ];
+    const before = await Promise.all(
+      protectedPaths.map((file) => fixture.read(file)),
+    );
+    for (const outFile of protectedPaths) {
+      const result = await build(
+        buildOptions(fixture, null, {
+          chunks: { mode: "off", outputType: "esm" },
+          entries: [{ file: "./index.ts", outFile }],
+          externs: [path.join(fixture.projectRoot, "extra.js")],
+        }),
+      );
+      expect(result.ok).toBe(false);
+      expect(
+        result.diagnostics.map(({ message }) => message).join("\n"),
+      ).toMatch(/Unsafe outFile/);
+      expect(
+        await Promise.all(protectedPaths.map((file) => fixture.read(file))),
+      ).toEqual(before);
+    }
+    if (process.platform !== "win32") {
+      await fs.symlink(
+        path.join(fixture.projectRoot, "base.json"),
+        path.join(fixture.projectRoot, "alias.js"),
+      );
+      const result = await build(
+        buildOptions(fixture, null, {
+          chunks: { mode: "off", outputType: "esm" },
+          entries: [{ file: "./index.ts", outFile: "alias.js" }],
+        }),
+      );
+      expect(result.ok).toBe(false);
+      expect(await fixture.read("base.json")).toBe(before[2]);
+    }
+  },
+);
 
 test.serial(
   "rejects canonical destructive output boundaries before touching inputs",
@@ -148,9 +529,6 @@ test.serial(
     const options = buildOptions(fixture, cacheDir);
     const first = await build(options);
     expect(first.ok).toBe(true);
-    const projectCacheDir = getProjectCacheDir(cacheDir, fixture.projectRoot);
-    const latestPath = path.join(projectCacheDir, "resolve", "latest.json");
-    const firstLatest = JSON.parse(await fs.readFile(latestPath, "utf8"));
 
     const second = await build({
       ...options,
@@ -162,9 +540,6 @@ test.serial(
     });
     expect(second.ok).toBe(true);
     expect(second.cacheHit).toBe(false);
-    const secondLatest = JSON.parse(await fs.readFile(latestPath, "utf8"));
-    expect(secondLatest.nativeEmitKey).not.toBe(firstLatest.nativeEmitKey);
-    expect(secondLatest.finalKey).not.toBe(firstLatest.finalKey);
   },
 );
 
@@ -210,29 +585,18 @@ test.serial(
     expect((await build(options)).ok).toBe(true);
 
     const projectCacheDir = getProjectCacheDir(cacheDir, fixture.projectRoot);
-    const latest = JSON.parse(
-      await fs.readFile(
-        path.join(projectCacheDir, "resolve", "latest.json"),
-        "utf8",
-      ),
-    );
-    const fastPath = path.join(projectCacheDir, "final-fast.json");
-    const finalMetaPath = path.join(
-      projectCacheDir,
-      "final",
-      latest.finalKey,
+    const [finalMetaPath] = await findFilesNamed(
+      path.join(projectCacheDir, "final"),
       "meta.json",
     );
     await Promise.all([
-      fs.writeFile(fastPath, '{"finalKey":'),
-      fs.writeFile(finalMetaPath, '{"outputFiles":'),
+      fs.writeFile(finalMetaPath, '{"artifacts":'),
       fs.rm(fixture.outDir, { force: true, recursive: true }),
     ]);
 
     const rebuilt = await build(options);
     expect(rebuilt.ok).toBe(true);
     expect(rebuilt.cacheHit).toBe(false);
-    expect(JSON.parse(await fs.readFile(fastPath, "utf8"))).toBeTruthy();
     expect(JSON.parse(await fs.readFile(finalMetaPath, "utf8"))).toBeTruthy();
   },
 );
@@ -248,12 +612,8 @@ test.serial(
     expect((await build(options)).ok).toBe(true);
 
     const projectCacheDir = getProjectCacheDir(cacheDir, fixture.projectRoot);
-    const latestPath = path.join(projectCacheDir, "resolve", "latest.json");
-    const latest = JSON.parse(await fs.readFile(latestPath, "utf8"));
-    const nativeMetaPath = path.join(
-      projectCacheDir,
-      "native-emit",
-      latest.nativeEmitKey,
+    const [nativeMetaPath] = await findFilesNamed(
+      path.join(projectCacheDir, "native-emit"),
       "meta.json",
     );
     const nativeMeta = JSON.parse(await fs.readFile(nativeMetaPath, "utf8"));
@@ -268,7 +628,6 @@ test.serial(
         force: true,
         recursive: true,
       }),
-      fs.rm(path.join(projectCacheDir, "final-fast.json"), { force: true }),
       fs.rm(fixture.outDir, { force: true, recursive: true }),
     ]);
 
@@ -314,29 +673,9 @@ test.serial(
     expect(rebuilt.ok).toBe(true);
     expect(rebuilt.cacheHit).toBe(false);
 
-    const projectCacheDir = getProjectCacheDir(cacheDir, fixture.projectRoot);
-    const latest = JSON.parse(
-      await fs.readFile(
-        path.join(projectCacheDir, "resolve", "latest.json"),
-        "utf8",
-      ),
-    );
-    const nativeMetadata = JSON.parse(
-      await fs.readFile(
-        path.join(
-          projectCacheDir,
-          "native-emit",
-          latest.nativeEmitKey,
-          "meta.json",
-        ),
-        "utf8",
-      ),
-    );
-    expect(
-      Object.keys(nativeMetadata.typeMetadataDependencies).some((filePath) =>
-        filePath.endsWith(`${path.sep}src${path.sep}types.ts`),
-      ),
-    ).toBe(true);
+    const warmAgain = await build(options);
+    expect(warmAgain.ok).toBe(true);
+    expect(warmAgain.cacheHit).toBe(true);
   },
 );
 

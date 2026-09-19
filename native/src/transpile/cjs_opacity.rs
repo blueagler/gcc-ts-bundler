@@ -1,4 +1,4 @@
-use super::*;
+use super::{should_normalize_commonjs, BTreeSet, HashSet, PackageAliasInput, Path};
 #[cfg(test)]
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{ImportDeclarationSpecifier, Program, Statement};
@@ -16,9 +16,7 @@ pub(crate) struct OpaqueCommonJs {
 
 impl OpaqueCommonJs {
     pub(super) fn file_is_opaque(&self, file_path: &Path) -> bool {
-        package_key(file_path)
-            .map(|key| self.package_keys.contains(&key))
-            .unwrap_or(true)
+        package_key(file_path).is_none_or(|key| self.package_keys.contains(&key))
     }
 
     pub(super) fn specifier_is_opaque(&self, specifier: &str) -> bool {
@@ -74,8 +72,7 @@ pub(crate) fn opaque_commonjs_from_package_keys(
         .iter()
         .filter(|specifier| {
             specifier_package_key(specifier, package_aliases)
-                .map(|key| package_keys.contains(&key))
-                .unwrap_or(true)
+                .is_none_or(|key| package_keys.contains(&key))
         })
         .cloned()
         .collect();
@@ -146,62 +143,67 @@ fn specifier_package_key(specifier: &str, package_aliases: &[PackageAliasInput])
         .iter()
         .find(|alias| {
             let full = if alias.subpath == "." {
-                alias.packageName.clone()
+                alias.package_name.clone()
             } else {
                 format!(
                     "{}/{}",
-                    alias.packageName,
+                    alias.package_name,
                     alias.subpath.trim_start_matches("./")
                 )
             };
             full == specifier
         })
-        .and_then(|alias| package_key(Path::new(&alias.targetPath)))
+        .and_then(|alias| package_key(Path::new(&alias.target_path)))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{package_key, parse_program, Allocator, BTreeSet, Path};
 
-    fn analyze(source: &str) -> crate::commonjs::CommonJsAnalysis {
-        crate::commonjs::analyze_commonjs_source(Path::new("/tmp/probe.js"), source).unwrap()
+    fn analyze(source: &str) -> Result<crate::commonjs::CommonJsAnalysis, String> {
+        crate::commonjs::analyze_commonjs_source(Path::new("/tmp/probe.js"), source)
     }
 
-    fn namespace_is_opaque(source: &str) -> bool {
+    fn namespace_is_opaque(source: &str) -> Result<bool, String> {
         let allocator = Allocator::default();
-        let program = parse_program(&allocator, Path::new("/tmp/consumer.js"), source).unwrap();
-        crate::commonjs::commonjs_namespace_is_opaque(&program, &BTreeSet::from(["ns".to_string()]))
+        let program = parse_program(&allocator, Path::new("/tmp/consumer.js"), source)?;
+        Ok(crate::commonjs::commonjs_namespace_is_opaque(
+            &program,
+            &BTreeSet::from(["ns".to_string()]),
+        ))
     }
 
     #[test]
-    fn own_export_reflection_is_fail_closed() {
+    fn own_export_reflection_is_fail_closed() -> Result<(), String> {
         assert!(
-            analyze("exports.alpha = 1;\nmodule.exports.names = Object.keys(exports);\n")
+            analyze("exports.alpha = 1;\nmodule.exports.names = Object.keys(exports);\n")?
                 .exports_are_opaque
         );
-        assert!(!analyze("exports.alpha = 1;\nmodule.exports.beta = 2;\n").exports_are_opaque);
-        assert!(!analyze("exports[\"alpha\"] = 1;\n").exports_are_opaque);
-        assert!(!analyze("module.exports = require(\"./inner.js\");\n").exports_are_opaque);
-        assert!(analyze("exports.alpha = 1;\nfor (var key in exports) {}\n").exports_are_opaque);
+        assert!(!analyze("exports.alpha = 1;\nmodule.exports.beta = 2;\n")?.exports_are_opaque);
+        assert!(!analyze("exports[\"alpha\"] = 1;\n")?.exports_are_opaque);
+        assert!(!analyze("module.exports = require(\"./inner.js\");\n")?.exports_are_opaque);
+        assert!(analyze("exports.alpha = 1;\nfor (var key in exports) {}\n")?.exports_are_opaque);
         assert!(
-            analyze("exports.alpha = 1;\nfunction get(k) { return exports[k]; }\n")
+            analyze("exports.alpha = 1;\nfunction get(k) { return exports[k]; }\n")?
                 .exports_are_opaque
         );
-        assert!(analyze("exports.alpha = 1;\nregister(module.exports);\n").exports_are_opaque);
+        assert!(analyze("exports.alpha = 1;\nregister(module.exports);\n")?.exports_are_opaque);
         assert!(
-            analyze("if (typeof exports === \"object\") { exports.alpha = 1; }\n")
+            analyze("if (typeof exports === \"object\") { exports.alpha = 1; }\n")?
                 .exports_are_opaque
         );
+        Ok(())
     }
 
     #[test]
-    fn namespace_consumer_reflection_is_detected() {
+    fn namespace_consumer_reflection_is_detected() -> Result<(), String> {
         assert!(namespace_is_opaque(
             "import * as ns from \"pkg\";\nObject.keys(ns);\nfor (const k in ns) {}\n"
-        ));
+        )?);
         assert!(!namespace_is_opaque(
             "import * as ns from \"pkg\";\nns.alpha; ns[\"beta\"]; use(ns);\n"
-        ));
+        )?);
+        Ok(())
     }
 
     #[test]

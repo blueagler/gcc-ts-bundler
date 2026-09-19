@@ -15,9 +15,7 @@
     "scripts/**/*.{mjs,cjs,ts}",
     "tools/**/*.ts",
     "test/**/*.test.mjs",
-    "test/**/*.assert.ts",
-    "test/helpers.mjs",
-    "test/helpers/**/*.mjs"
+    "test/**/*.assert.ts"
   ],
 
   // Not TypeScript module graphs. `closure-externs/` and `closure-lib/` are
@@ -38,18 +36,12 @@
     // literal in `src/api/targets.ts` and resolved when that target is built.
     "@cloudflare/workers-types",
 
-    // Invoked by path, not imported:
-    // `scripts/bundle-declarations.mjs` spawns
-    // `./node_modules/dts-bundle-generator/dist/bin/dts-bundle-generator.js`.
-    "dts-bundle-generator",
-
     // Loaded by the oxlint runner from `.oxlintrc.json` -> `jsPlugins`.
     "eslint-plugin-perfectionist",
 
-    // Aliased `npm:typescript@5.9.3`, resolved through the require hook in
-    // `scripts/typescript-dts-register.cjs` so dts-bundle-generator gets the
-    // TypeScript 5 compiler API while the repo builds on TypeScript 7.
-    "typescript-dts",
+    // Declaration bundling is a repository build step, not a shipped runtime.
+    // Its script is an explicit entry above, so fallow treats its import as production.
+    "rolldown-plugin-dts",
 
     // Correctly a devDependency: it backs the lint rules in `tools/oxlint/**`,
     // which never ship. Those files are entry points above, so fallow counts
@@ -74,8 +66,8 @@
   // `build` and `cleanCache`: `src/build/pipeline.ts` holds the sole
   // implementation of each; `src/api/build.ts` is the published facade that
   // wraps it (adding the extern-audit warning pass for `build`, and an
-  // explicit `Promise<void>` signature for `cleanCache`). `src/api/build.ts`
-  // is the only importer of the pipeline exports.
+  // explicit `Promise<void>` signature for `cleanCache`). The Vite adapter
+  // also calls the pipeline directly with its host-owned build inputs.
   //
   // `ResolvedBuildOptions`: two deliberately co-named interfaces, not one
   // symbol exported twice. `src/api/types.ts` declares the public base;

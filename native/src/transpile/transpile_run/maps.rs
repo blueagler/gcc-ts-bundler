@@ -11,8 +11,8 @@ pub(crate) fn index_resolved_imports(
         .into_iter()
         .map(|resolved| {
             (
-                resolved_import_key(Path::new(&resolved.importerFilePath), &resolved.specifier),
-                resolved.moduleId,
+                resolved_import_key(Path::new(&resolved.importer_file_path), &resolved.specifier),
+                resolved.module_id,
             )
         })
         .collect()
@@ -25,7 +25,7 @@ pub(crate) fn index_external_specifiers(
         .into_iter()
         .map(|boundary| {
             (
-                resolved_import_key(Path::new(&boundary.importerFilePath), &boundary.specifier),
+                resolved_import_key(Path::new(&boundary.importer_file_path), &boundary.specifier),
                 boundary.specifier,
             )
         })
