@@ -32,11 +32,9 @@ fn namespace_literal(expression: &Expression<'_>) -> bool {
 }
 
 fn reference_symbol(reference: &IdentifierReference<'_>, scoping: &Scoping) -> Option<SymbolId> {
-    Some(
-        scoping
-            .get_reference(reference.reference_id.get()?)
-            .symbol_id()?,
-    )
+    scoping
+        .get_reference(reference.reference_id.get()?)
+        .symbol_id()
 }
 
 /// Replacing the IIFE parameter with the outer binding is only sound if even an
@@ -344,12 +342,17 @@ pub(super) fn flatten_literal_namespaces<'a>(
         else {
             unreachable!();
         };
-        for statement in function.unbox().body.unwrap().unbox().statements {
+        let Some(body) = function.unbox().body else {
+            unreachable!();
+        };
+        for statement in body.unbox().statements {
             let Statement::VariableDeclaration(declaration) = statement else {
                 unreachable!();
             };
             for declarator in declaration.unbox().declarations {
-                let mut expression = declarator.init.unwrap();
+                let Some(mut expression) = declarator.init else {
+                    unreachable!();
+                };
                 let Expression::AssignmentExpression(assignment) = &mut expression else {
                     unreachable!();
                 };
